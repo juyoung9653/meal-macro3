@@ -77,6 +77,9 @@ def parse_note(note: str, ref_year: int) -> list[dict]:
             break
         sm, sd = int(m.group(1)), int(m.group(2))
         em, ed = int(m.group(3)), int(m.group(4))
+        if not (1 <= sm <= 12 and 1 <= em <= 12):
+            remaining = remaining[: m.start()] + remaining[m.end() :]
+            continue
         sy = ey = ref_year
         if em < sm:
             ey += 1
@@ -92,6 +95,9 @@ def parse_note(note: str, ref_year: int) -> list[dict]:
         if not m:
             break
         sm, sd = int(m.group(1)), int(m.group(2))
+        if not (1 <= sm <= 12):
+            remaining = remaining[: m.start()] + remaining[m.end() :]
+            continue
         results.append(
             {
                 "type": "pause",
@@ -102,12 +108,16 @@ def parse_note(note: str, ref_year: int) -> list[dict]:
         remaining = remaining[: m.start()] + remaining[m.end() :]
 
     # 3. 신규: "6/1 신규" / "신규 6/1부터" / "6.1부터"
-    new_pat = re.compile(r"(\d{1,2})[./](\d{1,2})\s*(?:부터\s*)?(?:신규)?")
+    # NOTE: month=1..12 보장, 실제 일시중지 제거 후 남은 텍스트에서만 동작
+    new_pat = re.compile(r"(\d{1,2})[./](\d{1,2})\s*(?:부터|신규)")
     while True:
         m = new_pat.search(remaining)
         if not m:
             break
         nm, nd = int(m.group(1)), int(m.group(2))
+        if not (1 <= nm <= 12 and 1 <= nd <= 31):
+            remaining = remaining[: m.start()] + remaining[m.end() :]
+            continue
         results.append({"type": "new", "start": date(ref_year, nm, nd), "end": None})
         remaining = remaining[: m.start()] + remaining[m.end() :]
 
@@ -202,24 +212,22 @@ def make_invoice(
             year, month, flags["breakfast"], flags["dinner"], flags["lunch"], note_text
         )
 
-        breakfast_cnt = days["breakfast"]
+        breakfast_cnt = days["breakfast"] * 3
         dinner_cnt = days["dinner"]
         lunch_cnt = days["lunch"]
-        total_meals = breakfast_cnt + dinner_cnt + lunch_cnt
-        amount = (
-            breakfast_cnt * unit_price_breakfast
-            + dinner_cnt * unit_price_dinner
-            + lunch_cnt * unit_price_lunch
-        )
 
         # 템플릿 매핑
         row_data = _map_person_to_row(person, col_mapping, i + 1)
-        # 급식 건수 / 금액은 계산값
         row_data["조식"] = breakfast_cnt
         row_data["석식"] = dinner_cnt
         row_data["중식"] = lunch_cnt
-        row_data["계"] = total_meals
-        row_data["청구금액"] = amount
+        # 계, 청구금액은 엑셀 수식
+        row_data["계"] = f"=L{row_idx}+M{row_idx}+N{row_idx}"
+        row_data["청구금액"] = (
+            f"=L{row_idx}*{unit_price_breakfast}"
+            f"+M{row_idx}*{unit_price_dinner}"
+            f"+N{row_idx}*{unit_price_lunch}"
+        )
         if provider:
             row_data["제공기관"] = provider
 

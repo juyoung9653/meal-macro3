@@ -2,7 +2,7 @@
 
 from datetime import date
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QSettings, Qt
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -35,7 +35,9 @@ class InvoiceTab(QWidget):
         self._roster_data = []
         self._roster_headers = []
         self._col_mapping = dict(DEFAULT_ROSTER_TO_TEMPLATE)
+        self._settings = QSettings("분당구", "급식비정산")
         self._setup_ui()
+        self._restore_state()
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -118,6 +120,13 @@ class InvoiceTab(QWidget):
         btn_layout.addWidget(self.clear_btn)
         layout.addLayout(btn_layout)
 
+        # 값 변경 시 자동 저장
+        self.year_spin.valueChanged.connect(self._save_settings)
+        self.month_spin.valueChanged.connect(self._save_settings)
+        self.breakfast_price.valueChanged.connect(self._save_settings)
+        self.dinner_price.valueChanged.connect(self._save_settings)
+        self.lunch_price.valueChanged.connect(self._save_settings)
+
         # ── 결과 테이블 ──
         table_group = QGroupBox("생성 결과")
         table_layout = QVBoxLayout(table_group)
@@ -140,12 +149,57 @@ class InvoiceTab(QWidget):
 
     # ── 액션 ──
 
+    def _restore_state(self):
+        # 출력 경로
+        out = self._settings.value("invoice/output_dir", "")
+        if out:
+            self.output_dir = out
+            self.path_label.setText(out)
+            self.path_label.setStyleSheet("color: #000;")
+
+        # 연월
+        y = self._settings.value("invoice/year", None)
+        if y is not None:
+            self.year_spin.setValue(int(y))
+        m = self._settings.value("invoice/month", None)
+        if m is not None:
+            self.month_spin.setValue(int(m))
+
+        # 단가
+        bp = self._settings.value("invoice/breakfast_price", None)
+        if bp is not None:
+            self.breakfast_price.setValue(int(bp))
+        dp = self._settings.value("invoice/dinner_price", None)
+        if dp is not None:
+            self.dinner_price.setValue(int(dp))
+        lp = self._settings.value("invoice/lunch_price", None)
+        if lp is not None:
+            self.lunch_price.setValue(int(lp))
+
+        # 컬럼 매핑
+        mapping = self._settings.value("invoice/col_mapping", None)
+        if mapping is not None:
+            self._col_mapping.update(mapping)
+
+    def _save_settings(self):
+        self._settings.setValue("invoice/year", self.year_spin.value())
+        self._settings.setValue("invoice/month", self.month_spin.value())
+        self._settings.setValue("invoice/breakfast_price", self.breakfast_price.value())
+        self._settings.setValue("invoice/dinner_price", self.dinner_price.value())
+        self._settings.setValue("invoice/lunch_price", self.lunch_price.value())
+        self._settings.setValue("invoice/col_mapping", self._col_mapping)
+        if self.output_dir:
+            self._settings.setValue("invoice/output_dir", self.output_dir)
+        self._settings.sync()
+
     def _select_output_dir(self):
         d = QFileDialog.getExistingDirectory(self, "출력 폴더 선택")
         if d:
             self.output_dir = d
             self.path_label.setText(d)
             self.path_label.setStyleSheet("color: #000;")
+            self._settings.setValue("invoice/output_dir", d)
+            self._settings.sync()
 
     def _open_mapping(self):
         if not self._roster_headers:
@@ -155,6 +209,7 @@ class InvoiceTab(QWidget):
         dlg.set_values(self._col_mapping)
         if dlg.exec():
             self._col_mapping = dlg.get_values()
+            self._save_settings()
             self.update()
 
     def _generate_invoices(self):
@@ -171,9 +226,16 @@ class InvoiceTab(QWidget):
         vacation_col = self._col_mapping.get("roster_vacation_col", "")
         note_col = self._col_mapping.get("roster_note_col", "")
 
-        # roster_data 에 _breakfast, _dinner, _lunch, _note 주입
+        # Y, Z열 (인덱스 24,25) — "중지" 포함 행 제외
+        y_key = self._roster_headers[24] if len(self._roster_headers) > 24 else None
+        z_key = self._roster_headers[25] if len(self._roster_headers) > 25 else None
+
         enriched = []
         for person in self._roster_data:
+            val_y = str(person.get(y_key, "")) if y_key else ""
+            val_z = str(person.get(z_key, "")) if z_key else ""
+            if "중지" in val_y or "중지" in val_z:
+                continue
             enriched.append(
                 {
                     **person,
@@ -186,6 +248,7 @@ class InvoiceTab(QWidget):
 
         year = self.year_spin.value()
         month = self.month_spin.value()
+        self._save_settings()
         fname = f"청구서_{year:04d}{month:02d}.xlsx"
         out = f"{self.output_dir}/{fname}"
 
@@ -221,11 +284,14 @@ class InvoiceTab(QWidget):
             l = _to_bool(p.get("_lunch", 0))
             n = p.get("_note", "")
             days = calc_delivery_days(year, month, b, d, l, n)
-            total = days["breakfast"] + days["dinner"] + days["lunch"]
+            breakfast_cnt = days["breakfast"] * 3
+            dinner_cnt = days["dinner"]
+            lunch_cnt = days["lunch"]
+            total = breakfast_cnt + dinner_cnt + lunch_cnt
             amount = (
-                days["breakfast"] * self.breakfast_price.value()
-                + days["dinner"] * self.dinner_price.value()
-                + days["lunch"] * self.lunch_price.value()
+                breakfast_cnt * self.breakfast_price.value()
+                + dinner_cnt * self.dinner_price.value()
+                + lunch_cnt * self.lunch_price.value()
             )
             name_col = self._col_mapping.get("roster_name_col", "성명")
             dept_col = self._col_mapping.get("roster_dept_col", "학교명")

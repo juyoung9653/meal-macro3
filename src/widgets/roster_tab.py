@@ -4,7 +4,7 @@ import os
 import re
 
 import msoffcrypto
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QSettings, Qt
 from PyQt6.QtWidgets import (
     QFileDialog,
     QGroupBox,
@@ -29,9 +29,11 @@ class RosterTab(QWidget):
     def __init__(self):
         super().__init__()
         self.roster_path = None
-        self.roster_data = []  # list[dict], key=원본컬럼명
-        self.roster_headers = []  # 원본 컬럼명 리스트
+        self.roster_data = []
+        self.roster_headers = []
+        self._settings = QSettings("분당구", "급식비정산")
         self._setup_ui()
+        self._restore_state()
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -76,7 +78,17 @@ class RosterTab(QWidget):
             self.roster_path = path
             self.file_label.setText(os.path.basename(path))
             self.file_label.setStyleSheet("color: #000;")
+            self._settings.setValue("roster/last_path", path)
+            self._settings.sync()
             self._load_roster(path)
+
+    def _restore_state(self):
+        last = self._settings.value("roster/last_path", "")
+        if last and os.path.exists(last):
+            self.roster_path = last
+            self.file_label.setText(os.path.basename(last))
+            self.file_label.setStyleSheet("color: #000;")
+            self._load_roster(last)
 
     # ── 메인 로드 ──
 
