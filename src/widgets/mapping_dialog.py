@@ -39,9 +39,6 @@ class MappingDialog(QDialog):
         ("roster_dinner_col", "석식 여부 컬럼 *", True),
         ("roster_vacation_col", "방중 여부 컬럼 *", True),
         ("roster_note_col", "비고 (일시중지 등)", False),
-        ("", "── 배송담당 정보 ──", False),  # 구분선
-        ("roster_delivery_person_col", "배송담당자명", False),
-        ("roster_delivery_phone_col", "배송담당 연락처", False),
     ]
 
     COLUMN_HELP = {
@@ -124,6 +121,9 @@ class MappingDialog(QDialog):
         btn_layout.addWidget(ok_btn)
         btn_layout.addWidget(cancel_btn)
         layout.addLayout(btn_layout)
+
+        # 자동 초기화: 다이얼로그 열릴 때 기본 매핑을 미리 채움
+        self._reset_defaults()
 
     def _reset_defaults(self):
         """자동 추천: 헤더명 기반으로 가장 비슷한 컬럼 찾아 선택"""

@@ -1,9 +1,9 @@
 """청구서 탭 — 명단 기반 실제 청구서 생성"""
 
 import calendar
+import os
 from datetime import date
 
-import holidays
 from PyQt6.QtCore import QDate, QSettings, Qt
 from PyQt6.QtWidgets import (
     QCalendarWidget,
@@ -25,7 +25,8 @@ from PyQt6.QtWidgets import (
 )
 
 from ..config import DEFAULT_ROSTER_TO_TEMPLATE
-from ..invoice_generator import make_invoice
+from ..holiday_fetcher import get_kr_holidays
+from ..invoice_generator import _to_bool, calc_delivery_days, make_invoice
 from .mapping_dialog import MappingDialog
 
 
@@ -43,6 +44,7 @@ class InvoiceTab(QWidget):
         self._settings = QSettings("분당구", "급식비정산")
         self._setup_ui()
         self._restore_state()
+        self._load_default_excluded_dates()
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -136,9 +138,11 @@ class InvoiceTab(QWidget):
         btn_layout.addWidget(self.clear_btn)
         layout.addLayout(btn_layout)
 
-        # 값 변경 시 자동 저장
+        # 값 변경 시 자동 저장 + 제외일 재계산
         self.year_spin.valueChanged.connect(self._save_settings)
         self.month_spin.valueChanged.connect(self._save_settings)
+        self.year_spin.valueChanged.connect(self._reload_excluded_dates)
+        self.month_spin.valueChanged.connect(self._reload_excluded_dates)
         self.breakfast_price.valueChanged.connect(self._save_settings)
         self.dinner_price.valueChanged.connect(self._save_settings)
         self.lunch_price.valueChanged.connect(self._save_settings)
@@ -238,41 +242,76 @@ class InvoiceTab(QWidget):
         y = self.year_spin.value()
         m = self.month_spin.value()
 
-        # 해당 월 공휴일을 _excluded_dates 에 자동 추가
-        kr_holidays = holidays.country_holidays("KR")
+        # 해당 월 공휴일을 임시 set에 자동 추가 (다이얼로그 수락 시에만 반영)
+        # 토/일은 제외일에 포함하지 않음
+        temp_excluded = {d for d in self._excluded_dates if d.weekday() < 5}
         last_day = calendar.monthrange(y, m)[1]
         for day in range(1, last_day + 1):
             d = date(y, m, day)
-            if d in kr_holidays:
-                self._excluded_dates.add(d)
+            if d in get_kr_holidays(y) and d.weekday() < 5:  # 토/일 제외
+                temp_excluded.add(d)
 
         cal = QCalendarWidget()
         cal.setGridVisible(True)
         cal.setCurrentPage(y, m)
 
-        # 제외일 하이라이트
+        # 제외일 하이라이트 — setDateTextFormat 직접 사용
         from PyQt6.QtGui import QTextCharFormat
 
-        fmt = cal.dateTextFormat()
-        for d in self._excluded_dates:
+        for d in temp_excluded:
             qd = QDate(d.year, d.month, d.day)
             f = QTextCharFormat()
             f.setBackground(Qt.GlobalColor.red)
             f.setForeground(Qt.GlobalColor.white)
-            fmt[qd] = f
+            cal.setDateTextFormat(qd, f)
 
-        cal.clicked.connect(lambda qd: self._toggle_exclude_date(qd, cal, dlg))
+        def _fmt_local() -> str:
+            if not temp_excluded:
+                return "선택된 제외일 없음"
+            parts = []
+            for d in sorted(temp_excluded):
+                parts.append(
+                    f"{d.month:02d}/{d.day:02d} ({['월', '화', '수', '목', '금', '토', '일'][d.weekday()]})"
+                )
+            return "제외일: " + ", ".join(parts)
+
+        def _toggle_local(qd):
+            d_local = date(qd.year(), qd.month(), qd.day())
+            if d_local.weekday() >= 5:  # 토/일 제외
+                return
+            if d_local in temp_excluded:
+                temp_excluded.discard(d_local)
+            else:
+                temp_excluded.add(d_local)
+            # 달력 전체 포맷 초기화 후 다시 칠함
+            for day in range(1, last_day + 1):
+                cal.setDateTextFormat(QDate(y, m, day), QTextCharFormat())
+            for ed in temp_excluded:
+                eqd = QDate(ed.year, ed.month, ed.day)
+                f = QTextCharFormat()
+                f.setBackground(Qt.GlobalColor.red)
+                f.setForeground(Qt.GlobalColor.white)
+                cal.setDateTextFormat(eqd, f)
+            self._exclude_list_label.setText(_fmt_local())
+
+        def _clear_local():
+            temp_excluded.clear()
+            for day in range(1, last_day + 1):
+                cal.setDateTextFormat(QDate(y, m, day), QTextCharFormat())
+            self._exclude_list_label.setText("선택된 제외일 없음")
+
+        cal.clicked.connect(_toggle_local)
         layout.addWidget(cal)
 
         # 선택된 날짜 목록 표시
-        self._exclude_list_label = QLabel(self._format_excluded_dates())
+        self._exclude_list_label = QLabel(_fmt_local())
         self._exclude_list_label.setWordWrap(True)
         layout.addWidget(self._exclude_list_label)
 
         # 버튼
         btn_layout = QHBoxLayout()
         clear_exclude_btn = QPushButton("전체 해제")
-        clear_exclude_btn.clicked.connect(lambda: self._clear_excluded_dates(cal, dlg))
+        clear_exclude_btn.clicked.connect(_clear_local)
         close_btn = QPushButton("닫기")
         close_btn.clicked.connect(dlg.accept)
         btn_layout.addWidget(clear_exclude_btn)
@@ -281,53 +320,36 @@ class InvoiceTab(QWidget):
         layout.addLayout(btn_layout)
 
         dlg.exec()
+        self._excluded_dates = temp_excluded
         self._update_exclude_label()
-
-    def _toggle_exclude_date(self, qd, cal, dlg):
-        from datetime import date as dt_date
-
-        from PyQt6.QtGui import QTextCharFormat
-
-        d = dt_date(qd.year(), qd.month(), qd.day())
-        if d in self._excluded_dates:
-            self._excluded_dates.discard(d)
-        else:
-            self._excluded_dates.add(d)
-        # 다시 그리기
-        fmt = cal.dateTextFormat()
-        fmt.clear()
-        for ed in self._excluded_dates:
-            eqd = QDate(ed.year, ed.month, ed.day)
-            f = QTextCharFormat()
-            f.setBackground(Qt.GlobalColor.red)
-            f.setForeground(Qt.GlobalColor.white)
-            fmt[eqd] = f
-        self._exclude_list_label.setText(self._format_excluded_dates())
-
-    def _clear_excluded_dates(self, cal, dlg):
-        self._excluded_dates.clear()
-        fmt = cal.dateTextFormat()
-        fmt.clear()
-        self._exclude_list_label.setText("선택된 제외일 없음")
-
-    def _format_excluded_dates(self) -> str:
-        if not self._excluded_dates:
-            return "선택된 제외일 없음"
-        sorted_dates = sorted(self._excluded_dates)
-        parts = []
-        for d in sorted_dates:
-            parts.append(
-                f"{d.month:02d}/{d.day:02d} ({['월', '화', '수', '목', '금', '토', '일'][d.weekday()]})"
-            )
-        return "제외일: " + ", ".join(parts)
 
     def _update_exclude_label(self):
         if not self._excluded_dates:
             self.exclude_label.setText("선택된 제외일 없음")
             self.exclude_label.setStyleSheet("color: #888;")
         else:
-            self.exclude_label.setText(f"{len(self._excluded_dates)}일 선택됨")
+            parts = []
+            for d in sorted(self._excluded_dates):
+                parts.append(
+                    f"{d.month:02d}/{d.day:02d} ({['월', '화', '수', '목', '금', '토', '일'][d.weekday()]})"
+                )
+            self.exclude_label.setText("제외일: " + ", ".join(parts))
             self.exclude_label.setStyleSheet("color: #c00; font-weight: bold;")
+
+    def _load_default_excluded_dates(self):
+        """현재 연월 공휴일을 제외일에 자동 추가 (토/일 제외)"""
+        y = self.year_spin.value()
+        m = self.month_spin.value()
+        for day in range(1, calendar.monthrange(y, m)[1] + 1):
+            d = date(y, m, day)
+            if d in get_kr_holidays(y) and d.weekday() < 5:
+                self._excluded_dates.add(d)
+        self._update_exclude_label()
+
+    def _reload_excluded_dates(self):
+        """연/월 변경 시 제외일 재계산"""
+        self._excluded_dates.clear()
+        self._load_default_excluded_dates()
 
     def _generate_invoices(self):
         if not self.output_dir:
@@ -344,14 +366,14 @@ class InvoiceTab(QWidget):
         note_col = self._col_mapping.get("roster_note_col", "")
 
         # Y, Z열 (인덱스 24,25) — "중지" 포함 행 제외
-        y_key = self._roster_headers[24] if len(self._roster_headers) > 24 else None
-        z_key = self._roster_headers[25] if len(self._roster_headers) > 25 else None
+        y_key = next(
+            (h for h in self._roster_headers if "중지" in h or "중단" in h), None
+        )
 
         enriched = []
         for person in self._roster_data:
             val_y = str(person.get(y_key, "")) if y_key else ""
-            val_z = str(person.get(z_key, "")) if z_key else ""
-            if "중지" in val_y or "중지" in val_z:
+            if "중지" in val_y or "중단" in val_y:
                 continue
             enriched.append(
                 {
@@ -368,6 +390,14 @@ class InvoiceTab(QWidget):
         self._save_settings()
         fname = f"청구서_{year:04d}{month:02d}.xlsx"
         out = f"{self.output_dir}/{fname}"
+
+        # 템플릿 파일 존재 여부 확인
+        template_path = "assets/청구서템플릿.xlsx"
+        if not os.path.exists(template_path):
+            QMessageBox.critical(
+                self, "파일 없음", f"템플릿 파일을 찾을 수 없습니다:\n{template_path}"
+            )
+            return
 
         try:
             cnt = make_invoice(
@@ -395,7 +425,6 @@ class InvoiceTab(QWidget):
         QMessageBox.information(self, "완료", f"청구서 {cnt}건 생성 완료!\n{out}")
 
     def _update_result(self, data: list[dict], year: int, month: int):
-        from ..invoice_generator import _to_bool, calc_delivery_days
 
         self.result_table.setRowCount(len(data))
         for i, p in enumerate(data):

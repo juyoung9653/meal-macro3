@@ -4,7 +4,6 @@ import calendar
 import re
 from datetime import date, timedelta
 
-import holidays
 import openpyxl
 from openpyxl.styles import Alignment, Font
 
@@ -13,17 +12,14 @@ from .config import (
     TEMPLATE_DATA_START_ROW,
     TEMPLATE_SHEET_NAME,
 )
+from .holiday_fetcher import get_kr_holidays
 
 # ── 요일 상수 ──
 MON, TUE, WED, THU, FRI, SAT, SUN = range(7)
 
 
-# ── 공휴일 캐시 (매번 생성 비용 大 → 모듈 로딩 시 1회) ──
-_KR_HOLIDAYS = holidays.country_holidays("KR")
-
-
 def _is_holiday(d: date) -> bool:
-    return d in _KR_HOLIDAYS
+    return d in get_kr_holidays(d.year)
 
 
 def count_weekdays(
@@ -49,9 +45,7 @@ def count_weekdays_in_range(
     d = start
     while d <= end:
         if d.weekday() in dow_set and not _is_holiday(d):
-            if excluded_dates and d in excluded_dates:
-                pass  # skip
-            else:
+            if not (excluded_dates and d in excluded_dates):
                 total += 1
         d += timedelta(days=1)
     return total
@@ -337,8 +331,6 @@ CONFIRM_FONT_SMALL = Font(name="맑은 고딕", size=10)
 
 def _get_week_ranges(year: int, month: int) -> list[tuple[int, date, date]]:
     """해당 월을 주차별로 분할. [(week_num, start, end), ...]"""
-    import calendar
-
     last_day = calendar.monthrange(year, month)[1]
     weeks = []
     for start_day in (1, 8, 15, 22, 29):

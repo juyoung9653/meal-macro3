@@ -55,8 +55,9 @@ class MainWindow(QMainWindow):
             year = self.invoice_tab.get_year()
             month = self.invoice_tab.get_month()
             excluded_dates = self.invoice_tab.get_excluded_dates()
+            roster_headers = self.roster_tab.get_roster_headers()
             self.confirm_tab.set_invoices(
-                invoices, col_mapping, year, month, excluded_dates
+                invoices, col_mapping, year, month, excluded_dates, roster_headers
             )
 
         messages = {

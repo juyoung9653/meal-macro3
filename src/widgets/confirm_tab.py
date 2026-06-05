@@ -2,12 +2,12 @@ from datetime import date
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
+    QComboBox,
     QFileDialog,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
-    QLineEdit,
     QMessageBox,
     QPushButton,
     QTableWidget,
@@ -31,8 +31,8 @@ class ConfirmTab(QWidget):
         self._year = 2026
         self._month = 6
         self._excluded_dates: set[date] = set()
+        self._roster_headers: list[str] = []
         self._setup_ui()
-        self._update_delivery_from_roster()
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -53,19 +53,39 @@ class ConfirmTab(QWidget):
         path_layout.addWidget(self.path_label, stretch=1)
         path_layout.addWidget(self.path_btn)
 
-        # ── 배송담당 정보 ──
-        info_group = QGroupBox("배송담당 정보")
-        info_layout = QHBoxLayout(info_group)
-        info_layout.addWidget(QLabel("담당자명:"))
-        self.delivery_edit = QLineEdit()
-        self.delivery_edit.setPlaceholderText("배송담당자 성명")
-        info_layout.addWidget(self.delivery_edit)
-        info_layout.addSpacing(10)
-        info_layout.addWidget(QLabel("연락처:"))
-        self.phone_edit = QLineEdit()
-        self.phone_edit.setPlaceholderText("010-xxxx-xxxx")
-        info_layout.addWidget(self.phone_edit)
-        info_layout.addStretch()
+        # ── 배송담당 매핑 ──
+        delivery_group = QGroupBox("배송담당 정보")
+        delivery_layout = QVBoxLayout(delivery_group)
+
+        # 컬럼 선택
+        col_row = QHBoxLayout()
+        col_row.addWidget(QLabel("배송담당자 컬럼:"))
+        self.delivery_col_combo = QComboBox()
+        self.delivery_col_combo.setMinimumWidth(180)
+        self.delivery_col_combo.addItem("(선택 안 함)", "")
+        self.delivery_col_combo.currentIndexChanged.connect(
+            self._on_delivery_col_changed
+        )
+        col_row.addWidget(self.delivery_col_combo)
+        col_row.addStretch()
+
+        # 테이블: 고유 배송담당자명 → 연락처
+        map_label = QLabel("※ 고유 배송담당자명 목록 — 연락처를 직접 입력하세요")
+        map_label.setStyleSheet("color: #555; font-size: 11px;")
+
+        self.delivery_table = QTableWidget()
+        self.delivery_table.setColumnCount(2)
+        self.delivery_table.setHorizontalHeaderLabels(["배송담당자명", "연락처"])
+        self.delivery_table.horizontalHeader().setStretchLastSection(True)
+        self.delivery_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.Stretch
+        )
+        self.delivery_table.setMinimumHeight(100)
+        self.delivery_table.setMaximumHeight(200)
+
+        delivery_layout.addLayout(col_row)
+        delivery_layout.addWidget(map_label)
+        delivery_layout.addWidget(self.delivery_table)
 
         # ── 버튼 ──
         btn_layout = QHBoxLayout()
@@ -106,25 +126,50 @@ class ConfirmTab(QWidget):
         # ── 조립 ──
         layout.addWidget(info_label)
         layout.addWidget(path_group)
-        layout.addWidget(info_group)
+        layout.addWidget(delivery_group)
         layout.addLayout(btn_layout)
         layout.addWidget(table_group, stretch=1)
         layout.addWidget(self.info_label)
 
-    def _update_delivery_from_roster(self):
-        """매핑 정보로 명단에서 배송담당자명/연락처 읽어 QLineEdit 자동 채움"""
-        if not self._invoices or not self._col_mapping:
+    def _on_delivery_col_changed(self):
+        """배송담당자 컬럼 변경 → 고유 이름 목록 테이블 갱신"""
+        col = self.delivery_col_combo.currentData()
+        if not col or not self._invoices:
+            self.delivery_table.setRowCount(0)
             return
-        person_key = self._col_mapping.get("roster_delivery_person_col", "")
-        phone_key = self._col_mapping.get("roster_delivery_phone_col", "")
-        if person_key and self._invoices:
-            val = str(self._invoices[0].get(person_key, ""))
-            if val:
-                self.delivery_edit.setText(val)
-        if phone_key and self._invoices:
-            val = str(self._invoices[0].get(phone_key, ""))
-            if val:
-                self.phone_edit.setText(val)
+
+        # 고유 이름 추출 (비어있지 않은 값, 순서 유지)
+        seen = set()
+        unique_names = []
+        for inv in self._invoices:
+            val = str(inv.get(col, "")).strip()
+            if val and val not in seen:
+                seen.add(val)
+                unique_names.append(val)
+
+        if not unique_names:
+            self.delivery_table.setRowCount(0)
+            return
+
+        self.delivery_table.setRowCount(len(unique_names))
+        for i, name in enumerate(unique_names):
+            name_item = QTableWidgetItem(name)
+            name_item.setFlags(name_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self.delivery_table.setItem(i, 0, name_item)
+            self.delivery_table.setItem(i, 1, QTableWidgetItem(""))
+
+    def _get_delivery_phone_map(self) -> dict[str, str]:
+        """테이블에서 {이름: 연락처} 매핑 반환"""
+        mapping = {}
+        for row in range(self.delivery_table.rowCount()):
+            name_item = self.delivery_table.item(row, 0)
+            phone_item = self.delivery_table.item(row, 1)
+            if name_item:
+                name = name_item.text().strip()
+                phone = phone_item.text().strip() if phone_item else ""
+                if name:
+                    mapping[name] = phone
+        return mapping
 
     def _select_output_dir(self):
         dir_path = QFileDialog.getExistingDirectory(self, "출력 폴더 선택")
@@ -143,28 +188,29 @@ class ConfirmTab(QWidget):
                 self, "알림", "청구서 데이터가 없습니다. 청구서 탭에서 먼저 생성하세요."
             )
             return
-        if not self._col_mapping:
-            QMessageBox.warning(self, "알림", "컬럼 매핑 정보가 없습니다.")
-            return
 
-        # QLineEdit 값 우선, 공란이면 명단 매핑에서 읽기
-        delivery_person = self.delivery_edit.text().strip()
-        delivery_phone = self.phone_edit.text().strip()
-        if not delivery_person or not delivery_phone:
-            person_key = self._col_mapping.get("roster_delivery_person_col", "")
-            phone_key = self._col_mapping.get("roster_delivery_phone_col", "")
-            if self._invoices:
-                if not delivery_person and person_key:
-                    delivery_person = str(self._invoices[0].get(person_key, ""))
-                if not delivery_phone and phone_key:
-                    delivery_phone = str(self._invoices[0].get(phone_key, ""))
+        # 배송담당자 컬럼 + 연락처 매핑
+        delivery_col = self.delivery_col_combo.currentData()
+        phone_map = self._get_delivery_phone_map()
+
+        # 첫 번째 고유명의 연락처를 대표값으로 사용
+        delivery_person = ""
+        delivery_phone = ""
+        if delivery_col and self._invoices:
+            # 첫 번째 인보이스에서 배송담당자명 읽기
+            delivery_person = str(self._invoices[0].get(delivery_col, "")).strip()
+            if delivery_person in phone_map:
+                delivery_phone = phone_map[delivery_person]
+            elif phone_map:
+                # 대표값: 맵핑의 첫 번째 전화번호
+                delivery_phone = next(iter(phone_map.values()))
 
         try:
             self.confirms = make_confirm(
                 roster_data=self._invoices,
                 col_mapping=self._col_mapping,
                 output_dir=self.output_dir,
-                template_path="확인서템플릿.xlsx",
+                template_path="assets/확인서템플릿.xlsx",
                 year=self._year,
                 month=self._month,
                 delivery_person=delivery_person,
@@ -203,6 +249,7 @@ class ConfirmTab(QWidget):
         year: int = 2026,
         month: int = 6,
         excluded_dates: set[date] | None = None,
+        roster_headers: list[str] | None = None,
     ):
         """청구서 데이터 + 매핑 + 제외일 전달받기"""
         self._invoices = invoices
@@ -212,11 +259,41 @@ class ConfirmTab(QWidget):
         self._month = month
         self._excluded_dates = excluded_dates or set()
         self.generate_btn.setEnabled(bool(invoices))
-        self._update_delivery_from_roster()
+
+        # 배송담당자 컬럼 콤보박스 채우기
+        self._delivery_col_combo_update(roster_headers)
+
         if invoices:
             self.info_label.setText(
                 f"청구서 {len(invoices)}건 로드됨. 생성 버튼을 누르면 확인서를 만듭니다."
             )
+
+    def _delivery_col_combo_update(self, roster_headers: list[str] | None = None):
+        """콤보박스 아이템 채우기"""
+        self.delivery_col_combo.blockSignals(True)
+        self.delivery_col_combo.clear()
+        self.delivery_col_combo.addItem("(선택 안 함)", "")
+
+        # roster_headers 우선, 없으면 invoice 키에서 추출
+        cols = (
+            roster_headers
+            if roster_headers
+            else (list(self._invoices[0].keys()) if self._invoices else [])
+        )
+        for c in cols:
+            # 내부 키 제외
+            if c.startswith("_"):
+                continue
+            self.delivery_col_combo.addItem(c, c)
+        self.delivery_col_combo.blockSignals(False)
+
+        # 기존 col_mapping에 배송담당 컬럼이 있으면 자동 선택
+        if self._col_mapping.get("roster_delivery_person_col"):
+            old = self._col_mapping["roster_delivery_person_col"]
+            idx = self.delivery_col_combo.findData(old)
+            if idx >= 0:
+                self.delivery_col_combo.setCurrentIndex(idx)
+                self._on_delivery_col_changed()
 
     def get_confirms(self):
         return self.confirms

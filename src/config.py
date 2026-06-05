@@ -17,9 +17,8 @@ DEFAULT_ROSTER_TO_TEMPLATE = {
     "roster_vacation_col": "방중",  # 방학중 급식 여부
     "roster_note_col": "학기중 비고",  # 비고(일시중지/신규)
     "roster_category_col": "해당구",  # 구분(신규/중/고)
-    "roster_delivery_person_col": "배송담당자",  # 배송담당자명
-    "roster_delivery_phone_col": "배송담당연락처",  # 배송담당 연락처
 }
+
 
 DEFAULT_TEMPLATE_COLUMNS = [
     "연번",  # A

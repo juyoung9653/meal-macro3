@@ -125,7 +125,9 @@ class RosterTab(QWidget):
             pw = self._prompt_password()
             if pw is None:
                 return None
-            wb = self._open_encrypted(self.roster_path, pw)
+            wb = self._open_encrypted(
+                self.roster_path, pw
+            )  # handles retries internally
             if wb is None:
                 return None
         sheet = wb.get_sheet_by_index(0)
@@ -156,24 +158,31 @@ class RosterTab(QWidget):
         return dlg.textValue().strip() if dlg.exec() else None
 
     def _open_encrypted(self, path: str, password: str):
-        try:
-            with open(path, "rb") as f:
-                off = msoffcrypto.OfficeFile(f)
-                off.load_key(password=password)
-                buf = io.BytesIO()
-                off.decrypt(buf)
-            buf.seek(0)
-            return CalamineWorkbook.from_filelike(buf)
-        except Exception as e:
-            msg = str(e).lower()
-            if "password" in msg or "key" in msg or "wrong" in msg:
-                QMessageBox.warning(self, "암호 오류", "암호가 올바르지 않습니다.")
-                return self._retry_password(path)
-            raise
-
-    def _retry_password(self, path: str):
-        pw = self._prompt_password()
-        return self._open_encrypted(path, pw) if pw else None
+        """암호 걸린 엑셀 파일 열기. 실패시 반복 재시도."""
+        attempts = 0
+        max_attempts = 10
+        while attempts < max_attempts:
+            try:
+                with open(path, "rb") as f:
+                    off = msoffcrypto.OfficeFile(f)
+                    off.load_key(password=password)
+                    buf = io.BytesIO()
+                    off.decrypt(buf)
+                buf.seek(0)
+                return CalamineWorkbook.from_filelike(buf)
+            except Exception as e:
+                msg = str(e).lower()
+                if "password" in msg or "key" in msg or "wrong" in msg:
+                    QMessageBox.warning(self, "암호 오류", "암호가 올바르지 않습니다.")
+                    pw = self._prompt_password()
+                    if pw is None:
+                        return None  # user cancelled
+                    password = pw
+                    attempts += 1
+                    continue
+                raise  # non-password error → propagate
+        QMessageBox.warning(self, "암호 오류", "최대 재시도 횟수를 초과했습니다.")
+        return None
 
     # ── 파싱 코어 ──
 
