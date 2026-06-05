@@ -516,7 +516,9 @@ def make_confirm(
             hh_groups[addr].append(p)
 
         # 3b. 관할동 시트 생성
-        safe_dong = dong.replace(" ", "_").replace(",", "").replace(".", "")[:20]
+        import re
+
+        safe_dong = re.sub(r"[\\/?*\[\]:]", "", dong.replace(" ", "_"))[:20]
         if not safe_dong:
             safe_dong = "기타"
         # 시트명 중복 방지
@@ -560,7 +562,7 @@ def make_confirm(
                         )
                 # G(7), H(8), I(9) 열 너비 11.8 고정
                 for col_letter in ("G", "H", "I", "J"):
-                    ws.column_dimensions[col_letter].width = 11.8
+                    ws.column_dimensions[col_letter].width = 12.5
                 col_widths_set = True
 
             # 3d. 템플릿 행 복사 (값 + 서식)
@@ -606,7 +608,7 @@ def make_confirm(
             ws.cell(row=current_row + 2, column=3).value = addr
 
             # 각 아동별 채움 (상대 행: 첫 아동=6, 이후 +5)
-            for ci, person in enumerate(members):
+            for ci, person in enumerate(members[:5]):
                 seq_total += 1
                 sheet_seq += 1
                 child_idx = ci + 1

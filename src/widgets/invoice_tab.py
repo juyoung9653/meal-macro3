@@ -2,6 +2,7 @@
 
 import calendar
 import os
+import re
 from datetime import date
 
 from PyQt6.QtCore import QDate, QSettings, Qt
@@ -486,13 +487,18 @@ class InvoiceTab(QWidget):
             val_y = str(person.get(y_key, "")) if y_key else ""
             if "중지" in val_y or "중단" in val_y:
                 continue
+            note_val = str(person.get(note_col, ""))
+            # 날짜 패턴 없는 비고는 비고를 비움 (행은 유지)
+            if not re.search(r"\d{1,2}[/.]\d{1,2}", note_val):
+                note_val = ""
             enriched.append(
                 {
                     **person,
+                    note_col: note_val,  # 원본 키 덮어써서 _map_person_to_row() 반영
                     "_breakfast": person.get(breakfast_col, 0),
                     "_dinner": person.get(dinner_col, 0),
                     "_lunch": person.get(vacation_col, 0),
-                    "_note": person.get(note_col, ""),
+                    "_note": note_val,
                 }
             )
 

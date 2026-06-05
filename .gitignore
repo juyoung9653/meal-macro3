@@ -20,3 +20,6 @@ Thumbs.db
 venv/
 
 output/
+
+# Cache
+cahce/
