@@ -47,7 +47,8 @@ class MainWindow(QMainWindow):
         if index >= 1:
             data = self.roster_tab.get_roster_data()
             headers = self.roster_tab.get_roster_headers()
-            self.invoice_tab.set_roster_data(data, headers)
+            roster_path = self.roster_tab.get_roster_path()
+            self.invoice_tab.set_roster_data(data, headers, roster_path)
 
         if index >= 2:
             invoices = self.invoice_tab.get_invoices()
@@ -56,8 +57,15 @@ class MainWindow(QMainWindow):
             month = self.invoice_tab.get_month()
             excluded_dates = self.invoice_tab.get_excluded_dates()
             roster_headers = self.roster_tab.get_roster_headers()
+            roster_path = self.roster_tab.get_roster_path()
             self.confirm_tab.set_invoices(
-                invoices, col_mapping, year, month, excluded_dates, roster_headers
+                invoices,
+                col_mapping,
+                year,
+                month,
+                excluded_dates,
+                roster_headers,
+                roster_path,
             )
 
         messages = {

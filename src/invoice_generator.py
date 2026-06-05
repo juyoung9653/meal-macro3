@@ -330,10 +330,17 @@ CONFIRM_FONT_SMALL = Font(name="맑은 고딕", size=10)
 
 
 def _get_week_ranges(year: int, month: int) -> list[tuple[int, date, date]]:
-    """해당 월을 주차별로 분할. [(week_num, start, end), ...]"""
+    """해당 월을 주차별로 분할. [(week_num, start, end), ...]
+    Week1: 1일~2일, Week2: 3일~9일, Week3: 10일~16일,
+    Week4: 17일~23일, Week5: 24일~말일
+    """
     last_day = calendar.monthrange(year, month)[1]
     weeks = []
-    for start_day in (1, 8, 15, 22, 29):
+    # 1주: 1일~2일
+    end_1 = min(2, last_day)
+    weeks.append((1, date(year, month, 1), date(year, month, end_1)))
+    # 2~5주: 7일 간격
+    for start_day in (3, 10, 17, 24):
         if start_day > last_day:
             break
         end_day = min(start_day + 6, last_day)
@@ -420,6 +427,32 @@ def _week_date_str(w_start: date, w_end: date) -> str:
 # ── 확인서 생성 ──────────────────────────────────────
 
 
+def _copy_cell(src, dst):
+    """셀 값 + 서식 복사"""
+    from copy import copy
+
+    dst.value = src.value
+    if src.has_style:
+        dst.font = copy(src.font)
+        dst.border = copy(src.border)
+        dst.fill = copy(src.fill)
+        dst.number_format = copy(src.number_format)
+        dst.protection = copy(src.protection)
+        dst.alignment = copy(src.alignment)
+
+
+def _adjust_formula(formula: str, row_offset: int) -> str:
+    """엑셀 formula 내 행 번호를 row_offset 만큼 증가"""
+    if not formula or not str(formula).startswith("="):
+        return formula
+    import re as _re
+
+    def _shift_row(m):
+        return f"{m.group(1)}{int(m.group(2)) + row_offset}"
+
+    return _re.sub(r"([A-Z]+)(\d+)", _shift_row, str(formula))
+
+
 def make_confirm(
     roster_data: list[dict],
     col_mapping: dict,
@@ -433,131 +466,232 @@ def make_confirm(
     excluded_dates: set[date] | None = None,
 ) -> list[dict]:
     """
-    명단 데이터 → 확인서템플릿 채워서 개별 확인서 생성.
-    동일 주소로 세대별 그룹핑 → 한 시트에 같이 출력.
+    명단 데이터 → 확인서템플릿 채워서 **단일 엑셀 파일** 생성.
+    관할동 → 시트, 세대(주소)별 n명 템플릿을 시트 내에 수직 적층.
+    주소 줄바꿈 → 공백 치환.
+    해당급식 0 → 빈 셀.
     반환: [{"name":..., "dept":..., "amount":..., "file":...}, ...]
     """
     import os
     from collections import OrderedDict
+    from copy import copy
 
     addr_col = col_mapping.get("roster_addr_col", "주소")
     name_col = col_mapping.get("roster_name_col", "성명")
     head_col = col_mapping.get("roster_head_col", "세대주성명")
     phone_col = col_mapping.get("roster_phone_col", "핸드폰")
     dept_col = col_mapping.get("roster_dept_col", "학교명")
+    dong_col = col_mapping.get("roster_dong_col", "관할동")
 
-    # 세대별 그룹핑 (주소 기준, 순서 유지)
-    groups = OrderedDict()
+    # 1. 주소 줄바꿈 → 공백
     for p in roster_data:
-        addr = str(p.get(addr_col, "")).strip()
-        if addr not in groups:
-            groups[addr] = []
-        groups[addr].append(p)
+        raw = str(p.get(addr_col, ""))
+        p[addr_col] = raw.replace("\n", " ").replace("\r", " ").strip()
+
+    # 2. 관할동별 그룹핑 (순서 유지)
+    dong_groups = OrderedDict()
+    for p in roster_data:
+        dong = str(p.get(dong_col, "")).strip()
+        if dong not in dong_groups:
+            dong_groups[dong] = []
+        dong_groups[dong].append(p)
 
     if not title_prefix:
         title_prefix = f"{year}년 {month}월"
 
+    weeks = _get_week_ranges(year, month)
     created = []
     seq_total = 0
 
-    for addr, members in groups.items():
-        n = len(members)
-        # 몇 명짜리 시트 쓸지 결정
-        sheet_key = f"{min(n, 5)}명"
+    # 3. 템플릿 워크북 로드 (최초 1회)
+    wb = openpyxl.load_workbook(template_path)
 
-        wb = openpyxl.load_workbook(template_path)
-        # 필요한 시트만 남기고 삭제
-        for sn in list(wb.sheetnames):
-            if sn != sheet_key:
-                del wb[sn]
-        ws = wb[sheet_key]
+    for dong, persons_in_dong in dong_groups.items():
+        # 3a. 세대(주소)별 그룹핑
+        hh_groups = OrderedDict()
+        for p in persons_in_dong:
+            addr = p.get(addr_col, "")
+            if addr not in hh_groups:
+                hh_groups[addr] = []
+            hh_groups[addr].append(p)
 
-        # 공통 채움
-        ws["A1"] = f"{title_prefix} 분당구 급식확인서"
-        if delivery_person:
-            ws["K3"] = delivery_person
-        if delivery_phone:
-            ws["K4"] = delivery_phone
-        # 주소
-        ws["C3"] = addr
+        # 3b. 관할동 시트 생성
+        safe_dong = dong.replace(" ", "_").replace(",", "").replace(".", "")[:20]
+        if not safe_dong:
+            safe_dong = "기타"
+        # 시트명 중복 방지
+        sheet_name = safe_dong
+        if sheet_name in wb.sheetnames:
+            for i in range(2, 100):
+                cand = f"{safe_dong}_{i}"
+                if cand not in wb.sheetnames:
+                    sheet_name = cand
+                    break
 
-        # 주간 범위
-        weeks = _get_week_ranges(year, month)
+        ws = wb.create_sheet(title=sheet_name)
 
-        # 각 아동별 채움
-        for ci, person in enumerate(members):
-            seq_total += 1
-            child_idx = ci + 1
-            base_row = 6 + ci * 5  # 1명=6, 2명=11, 3명=16, ...
+        # 페이지 설정: 가로방향, 여백 0.3cm, 한 페이지에 모든 열 맞춤
+        ws.page_setup.orientation = "landscape"
+        ws.page_setup.fitToWidth = 1
+        ws.page_setup.fitToHeight = 0
+        ws.page_setup.fitToPage = True
+        ws.page_setup.paperSize = 9  # A4
+        for side in ("left", "right", "top", "bottom"):
+            setattr(ws.page_margins, side, 0.3 / 2.54)
+        ws.page_margins.header = 0
+        ws.page_margins.footer = 0
 
-            name = str(person.get(name_col, ""))
-            head = str(person.get(head_col, ""))
-            phone = str(person.get(phone_col, ""))
+        current_row = 1  # 현 시트에서 다음 템플릿을 붙일 시작 행
+        sheet_seq = 0  # 시트별 연번
+        col_widths_set = False
 
-            ws[f"A{base_row}"] = child_idx
-            ws[f"B{base_row}"] = name
-            ws[f"C{base_row}"] = head
-            ws[f"D{base_row}"] = phone
+        for addr, members in hh_groups.items():
+            n = len(members)
+            tpl_key = f"{min(n, 5)}명"
+            src = wb[tpl_key]
+            tpl_rows = src.max_row  # 1명=13, 2명=18, 3명=23, 4명=28, 5명=33
 
-            # 주간 배송 계산
-            flags = {
-                "breakfast": _to_bool(person.get("_breakfast", 0)),
-                "dinner": _to_bool(person.get("_dinner", 0)),
-                "lunch": _to_bool(person.get("_lunch", 0)),
-            }
-            note_text = str(person.get("_note", ""))
-            weekly = calc_weekly_breakdown(
-                year,
-                month,
-                flags["breakfast"],
-                flags["dinner"],
-                flags["lunch"],
-                note_text,
-                excluded_dates,
-            )
-
-            for wi, wdata in enumerate(weeks):
-                row = base_row + wi
-                wd = (
-                    weekly[wi]
-                    if wi < len(weekly)
-                    else {"breakfast": 0, "dinner": 0, "lunch": 0}
-                )
-                ws[f"F{row}"] = _week_date_str(wdata[1], wdata[2])
-                ws[f"G{row}"] = wd["breakfast"]
-                ws[f"H{row}"] = wd["dinner"]
-                ws[f"I{row}"] = wd["lunch"]
-
-            # 폰트 적용
-            for wi in range(len(weeks)):
-                row = base_row + wi
-                for col in ("A", "B", "C", "D", "F", "G", "H", "I", "J", "K"):
-                    cell = ws[f"{col}{row}"]
-                    if cell.value is not None:
-                        cell.font = CONFIRM_FONT
-                        cell.alignment = Alignment(
-                            horizontal="center", vertical="center"
+            # 3c. 컬럼 너비 복사 (첫 템플릿만)
+            if not col_widths_set:
+                for col_letter in src.column_dimensions:
+                    if src.column_dimensions[col_letter].width:
+                        ws.column_dimensions[col_letter].width = copy(
+                            src.column_dimensions[col_letter].width
                         )
+                # G(7), H(8), I(9) 열 너비 11.8 고정
+                for col_letter in ("G", "H", "I", "J"):
+                    ws.column_dimensions[col_letter].width = 11.8
+                col_widths_set = True
 
-            # 결과 저장용
-            dept = str(person.get(dept_col, ""))
-            created.append(
-                {
-                    "name": name,
-                    "dept": dept,
-                    "amount": 0,  # 금액은 청구서 참조
-                    "file": f"{addr[:15]}.xlsx",
+            # 3d. 템플릿 행 복사 (값 + 서식)
+            for src_r in range(1, tpl_rows + 1):
+                dst_r = current_row + src_r - 1
+                for src_c in range(1, 12):  # A~K = 11열
+                    _copy_cell(
+                        src.cell(row=src_r, column=src_c),
+                        ws.cell(row=dst_r, column=src_c),
+                    )
+                # 행 높이 복사
+                if src_r in src.row_dimensions:
+                    ws.row_dimensions[dst_r].height = copy(
+                        src.row_dimensions[src_r].height
+                    )
+
+            # 3e. 병합 셀 복사 (오프셋 적용)
+            for mr in src.merged_cells.ranges:
+                ws.merge_cells(
+                    start_row=current_row + mr.min_row - 1,
+                    start_column=mr.min_col,
+                    end_row=current_row + mr.max_row - 1,
+                    end_column=mr.max_col,
+                )
+
+            # 3f. Formula 행 번호 보정
+            for src_r in range(1, tpl_rows + 1):
+                dst_r = current_row + src_r - 1
+                for src_c in range(1, 12):
+                    cell = ws.cell(row=dst_r, column=src_c)
+                    if cell.value and str(cell.value).startswith("="):
+                        cell.value = _adjust_formula(cell.value, current_row - 1)
+
+            # ── 데이터 채움 ──
+            # 공통 정보 (상대 행: 1=title, 2=agency, 3=addr, 4=header, 5=subheader)
+            ws.cell(
+                row=current_row, column=1
+            ).value = f"{title_prefix} 분당구 급식확인서"
+            if delivery_person:
+                ws.cell(row=current_row + 2, column=11).value = delivery_person
+            if delivery_phone:
+                ws.cell(row=current_row + 3, column=11).value = delivery_phone
+            ws.cell(row=current_row + 2, column=3).value = addr
+
+            # 각 아동별 채움 (상대 행: 첫 아동=6, 이후 +5)
+            for ci, person in enumerate(members):
+                seq_total += 1
+                sheet_seq += 1
+                child_idx = ci + 1
+                base_row = current_row + 5 + ci * 5  # 6, 11, 16, ...
+
+                name = str(person.get(name_col, ""))
+                head = str(person.get(head_col, ""))
+                phone = str(person.get(phone_col, ""))
+
+                ws.cell(row=base_row, column=1).value = sheet_seq  # A: 연번
+                ws.cell(row=base_row, column=2).value = name  # B: 아동명
+                ws.cell(row=base_row, column=3).value = head  # C: 보호자(세대주성명)
+                ws.cell(row=base_row, column=4).value = phone  # D: 연락처
+
+                # 주간 배송 계산
+                flags = {
+                    "breakfast": _to_bool(person.get("_breakfast", 0)),
+                    "dinner": _to_bool(person.get("_dinner", 0)),
+                    "lunch": _to_bool(person.get("_lunch", 0)),
                 }
-            )
+                note_text = str(person.get("_note", ""))
+                weekly = calc_weekly_breakdown(
+                    year,
+                    month,
+                    flags["breakfast"],
+                    flags["dinner"],
+                    flags["lunch"],
+                    note_text,
+                    excluded_dates,
+                )
 
-        # 저장
-        safe_addr = addr.replace(" ", "_").replace(",", "").replace(".", "")[:20]
-        fname = f"확인서_{year:04d}{month:02d}_{safe_addr}.xlsx"
-        out_path = os.path.join(output_dir, fname)
-        wb.save(out_path)
+                for wi, wdata in enumerate(weeks):
+                    row = base_row + wi
+                    wd = (
+                        weekly[wi]
+                        if wi < len(weekly)
+                        else {"breakfast": 0, "dinner": 0, "lunch": 0}
+                    )
+                    ws.cell(row=row, column=6).value = _week_date_str(
+                        wdata[1], wdata[2]
+                    )
+                    # 0 → 빈 셀
+                    ws.cell(row=row, column=7).value = (
+                        wd["breakfast"] if wd["breakfast"] else ""
+                    )
+                    ws.cell(row=row, column=8).value = (
+                        wd["dinner"] if wd["dinner"] else ""
+                    )
+                    ws.cell(row=row, column=9).value = (
+                        wd["lunch"] if wd["lunch"] else ""
+                    )
 
-        # file명 업데이트
-        for item in created[-n:]:
-            item["file"] = fname
+                # 폰트 적용
+                for wi in range(len(weeks)):
+                    row = base_row + wi
+                    for col_idx in (1, 2, 3, 4, 6, 7, 8, 9, 10, 11):
+                        cell = ws.cell(row=row, column=col_idx)
+                        if cell.value is not None:
+                            cell.font = CONFIRM_FONT
+                            cell.alignment = Alignment(
+                                horizontal="center", vertical="center"
+                            )
+
+                # 결과 저장용
+                dept = str(person.get(dept_col, ""))
+                created.append({"name": name, "dept": dept, "amount": 0, "file": ""})
+
+            # 다음 세대로 오프셋 이동
+            current_row += tpl_rows
+
+        # file명 업데이트 (중간 저장용)
+        n_persons = len(persons_in_dong)
+
+    # 4. 원본 템플릿 시트 제거
+    for sn in list(wb.sheetnames):
+        if sn in ("1명", "2명", "3명", "4명", "5명"):
+            del wb[sn]
+
+    # 5. 단일 파일 저장
+    fname = f"확인서_{year:04d}{month:02d}.xlsx"
+    out_path = os.path.join(output_dir, fname)
+    wb.save(out_path)
+
+    # 모든 결과에 동일 파일명
+    for item in created:
+        item["file"] = fname
 
     return created

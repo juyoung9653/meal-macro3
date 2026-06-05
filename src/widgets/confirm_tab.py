@@ -1,6 +1,6 @@
 from datetime import date
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QSettings, Qt
 from PyQt6.QtWidgets import (
     QComboBox,
     QFileDialog,
@@ -16,6 +16,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from ..form_cache import load_form_cache, save_form_cache
 from ..invoice_generator import make_confirm
 
 
@@ -32,7 +33,11 @@ class ConfirmTab(QWidget):
         self._month = 6
         self._excluded_dates: set[date] = set()
         self._roster_headers: list[str] = []
+        self._roster_path = None
+        self._per_file_mode = True
+        self._settings = QSettings("분당구", "급식비정산")
         self._setup_ui()
+        self._restore_state()
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -86,6 +91,7 @@ class ConfirmTab(QWidget):
         delivery_layout.addLayout(col_row)
         delivery_layout.addWidget(map_label)
         delivery_layout.addWidget(self.delivery_table)
+        self.delivery_table.cellChanged.connect(self._save_settings)
 
         # ── 버튼 ──
         btn_layout = QHBoxLayout()
@@ -131,8 +137,51 @@ class ConfirmTab(QWidget):
         layout.addWidget(table_group, stretch=1)
         layout.addWidget(self.info_label)
 
+    def _save_settings(self):
+        self._settings.setValue("confirm/output_dir", self.output_dir or "")
+        self._settings.setValue(
+            "confirm/delivery_col", self.delivery_col_combo.currentData() or ""
+        )
+        self._settings.setValue(
+            "confirm/delivery_phone_map", self._get_delivery_phone_map()
+        )
+        self._settings.sync()
+
+    def _collect_form_state(self) -> dict:
+        return {
+            "output_dir": self.output_dir or "",
+            "delivery_col": self.delivery_col_combo.currentData() or "",
+            "delivery_phone_map": self._get_delivery_phone_map(),
+        }
+
+    def _apply_form_state(self, state: dict):
+        if not state:
+            return False
+        try:
+            if "output_dir" in state and state["output_dir"]:
+                self.output_dir = state["output_dir"]
+                self.path_label.setText(state["output_dir"])
+                self.path_label.setStyleSheet("color: #000;")
+            if "delivery_col" in state and state["delivery_col"]:
+                idx = self.delivery_col_combo.findData(state["delivery_col"])
+                if idx >= 0:
+                    self.delivery_col_combo.setCurrentIndex(idx)
+            return True
+        except (ValueError, TypeError, AttributeError):
+            return False
+
+    def _restore_state(self):
+        raw = self._settings.value("confirm/output_dir", "")
+        if raw:
+            self.output_dir = raw
+            self.path_label.setText(raw)
+            self.path_label.setStyleSheet("color: #000;")
+
+        # 배송담당자 컬럼/전화번호는 set_invoices()에서 복원 (콤보박스 채워진 후)
+
     def _on_delivery_col_changed(self):
         """배송담당자 컬럼 변경 → 고유 이름 목록 테이블 갱신"""
+        self._save_settings()
         col = self.delivery_col_combo.currentData()
         if not col or not self._invoices:
             self.delivery_table.setRowCount(0)
@@ -177,6 +226,7 @@ class ConfirmTab(QWidget):
             self.output_dir = dir_path
             self.path_label.setText(dir_path)
             self.path_label.setStyleSheet("color: #000;")
+            self._save_settings()
 
     def _generate_confirms(self):
         """확인서 생성"""
@@ -206,6 +256,13 @@ class ConfirmTab(QWidget):
                 delivery_phone = next(iter(phone_map.values()))
 
         try:
+            self._save_settings()
+
+            # ── Per-file cache: save on generate ──
+            if self._roster_path:
+                state = self._collect_form_state()
+                save_form_cache(self._roster_path, state)
+
             self.confirms = make_confirm(
                 roster_data=self._invoices,
                 col_mapping=self._col_mapping,
@@ -250,6 +307,7 @@ class ConfirmTab(QWidget):
         month: int = 6,
         excluded_dates: set[date] | None = None,
         roster_headers: list[str] | None = None,
+        roster_path: str | None = None,
     ):
         """청구서 데이터 + 매핑 + 제외일 전달받기"""
         self._invoices = invoices
@@ -258,10 +316,36 @@ class ConfirmTab(QWidget):
         self._year = year
         self._month = month
         self._excluded_dates = excluded_dates or set()
+        self._roster_path = roster_path
         self.generate_btn.setEnabled(bool(invoices))
 
         # 배송담당자 컬럼 콤보박스 채우기
         self._delivery_col_combo_update(roster_headers)
+
+        # 저장된 배송담당자 컬럼/전화번호 복원
+        saved_col = self._settings.value("confirm/delivery_col", "")
+        if saved_col:
+            idx = self.delivery_col_combo.findData(saved_col)
+            if idx >= 0:
+                self.delivery_col_combo.setCurrentIndex(idx)
+
+        # 테이블이 채워진 후 전화번호 복원 (cellChanged signal flood 방지)
+        self.delivery_table.blockSignals(True)
+        phone_map = self._settings.value("confirm/delivery_phone_map", None)
+        if isinstance(phone_map, dict) and phone_map:
+            for row in range(self.delivery_table.rowCount()):
+                name_item = self.delivery_table.item(row, 0)
+                if name_item and name_item.text() in phone_map:
+                    self.delivery_table.setItem(
+                        row, 1, QTableWidgetItem(phone_map[name_item.text()])
+                    )
+        self.delivery_table.blockSignals(False)
+
+        # ── Per-file cache auto-restore (after global defaults, so cache wins) ──
+        if invoices and roster_path:
+            cached = load_form_cache(roster_path)
+            if cached:
+                self._apply_form_state(cached)
 
         if invoices:
             self.info_label.setText(

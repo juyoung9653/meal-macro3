@@ -301,6 +301,9 @@ class RosterTab(QWidget):
         )
         return {"name": name, "dept": dept, "note": note}
 
+    def get_roster_path(self):
+        return self.roster_path
+
     def get_roster_data(self):
         return self.roster_data
 

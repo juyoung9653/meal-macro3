@@ -25,6 +25,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ..config import DEFAULT_ROSTER_TO_TEMPLATE
+from ..form_cache import load_form_cache, save_form_cache
 from ..holiday_fetcher import get_kr_holidays
 from ..invoice_generator import _to_bool, calc_delivery_days, make_invoice
 from .mapping_dialog import MappingDialog
@@ -39,8 +40,10 @@ class InvoiceTab(QWidget):
         self.output_dir = None
         self._roster_data = []
         self._roster_headers = []
+        self._roster_path = None
         self._col_mapping = dict(DEFAULT_ROSTER_TO_TEMPLATE)
         self._excluded_dates: set[date] = set()
+        self._per_file_mode = True  # default: per-file cache on
         self._settings = QSettings("분당구", "급식비정산")
         self._setup_ui()
         self._restore_state()
@@ -132,13 +135,20 @@ class InvoiceTab(QWidget):
         self.generate_btn.clicked.connect(self._generate_invoices)
         self.clear_btn = QPushButton("초기화")
         self.clear_btn.clicked.connect(self._clear)
+        self.per_file_cb = QCheckBox("파일별 설정 저장")
+        self.per_file_cb.setChecked(self._per_file_mode)
+        self.per_file_cb.setToolTip(
+            "켜기: 명단 파일별로 설정 저장/복원\n끄기: 전역 기본값 사용"
+        )
+        self.per_file_cb.toggled.connect(self._on_per_file_toggled)
         btn_layout.addWidget(self.mapping_btn)
+        btn_layout.addWidget(self.per_file_cb)
         btn_layout.addStretch()
         btn_layout.addWidget(self.generate_btn)
         btn_layout.addWidget(self.clear_btn)
         layout.addLayout(btn_layout)
 
-        # 값 변경 시 자동 저장 + 제외일 재계산
+        # 값 변경 시 자동 저장 (전역 only) + 제외일 재계산
         self.year_spin.valueChanged.connect(self._save_settings)
         self.month_spin.valueChanged.connect(self._save_settings)
         self.year_spin.valueChanged.connect(self._reload_excluded_dates)
@@ -170,6 +180,12 @@ class InvoiceTab(QWidget):
     # ── 액션 ──
 
     def _restore_state(self):
+        # per-file mode
+        self._per_file_mode = self._settings.value(
+            "invoice/per_file_mode", True, type=bool
+        )
+        self.per_file_cb.setChecked(self._per_file_mode)
+
         # 출력 경로
         out = self._settings.value("invoice/output_dir", "")
         if out:
@@ -201,6 +217,12 @@ class InvoiceTab(QWidget):
         if mapping is not None:
             self._col_mapping.update(mapping)
 
+        # 제외일
+        excluded = self._settings.value("invoice/excluded_dates", None)
+        if excluded is not None and isinstance(excluded, list):
+            self._excluded_dates = {date.fromisoformat(s) for s in excluded}
+            self._update_exclude_label()
+
     def _save_settings(self):
         self._settings.setValue("invoice/year", self.year_spin.value())
         self._settings.setValue("invoice/month", self.month_spin.value())
@@ -208,8 +230,16 @@ class InvoiceTab(QWidget):
         self._settings.setValue("invoice/dinner_price", self.dinner_price.value())
         self._settings.setValue("invoice/lunch_price", self.lunch_price.value())
         self._settings.setValue("invoice/col_mapping", self._col_mapping)
+        self._settings.setValue(
+            "invoice/excluded_dates", [d.isoformat() for d in self._excluded_dates]
+        )
         if self.output_dir:
             self._settings.setValue("invoice/output_dir", self.output_dir)
+        self._settings.sync()
+
+    def _on_per_file_toggled(self, checked: bool):
+        self._per_file_mode = checked
+        self._settings.setValue("invoice/per_file_mode", checked)
         self._settings.sync()
 
     def _select_output_dir(self):
@@ -322,6 +352,7 @@ class InvoiceTab(QWidget):
         dlg.exec()
         self._excluded_dates = temp_excluded
         self._update_exclude_label()
+        self._save_settings()
 
     def _update_exclude_label(self):
         if not self._excluded_dates:
@@ -350,6 +381,57 @@ class InvoiceTab(QWidget):
         """연/월 변경 시 제외일 재계산"""
         self._excluded_dates.clear()
         self._load_default_excluded_dates()
+
+    def _collect_form_state(self) -> dict:
+        """Collect all GUI values into a serializable dict."""
+        return {
+            "year": self.year_spin.value(),
+            "month": self.month_spin.value(),
+            "breakfast_price": self.breakfast_price.value(),
+            "dinner_price": self.dinner_price.value(),
+            "lunch_price": self.lunch_price.value(),
+            "output_dir": self.output_dir or "",
+            "col_mapping": dict(self._col_mapping),
+            "excluded_dates": [d.isoformat() for d in sorted(self._excluded_dates)],
+        }
+
+    def _apply_form_state(self, state: dict):
+        """Restore GUI values from a cached state dict."""
+        if not state:
+            return False
+        try:
+            if "year" in state:
+                self.year_spin.blockSignals(True)
+                self.year_spin.setValue(int(state["year"]))
+                self.year_spin.blockSignals(False)
+            if "month" in state:
+                self.month_spin.blockSignals(True)
+                self.month_spin.setValue(int(state["month"]))
+                self.month_spin.blockSignals(False)
+            if "breakfast_price" in state:
+                self.breakfast_price.setValue(int(state["breakfast_price"]))
+            if "dinner_price" in state:
+                self.dinner_price.setValue(int(state["dinner_price"]))
+            if "lunch_price" in state:
+                self.lunch_price.setValue(int(state["lunch_price"]))
+            if "output_dir" in state and state["output_dir"]:
+                self.output_dir = state["output_dir"]
+                self.path_label.setText(state["output_dir"])
+                self.path_label.setStyleSheet("color: #000;")
+            if "col_mapping" in state and isinstance(state["col_mapping"], dict):
+                self._col_mapping.update(state["col_mapping"])
+            if "excluded_dates" in state and isinstance(state["excluded_dates"], list):
+                dates = set()
+                for s in state["excluded_dates"]:
+                    try:
+                        dates.add(date.fromisoformat(s))
+                    except (ValueError, TypeError):
+                        pass
+                self._excluded_dates = dates
+                self._update_exclude_label()
+            return True
+        except (ValueError, TypeError, AttributeError):
+            return False
 
     def _generate_invoices(self):
         if not self.output_dir:
@@ -388,6 +470,12 @@ class InvoiceTab(QWidget):
         year = self.year_spin.value()
         month = self.month_spin.value()
         self._save_settings()
+
+        # ── Per-file cache: save all GUI state on generate ──
+        if self._per_file_mode and self._roster_path:
+            state = self._collect_form_state()
+            save_form_cache(self._roster_path, state)
+
         fname = f"청구서_{year:04d}{month:02d}.xlsx"
         out = f"{self.output_dir}/{fname}"
 
@@ -466,12 +554,22 @@ class InvoiceTab(QWidget):
         self.result_table.setRowCount(0)
         self.info_label.setText("생성된 청구서: 0건")
 
-    def set_roster_data(self, data: list[dict], headers: list[str]):
+    def set_roster_data(
+        self, data: list[dict], headers: list[str], roster_path: str | None = None
+    ):
         self._roster_data = data
         self._roster_headers = headers
+        self._roster_path = roster_path
         has = bool(data)
         self.mapping_btn.setEnabled(has)
         self.generate_btn.setEnabled(has)
+
+        # ── Per-file cache auto-restore ──
+        if has and self._per_file_mode and roster_path:
+            cached = load_form_cache(roster_path)
+            if cached:
+                self._apply_form_state(cached)
+
         if has:
             self.info_label.setText(f"명단 {len(data)}명 로드됨. 컬럼 매핑 → 생성")
 
