@@ -18,29 +18,41 @@ from .config import (
 MON, TUE, WED, THU, FRI, SAT, SUN = range(7)
 
 
+# ── 공휴일 캐시 (매번 생성 비용 大 → 모듈 로딩 시 1회) ──
+_KR_HOLIDAYS = holidays.country_holidays("KR")
+
+
 def _is_holiday(d: date) -> bool:
-    kr = holidays.country_holidays("KR")
-    return d in kr
+    return d in _KR_HOLIDAYS
 
 
-def count_weekdays(year: int, month: int, dow_set: set[int]) -> int:
-    """해당 월에서 특정 요일(dow_set)에 속하고 공휴일이 아닌 날짜 수"""
+def count_weekdays(
+    year: int, month: int, dow_set: set[int], excluded_dates: set[date] | None = None
+) -> int:
+    """해당 월에서 특정 요일(dow_set)에 속하고 공휴일 아닌 날짜 수. excluded_dates 제외"""
     total = 0
     last_day = calendar.monthrange(year, month)[1]
     for day in range(1, last_day + 1):
         d = date(year, month, day)
         if d.weekday() in dow_set and not _is_holiday(d):
+            if excluded_dates and d in excluded_dates:
+                continue
             total += 1
     return total
 
 
-def count_weekdays_in_range(start: date, end: date, dow_set: set[int]) -> int:
-    """기간 내 특정 요일 중 공휴일 아닌 날짜 수"""
+def count_weekdays_in_range(
+    start: date, end: date, dow_set: set[int], excluded_dates: set[date] | None = None
+) -> int:
+    """기간 내 특정 요일 중 공휴일 아닌 날짜 수. excluded_dates 제외"""
     total = 0
     d = start
     while d <= end:
         if d.weekday() in dow_set and not _is_holiday(d):
-            total += 1
+            if excluded_dates and d in excluded_dates:
+                pass  # skip
+            else:
+                total += 1
         d += timedelta(days=1)
     return total
 
@@ -131,17 +143,23 @@ def calc_delivery_days(
     flag_dinner: bool,
     flag_lunch: bool,
     note: str = "",
+    excluded_dates: set[date] | None = None,
 ) -> dict:
     """
     한 사람의 월별 배송일 수 계산.
     flag_*: 명단에서 해당 급식 이용 여부 (1.0=True)
+    excluded_dates: 배송 제외일 집합
     """
     base = {
-        "breakfast": count_weekdays(year, month, SCHEDULE["breakfast"])
+        "breakfast": count_weekdays(year, month, SCHEDULE["breakfast"], excluded_dates)
         if flag_breakfast
         else 0,
-        "dinner": count_weekdays(year, month, SCHEDULE["dinner"]) if flag_dinner else 0,
-        "lunch": count_weekdays(year, month, SCHEDULE["lunch"]) if flag_lunch else 0,
+        "dinner": count_weekdays(year, month, SCHEDULE["dinner"], excluded_dates)
+        if flag_dinner
+        else 0,
+        "lunch": count_weekdays(year, month, SCHEDULE["lunch"], excluded_dates)
+        if flag_lunch
+        else 0,
     }
 
     # 비고 조정
@@ -155,7 +173,9 @@ def calc_delivery_days(
             )
             if p_start <= p_end:
                 for meal in ["breakfast", "dinner", "lunch"]:
-                    deducted = count_weekdays_in_range(p_start, p_end, SCHEDULE[meal])
+                    deducted = count_weekdays_in_range(
+                        p_start, p_end, SCHEDULE[meal], excluded_dates
+                    )
                     base[meal] = max(0, base[meal] - deducted)
 
         elif p["type"] == "new":
@@ -181,13 +201,14 @@ def make_invoice(
     roster_data: list[dict],
     col_mapping: dict,
     output_path: str,
-    template_path: str = "청구서템플릿.xlsx",
+    template_path: str,
     year: int = 2026,
     month: int = 6,
     unit_price_breakfast: int = 4000,
     unit_price_dinner: int = 2000,
     unit_price_lunch: int = 4000,
     provider: str = "",
+    excluded_dates: set[date] | None = None,
 ):
     """
     roaster_data → 청구서템플릿 채워서 output_path 에 저장.
@@ -209,7 +230,13 @@ def make_invoice(
         }
         note_text = person.get("_note", "")
         days = calc_delivery_days(
-            year, month, flags["breakfast"], flags["dinner"], flags["lunch"], note_text
+            year,
+            month,
+            flags["breakfast"],
+            flags["dinner"],
+            flags["lunch"],
+            note_text,
+            excluded_dates,
         )
 
         breakfast_cnt = days["breakfast"] * 3
@@ -302,17 +329,243 @@ def _col_name_to_letter(name: str) -> str:
     return idx_map.get(name, "A")
 
 
+# ── 확인서: 주간 배송 계산 ──────────────────────────────
+
+CONFIRM_FONT = Font(name="맑은 고딕", size=11)
+CONFIRM_FONT_SMALL = Font(name="맑은 고딕", size=10)
+
+
+def _get_week_ranges(year: int, month: int) -> list[tuple[int, date, date]]:
+    """해당 월을 주차별로 분할. [(week_num, start, end), ...]"""
+    import calendar
+
+    last_day = calendar.monthrange(year, month)[1]
+    weeks = []
+    for start_day in (1, 8, 15, 22, 29):
+        if start_day > last_day:
+            break
+        end_day = min(start_day + 6, last_day)
+        weeks.append(
+            (len(weeks) + 1, date(year, month, start_day), date(year, month, end_day))
+        )
+    return weeks
+
+
+def calc_weekly_breakdown(
+    year: int,
+    month: int,
+    flag_breakfast: bool,
+    flag_dinner: bool,
+    flag_lunch: bool,
+    note: str = "",
+    excluded_dates: set[date] | None = None,
+) -> list[dict]:
+    """
+    주차별 배송 건수 계산.
+    반환: [{"week":1, "start":date, "end":date, "breakfast":N, "dinner":N, "lunch":N}, ...]
+    """
+    weeks = _get_week_ranges(year, month)
+    pauses = parse_note(note, year)
+
+    result = []
+    for wn, wstart, wend in weeks:
+        b = (
+            count_weekdays_in_range(wstart, wend, SCHEDULE["breakfast"], excluded_dates)
+            * 3
+            if flag_breakfast
+            else 0
+        )
+        d = (
+            count_weekdays_in_range(wstart, wend, SCHEDULE["dinner"], excluded_dates)
+            if flag_dinner
+            else 0
+        )
+        l = (
+            count_weekdays_in_range(wstart, wend, SCHEDULE["lunch"], excluded_dates)
+            if flag_lunch
+            else 0
+        )
+
+        for p in pauses:
+            if p["type"] == "pause":
+                ps = max(p["start"], wstart)
+                pe = min(p["end"], wend)
+                if ps <= pe:
+                    if flag_breakfast:
+                        b -= (
+                            count_weekdays_in_range(
+                                ps, pe, SCHEDULE["breakfast"], excluded_dates
+                            )
+                            * 3
+                        )
+                    if flag_dinner:
+                        d -= count_weekdays_in_range(
+                            ps, pe, SCHEDULE["dinner"], excluded_dates
+                        )
+                    if flag_lunch:
+                        l -= count_weekdays_in_range(
+                            ps, pe, SCHEDULE["lunch"], excluded_dates
+                        )
+
+        result.append(
+            {
+                "week": wn,
+                "start": wstart,
+                "end": wend,
+                "breakfast": max(0, b),
+                "dinner": max(0, d),
+                "lunch": max(0, l),
+            }
+        )
+    return result
+
+
+def _week_date_str(w_start: date, w_end: date) -> str:
+    """주차 날짜 범위 문자열 "05.01~05.02"""
+    return f"{w_start.month:02d}.{w_start.day:02d}~{w_end.month:02d}.{w_end.day:02d}"
+
+
+# ── 확인서 생성 ──────────────────────────────────────
+
+
 def make_confirm(
-    invoice_path: str,
-    output_path: str,
+    roster_data: list[dict],
+    col_mapping: dict,
+    output_dir: str,
+    template_path: str = "확인서템플릿.xlsx",
     year: int = 2026,
     month: int = 6,
-) -> int:
+    title_prefix: str = "",
+    delivery_person: str = "",
+    delivery_phone: str = "",
+    excluded_dates: set[date] | None = None,
+) -> list[dict]:
     """
-    청구서 기반 확인서 생성 (TODO: 추후 구현).
-    현재는 청구서 복사본.
+    명단 데이터 → 확인서템플릿 채워서 개별 확인서 생성.
+    동일 주소로 세대별 그룹핑 → 한 시트에 같이 출력.
+    반환: [{"name":..., "dept":..., "amount":..., "file":...}, ...]
     """
-    import shutil
+    import os
+    from collections import OrderedDict
 
-    shutil.copy2(invoice_path, output_path)
-    return 0
+    addr_col = col_mapping.get("roster_addr_col", "주소")
+    name_col = col_mapping.get("roster_name_col", "성명")
+    head_col = col_mapping.get("roster_head_col", "세대주성명")
+    phone_col = col_mapping.get("roster_phone_col", "핸드폰")
+    dept_col = col_mapping.get("roster_dept_col", "학교명")
+
+    # 세대별 그룹핑 (주소 기준, 순서 유지)
+    groups = OrderedDict()
+    for p in roster_data:
+        addr = str(p.get(addr_col, "")).strip()
+        if addr not in groups:
+            groups[addr] = []
+        groups[addr].append(p)
+
+    if not title_prefix:
+        title_prefix = f"{year}년 {month}월"
+
+    created = []
+    seq_total = 0
+
+    for addr, members in groups.items():
+        n = len(members)
+        # 몇 명짜리 시트 쓸지 결정
+        sheet_key = f"{min(n, 5)}명"
+
+        wb = openpyxl.load_workbook(template_path)
+        # 필요한 시트만 남기고 삭제
+        for sn in list(wb.sheetnames):
+            if sn != sheet_key:
+                del wb[sn]
+        ws = wb[sheet_key]
+
+        # 공통 채움
+        ws["A1"] = f"{title_prefix} 분당구 급식확인서"
+        if delivery_person:
+            ws["K3"] = delivery_person
+        if delivery_phone:
+            ws["K4"] = delivery_phone
+        # 주소
+        ws["C3"] = addr
+
+        # 주간 범위
+        weeks = _get_week_ranges(year, month)
+
+        # 각 아동별 채움
+        for ci, person in enumerate(members):
+            seq_total += 1
+            child_idx = ci + 1
+            base_row = 6 + ci * 5  # 1명=6, 2명=11, 3명=16, ...
+
+            name = str(person.get(name_col, ""))
+            head = str(person.get(head_col, ""))
+            phone = str(person.get(phone_col, ""))
+
+            ws[f"A{base_row}"] = child_idx
+            ws[f"B{base_row}"] = name
+            ws[f"C{base_row}"] = head
+            ws[f"D{base_row}"] = phone
+
+            # 주간 배송 계산
+            flags = {
+                "breakfast": _to_bool(person.get("_breakfast", 0)),
+                "dinner": _to_bool(person.get("_dinner", 0)),
+                "lunch": _to_bool(person.get("_lunch", 0)),
+            }
+            note_text = str(person.get("_note", ""))
+            weekly = calc_weekly_breakdown(
+                year,
+                month,
+                flags["breakfast"],
+                flags["dinner"],
+                flags["lunch"],
+                note_text,
+                excluded_dates,
+            )
+
+            for wi, wdata in enumerate(weeks):
+                row = base_row + wi
+                wd = (
+                    weekly[wi]
+                    if wi < len(weekly)
+                    else {"breakfast": 0, "dinner": 0, "lunch": 0}
+                )
+                ws[f"F{row}"] = _week_date_str(wdata[1], wdata[2])
+                ws[f"G{row}"] = wd["breakfast"]
+                ws[f"H{row}"] = wd["dinner"]
+                ws[f"I{row}"] = wd["lunch"]
+
+            # 폰트 적용
+            for wi in range(len(weeks)):
+                row = base_row + wi
+                for col in ("A", "B", "C", "D", "F", "G", "H", "I", "J", "K"):
+                    cell = ws[f"{col}{row}"]
+                    if cell.value is not None:
+                        cell.font = CONFIRM_FONT
+                        cell.alignment = Alignment(
+                            horizontal="center", vertical="center"
+                        )
+
+            # 결과 저장용
+            dept = str(person.get(dept_col, ""))
+            created.append(
+                {
+                    "name": name,
+                    "dept": dept,
+                    "amount": 0,  # 금액은 청구서 참조
+                    "file": f"{addr[:15]}.xlsx",
+                }
+            )
+
+        # 저장
+        safe_addr = addr.replace(" ", "_").replace(",", "").replace(".", "")[:20]
+        fname = f"확인서_{year:04d}{month:02d}_{safe_addr}.xlsx"
+        out_path = os.path.join(output_dir, fname)
+        wb.save(out_path)
+
+        # file명 업데이트
+        for item in created[-n:]:
+            item["file"] = fname
+
+    return created

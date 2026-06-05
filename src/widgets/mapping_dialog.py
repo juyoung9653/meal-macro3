@@ -39,6 +39,9 @@ class MappingDialog(QDialog):
         ("roster_dinner_col", "석식 여부 컬럼 *", True),
         ("roster_vacation_col", "방중 여부 컬럼 *", True),
         ("roster_note_col", "비고 (일시중지 등)", False),
+        ("", "── 배송담당 정보 ──", False),  # 구분선
+        ("roster_delivery_person_col", "배송담당자명", False),
+        ("roster_delivery_phone_col", "배송담당 연락처", False),
     ]
 
     COLUMN_HELP = {

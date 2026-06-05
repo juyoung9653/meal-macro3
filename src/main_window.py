@@ -51,7 +51,13 @@ class MainWindow(QMainWindow):
 
         if index >= 2:
             invoices = self.invoice_tab.get_invoices()
-            self.confirm_tab.set_invoices(invoices)
+            col_mapping = self.invoice_tab.get_col_mapping()
+            year = self.invoice_tab.get_year()
+            month = self.invoice_tab.get_month()
+            excluded_dates = self.invoice_tab.get_excluded_dates()
+            self.confirm_tab.set_invoices(
+                invoices, col_mapping, year, month, excluded_dates
+            )
 
         messages = {
             0: "명단 파일을 선택해 주세요.",

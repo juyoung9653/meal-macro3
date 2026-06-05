@@ -178,6 +178,18 @@ class RosterTab(QWidget):
     # ── 파싱 코어 ──
 
     @staticmethod
+    def _col_letter(idx: int) -> str:
+        """0-based index → Excel column letter (0=A, 1=B, ..., 25=Z, 26=AA, ...)"""
+        result = ""
+        i = idx
+        while True:
+            result = chr(i % 26 + 65) + result
+            i = i // 26 - 1
+            if i < 0:
+                break
+        return result
+
+    @staticmethod
     def _is_name(v: str) -> bool:
         if not v or not v.strip():
             return False
@@ -207,7 +219,7 @@ class RosterTab(QWidget):
         for h in raw_headers:
             h = h.strip()
             if not h:
-                h = f"__col{len(headers)}"
+                h = self._col_letter(len(headers))
             if h in seen:
                 seen[h] += 1
                 h = f"{h}_{seen[h]}"

@@ -1,11 +1,15 @@
 """청구서 탭 — 명단 기반 실제 청구서 생성"""
 
+import calendar
 from datetime import date
 
-from PyQt6.QtCore import QSettings, Qt
+import holidays
+from PyQt6.QtCore import QDate, QSettings, Qt
 from PyQt6.QtWidgets import (
+    QCalendarWidget,
     QCheckBox,
     QComboBox,
+    QDialog,
     QFileDialog,
     QGroupBox,
     QHBoxLayout,
@@ -35,6 +39,7 @@ class InvoiceTab(QWidget):
         self._roster_data = []
         self._roster_headers = []
         self._col_mapping = dict(DEFAULT_ROSTER_TO_TEMPLATE)
+        self._excluded_dates: set[date] = set()
         self._settings = QSettings("분당구", "급식비정산")
         self._setup_ui()
         self._restore_state()
@@ -103,6 +108,17 @@ class InvoiceTab(QWidget):
         path_layout.addWidget(self.path_label, stretch=1)
         path_layout.addWidget(self.path_btn)
         layout.addWidget(path_group)
+
+        # ── 배송 제외일 버튼 (달력) ──
+        exclude_group = QGroupBox("배송 제외일")
+        exclude_layout = QHBoxLayout(exclude_group)
+        self.exclude_btn = QPushButton("📅 제외일 선택")
+        self.exclude_btn.clicked.connect(self._open_exclude_dialog)
+        self.exclude_label = QLabel("선택된 제외일 없음")
+        self.exclude_label.setStyleSheet("color: #888;")
+        exclude_layout.addWidget(self.exclude_btn)
+        exclude_layout.addWidget(self.exclude_label, stretch=1)
+        layout.addWidget(exclude_group)
 
         # ── 버튼 ──
         btn_layout = QHBoxLayout()
@@ -212,6 +228,107 @@ class InvoiceTab(QWidget):
             self._save_settings()
             self.update()
 
+    def _open_exclude_dialog(self):
+        """배송 제외일 선택 다이얼로그 — 공휴일 기본 제외"""
+        dlg = QDialog(self)
+        dlg.setWindowTitle("배송 제외일 선택")
+        dlg.setMinimumWidth(400)
+        layout = QVBoxLayout(dlg)
+
+        y = self.year_spin.value()
+        m = self.month_spin.value()
+
+        # 해당 월 공휴일을 _excluded_dates 에 자동 추가
+        kr_holidays = holidays.country_holidays("KR")
+        last_day = calendar.monthrange(y, m)[1]
+        for day in range(1, last_day + 1):
+            d = date(y, m, day)
+            if d in kr_holidays:
+                self._excluded_dates.add(d)
+
+        cal = QCalendarWidget()
+        cal.setGridVisible(True)
+        cal.setCurrentPage(y, m)
+
+        # 제외일 하이라이트
+        from PyQt6.QtGui import QTextCharFormat
+
+        fmt = cal.dateTextFormat()
+        for d in self._excluded_dates:
+            qd = QDate(d.year, d.month, d.day)
+            f = QTextCharFormat()
+            f.setBackground(Qt.GlobalColor.red)
+            f.setForeground(Qt.GlobalColor.white)
+            fmt[qd] = f
+
+        cal.clicked.connect(lambda qd: self._toggle_exclude_date(qd, cal, dlg))
+        layout.addWidget(cal)
+
+        # 선택된 날짜 목록 표시
+        self._exclude_list_label = QLabel(self._format_excluded_dates())
+        self._exclude_list_label.setWordWrap(True)
+        layout.addWidget(self._exclude_list_label)
+
+        # 버튼
+        btn_layout = QHBoxLayout()
+        clear_exclude_btn = QPushButton("전체 해제")
+        clear_exclude_btn.clicked.connect(lambda: self._clear_excluded_dates(cal, dlg))
+        close_btn = QPushButton("닫기")
+        close_btn.clicked.connect(dlg.accept)
+        btn_layout.addWidget(clear_exclude_btn)
+        btn_layout.addStretch()
+        btn_layout.addWidget(close_btn)
+        layout.addLayout(btn_layout)
+
+        dlg.exec()
+        self._update_exclude_label()
+
+    def _toggle_exclude_date(self, qd, cal, dlg):
+        from datetime import date as dt_date
+
+        from PyQt6.QtGui import QTextCharFormat
+
+        d = dt_date(qd.year(), qd.month(), qd.day())
+        if d in self._excluded_dates:
+            self._excluded_dates.discard(d)
+        else:
+            self._excluded_dates.add(d)
+        # 다시 그리기
+        fmt = cal.dateTextFormat()
+        fmt.clear()
+        for ed in self._excluded_dates:
+            eqd = QDate(ed.year, ed.month, ed.day)
+            f = QTextCharFormat()
+            f.setBackground(Qt.GlobalColor.red)
+            f.setForeground(Qt.GlobalColor.white)
+            fmt[eqd] = f
+        self._exclude_list_label.setText(self._format_excluded_dates())
+
+    def _clear_excluded_dates(self, cal, dlg):
+        self._excluded_dates.clear()
+        fmt = cal.dateTextFormat()
+        fmt.clear()
+        self._exclude_list_label.setText("선택된 제외일 없음")
+
+    def _format_excluded_dates(self) -> str:
+        if not self._excluded_dates:
+            return "선택된 제외일 없음"
+        sorted_dates = sorted(self._excluded_dates)
+        parts = []
+        for d in sorted_dates:
+            parts.append(
+                f"{d.month:02d}/{d.day:02d} ({['월', '화', '수', '목', '금', '토', '일'][d.weekday()]})"
+            )
+        return "제외일: " + ", ".join(parts)
+
+    def _update_exclude_label(self):
+        if not self._excluded_dates:
+            self.exclude_label.setText("선택된 제외일 없음")
+            self.exclude_label.setStyleSheet("color: #888;")
+        else:
+            self.exclude_label.setText(f"{len(self._excluded_dates)}일 선택됨")
+            self.exclude_label.setStyleSheet("color: #c00; font-weight: bold;")
+
     def _generate_invoices(self):
         if not self.output_dir:
             QMessageBox.warning(self, "알림", "출력 경로를 먼저 선택하세요.")
@@ -257,13 +374,16 @@ class InvoiceTab(QWidget):
                 enriched,
                 self._col_mapping,
                 out,
-                template_path="청구서템플릿.xlsx",
+                template_path="assets/청구서템플릿.xlsx",
                 year=year,
                 month=month,
                 unit_price_breakfast=self.breakfast_price.value(),
                 unit_price_dinner=self.dinner_price.value(),
                 unit_price_lunch=self.lunch_price.value(),
                 provider="분당구",
+                excluded_dates=self._excluded_dates.copy()
+                if self._excluded_dates
+                else None,
             )
         except Exception as e:
             QMessageBox.critical(self, "생성 오류", f"청구서 생성 실패:\n{e}")
@@ -283,7 +403,17 @@ class InvoiceTab(QWidget):
             d = _to_bool(p.get("_dinner", 0))
             l = _to_bool(p.get("_lunch", 0))
             n = p.get("_note", "")
-            days = calc_delivery_days(year, month, b, d, l, n)
+            days = calc_delivery_days(
+                year,
+                month,
+                b,
+                d,
+                l,
+                n,
+                excluded_dates=self._excluded_dates.copy()
+                if self._excluded_dates
+                else None,
+            )
             breakfast_cnt = days["breakfast"] * 3
             dinner_cnt = days["dinner"]
             lunch_cnt = days["lunch"]
@@ -318,3 +448,15 @@ class InvoiceTab(QWidget):
 
     def get_invoices(self):
         return self.invoices
+
+    def get_col_mapping(self):
+        return dict(self._col_mapping)
+
+    def get_year(self):
+        return self.year_spin.value()
+
+    def get_month(self):
+        return self.month_spin.value()
+
+    def get_excluded_dates(self) -> set[date]:
+        return self._excluded_dates.copy()
