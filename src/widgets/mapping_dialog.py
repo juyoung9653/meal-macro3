@@ -122,8 +122,7 @@ class MappingDialog(QDialog):
         btn_layout.addWidget(cancel_btn)
         layout.addLayout(btn_layout)
 
-        # 자동 초기화: 다이얼로그 열릴 때 기본 매핑을 미리 채움
-        self._reset_defaults()
+        # (초기화 안 함 — InvoiceTab._open_mapping()에서 set_values()로 현재 설정을 채움)
 
     def _reset_defaults(self):
         """자동 추천: 헤더명 기반으로 가장 비슷한 컬럼 찾아 선택"""

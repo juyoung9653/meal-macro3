@@ -193,6 +193,24 @@ class InvoiceTab(QWidget):
             self.path_label.setText(out)
             self.path_label.setStyleSheet("color: #000;")
 
+        # ── Signal block: 모든 값을 한 번에 복원 후 마지막에 저장 ──
+        self.year_spin.blockSignals(True)
+        self.month_spin.blockSignals(True)
+        self.breakfast_price.blockSignals(True)
+        self.dinner_price.blockSignals(True)
+        self.lunch_price.blockSignals(True)
+
+        # 컬럼 매핑
+        mapping = self._settings.value("invoice/col_mapping", None)
+        if mapping is not None:
+            self._col_mapping.update(mapping)
+
+        # 제외일
+        excluded = self._settings.value("invoice/excluded_dates", None)
+        if excluded is not None and isinstance(excluded, list):
+            self._excluded_dates = {date.fromisoformat(s) for s in excluded}
+            self._update_exclude_label()
+
         # 연월
         y = self._settings.value("invoice/year", None)
         if y is not None:
@@ -212,16 +230,14 @@ class InvoiceTab(QWidget):
         if lp is not None:
             self.lunch_price.setValue(int(lp))
 
-        # 컬럼 매핑
-        mapping = self._settings.value("invoice/col_mapping", None)
-        if mapping is not None:
-            self._col_mapping.update(mapping)
+        self.year_spin.blockSignals(False)
+        self.month_spin.blockSignals(False)
+        self.breakfast_price.blockSignals(False)
+        self.dinner_price.blockSignals(False)
+        self.lunch_price.blockSignals(False)
 
-        # 제외일
-        excluded = self._settings.value("invoice/excluded_dates", None)
-        if excluded is not None and isinstance(excluded, list):
-            self._excluded_dates = {date.fromisoformat(s) for s in excluded}
-            self._update_exclude_label()
+        # 모든 값 복원 후 한 번에 저장
+        self._save_settings()
 
     def _save_settings(self):
         self._settings.setValue("invoice/year", self.year_spin.value())
@@ -236,6 +252,11 @@ class InvoiceTab(QWidget):
         if self.output_dir:
             self._settings.setValue("invoice/output_dir", self.output_dir)
         self._settings.sync()
+
+        # ── Per-file cache: also persist to the roster-level cache ──
+        if self._per_file_mode and self._roster_path:
+            state = self._collect_form_state()
+            save_form_cache(self._roster_path, state, "invoice")
 
     def _on_per_file_toggled(self, checked: bool):
         self._per_file_mode = checked
@@ -409,11 +430,17 @@ class InvoiceTab(QWidget):
                 self.month_spin.setValue(int(state["month"]))
                 self.month_spin.blockSignals(False)
             if "breakfast_price" in state:
+                self.breakfast_price.blockSignals(True)
                 self.breakfast_price.setValue(int(state["breakfast_price"]))
+                self.breakfast_price.blockSignals(False)
             if "dinner_price" in state:
+                self.dinner_price.blockSignals(True)
                 self.dinner_price.setValue(int(state["dinner_price"]))
+                self.dinner_price.blockSignals(False)
             if "lunch_price" in state:
+                self.lunch_price.blockSignals(True)
                 self.lunch_price.setValue(int(state["lunch_price"]))
+                self.lunch_price.blockSignals(False)
             if "output_dir" in state and state["output_dir"]:
                 self.output_dir = state["output_dir"]
                 self.path_label.setText(state["output_dir"])
@@ -429,6 +456,8 @@ class InvoiceTab(QWidget):
                         pass
                 self._excluded_dates = dates
                 self._update_exclude_label()
+            # 모든 값 restore 후 한 번에 저장 (signal cascade로 인한 부분저장 방지)
+            self._save_settings()
             return True
         except (ValueError, TypeError, AttributeError):
             return False
@@ -474,7 +503,7 @@ class InvoiceTab(QWidget):
         # ── Per-file cache: save all GUI state on generate ──
         if self._per_file_mode and self._roster_path:
             state = self._collect_form_state()
-            save_form_cache(self._roster_path, state)
+            save_form_cache(self._roster_path, state, "invoice")
 
         fname = f"청구서_{year:04d}{month:02d}.xlsx"
         out = f"{self.output_dir}/{fname}"
@@ -566,7 +595,7 @@ class InvoiceTab(QWidget):
 
         # ── Per-file cache auto-restore ──
         if has and self._per_file_mode and roster_path:
-            cached = load_form_cache(roster_path)
+            cached = load_form_cache(roster_path, "invoice")
             if cached:
                 self._apply_form_state(cached)
 

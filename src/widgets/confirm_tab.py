@@ -261,7 +261,7 @@ class ConfirmTab(QWidget):
             # ── Per-file cache: save on generate ──
             if self._roster_path:
                 state = self._collect_form_state()
-                save_form_cache(self._roster_path, state)
+                save_form_cache(self._roster_path, state, "confirm")
 
             self.confirms = make_confirm(
                 roster_data=self._invoices,
@@ -343,7 +343,7 @@ class ConfirmTab(QWidget):
 
         # ── Per-file cache auto-restore (after global defaults, so cache wins) ──
         if invoices and roster_path:
-            cached = load_form_cache(roster_path)
+            cached = load_form_cache(roster_path, "confirm")
             if cached:
                 self._apply_form_state(cached)
 

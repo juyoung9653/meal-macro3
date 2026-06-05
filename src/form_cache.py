@@ -40,18 +40,25 @@ def _str_to_date(s: str) -> date | None:
 # ── public API ──
 
 
+def _ns_key(roster_path: str, namespace: str) -> str:
+    """Namespace-scoped key. Different tabs don't collide."""
+    return f"{namespace}:{_roster_key(roster_path)}"
+
+
 def save_form_cache(
     roster_path: str | None,
     data: dict,
+    namespace: str = "default",
 ):
     """Save GUI state to per-file cache.
 
     ``data`` is a dict of all form values to persist.
+    ``namespace`` keeps different tabs from colliding.
     Merges into existing cache for the same file.
     """
     if not roster_path:
         return
-    key = _roster_key(roster_path)
+    key = _ns_key(roster_path, namespace)
     cpath = _cache_path(roster_path)
     try:
         if os.path.exists(cpath):
@@ -70,14 +77,17 @@ def save_form_cache(
         pass  # best effort
 
 
-def load_form_cache(roster_path: str | None) -> dict | None:
+def load_form_cache(
+    roster_path: str | None,
+    namespace: str = "default",
+) -> dict | None:
     """Load GUI state for given roster file.
 
     Returns saved data dict, or None if no cache.
     """
     if not roster_path:
         return None
-    key = _roster_key(roster_path)
+    key = _ns_key(roster_path, namespace)
     cpath = _cache_path(roster_path)
     try:
         if not os.path.exists(cpath):
@@ -89,11 +99,14 @@ def load_form_cache(roster_path: str | None) -> dict | None:
         return None
 
 
-def clear_form_cache(roster_path: str | None):
+def clear_form_cache(
+    roster_path: str | None,
+    namespace: str = "default",
+):
     """Remove cache entry for given roster file."""
     if not roster_path:
         return
-    key = _roster_key(roster_path)
+    key = _ns_key(roster_path, namespace)
     cpath = _cache_path(roster_path)
     try:
         if not os.path.exists(cpath):
