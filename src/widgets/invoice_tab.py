@@ -24,7 +24,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from ..config import DEFAULT_TEMPLATE_COLUMNS
+from ..config import auto_detect_semantic_columns, read_template_columns
 from ..form_cache import load_form_cache, save_form_cache
 from ..holiday_fetcher import get_kr_holidays
 from ..invoice_generator import _to_bool, calc_delivery_days, make_invoice
@@ -41,7 +41,14 @@ class InvoiceTab(QWidget):
         self._roster_data = []
         self._roster_headers = []
         self._roster_path = None
-        self._col_mapping = {col: "" for col in DEFAULT_TEMPLATE_COLUMNS}
+        self._template_path = "assets/청구서템플릿.xlsx"
+        self._template_columns = read_template_columns(self._template_path)
+        # 템플릿 컬럼 → 명단 컬럼 매핑
+        self._col_mapping = {col: "" for col in self._template_columns}
+        # 의미론적 컬럼 (auto-detect → GUI override 가능)
+        _sem = auto_detect_semantic_columns(self._template_columns)
+        self._col_mapping.update(_sem)
+        # 배송 플래그
         self._col_mapping.update(
             {"__breakfast": "", "__dinner": "", "__vacation": "", "__note": ""}
         )
@@ -281,11 +288,11 @@ class InvoiceTab(QWidget):
         if not self._roster_headers:
             QMessageBox.warning(self, "알림", "먼저 명단 파일을 불러오세요.")
             return
-        dlg = MappingDialog(self._roster_headers, self)
+        dlg = MappingDialog(self._roster_headers, self._template_columns, self)
         dlg.set_values(self._col_mapping)
         # 캐시된 매핑 없으면 자동 기본값 채움
         if not any(
-            v for k, v in self._col_mapping.items() if k in DEFAULT_TEMPLATE_COLUMNS
+            v for k, v in self._col_mapping.items() if k in self._template_columns
         ):
             dlg._reset_defaults()
         if dlg.exec():
@@ -524,10 +531,11 @@ class InvoiceTab(QWidget):
         out = f"{self.output_dir}/{fname}"
 
         # 템플릿 파일 존재 여부 확인
-        template_path = "assets/청구서템플릿.xlsx"
-        if not os.path.exists(template_path):
+        if not os.path.exists(self._template_path):
             QMessageBox.critical(
-                self, "파일 없음", f"템플릿 파일을 찾을 수 없습니다:\n{template_path}"
+                self,
+                "파일 없음",
+                f"템플릿 파일을 찾을 수 없습니다:\n{self._template_path}",
             )
             return
 
@@ -536,7 +544,7 @@ class InvoiceTab(QWidget):
                 enriched,
                 self._col_mapping,
                 out,
-                template_path="assets/청구서템플릿.xlsx",
+                template_path=self._template_path,
                 year=year,
                 month=month,
                 unit_price_breakfast=self.breakfast_price.value(),

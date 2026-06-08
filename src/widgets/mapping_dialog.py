@@ -14,6 +14,8 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
 )
 
+from ..config import SEMANTIC_COLUMN_ROLES, auto_detect_semantic_columns
+
 
 class _NoWheelComboBox(QComboBox):
     """마우스 휠로 선택값 바뀌는 것 방지"""
@@ -21,8 +23,6 @@ class _NoWheelComboBox(QComboBox):
     def wheelEvent(self, event: QWheelEvent):
         event.ignore()
 
-
-from ..config import DEFAULT_TEMPLATE_COLUMNS
 
 # 배송일 계산용 플래그 — 템플릿 컬럼과 별도 섹션
 _FLAG_FIELDS = [
@@ -43,17 +43,23 @@ _FLAG_SEARCH_TERMS = {
 
 class MappingDialog(QDialog):
     """
-    템플릿 컬럼 목록을 config.DEFAULT_TEMPLATE_COLUMNS 기준으로 동적 생성.
-    테이블에서 각 템플릿 컬럼에 대응할 명단 컬럼을 선택.
+    템플릿 컬럼 목록을 template_columns 기준으로 동적 생성.
+    3개 섹션:
+      1. 템플릿 컬럼 ↔ 명단 컬럼 매핑
+      2. 계산값 입력 대상 (템플릿 내 특수 컬럼 지정)
+      3. 배송일 계산용 플래그
     """
 
-    def __init__(self, roster_headers: list[str], parent=None):
+    def __init__(
+        self, roster_headers: list[str], template_columns: list[str], parent=None
+    ):
         super().__init__(parent)
         self.setWindowTitle("컬럼 매핑 설정")
         self.setMinimumWidth(650)
         self.resize(650, 500)
 
         self.roster_headers = [h.strip() for h in roster_headers if h.strip()]
+        self._template_columns = template_columns
         self._combo_map: dict[str, QComboBox] = {}
         self._setup_ui()
 
@@ -70,7 +76,7 @@ class MappingDialog(QDialog):
         # ── 테이블 ──
         table = QTableWidget()
         table.setColumnCount(2)
-        table.setHorizontalHeaderLabels(["템플릿 컬럼", "명단 컬럼 선택"])
+        table.setHorizontalHeaderLabels(["항목", "값 선택"])
         table.horizontalHeader().setSectionResizeMode(
             0, QHeaderView.ResizeMode.ResizeToContents
         )
@@ -78,32 +84,63 @@ class MappingDialog(QDialog):
         table.verticalHeader().setVisible(False)
 
         row = 0
-        # 템플릿 컬럼
-        for col_name in DEFAULT_TEMPLATE_COLUMNS:
+        # ── 섹션 1: 템플릿 컬럼 → 명단 컬럼 ──
+        for col_name in self._template_columns:
             table.insertRow(row)
 
             item = QTableWidgetItem(col_name)
             item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             table.setItem(row, 0, item)
 
-            combo = self._make_combo()
+            combo = self._make_roster_combo()
             table.setCellWidget(row, 1, combo)
             self._combo_map[col_name] = combo
             row += 1
 
-        # 구분선
+        # ── 섹션 2: 계산값 입력 대상 (auto-detect + GUI override) ──
         table.insertRow(row)
-        sep = QTableWidgetItem("── 배송일 계산용 ──")
-        sep.setFlags(sep.flags() & ~Qt.ItemFlag.ItemIsEditable)
-        sep.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-        f = sep.font()
+        sep1 = QTableWidgetItem("── 계산값 입력 대상 ──")
+        sep1.setFlags(sep1.flags() & ~Qt.ItemFlag.ItemIsEditable)
+        sep1.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        f = sep1.font()
         f.setBold(True)
-        sep.setFont(f)
-        table.setItem(row, 0, sep)
+        sep1.setFont(f)
+        table.setItem(row, 0, sep1)
         table.setSpan(row, 0, 1, 2)
         row += 1
 
-        # 플래그
+        _semantic_defaults = auto_detect_semantic_columns(self._template_columns)
+
+        for key, info in SEMANTIC_COLUMN_ROLES.items():
+            table.insertRow(row)
+
+            item = QTableWidgetItem(info["label"])
+            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            table.setItem(row, 0, item)
+
+            combo = self._make_template_combo()
+            table.setCellWidget(row, 1, combo)
+            # auto-detect 값 기본 선택
+            detected = _semantic_defaults.get(key, "")
+            if detected:
+                idx = combo.findText(detected)
+                if idx >= 0:
+                    combo.setCurrentIndex(idx)
+            self._combo_map[key] = combo
+            row += 1
+
+        # ── 섹션 3: 배송일 계산용 플래그 ──
+        table.insertRow(row)
+        sep2 = QTableWidgetItem("── 배송일 계산용 ──")
+        sep2.setFlags(sep2.flags() & ~Qt.ItemFlag.ItemIsEditable)
+        sep2.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        f2 = sep2.font()
+        f2.setBold(True)
+        sep2.setFont(f2)
+        table.setItem(row, 0, sep2)
+        table.setSpan(row, 0, 1, 2)
+        row += 1
+
         for key, label, tip in _FLAG_FIELDS:
             table.insertRow(row)
 
@@ -111,7 +148,7 @@ class MappingDialog(QDialog):
             item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             table.setItem(row, 0, item)
 
-            combo = self._make_combo()
+            combo = self._make_roster_combo()
             if tip:
                 combo.setToolTip(tip)
             table.setCellWidget(row, 1, combo)
@@ -134,7 +171,8 @@ class MappingDialog(QDialog):
         btn_layout.addWidget(cancel_btn)
         layout.addLayout(btn_layout)
 
-    def _make_combo(self) -> QComboBox:
+    def _make_roster_combo(self) -> QComboBox:
+        """명단 컬럼명을 선택하는 콤보박스"""
         combo = _NoWheelComboBox()
         combo.setMinimumWidth(200)
         combo.addItem("(선택 안 함)", "")
@@ -142,13 +180,26 @@ class MappingDialog(QDialog):
             combo.addItem(h, h)
         return combo
 
+    def _make_template_combo(self) -> QComboBox:
+        """템플릿 컬럼명을 선택하는 콤보박스"""
+        combo = _NoWheelComboBox()
+        combo.setMinimumWidth(200)
+        for col in self._template_columns:
+            combo.addItem(col, col)
+        return combo
+
     def _reset_defaults(self):
-        """템플릿 컬럼명/플래그와 유사한 명단 헤더 자동 선택"""
+        """템플릿 컬럼명/플래그/계산값 자동 선택"""
         import difflib
 
         auto_map = {}
         for key in self._combo_map:
-            if key.startswith("__"):
+            if key.startswith("__calc_"):
+                # 계산값 대상: auto_detect
+                detected = auto_detect_semantic_columns(self._template_columns)
+                auto_map[key] = detected.get(key, "")
+            elif key.startswith("__"):
+                # 플래그: 명단 헤더에서 검색
                 terms = _FLAG_SEARCH_TERMS.get(key, [key])
                 best = ""
                 for t in terms:
@@ -161,7 +212,9 @@ class MappingDialog(QDialog):
                     if matches:
                         best = matches[0]
                         break
+                auto_map[key] = best
             else:
+                # 일반 템플릿 컬럼: 명단 헤더와 exact/match
                 if key in self.roster_headers:
                     best = key
                 else:
@@ -169,7 +222,7 @@ class MappingDialog(QDialog):
                         key, self.roster_headers, n=1, cutoff=0.5
                     )
                     best = matches[0] if matches else ""
-            auto_map[key] = best
+                auto_map[key] = best
         self.set_values(auto_map)
 
     def set_values(self, mapping: dict):

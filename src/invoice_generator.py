@@ -8,9 +8,10 @@ import openpyxl
 from openpyxl.styles import Alignment, Font
 
 from .config import (
-    DEFAULT_TEMPLATE_COLUMNS,
     TEMPLATE_DATA_START_ROW,
     TEMPLATE_SHEET_NAME,
+    col_name_to_letter,
+    read_template_columns,
 )
 from .holiday_fetcher import get_kr_holidays
 
@@ -205,11 +206,22 @@ def make_invoice(
     excluded_dates: set[date] | None = None,
 ):
     """
-    roaster_data → 청구서템플릿 채워서 output_path 에 저장.
+    roster_data → 청구서템플릿 채워서 output_path 에 저장.
 
-    col_mapping 은 roster_data dict key → template 컬럼명(0-based index) 대응.
-    config.DEFAULT_TEMPLATE_COLUMNS 기준.
+    template_path 의 실제 헤더를 읽어 컬럼명을 동적으로 결정.
+    col_mapping 의 key 는 템플릿 컬럼명과 일치해야 함.
     """
+    # ── 템플릿 컬럼명 동적 읽기 ──
+    template_columns = read_template_columns(template_path)
+
+    # col_mapping 에서 의미론적 컬럼명 읽기 (auto-detect → GUI override)
+    bf_col = col_mapping.get("__calc_breakfast", "조식")
+    dn_col = col_mapping.get("__calc_dinner", "석식")
+    lh_col = col_mapping.get("__calc_lunch", "중식")
+    total_col = col_mapping.get("__calc_total", "계")
+    price_col = col_mapping.get("__calc_price", "청구금액")
+    prov_col = col_mapping.get("__calc_provider", "제공기관")
+
     wb = openpyxl.load_workbook(template_path)
     ws = wb[TEMPLATE_SHEET_NAME]
 
@@ -233,28 +245,45 @@ def make_invoice(
             excluded_dates,
         )
 
+        # 조식: 배송일*3, 단 excluded_dates 중 금요일은 -1만 적용 (현재 -3이므로 +2 보정)
         breakfast_cnt = days["breakfast"] * 3
+        if excluded_dates and flags["breakfast"]:
+            excluded_fridays = sum(
+                1
+                for d in excluded_dates
+                if d.weekday() == FRI and d.year == year and d.month == month
+            )
+            breakfast_cnt = max(0, breakfast_cnt + 2 * excluded_fridays)
+
         dinner_cnt = days["dinner"]
         lunch_cnt = days["lunch"]
 
         # 템플릿 매핑
-        row_data = _map_person_to_row(person, col_mapping, i + 1)
-        row_data["조식"] = breakfast_cnt
-        row_data["석식"] = dinner_cnt
-        row_data["중식"] = lunch_cnt
-        # 계, 청구금액은 엑셀 수식
-        row_data["계"] = f"=L{row_idx}+M{row_idx}+N{row_idx}"
-        row_data["청구금액"] = (
-            f"=L{row_idx}*{unit_price_breakfast}"
-            f"+M{row_idx}*{unit_price_dinner}"
-            f"+N{row_idx}*{unit_price_lunch}"
+        row_data = _map_person_to_row(person, col_mapping, i + 1, template_columns)
+
+        row_data[bf_col] = breakfast_cnt
+        row_data[dn_col] = dinner_cnt
+        row_data[lh_col] = lunch_cnt
+
+        # 계, 청구금액 → 엑셀 수식 (실제 컬럼 문자 사용)
+        bf_letter = col_name_to_letter(bf_col, template_columns)
+        dn_letter = col_name_to_letter(dn_col, template_columns)
+        lh_letter = col_name_to_letter(lh_col, template_columns)
+
+        row_data[total_col] = (
+            f"={bf_letter}{row_idx}+{dn_letter}{row_idx}+{lh_letter}{row_idx}"
+        )
+        row_data[price_col] = (
+            f"={bf_letter}{row_idx}*{unit_price_breakfast}"
+            f"+{dn_letter}{row_idx}*{unit_price_dinner}"
+            f"+{lh_letter}{row_idx}*{unit_price_lunch}"
         )
         if provider:
-            row_data["제공기관"] = provider
+            row_data[prov_col] = provider
 
         # 엑셀 쓰기
         for col_name, value in row_data.items():
-            col_letter = _col_name_to_letter(col_name)
+            col_letter = col_name_to_letter(col_name, template_columns)
             cell = ws[f"{col_letter}{row_idx}"]
             cell.value = value
             cell.font = INVOICE_FONT
@@ -274,22 +303,18 @@ def _to_bool(val) -> bool:
     return bool(val)
 
 
-def _map_person_to_row(person: dict, mapping: dict, seq: int) -> dict:
+def _map_person_to_row(
+    person: dict, mapping: dict, seq: int, template_columns: list[str]
+) -> dict:
     """person dict + mapping → {template_col_name: value}"""
-    row = {"연번": seq}
-    for col in DEFAULT_TEMPLATE_COLUMNS:
+    row: dict[str, str | int] = {}
+    for col in template_columns:
         if col == "연번":
-            continue
-        roster_key = mapping.get(col, "")
-        row[col] = person.get(roster_key, "") if roster_key else ""
+            row[col] = seq
+        else:
+            roster_key = mapping.get(col, "")
+            row[col] = person.get(roster_key, "") if roster_key else ""
     return row
-
-
-def _col_name_to_letter(name: str) -> str:
-    """DEFAULT_TEMPLATE_COLUMNS 인덱스 → 엑셀 컬럼 문자"""
-    if name not in DEFAULT_TEMPLATE_COLUMNS:
-        return ""
-    return chr(ord("A") + DEFAULT_TEMPLATE_COLUMNS.index(name))
 
 
 # ── 확인서: 주간 배송 계산 ──────────────────────────────
@@ -606,6 +631,21 @@ def make_confirm(
                     note_text,
                     excluded_dates,
                 )
+
+                # 조식 주간값 보정: excluded_dates 중 금요일은 -1만 적용 (현재 -3이므로 +2)
+                if excluded_dates and flags["breakfast"]:
+                    for wi, wdata in enumerate(weeks):
+                        if wi >= len(weekly):
+                            break
+                        w_start, w_end = wdata[1], wdata[2]
+                        excluded_fri_in_week = sum(
+                            1
+                            for d in excluded_dates
+                            if d.weekday() == FRI and w_start <= d <= w_end
+                        )
+                        weekly[wi]["breakfast"] = max(
+                            0, weekly[wi]["breakfast"] + 2 * excluded_fri_in_week
+                        )
 
                 for wi, wdata in enumerate(weeks):
                     row = base_row + wi
