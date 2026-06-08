@@ -661,7 +661,6 @@ class InvoiceTab(QWidget):
                 unit_price_breakfast=self.breakfast_price.value(),
                 unit_price_dinner=self.dinner_price.value(),
                 unit_price_lunch=self.lunch_price.value(),
-                provider=self._s.get("invoice", "default_provider", default="분당구"),
                 excluded_dates=self._excluded_dates.copy()
                 if self._excluded_dates
                 else None,

@@ -209,7 +209,6 @@ def make_invoice(
     unit_price_breakfast: int,
     unit_price_dinner: int,
     unit_price_lunch: int,
-    provider: str = "",
     excluded_dates: set[date] | None = None,
 ):
     """roster_data → 청구서템플릿 채워서 output_path 에 저장."""
@@ -221,13 +220,19 @@ def make_invoice(
     lh_col = col_mapping.get("__calc_lunch", "중식")
     total_col = col_mapping.get("__calc_total", "계")
     price_col = col_mapping.get("__calc_price", "청구금액")
-    prov_col = col_mapping.get("__calc_provider", "제공기관")
 
     sheet_name = _get_template_sheet_name()
     wb = openpyxl.load_workbook(template_path)
     ws = wb[sheet_name]
 
     row_idx = _get_template_data_start_row()
+    data_start_row = row_idx
+
+    # 첫 데이터 행 셀 참조·높이 저장 (값+서식+수식 복사용)
+    _template_row_cells = [
+        ws.cell(row=data_start_row, column=c) for c in range(1, ws.max_column + 1)
+    ]
+    _tmpl_row_height = ws.row_dimensions[data_start_row].height
 
     for i, person in enumerate(roster_data):
         flags = {
@@ -268,17 +273,17 @@ def make_invoice(
         dn_letter = col_name_to_letter(dn_col, template_columns)
         lh_letter = col_name_to_letter(lh_col, template_columns)
 
-        row_data[total_col] = (
-            f"={bf_letter}{row_idx}+{dn_letter}{row_idx}+{lh_letter}{row_idx}"
-        )
         row_data[price_col] = (
             f"={bf_letter}{row_idx}*{unit_price_breakfast}"
             f"+{dn_letter}{row_idx}*{unit_price_dinner}"
             f"+{lh_letter}{row_idx}*{unit_price_lunch}"
         )
-        if provider:
-            row_data[prov_col] = provider
 
+        # 두 번째 행부턴 첫 데이터 행 전체 복사 (값+서식+수식+높이)
+        if i > 0:
+            for _col_idx, _src_cell in enumerate(_template_row_cells, start=1):
+                _copy_cell(_src_cell, ws.cell(row=row_idx, column=_col_idx))
+            ws.row_dimensions[row_idx].height = _tmpl_row_height
         for col_name, value in row_data.items():
             col_letter = col_name_to_letter(col_name, template_columns)
             cell = ws[f"{col_letter}{row_idx}"]
@@ -310,7 +315,9 @@ def _map_person_to_row(
             row[col] = seq
         else:
             roster_key = mapping.get(col, "")
-            row[col] = person.get(roster_key, "") if roster_key else ""
+            if not roster_key:
+                continue  # 매핑 없는 컬럼은 템플릿 값 유지
+            row[col] = person.get(roster_key, "")
     return row
 
 

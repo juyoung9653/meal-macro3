@@ -48,7 +48,6 @@ DEFAULTS: dict[str, Any] = {
     },
     "invoice": {
         "output_filename_format": "청구서_{year:04d}{month:02d}.xlsx",
-        "default_provider": "분당구",
     },
     "roster": {
         "name_keywords": ["성명", "이름", "성함", "학생명", "학생", "name", "Name"],
@@ -81,11 +80,6 @@ DEFAULTS: dict[str, Any] = {
             "label": "청구금액 수식",
             "patterns": ["청구금액"],
             "default": "청구금액",
-        },
-        "__calc_provider": {
-            "label": "제공기관 입력",
-            "patterns": ["제공기관"],
-            "default": "제공기관",
         },
     },
     "flag_fields": {

@@ -82,8 +82,6 @@ class SettingsDialog(QDialog):
         self._win_h_spin = _NoWheelSpinBox()
         self._win_h_spin.setRange(400, 2000)
         form.addRow("기본 창 높이:", self._win_h_spin)
-        self._provider_edit = QLineEdit()
-        form.addRow("제공기관 기본값:", self._provider_edit)
         return self._wrap_scroll(w)
 
     def _make_template_tab(self):
@@ -254,7 +252,6 @@ class SettingsDialog(QDialog):
         s = self._s
         self._win_w_spin.setValue(s.get("app", "window_width", default=1000))
         self._win_h_spin.setValue(s.get("app", "window_height", default=700))
-        self._provider_edit.setText(s.get("invoice", "default_provider", default=""))
 
         self._invoice_tpl_edit.setText(s.get("templates", "invoice_path", default=""))
         self._confirm_tpl_edit.setText(s.get("templates", "confirm_path", default=""))
@@ -305,7 +302,6 @@ class SettingsDialog(QDialog):
         s = self._s
         s.set("app", "window_width", value=self._win_w_spin.value())
         s.set("app", "window_height", value=self._win_h_spin.value())
-        s.set("invoice", "default_provider", value=self._provider_edit.text())
 
         s.set("templates", "invoice_path", value=self._invoice_tpl_edit.text())
         s.set("templates", "confirm_path", value=self._confirm_tpl_edit.text())

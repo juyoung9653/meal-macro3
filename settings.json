@@ -39,8 +39,7 @@
     "col_width_j": 12.5
   },
   "invoice": {
-    "output_filename_format": "청구서_{year:04d}{month:02d}.xlsx",
-    "default_provider": "행복도시락"
+    "output_filename_format": "청구서_{year:04d}{month:02d}.xlsx"
   },
   "roster": {
     "name_keywords": ["성명", "이름", "성함", "학생명", "학생", "name", "Name"],
@@ -61,7 +60,7 @@
     },
     "__calc_lunch": {
       "label": "중식 건수 입력",
-      "patterns": ["중식"],
+      "patterns": ["중식", "방중"],
       "default": "중식"
     },
     "__calc_total": {
@@ -73,11 +72,6 @@
       "label": "청구금액 수식",
       "patterns": ["청구금액"],
       "default": "청구금액"
-    },
-    "__calc_provider": {
-      "label": "제공기관 입력",
-      "patterns": ["제공기관"],
-      "default": "제공기관"
     }
   },
   "flag_fields": {

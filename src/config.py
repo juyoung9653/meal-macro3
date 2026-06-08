@@ -47,11 +47,6 @@ def _get_semantic_column_roles():
                 "patterns": ["청구금액"],
                 "default": "청구금액",
             },
-            "__calc_provider": {
-                "label": "제공기관 입력",
-                "patterns": ["제공기관"],
-                "default": "제공기관",
-            },
         }
     return roles
 
