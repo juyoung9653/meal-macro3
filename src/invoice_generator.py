@@ -318,24 +318,22 @@ def _map_person_to_row(
 
 
 def _get_week_ranges(year: int, month: int) -> list[tuple[int, date, date]]:
-    """설정 기반으로 해당 월을 주차별로 분할."""
-    s = get_settings()
+    """해당 월을 일(요일)~토(요일) 주차 단위로 분할."""
     last_day = calendar.monthrange(year, month)[1]
-    week1_end = s.get("week_ranges", "week1_end_day", default=2)
-    week_duration = s.get("week_ranges", "week_duration", default=7)
-    start_days = s.get("week_ranges", "week_start_days", default=[3, 10, 17, 24])
-
     weeks = []
-    end_1 = min(week1_end, last_day)
-    weeks.append((1, date(year, month, 1), date(year, month, end_1)))
+    week_start = None
 
-    for start_day in start_days:
-        if start_day > last_day:
-            break
-        end_day = min(start_day + week_duration - 1, last_day)
-        weeks.append(
-            (len(weeks) + 1, date(year, month, start_day), date(year, month, end_day))
-        )
+    for day in range(1, last_day + 1):
+        d = date(year, month, day)
+        if d.weekday() == SUN:
+            week_start = d
+        if week_start is None:
+            week_start = date(year, month, 1)
+
+        if d.weekday() == SAT or day == last_day:
+            weeks.append((len(weeks) + 1, week_start, d))
+            week_start = None
+
     return weeks
 
 
@@ -425,6 +423,20 @@ def _copy_cell(src, dst):
         dst.number_format = copy(src.number_format)
         dst.protection = copy(src.protection)
         dst.alignment = copy(src.alignment)
+
+
+def _safe_set_cell_value(ws, row, column, value):
+    """병합셀 고려 안전한 값 쓰기. MergedCell이면 앵커셀 찾아 씀."""
+    from openpyxl.cell.cell import MergedCell
+
+    cell = ws.cell(row=row, column=column)
+    if isinstance(cell, MergedCell):
+        for mr in ws.merged_cells.ranges:
+            if mr.min_row <= row <= mr.max_row and mr.min_col <= column <= mr.max_col:
+                ws.cell(row=mr.min_row, column=mr.min_col).value = value
+                return
+        return
+    cell.value = value
 
 
 def _adjust_formula(formula: str, row_offset: int) -> str:
@@ -578,16 +590,21 @@ def make_confirm(
                 for src_c in range(1, data_cols + 1):
                     cell = ws.cell(row=dst_r, column=src_c)
                     if cell.value and str(cell.value).startswith("="):
-                        cell.value = _adjust_formula(cell.value, current_row - 1)
+                        _safe_set_cell_value(
+                            ws,
+                            dst_r,
+                            src_c,
+                            _adjust_formula(cell.value, current_row - 1),
+                        )
 
             # 공통 정보 채움
             title_suffix = s.get("confirm", "title_suffix", default="분당구 급식확인서")
-            ws.cell(row=current_row, column=1).value = f"{title_prefix} {title_suffix}"
+            _safe_set_cell_value(ws, current_row, 1, f"{title_prefix} {title_suffix}")
             if delivery_person:
-                ws.cell(row=current_row + 2, column=11).value = delivery_person
+                _safe_set_cell_value(ws, current_row + 2, 11, delivery_person)
             if delivery_phone:
-                ws.cell(row=current_row + 3, column=11).value = delivery_phone
-            ws.cell(row=current_row + 2, column=3).value = addr
+                _safe_set_cell_value(ws, current_row + 3, 11, delivery_phone)
+            _safe_set_cell_value(ws, current_row + 2, 3, addr)
 
             # 각 아동별 채움
             for ci, person in enumerate(members[:5]):
@@ -598,10 +615,10 @@ def make_confirm(
                 head = str(person.get(head_col, ""))
                 phone = str(person.get(phone_col, ""))
 
-                ws.cell(row=base_row, column=1).value = sheet_seq
-                ws.cell(row=base_row, column=2).value = name
-                ws.cell(row=base_row, column=3).value = head
-                ws.cell(row=base_row, column=4).value = phone
+                _safe_set_cell_value(ws, base_row, 1, sheet_seq)
+                _safe_set_cell_value(ws, base_row, 2, name)
+                _safe_set_cell_value(ws, base_row, 3, head)
+                _safe_set_cell_value(ws, base_row, 4, phone)
 
                 flags = {
                     "breakfast": _to_bool(person.get("_breakfast", 0)),
@@ -640,18 +657,14 @@ def make_confirm(
                         if wi < len(weekly)
                         else {"breakfast": 0, "dinner": 0, "lunch": 0}
                     )
-                    ws.cell(row=row, column=6).value = _week_date_str(
-                        wdata[1], wdata[2]
+                    _safe_set_cell_value(ws, row, 6, _week_date_str(wdata[1], wdata[2]))
+                    _safe_set_cell_value(
+                        ws, row, 7, wd["breakfast"] if wd["breakfast"] else ""
                     )
-                    ws.cell(row=row, column=7).value = (
-                        wd["breakfast"] if wd["breakfast"] else ""
+                    _safe_set_cell_value(
+                        ws, row, 8, wd["dinner"] if wd["dinner"] else ""
                     )
-                    ws.cell(row=row, column=8).value = (
-                        wd["dinner"] if wd["dinner"] else ""
-                    )
-                    ws.cell(row=row, column=9).value = (
-                        wd["lunch"] if wd["lunch"] else ""
-                    )
+                    _safe_set_cell_value(ws, row, 9, wd["lunch"] if wd["lunch"] else "")
 
                 for wi in range(len(weeks)):
                     row = base_row + wi

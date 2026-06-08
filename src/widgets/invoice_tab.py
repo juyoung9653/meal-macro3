@@ -1,20 +1,24 @@
-"""청구서 탭 — 명단 기반 실제 청구서 생성"""
+"""청구서 탭 — 명단 파일 임포트 + 청구서 생성"""
 
 import calendar
+import csv
+import io
 import os
 import re
 from datetime import date
 
+import msoffcrypto
 from PyQt6.QtCore import QDate, QSettings, Qt
 from PyQt6.QtWidgets import (
     QCalendarWidget,
-    QCheckBox,
     QDialog,
     QFileDialog,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QPushButton,
     QSpinBox,
@@ -23,9 +27,9 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from python_calamine import CalamineWorkbook, PasswordError
 
 from ..config import auto_detect_semantic_columns, read_template_columns
-from ..form_cache import load_form_cache, save_form_cache
 from ..holiday_fetcher import get_kr_holidays
 from ..invoice_generator import _to_bool, calc_delivery_days, make_invoice
 from ..settings import get_settings
@@ -33,15 +37,17 @@ from .mapping_dialog import MappingDialog
 
 
 class InvoiceTab(QWidget):
-    """청구서 생성 탭"""
+    """청구서 생성 탭 (명단 임포트 포함)"""
+
+    MAX_RESULT_ROWS = 10
 
     def __init__(self):
         super().__init__()
         self.invoices = []
         self.output_dir = None
-        self._roster_data = []
-        self._roster_headers = []
-        self._roster_path = None
+        self.roster_path = None
+        self.roster_data = []
+        self.roster_headers = []
         self._s = get_settings()
         self._template_path = self._s.get(
             "templates", "invoice_path", default="assets/청구서템플릿.xlsx"
@@ -57,7 +63,6 @@ class InvoiceTab(QWidget):
             {"__breakfast": "", "__dinner": "", "__vacation": "", "__note": ""}
         )
         self._excluded_dates: set[date] = set()
-        self._per_file_mode = True  # default: per-file cache on
         org = self._s.get("app", "organization", default="분당구")
         app_title = self._s.get("app", "title", default="급식비정산")
         self._settings = QSettings(org, app_title)
@@ -65,36 +70,39 @@ class InvoiceTab(QWidget):
         self._restore_state()
         self._load_default_excluded_dates()
 
+    # ── UI ──
+
     def _setup_ui(self):
         layout = QVBoxLayout(self)
 
-        # ── 안내 ──
-        info_label = QLabel("명단 → 청구서 생성. 컬럼 매핑 후 생성 버튼을 누르세요.")
-        info_label.setStyleSheet("color: #666; font-style: italic;")
-        layout.addWidget(info_label)
+        # ── 명단 파일 임포트 ──
+        import_group = QGroupBox("① 명단 파일 임포트")
+        import_layout = QHBoxLayout(import_group)
+        self.file_label = QLabel("선택된 파일 없음")
+        self.file_label.setStyleSheet("color: #888;")
+        self.select_btn = QPushButton("파일 탐색")
+        self.select_btn.clicked.connect(self._select_file)
+        import_layout.addWidget(self.file_label, stretch=1)
+        import_layout.addWidget(self.select_btn)
+        layout.addWidget(import_group)
 
-        # ── 설정행: 연월 + 단가 ──
-        config_group = QGroupBox("청구 기준")
+        # ── 청구 기준 ──
+        config_group = QGroupBox("② 청구 기준")
         config_row = QHBoxLayout(config_group)
 
         config_row.addWidget(QLabel("귀속 연월:"))
-
         self.year_spin = QSpinBox()
         self.year_spin.setRange(2020, 2030)
         self.year_spin.setValue(date.today().year)
         config_row.addWidget(self.year_spin)
-
         config_row.addWidget(QLabel("년"))
-
         self.month_spin = QSpinBox()
         self.month_spin.setRange(1, 12)
         self.month_spin.setValue(date.today().month)
         config_row.addWidget(self.month_spin)
-
         config_row.addWidget(QLabel("월"))
         config_row.addSpacing(20)
 
-        # 단가
         config_row.addWidget(QLabel("조식단가:"))
         self.breakfast_price = QSpinBox()
         self.breakfast_price.setRange(0, 99999)
@@ -115,12 +123,11 @@ class InvoiceTab(QWidget):
         self.lunch_price.setValue(self._s.get("pricing", "lunch", default=9500))
         self.lunch_price.setSuffix("원")
         config_row.addWidget(self.lunch_price)
-
         config_row.addStretch()
         layout.addWidget(config_group)
 
         # ── 출력 경로 ──
-        path_group = QGroupBox("출력 경로")
+        path_group = QGroupBox("③ 출력 경로")
         path_layout = QHBoxLayout(path_group)
         self.path_label = QLabel("선택된 경로 없음")
         self.path_label.setStyleSheet("color: #888;")
@@ -130,7 +137,7 @@ class InvoiceTab(QWidget):
         path_layout.addWidget(self.path_btn)
         layout.addWidget(path_group)
 
-        # ── 배송 제외일 버튼 (달력) ──
+        # ── 배송 제외일 ──
         exclude_group = QGroupBox("배송 제외일")
         exclude_layout = QHBoxLayout(exclude_group)
         self.exclude_btn = QPushButton("📅 제외일 선택")
@@ -151,20 +158,13 @@ class InvoiceTab(QWidget):
         self.generate_btn.clicked.connect(self._generate_invoices)
         self.clear_btn = QPushButton("초기화")
         self.clear_btn.clicked.connect(self._clear)
-        self.per_file_cb = QCheckBox("파일별 설정 저장")
-        self.per_file_cb.setChecked(self._per_file_mode)
-        self.per_file_cb.setToolTip(
-            "켜기: 명단 파일별로 설정 저장/복원\n끄기: 전역 기본값 사용"
-        )
-        self.per_file_cb.toggled.connect(self._on_per_file_toggled)
         btn_layout.addWidget(self.mapping_btn)
-        btn_layout.addWidget(self.per_file_cb)
         btn_layout.addStretch()
         btn_layout.addWidget(self.generate_btn)
         btn_layout.addWidget(self.clear_btn)
         layout.addLayout(btn_layout)
 
-        # 값 변경 시 자동 저장 (전역 only) + 제외일 재계산
+        # 값 변경 시 자동 저장
         self.year_spin.valueChanged.connect(self._save_settings)
         self.month_spin.valueChanged.connect(self._save_settings)
         self.year_spin.valueChanged.connect(self._reload_excluded_dates)
@@ -173,8 +173,8 @@ class InvoiceTab(QWidget):
         self.dinner_price.valueChanged.connect(self._save_settings)
         self.lunch_price.valueChanged.connect(self._save_settings)
 
-        # ── 결과 테이블 ──
-        table_group = QGroupBox("생성 결과")
+        # ── 결과 테이블 (최대 10행) ──
+        table_group = QGroupBox("④ 생성 결과")
         table_layout = QVBoxLayout(table_group)
         self.result_table = QTableWidget()
         self.result_table.setColumnCount(4)
@@ -193,23 +193,40 @@ class InvoiceTab(QWidget):
         table_layout.addWidget(self.info_label)
         layout.addWidget(table_group, stretch=1)
 
-    # ── 액션 ──
+    # ── 명단 파일 로드 (RosterTab에서 이동) ──
+
+    def _select_file(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "명단 파일 선택",
+            "",
+            "지원 파일 (*.xlsx *.xls *.csv *.txt);;Excel (*.xlsx *.xls);;CSV (*.csv);;텍스트 (*.txt);;모든 파일 (*.*)",
+        )
+        if path:
+            self.roster_path = path
+            self.file_label.setText(os.path.basename(path))
+            self.file_label.setStyleSheet("color: #000;")
+            self._settings.setValue("roster/last_path", path)
+            self._settings.sync()
+            self._load_roster(path)
 
     def _restore_state(self):
-        # per-file mode
-        self._per_file_mode = self._settings.value(
-            "invoice/per_file_mode", True, type=bool
-        )
-        self.per_file_cb.setChecked(self._per_file_mode)
+        # 마지막 명단 경로 복원
+        last = self._settings.value("roster/last_path", "")
+        if last and os.path.exists(last):
+            self.roster_path = last
+            self.file_label.setText(os.path.basename(last))
+            self.file_label.setStyleSheet("color: #000;")
+            self._load_roster(last)
 
-        # 출력 경로
+        # 출력 경로 복원
         out = self._settings.value("invoice/output_dir", "")
         if out:
             self.output_dir = out
             self.path_label.setText(out)
             self.path_label.setStyleSheet("color: #000;")
 
-        # ── Signal block: 모든 값을 한 번에 복원 후 마지막에 저장 ──
+        # ── Signal block ──
         self.year_spin.blockSignals(True)
         self.month_spin.blockSignals(True)
         self.breakfast_price.blockSignals(True)
@@ -254,8 +271,171 @@ class InvoiceTab(QWidget):
         self.dinner_price.blockSignals(False)
         self.lunch_price.blockSignals(False)
 
-        # 모든 값 복원 후 한 번에 저장
         self._save_settings()
+
+    def _load_roster(self, path: str):
+        ext = os.path.splitext(path)[1].lower()
+        try:
+            if ext in (".xlsx", ".xls", ".xlsb", ".ods"):
+                raw = self._load_excel()
+            elif ext == ".csv":
+                raw = self._load_csv(path)
+            elif ext == ".txt":
+                raw = self._load_txt(path)
+            else:
+                QMessageBox.warning(self, "알림", f"지원하지 않는 형식: {ext}")
+                return
+        except Exception as e:
+            QMessageBox.critical(self, "오류", f"파일 읽기 실패:\n{e}")
+            return
+
+        if not raw:
+            QMessageBox.information(self, "알림", "데이터가 비어 있습니다.")
+            return
+
+        self.roster_headers, self.roster_data = raw
+        has = bool(self.roster_data)
+        self.mapping_btn.setEnabled(has)
+        self.generate_btn.setEnabled(has)
+        if has:
+            self.info_label.setText(
+                f"명단 {len(self.roster_data)}명 로드됨. 컬럼 매핑 → 생성"
+            )
+
+    def _load_excel(self):
+        try:
+            wb = CalamineWorkbook.from_path(self.roster_path)
+        except PasswordError:
+            pw = self._prompt_password()
+            if pw is None:
+                return None
+            wb = self._open_encrypted(self.roster_path, pw)
+            if wb is None:
+                return None
+        sheet = wb.get_sheet_by_index(0)
+        rows = list(sheet.iter_rows())
+        return self._parse_rows(rows)
+
+    def _load_csv(self, path: str):
+        with open(path, "r", encoding="utf-8-sig") as f:
+            reader = csv.reader(f)
+            rows = list(reader)
+        return self._parse_rows(rows)
+
+    def _load_txt(self, path: str):
+        with open(path, "r", encoding="utf-8") as f:
+            lines = [line.strip() for line in f if line.strip()]
+        headers = ["이름"]
+        data = [{"이름": line} for line in lines]
+        return headers, data
+
+    def _prompt_password(self) -> str | None:
+        dlg = QInputDialog(self)
+        dlg.setWindowTitle("암호 해제")
+        dlg.setLabelText("이 파일은 암호로 보호되어 있습니다.\n암호를 입력하세요:")
+        dlg.setTextEchoMode(QLineEdit.EchoMode.Password)
+        dlg.resize(300, 120)
+        return dlg.textValue().strip() if dlg.exec() else None
+
+    def _open_encrypted(self, path: str, password: str):
+        attempts = 0
+        max_attempts = 10
+        while attempts < max_attempts:
+            try:
+                with open(path, "rb") as f:
+                    off = msoffcrypto.OfficeFile(f)
+                    off.load_key(password=password)
+                    buf = io.BytesIO()
+                    off.decrypt(buf)
+                buf.seek(0)
+                return CalamineWorkbook.from_filelike(buf)
+            except Exception as e:
+                msg = str(e).lower()
+                if "password" in msg or "key" in msg or "wrong" in msg:
+                    QMessageBox.warning(self, "암호 오류", "암호가 올바르지 않습니다.")
+                    pw = self._prompt_password()
+                    if pw is None:
+                        return None
+                    password = pw
+                    attempts += 1
+                    continue
+                raise
+        QMessageBox.warning(self, "암호 오류", "최대 재시도 횟수를 초과했습니다.")
+        return None
+
+    @staticmethod
+    def _col_letter(idx: int) -> str:
+        result = ""
+        i = idx
+        while True:
+            result = chr(i % 26 + 65) + result
+            i = i // 26 - 1
+            if i < 0:
+                break
+        return result
+
+    @staticmethod
+    def _is_name(v: str) -> bool:
+        if not v or not v.strip():
+            return False
+        v = v.strip()
+        if re.fullmatch(r"\d+(\.\d+)?", v):
+            return False
+        if re.fullmatch(r"\d{2}\.\d{2}(\.\d{2,4})?", v):
+            return False
+        if len(v) <= 1:
+            return False
+        return True
+
+    def _parse_rows(self, rows: list) -> tuple:
+        if not rows:
+            return [], []
+
+        raw_headers = [str(c) for c in rows[0]]
+        headers = []
+        seen = {}
+        for h in raw_headers:
+            h = h.strip()
+            if not h:
+                h = self._col_letter(len(headers))
+            if h in seen:
+                seen[h] += 1
+                h = f"{h}_{seen[h]}"
+            else:
+                seen[h] = 1
+            headers.append(h)
+
+        name_idx = self._resolve_name_col(raw_headers)
+
+        data = []
+        for row in rows[1:]:
+            vals = [str(c) for c in row]
+            name_val = vals[name_idx] if name_idx < len(vals) else ""
+            if not self._is_name(name_val):
+                continue
+            entry = {
+                headers[i]: vals[i] if i < len(vals) else ""
+                for i in range(len(headers))
+            }
+            data.append(entry)
+
+        return headers, data
+
+    @staticmethod
+    def _resolve_name_col(header: list) -> int:
+        s = get_settings()
+        keywords = s.get(
+            "roster",
+            "name_keywords",
+            default=["성명", "이름", "성함", "학생명", "학생", "name", "Name"],
+        )
+        for i, col in enumerate(header):
+            c = str(col).strip()
+            if any(c == kw or c.startswith(kw) for kw in keywords):
+                return i
+        return 0
+
+    # ── 설정 저장/복원 ──
 
     def _save_settings(self):
         self._settings.setValue("invoice/year", self.year_spin.value())
@@ -271,16 +451,6 @@ class InvoiceTab(QWidget):
             self._settings.setValue("invoice/output_dir", self.output_dir)
         self._settings.sync()
 
-        # ── Per-file cache: also persist to the roster-level cache ──
-        if self._per_file_mode and self._roster_path:
-            state = self._collect_form_state()
-            save_form_cache(self._roster_path, state, "invoice")
-
-    def _on_per_file_toggled(self, checked: bool):
-        self._per_file_mode = checked
-        self._settings.setValue("invoice/per_file_mode", checked)
-        self._settings.sync()
-
     def _select_output_dir(self):
         d = QFileDialog.getExistingDirectory(self, "출력 폴더 선택")
         if d:
@@ -291,23 +461,24 @@ class InvoiceTab(QWidget):
             self._settings.sync()
 
     def _open_mapping(self):
-        if not self._roster_headers:
+        if not self.roster_headers:
             QMessageBox.warning(self, "알림", "먼저 명단 파일을 불러오세요.")
             return
-        dlg = MappingDialog(self._roster_headers, self._template_columns, self)
+        dlg = MappingDialog(self.roster_headers, self._template_columns, self)
         dlg.set_values(self._col_mapping)
-        # 캐시된 매핑 없으면 자동 기본값 채움
         if not any(
             v for k, v in self._col_mapping.items() if k in self._template_columns
         ):
             dlg._reset_defaults()
         if dlg.exec():
             self._col_mapping = dlg.get_values()
+            # 계산값 입력 대상은 auto-detect → GUI 불필요
+            _sem = auto_detect_semantic_columns(self._template_columns)
+            self._col_mapping.update(_sem)
             self._save_settings()
             self.update()
 
     def _open_exclude_dialog(self):
-        """배송 제외일 선택 다이얼로그 — 공휴일 기본 제외"""
         dlg = QDialog(self)
         dlg.setWindowTitle("배송 제외일 선택")
         dlg.setMinimumWidth(400)
@@ -316,20 +487,17 @@ class InvoiceTab(QWidget):
         y = self.year_spin.value()
         m = self.month_spin.value()
 
-        # 해당 월 공휴일을 임시 set에 자동 추가 (다이얼로그 수락 시에만 반영)
-        # 토/일은 제외일에 포함하지 않음
         temp_excluded = {d for d in self._excluded_dates if d.weekday() < 5}
         last_day = calendar.monthrange(y, m)[1]
         for day in range(1, last_day + 1):
             d = date(y, m, day)
-            if d in get_kr_holidays(y) and d.weekday() < 5:  # 토/일 제외
+            if d in get_kr_holidays(y) and d.weekday() < 5:
                 temp_excluded.add(d)
 
         cal = QCalendarWidget()
         cal.setGridVisible(True)
         cal.setCurrentPage(y, m)
 
-        # 제외일 하이라이트 — setDateTextFormat 직접 사용
         from PyQt6.QtGui import QTextCharFormat
 
         for d in temp_excluded:
@@ -351,13 +519,12 @@ class InvoiceTab(QWidget):
 
         def _toggle_local(qd):
             d_local = date(qd.year(), qd.month(), qd.day())
-            if d_local.weekday() >= 5:  # 토/일 제외
+            if d_local.weekday() >= 5:
                 return
             if d_local in temp_excluded:
                 temp_excluded.discard(d_local)
             else:
                 temp_excluded.add(d_local)
-            # 달력 전체 포맷 초기화 후 다시 칠함
             for day in range(1, last_day + 1):
                 cal.setDateTextFormat(QDate(y, m, day), QTextCharFormat())
             for ed in temp_excluded:
@@ -377,12 +544,10 @@ class InvoiceTab(QWidget):
         cal.clicked.connect(_toggle_local)
         layout.addWidget(cal)
 
-        # 선택된 날짜 목록 표시
         self._exclude_list_label = QLabel(_fmt_local())
         self._exclude_list_label.setWordWrap(True)
         layout.addWidget(self._exclude_list_label)
 
-        # 버튼
         btn_layout = QHBoxLayout()
         clear_exclude_btn = QPushButton("전체 해제")
         clear_exclude_btn.clicked.connect(_clear_local)
@@ -412,7 +577,6 @@ class InvoiceTab(QWidget):
             self.exclude_label.setStyleSheet("color: #c00; font-weight: bold;")
 
     def _load_default_excluded_dates(self):
-        """현재 연월 공휴일을 제외일에 자동 추가 (토/일 제외)"""
         y = self.year_spin.value()
         m = self.month_spin.value()
         for day in range(1, calendar.monthrange(y, m)[1] + 1):
@@ -422,101 +586,40 @@ class InvoiceTab(QWidget):
         self._update_exclude_label()
 
     def _reload_excluded_dates(self):
-        """연/월 변경 시 제외일 재계산"""
         self._excluded_dates.clear()
         self._load_default_excluded_dates()
 
-    def _collect_form_state(self) -> dict:
-        """Collect all GUI values into a serializable dict."""
-        return {
-            "year": self.year_spin.value(),
-            "month": self.month_spin.value(),
-            "breakfast_price": self.breakfast_price.value(),
-            "dinner_price": self.dinner_price.value(),
-            "lunch_price": self.lunch_price.value(),
-            "output_dir": self.output_dir or "",
-            "col_mapping": dict(self._col_mapping),
-            "excluded_dates": [d.isoformat() for d in sorted(self._excluded_dates)],
-        }
-
-    def _apply_form_state(self, state: dict):
-        """Restore GUI values from a cached state dict."""
-        if not state:
-            return False
-        try:
-            if "year" in state:
-                self.year_spin.blockSignals(True)
-                self.year_spin.setValue(int(state["year"]))
-                self.year_spin.blockSignals(False)
-            if "month" in state:
-                self.month_spin.blockSignals(True)
-                self.month_spin.setValue(int(state["month"]))
-                self.month_spin.blockSignals(False)
-            if "breakfast_price" in state:
-                self.breakfast_price.blockSignals(True)
-                self.breakfast_price.setValue(int(state["breakfast_price"]))
-                self.breakfast_price.blockSignals(False)
-            if "dinner_price" in state:
-                self.dinner_price.blockSignals(True)
-                self.dinner_price.setValue(int(state["dinner_price"]))
-                self.dinner_price.blockSignals(False)
-            if "lunch_price" in state:
-                self.lunch_price.blockSignals(True)
-                self.lunch_price.setValue(int(state["lunch_price"]))
-                self.lunch_price.blockSignals(False)
-            if "output_dir" in state and state["output_dir"]:
-                self.output_dir = state["output_dir"]
-                self.path_label.setText(state["output_dir"])
-                self.path_label.setStyleSheet("color: #000;")
-            if "col_mapping" in state and isinstance(state["col_mapping"], dict):
-                self._col_mapping.update(state["col_mapping"])
-            if "excluded_dates" in state and isinstance(state["excluded_dates"], list):
-                dates = set()
-                for s in state["excluded_dates"]:
-                    try:
-                        dates.add(date.fromisoformat(s))
-                    except (ValueError, TypeError):
-                        pass
-                self._excluded_dates = dates
-                self._update_exclude_label()
-            # 모든 값 restore 후 한 번에 저장 (signal cascade로 인한 부분저장 방지)
-            self._save_settings()
-            return True
-        except (ValueError, TypeError, AttributeError):
-            return False
+    # ── 청구서 생성 ──
 
     def _generate_invoices(self):
         if not self.output_dir:
             QMessageBox.warning(self, "알림", "출력 경로를 먼저 선택하세요.")
             return
-        if not self._roster_data:
+        if not self.roster_data:
             QMessageBox.warning(self, "알림", "명단 데이터가 없습니다.")
             return
 
-        # 매핑에서 플래그 컬럼명 가져오기
         breakfast_col = self._col_mapping.get("__breakfast", "")
         dinner_col = self._col_mapping.get("__dinner", "")
         vacation_col = self._col_mapping.get("__vacation", "")
         note_col = self._col_mapping.get("__note", "")
 
-        # Y, Z열 (인덱스 24,25) — "중지" 포함 행 제외
         y_key = next(
-            (h for h in self._roster_headers if "중지" in h or "중단" in h), None
+            (h for h in self.roster_headers if "중지" in h or "중단" in h), None
         )
 
         enriched = []
-        for person in self._roster_data:
+        for person in self.roster_data:
             val_y = str(person.get(y_key, "")) if y_key else ""
             if "중지" in val_y or "중단" in val_y:
                 continue
             note_val = str(person.get(note_col, ""))
-            # 날짜 패턴 없는 비고는 비고를 비움 (행은 유지)
             if not re.search(r"\d{1,2}[/.]\d{1,2}", note_val):
                 note_val = ""
             enriched.append(
                 {
                     **person,
-                    note_col: note_val,  # 원본 키 덮어써서 _map_person_to_row() 반영
+                    note_col: note_val,
                     "_breakfast": person.get(breakfast_col, 0),
                     "_dinner": person.get(dinner_col, 0),
                     "_lunch": person.get(vacation_col, 0),
@@ -528,11 +631,6 @@ class InvoiceTab(QWidget):
         month = self.month_spin.value()
         self._save_settings()
 
-        # ── Per-file cache: save all GUI state on generate ──
-        if self._per_file_mode and self._roster_path:
-            state = self._collect_form_state()
-            save_form_cache(self._roster_path, state, "invoice")
-
         fname = self._s.get(
             "invoice",
             "output_filename_format",
@@ -540,7 +638,6 @@ class InvoiceTab(QWidget):
         ).format(year=year, month=month)
         out = f"{self.output_dir}/{fname}"
 
-        # 템플릿 파일 존재 여부 확인
         if not os.path.exists(self._template_path):
             QMessageBox.critical(
                 self,
@@ -550,9 +647,13 @@ class InvoiceTab(QWidget):
             return
 
         try:
+            # 계산값 입력 대상은 항상 auto-detect (GUI 불필요)
+            _sem = auto_detect_semantic_columns(self._template_columns)
+            col_mapping = {**self._col_mapping, **_sem}
+
             cnt = make_invoice(
                 enriched,
-                self._col_mapping,
+                col_mapping,
                 out,
                 template_path=self._template_path,
                 year=year,
@@ -569,70 +670,57 @@ class InvoiceTab(QWidget):
             QMessageBox.critical(self, "생성 오류", f"청구서 생성 실패:\n{e}")
             return
 
-        # 결과 테이블
-        self.invoices = enriched
-        self._update_result(enriched, year, month)
-        QMessageBox.information(self, "완료", f"청구서 {cnt}건 생성 완료!\n{out}")
-
-    def _update_result(self, data: list[dict], year: int, month: int):
-
-        self.result_table.setRowCount(len(data))
-        for i, p in enumerate(data):
-            b = _to_bool(p.get("_breakfast", 0))
-            d = _to_bool(p.get("_dinner", 0))
-            l = _to_bool(p.get("_lunch", 0))
-            n = p.get("_note", "")
+        # 결과 표시용 계산
+        for p in enriched:
+            flags = {
+                "breakfast": _to_bool(p.get("_breakfast", 0)),
+                "dinner": _to_bool(p.get("_dinner", 0)),
+                "lunch": _to_bool(p.get("_lunch", 0)),
+            }
             days = calc_delivery_days(
                 year,
                 month,
-                b,
-                d,
-                l,
-                n,
+                flags["breakfast"],
+                flags["dinner"],
+                flags["lunch"],
+                p.get("_note", ""),
                 excluded_dates=self._excluded_dates.copy()
                 if self._excluded_dates
                 else None,
             )
-            breakfast_cnt = days["breakfast"] * 3
-            dinner_cnt = days["dinner"]
-            lunch_cnt = days["lunch"]
-            total = breakfast_cnt + dinner_cnt + lunch_cnt
-            amount = (
-                breakfast_cnt * self.breakfast_price.value()
-                + dinner_cnt * self.dinner_price.value()
-                + lunch_cnt * self.lunch_price.value()
+            b_cnt = days["breakfast"] * 3
+            d_cnt = days["dinner"]
+            l_cnt = days["lunch"]
+            p["_total"] = b_cnt + d_cnt + l_cnt
+            p["_amount"] = (
+                f"{b_cnt * self.breakfast_price.value() + d_cnt * self.dinner_price.value() + l_cnt * self.lunch_price.value():,}원"
             )
-            name_col = self._col_mapping.get("성명", "성명")
-            dept_col = self._col_mapping.get("학교명", "학교명")
+
+        self.invoices = enriched
+        self._update_result(enriched)
+        QMessageBox.information(self, "완료", f"청구서 {cnt}건 생성 완료!\n{out}")
+
+    def _update_result(self, data: list[dict]):
+        """결과 중 최대 10건만 직접 표시"""
+        show = data[: self.MAX_RESULT_ROWS]
+        self.result_table.setRowCount(len(show))
+        name_col = self._col_mapping.get("성명", "성명")
+        dept_col = self._col_mapping.get("학교명", "학교명")
+        for i, p in enumerate(show):
             self.result_table.setItem(i, 0, QTableWidgetItem(p.get(name_col, "")))
             self.result_table.setItem(i, 1, QTableWidgetItem(p.get(dept_col, "")))
-            self.result_table.setItem(i, 2, QTableWidgetItem(str(total)))
-            self.result_table.setItem(i, 3, QTableWidgetItem(f"{amount:,}원"))
-        self.info_label.setText(f"생성된 청구서: {len(data)}건")
+            self.result_table.setItem(i, 2, QTableWidgetItem(str(p.get("_total", ""))))
+            self.result_table.setItem(i, 3, QTableWidgetItem(p.get("_amount", "")))
+        self.info_label.setText(
+            f"생성된 청구서: {len(data)}건 (처음 {len(show)}건 표시)"
+        )
 
     def _clear(self):
         self.invoices.clear()
         self.result_table.setRowCount(0)
         self.info_label.setText("생성된 청구서: 0건")
 
-    def set_roster_data(
-        self, data: list[dict], headers: list[str], roster_path: str | None = None
-    ):
-        self._roster_data = data
-        self._roster_headers = headers
-        self._roster_path = roster_path
-        has = bool(data)
-        self.mapping_btn.setEnabled(has)
-        self.generate_btn.setEnabled(has)
-
-        # ── Per-file cache auto-restore ──
-        if has and self._per_file_mode and roster_path:
-            cached = load_form_cache(roster_path, "invoice")
-            if cached:
-                self._apply_form_state(cached)
-
-        if has:
-            self.info_label.setText(f"명단 {len(data)}명 로드됨. 컬럼 매핑 → 생성")
+    # ── 외부 접근 ──
 
     def get_invoices(self):
         return self.invoices
@@ -648,3 +736,9 @@ class InvoiceTab(QWidget):
 
     def get_excluded_dates(self) -> set[date]:
         return self._excluded_dates.copy()
+
+    def get_roster_headers(self):
+        return self.roster_headers
+
+    def get_roster_path(self):
+        return self.roster_path

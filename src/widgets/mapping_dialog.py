@@ -14,7 +14,6 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
 )
 
-from ..config import auto_detect_semantic_columns
 from ..settings import get_settings
 
 
@@ -59,10 +58,9 @@ def _get_flag_search_terms():
 class MappingDialog(QDialog):
     """
     템플릿 컬럼 목록을 template_columns 기준으로 동적 생성.
-    3개 섹션:
+    2개 섹션:
       1. 템플릿 컬럼 ↔ 명단 컬럼 매핑
-      2. 계산값 입력 대상 (템플릿 내 특수 컬럼 지정)
-      3. 배송일 계산용 플래그
+      2. 배송일 계산용 플래그
     """
 
     def __init__(
@@ -112,39 +110,7 @@ class MappingDialog(QDialog):
             self._combo_map[col_name] = combo
             row += 1
 
-        # ── 섹션 2: 계산값 입력 대상 (auto-detect + GUI override) ──
-        table.insertRow(row)
-        sep1 = QTableWidgetItem("── 계산값 입력 대상 ──")
-        sep1.setFlags(sep1.flags() & ~Qt.ItemFlag.ItemIsEditable)
-        sep1.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-        f = sep1.font()
-        f.setBold(True)
-        sep1.setFont(f)
-        table.setItem(row, 0, sep1)
-        table.setSpan(row, 0, 1, 2)
-        row += 1
-
-        _semantic_defaults = auto_detect_semantic_columns(self._template_columns)
-
-        for key, info in get_settings().get("semantic_columns", default={}).items():
-            table.insertRow(row)
-
-            item = QTableWidgetItem(info["label"])
-            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-            table.setItem(row, 0, item)
-
-            combo = self._make_template_combo()
-            table.setCellWidget(row, 1, combo)
-            # auto-detect 값 기본 선택
-            detected = _semantic_defaults.get(key, "")
-            if detected:
-                idx = combo.findText(detected)
-                if idx >= 0:
-                    combo.setCurrentIndex(idx)
-            self._combo_map[key] = combo
-            row += 1
-
-        # ── 섹션 3: 배송일 계산용 플래그 ──
+        # ── 섹션 2: 배송일 계산용 플래그 ──
         table.insertRow(row)
         sep2 = QTableWidgetItem("── 배송일 계산용 ──")
         sep2.setFlags(sep2.flags() & ~Qt.ItemFlag.ItemIsEditable)
@@ -195,25 +161,13 @@ class MappingDialog(QDialog):
             combo.addItem(h, h)
         return combo
 
-    def _make_template_combo(self) -> QComboBox:
-        """템플릿 컬럼명을 선택하는 콤보박스"""
-        combo = _NoWheelComboBox()
-        combo.setMinimumWidth(200)
-        for col in self._template_columns:
-            combo.addItem(col, col)
-        return combo
-
     def _reset_defaults(self):
         """템플릿 컬럼명/플래그/계산값 자동 선택"""
         import difflib
 
         auto_map = {}
         for key in self._combo_map:
-            if key.startswith("__calc_"):
-                # 계산값 대상: auto_detect
-                detected = auto_detect_semantic_columns(self._template_columns)
-                auto_map[key] = detected.get(key, "")
-            elif key.startswith("__"):
+            if key.startswith("__"):
                 # 플래그: 명단 헤더에서 검색
                 terms = _get_flag_search_terms().get(key, [key])
                 best = ""

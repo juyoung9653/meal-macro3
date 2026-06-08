@@ -38,11 +38,6 @@ DEFAULTS: dict[str, Any] = {
         "confirm_font_size": 11,
         "confirm_font_size_small": 10,
     },
-    "week_ranges": {
-        "week1_end_day": 2,
-        "week_start_days": [3, 10, 17, 24],
-        "week_duration": 7,
-    },
     "confirm": {
         "title_suffix": "분당구 급식확인서",
         "output_filename_format": "확인서_{year:04d}{month:02d}.xlsx",
@@ -54,10 +49,6 @@ DEFAULTS: dict[str, Any] = {
     "invoice": {
         "output_filename_format": "청구서_{year:04d}{month:02d}.xlsx",
         "default_provider": "분당구",
-    },
-    "cache": {
-        "dir_name": "cahce",
-        "max_size_mb": 100,
     },
     "roster": {
         "name_keywords": ["성명", "이름", "성함", "학생명", "학생", "name", "Name"],

@@ -58,9 +58,7 @@ class SettingsDialog(QDialog):
         tabs.addTab(self._make_pricing_tab(), "단가")
         tabs.addTab(self._make_schedule_tab(), "배송 요일")
         tabs.addTab(self._make_display_tab(), "표시")
-        tabs.addTab(self._make_week_tab(), "주차 구분")
         tabs.addTab(self._make_confirm_tab(), "확인서")
-        tabs.addTab(self._make_advanced_tab(), "고급")
         layout.addWidget(tabs)
 
         btn_box = QDialogButtonBox()
@@ -78,10 +76,6 @@ class SettingsDialog(QDialog):
     def _make_general_tab(self):
         w = QWidget()
         form = QFormLayout(w)
-        self._app_title_edit = QLineEdit()
-        form.addRow("프로그램 제목:", self._app_title_edit)
-        self._org_edit = QLineEdit()
-        form.addRow("조직명 (설정 저장용):", self._org_edit)
         self._win_w_spin = _NoWheelSpinBox()
         self._win_w_spin.setRange(600, 3000)
         form.addRow("기본 창 너비:", self._win_w_spin)
@@ -203,26 +197,6 @@ class SettingsDialog(QDialog):
         form.addRow("확인서 작은 폰트 크기:", self._cnf_font_small_spin)
         return self._wrap_scroll(w)
 
-    def _make_week_tab(self):
-        w = QWidget()
-        form = QFormLayout(w)
-        info = QLabel(
-            "확인서 생성 시 월을 주차별로 분할하는 규칙입니다.\n1주차: 1일 ~ 지정일까지\n이후 주차: 시작일 ~ 시작일+기간"
-        )
-        info.setStyleSheet("color: #555;")
-        info.setWordWrap(True)
-        form.addRow(info)
-        self._week1_end_spin = _NoWheelSpinBox()
-        self._week1_end_spin.setRange(1, 31)
-        form.addRow("1주차 종료일:", self._week1_end_spin)
-        self._week_duration_spin = _NoWheelSpinBox()
-        self._week_duration_spin.setRange(3, 14)
-        form.addRow("주차 기간(일):", self._week_duration_spin)
-        self._week_starts_edit = QLineEdit()
-        self._week_starts_edit.setPlaceholderText("예: 3, 10, 17, 24")
-        form.addRow("주차 시작일 (쉼표 구분):", self._week_starts_edit)
-        return self._wrap_scroll(w)
-
     def _make_confirm_tab(self):
         w = QWidget()
         form = QFormLayout(w)
@@ -248,17 +222,6 @@ class SettingsDialog(QDialog):
         self._col_w_j_spin.setRange(5, 30)
         self._col_w_j_spin.setDecimals(1)
         form.addRow("J열 너비:", self._col_w_j_spin)
-        return self._wrap_scroll(w)
-
-    def _make_advanced_tab(self):
-        w = QWidget()
-        form = QFormLayout(w)
-        self._cache_dir_edit = QLineEdit()
-        form.addRow("캐시 디렉토리명:", self._cache_dir_edit)
-        self._cache_max_spin = _NoWheelSpinBox()
-        self._cache_max_spin.setRange(10, 1000)
-        self._cache_max_spin.setSuffix(" MB")
-        form.addRow("캐시 최대 크기:", self._cache_max_spin)
         return self._wrap_scroll(w)
 
     # ── 헬퍼 ──
@@ -289,8 +252,6 @@ class SettingsDialog(QDialog):
 
     def _load_settings(self):
         s = self._s
-        self._app_title_edit.setText(s.get("app", "title", default=""))
-        self._org_edit.setText(s.get("app", "organization", default=""))
         self._win_w_spin.setValue(s.get("app", "window_width", default=1000))
         self._win_h_spin.setValue(s.get("app", "window_height", default=700))
         self._provider_edit.setText(s.get("invoice", "default_provider", default=""))
@@ -326,13 +287,6 @@ class SettingsDialog(QDialog):
             s.get("display", "confirm_font_size_small", default=10)
         )
 
-        self._week1_end_spin.setValue(s.get("week_ranges", "week1_end_day", default=2))
-        self._week_duration_spin.setValue(
-            s.get("week_ranges", "week_duration", default=7)
-        )
-        starts = s.get("week_ranges", "week_start_days", default=[3, 10, 17, 24])
-        self._week_starts_edit.setText(", ".join(str(x) for x in starts))
-
         self._confirm_title_suffix_edit.setText(
             s.get("confirm", "title_suffix", default="")
         )
@@ -347,13 +301,8 @@ class SettingsDialog(QDialog):
         self._col_w_i_spin.setValue(s.get("confirm", "col_width_i", default=12.5))
         self._col_w_j_spin.setValue(s.get("confirm", "col_width_j", default=12.5))
 
-        self._cache_dir_edit.setText(s.get("cache", "dir_name", default=""))
-        self._cache_max_spin.setValue(s.get("cache", "max_size_mb", default=100))
-
     def _collect_settings(self):
         s = self._s
-        s.set("app", "title", value=self._app_title_edit.text())
-        s.set("app", "organization", value=self._org_edit.text())
         s.set("app", "window_width", value=self._win_w_spin.value())
         s.set("app", "window_height", value=self._win_h_spin.value())
         s.set("invoice", "default_provider", value=self._provider_edit.text())
@@ -387,16 +336,6 @@ class SettingsDialog(QDialog):
             value=self._cnf_font_small_spin.value(),
         )
 
-        s.set("week_ranges", "week1_end_day", value=self._week1_end_spin.value())
-        s.set("week_ranges", "week_duration", value=self._week_duration_spin.value())
-        starts_text = self._week_starts_edit.text()
-        try:
-            starts = [int(x.strip()) for x in starts_text.split(",") if x.strip()]
-            if starts:
-                s.set("week_ranges", "week_start_days", value=starts)
-        except ValueError:
-            pass
-
         s.set("confirm", "title_suffix", value=self._confirm_title_suffix_edit.text())
         s.set(
             "confirm",
@@ -412,9 +351,6 @@ class SettingsDialog(QDialog):
         s.set("confirm", "col_width_h", value=self._col_w_h_spin.value())
         s.set("confirm", "col_width_i", value=self._col_w_i_spin.value())
         s.set("confirm", "col_width_j", value=self._col_w_j_spin.value())
-
-        s.set("cache", "dir_name", value=self._cache_dir_edit.text())
-        s.set("cache", "max_size_mb", value=self._cache_max_spin.value())
 
     def _accept(self):
         self._collect_settings()

@@ -1,11 +1,9 @@
-from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QAction
-from PyQt6.QtWidgets import QMainWindow, QMenuBar, QMessageBox, QStatusBar, QTabWidget
+from PyQt6.QtWidgets import QMainWindow, QStatusBar, QTabWidget
 
 from src.settings import get_settings
 from src.widgets.confirm_tab import ConfirmTab
 from src.widgets.invoice_tab import InvoiceTab
-from src.widgets.roster_tab import RosterTab
 from src.widgets.settings_dialog import SettingsDialog
 
 
@@ -37,12 +35,10 @@ class MainWindow(QMainWindow):
 
     def _setup_tabs(self):
         self.tab_widget = QTabWidget()
-        self.roster_tab = RosterTab()
         self.invoice_tab = InvoiceTab()
         self.confirm_tab = ConfirmTab()
-        self.tab_widget.addTab(self.roster_tab, "① 명단")
-        self.tab_widget.addTab(self.invoice_tab, "② 청구서")
-        self.tab_widget.addTab(self.confirm_tab, "③ 확인서")
+        self.tab_widget.addTab(self.invoice_tab, "① 청구서")
+        self.tab_widget.addTab(self.confirm_tab, "② 확인서")
         self.setCentralWidget(self.tab_widget)
 
     def _connect_signals(self):
@@ -55,19 +51,13 @@ class MainWindow(QMainWindow):
 
     def _on_tab_changed(self, index: int):
         if index >= 1:
-            data = self.roster_tab.get_roster_data()
-            headers = self.roster_tab.get_roster_headers()
-            roster_path = self.roster_tab.get_roster_path()
-            self.invoice_tab.set_roster_data(data, headers, roster_path)
-
-        if index >= 2:
             invoices = self.invoice_tab.get_invoices()
             col_mapping = self.invoice_tab.get_col_mapping()
             year = self.invoice_tab.get_year()
             month = self.invoice_tab.get_month()
             excluded_dates = self.invoice_tab.get_excluded_dates()
-            roster_headers = self.roster_tab.get_roster_headers()
-            roster_path = self.roster_tab.get_roster_path()
+            roster_headers = self.invoice_tab.get_roster_headers()
+            roster_path = self.invoice_tab.get_roster_path()
             self.confirm_tab.set_invoices(
                 invoices,
                 col_mapping,
@@ -79,9 +69,8 @@ class MainWindow(QMainWindow):
             )
 
         messages = {
-            0: "명단 파일을 선택해 주세요.",
-            1: "명단 로드 완료. 컬럼 매핑 후 청구서 생성",
-            2: "청구서 기반 확인서 생성",
+            0: "명단 로드 완료. 컬럼 매핑 후 청구서 생성",
+            1: "청구서 기반 확인서 생성",
         }
         self.statusbar.showMessage(messages.get(index, ""))
 

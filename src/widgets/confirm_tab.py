@@ -16,13 +16,14 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from ..form_cache import load_form_cache, save_form_cache
 from ..invoice_generator import make_confirm
 from ..settings import get_settings
 
 
 class ConfirmTab(QWidget):
     """확인서 생성 탭"""
+
+    MAX_RESULT_ROWS = 10
 
     def __init__(self):
         super().__init__()
@@ -151,29 +152,6 @@ class ConfirmTab(QWidget):
         )
         self._settings.sync()
 
-    def _collect_form_state(self) -> dict:
-        return {
-            "output_dir": self.output_dir or "",
-            "delivery_col": self.delivery_col_combo.currentData() or "",
-            "delivery_phone_map": self._get_delivery_phone_map(),
-        }
-
-    def _apply_form_state(self, state: dict):
-        if not state:
-            return False
-        try:
-            if "output_dir" in state and state["output_dir"]:
-                self.output_dir = state["output_dir"]
-                self.path_label.setText(state["output_dir"])
-                self.path_label.setStyleSheet("color: #000;")
-            if "delivery_col" in state and state["delivery_col"]:
-                idx = self.delivery_col_combo.findData(state["delivery_col"])
-                if idx >= 0:
-                    self.delivery_col_combo.setCurrentIndex(idx)
-            return True
-        except (ValueError, TypeError, AttributeError):
-            return False
-
     def _restore_state(self):
         raw = self._settings.value("confirm/output_dir", "")
         if raw:
@@ -262,11 +240,6 @@ class ConfirmTab(QWidget):
         try:
             self._save_settings()
 
-            # ── Per-file cache: save on generate ──
-            if self._roster_path:
-                state = self._collect_form_state()
-                save_form_cache(self._roster_path, state, "confirm")
-
             self.confirms = make_confirm(
                 roster_data=self._invoices,
                 col_mapping=self._col_mapping,
@@ -290,15 +263,18 @@ class ConfirmTab(QWidget):
             QMessageBox.critical(self, "생성 오류", f"확인서 생성 실패:\n{e}")
 
     def _update_table(self):
-        self.confirm_table.setRowCount(len(self.confirms))
-        for i, cf in enumerate(self.confirms):
+        show = self.confirms[: self.MAX_RESULT_ROWS]
+        self.confirm_table.setRowCount(len(show))
+        for i, cf in enumerate(show):
             self.confirm_table.setItem(i, 0, QTableWidgetItem(str(i + 1)))
             self.confirm_table.setItem(i, 1, QTableWidgetItem(cf["name"]))
             self.confirm_table.setItem(i, 2, QTableWidgetItem(cf["dept"]))
             self.confirm_table.setItem(i, 3, QTableWidgetItem(f"{cf['amount']:,}원"))
             self.confirm_table.setItem(i, 4, QTableWidgetItem(cf["file"]))
 
-        self.info_label.setText(f"생성된 확인서: {len(self.confirms)}건")
+        self.info_label.setText(
+            f"생성된 확인서: {len(self.confirms)}건 (처음 {len(show)}건 표시)"
+        )
 
     def _clear(self):
         self.confirms.clear()
@@ -346,12 +322,6 @@ class ConfirmTab(QWidget):
                         row, 1, QTableWidgetItem(phone_map[name_item.text()])
                     )
         self.delivery_table.blockSignals(False)
-
-        # ── Per-file cache auto-restore (after global defaults, so cache wins) ──
-        if invoices and roster_path:
-            cached = load_form_cache(roster_path, "confirm")
-            if cached:
-                self._apply_form_state(cached)
 
         if invoices:
             self.info_label.setText(
