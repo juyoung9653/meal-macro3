@@ -9,7 +9,6 @@ from PyQt6.QtCore import QDate, QSettings, Qt
 from PyQt6.QtWidgets import (
     QCalendarWidget,
     QCheckBox,
-    QComboBox,
     QDialog,
     QFileDialog,
     QGroupBox,
@@ -25,7 +24,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from ..config import DEFAULT_ROSTER_TO_TEMPLATE
+from ..config import DEFAULT_TEMPLATE_COLUMNS
 from ..form_cache import load_form_cache, save_form_cache
 from ..holiday_fetcher import get_kr_holidays
 from ..invoice_generator import _to_bool, calc_delivery_days, make_invoice
@@ -42,7 +41,10 @@ class InvoiceTab(QWidget):
         self._roster_data = []
         self._roster_headers = []
         self._roster_path = None
-        self._col_mapping = dict(DEFAULT_ROSTER_TO_TEMPLATE)
+        self._col_mapping = {col: "" for col in DEFAULT_TEMPLATE_COLUMNS}
+        self._col_mapping.update(
+            {"__breakfast": "", "__dinner": "", "__vacation": "", "__note": ""}
+        )
         self._excluded_dates: set[date] = set()
         self._per_file_mode = True  # default: per-file cache on
         self._settings = QSettings("분당구", "급식비정산")
@@ -83,21 +85,21 @@ class InvoiceTab(QWidget):
         config_row.addWidget(QLabel("조식단가:"))
         self.breakfast_price = QSpinBox()
         self.breakfast_price.setRange(0, 99999)
-        self.breakfast_price.setValue(4000)
+        self.breakfast_price.setValue(9500)
         self.breakfast_price.setSuffix("원")
         config_row.addWidget(self.breakfast_price)
 
         config_row.addWidget(QLabel("석식단가:"))
         self.dinner_price = QSpinBox()
         self.dinner_price.setRange(0, 99999)
-        self.dinner_price.setValue(2000)
+        self.dinner_price.setValue(9500)
         self.dinner_price.setSuffix("원")
         config_row.addWidget(self.dinner_price)
 
         config_row.addWidget(QLabel("중식단가:"))
         self.lunch_price = QSpinBox()
         self.lunch_price.setRange(0, 99999)
-        self.lunch_price.setValue(4000)
+        self.lunch_price.setValue(9500)
         self.lunch_price.setSuffix("원")
         config_row.addWidget(self.lunch_price)
 
@@ -162,9 +164,9 @@ class InvoiceTab(QWidget):
         table_group = QGroupBox("생성 결과")
         table_layout = QVBoxLayout(table_group)
         self.result_table = QTableWidget()
-        self.result_table.setColumnCount(5)
+        self.result_table.setColumnCount(4)
         self.result_table.setHorizontalHeaderLabels(
-            ["번호", "이름", "소속", "총급식수", "청구금액"]
+            ["이름", "소속", "총급식수", "청구금액"]
         )
         self.result_table.horizontalHeader().setStretchLastSection(True)
         self.result_table.horizontalHeader().setSectionResizeMode(
@@ -204,7 +206,9 @@ class InvoiceTab(QWidget):
         # 컬럼 매핑
         mapping = self._settings.value("invoice/col_mapping", None)
         if mapping is not None:
-            self._col_mapping.update(mapping)
+            self._col_mapping = {
+                k: mapping.get(k, v) for k, v in self._col_mapping.items()
+            }
 
         # 제외일
         excluded = self._settings.value("invoice/excluded_dates", None)
@@ -279,6 +283,11 @@ class InvoiceTab(QWidget):
             return
         dlg = MappingDialog(self._roster_headers, self)
         dlg.set_values(self._col_mapping)
+        # 캐시된 매핑 없으면 자동 기본값 채움
+        if not any(
+            v for k, v in self._col_mapping.items() if k in DEFAULT_TEMPLATE_COLUMNS
+        ):
+            dlg._reset_defaults()
         if dlg.exec():
             self._col_mapping = dlg.get_values()
             self._save_settings()
@@ -472,10 +481,10 @@ class InvoiceTab(QWidget):
             return
 
         # 매핑에서 플래그 컬럼명 가져오기
-        breakfast_col = self._col_mapping.get("roster_breakfast_col", "")
-        dinner_col = self._col_mapping.get("roster_dinner_col", "")
-        vacation_col = self._col_mapping.get("roster_vacation_col", "")
-        note_col = self._col_mapping.get("roster_note_col", "")
+        breakfast_col = self._col_mapping.get("__breakfast", "")
+        dinner_col = self._col_mapping.get("__dinner", "")
+        vacation_col = self._col_mapping.get("__vacation", "")
+        note_col = self._col_mapping.get("__note", "")
 
         # Y, Z열 (인덱스 24,25) — "중지" 포함 행 제외
         y_key = next(
@@ -575,13 +584,12 @@ class InvoiceTab(QWidget):
                 + dinner_cnt * self.dinner_price.value()
                 + lunch_cnt * self.lunch_price.value()
             )
-            name_col = self._col_mapping.get("roster_name_col", "성명")
-            dept_col = self._col_mapping.get("roster_dept_col", "학교명")
-            self.result_table.setItem(i, 0, QTableWidgetItem(str(i + 1)))
-            self.result_table.setItem(i, 1, QTableWidgetItem(p.get(name_col, "")))
-            self.result_table.setItem(i, 2, QTableWidgetItem(p.get(dept_col, "")))
-            self.result_table.setItem(i, 3, QTableWidgetItem(str(total)))
-            self.result_table.setItem(i, 4, QTableWidgetItem(f"{amount:,}원"))
+            name_col = self._col_mapping.get("성명", "성명")
+            dept_col = self._col_mapping.get("학교명", "학교명")
+            self.result_table.setItem(i, 0, QTableWidgetItem(p.get(name_col, "")))
+            self.result_table.setItem(i, 1, QTableWidgetItem(p.get(dept_col, "")))
+            self.result_table.setItem(i, 2, QTableWidgetItem(str(total)))
+            self.result_table.setItem(i, 3, QTableWidgetItem(f"{amount:,}원"))
         self.info_label.setText(f"생성된 청구서: {len(data)}건")
 
     def _clear(self):

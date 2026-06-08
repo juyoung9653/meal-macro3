@@ -1,51 +1,51 @@
 """컬럼 매핑 편집 다이얼로그 — 명단 컬럼 ↔ 청구서 템플릿"""
 
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QWheelEvent
 from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
-    QFormLayout,
-    QGroupBox,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
-    QMessageBox,
     QPushButton,
+    QTableWidget,
+    QTableWidgetItem,
     QVBoxLayout,
 )
 
+
+class _NoWheelComboBox(QComboBox):
+    """마우스 휠로 선택값 바뀌는 것 방지"""
+
+    def wheelEvent(self, event: QWheelEvent):
+        event.ignore()
+
+
 from ..config import DEFAULT_TEMPLATE_COLUMNS
+
+# 배송일 계산용 플래그 — 템플릿 컬럼과 별도 섹션
+_FLAG_FIELDS = [
+    ("__breakfast", "조식 여부", "1.0=해당, 0/공란=미해당 (금요일 배송)"),
+    ("__dinner", "석식 여부", "1.0=해당, 0/공란=미해당 (월~목 배송)"),
+    ("__vacation", "방중 여부", "1.0=해당, 0/공란=미해당 (방학중 월~금 배송)"),
+    ("__note", "비고 (일시중지 등)", ""),
+]
+
+# 플래그 키별 자동 탐색할 명단 컬럼명 후보
+_FLAG_SEARCH_TERMS = {
+    "__breakfast": ["조식"],
+    "__dinner": ["석식"],
+    "__vacation": ["중식", "방중"],
+    "__note": ["비고"],
+}
 
 
 class MappingDialog(QDialog):
     """
-    명단 컬럼 → 청구서 템플릿 각 필드에 매핑.
-    사용자가 드롭다운으로 명단의 어떤 컬럼을 쓸지 선택.
+    템플릿 컬럼 목록을 config.DEFAULT_TEMPLATE_COLUMNS 기준으로 동적 생성.
+    테이블에서 각 템플릿 컬럼에 대응할 명단 컬럼을 선택.
     """
-
-    # 청구서 템플릿에서 사용자가 지정해야 할 필드들
-    FIELDS = [
-        ("roster_category_col", "구분 (신규/중/고)", False),
-        ("roster_dept_col", "학교명", False),
-        ("roster_grade_col", "학년", False),
-        ("roster_name_col", "성명 *", True),
-        ("roster_birth_col", "생년월일", False),
-        ("roster_head_col", "세대주성명", False),
-        ("roster_relation_col", "아동과의관계", False),
-        ("roster_dong_col", "관할동", False),
-        ("roster_addr_col", "주소", False),
-        ("roster_phone_col", "핸드폰", False),
-        ("", "── 급식 플래그 (배송일 계산용) ──", False),  # 구분선
-        ("roster_breakfast_col", "조식 여부 컬럼 *", True),
-        ("roster_dinner_col", "석식 여부 컬럼 *", True),
-        ("roster_vacation_col", "방중 여부 컬럼 *", True),
-        ("roster_note_col", "비고 (일시중지 등)", False),
-    ]
-
-    COLUMN_HELP = {
-        "roster_breakfast_col": "1.0=해당, 0/공란=미해당 (금요일 배송)",
-        "roster_dinner_col": "1.0=해당, 0/공란=미해당 (월~목 배송)",
-        "roster_vacation_col": "1.0=해당, 0/공란=미해당 (방학중 월~금 배송)",
-    }
 
     def __init__(self, roster_headers: list[str], parent=None):
         super().__init__(parent)
@@ -53,62 +53,74 @@ class MappingDialog(QDialog):
         self.setMinimumWidth(650)
         self.resize(650, 500)
 
-        self.roster_headers = roster_headers
+        self.roster_headers = [h.strip() for h in roster_headers if h.strip()]
         self._combo_map: dict[str, QComboBox] = {}
         self._setup_ui()
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
 
-        # 안내
         info = QLabel(
-            "명단 파일의 각 컬럼이 청구서 템플릿의 어느 필드에 대응되는지 선택하세요.\n"
-            "* 표시는 필수 항목입니다."
+            "명단 파일의 각 컬럼이 청구서 템플릿의 어느 필드에 대응되는지 선택하세요."
         )
         info.setStyleSheet("color: #555; margin-bottom: 8px;")
         info.setWordWrap(True)
         layout.addWidget(info)
 
-        # 폼
-        form_group = QGroupBox("명단 컬럼 → 청구서 필드")
-        form = QFormLayout(form_group)
-        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
-        form.setHorizontalSpacing(20)
-        form.setVerticalSpacing(6)
+        # ── 테이블 ──
+        table = QTableWidget()
+        table.setColumnCount(2)
+        table.setHorizontalHeaderLabels(["템플릿 컬럼", "명단 컬럼 선택"])
+        table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.ResizeToContents
+        )
+        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        table.verticalHeader().setVisible(False)
 
-        for key, label, required in self.FIELDS:
-            if not key:
-                # 구분선
-                sep = QLabel(f"<b>{label}</b>")
-                sep.setStyleSheet("margin-top: 12px;")
-                form.addRow(sep)
-                continue
+        row = 0
+        # 템플릿 컬럼
+        for col_name in DEFAULT_TEMPLATE_COLUMNS:
+            table.insertRow(row)
 
-            lbl_text = label
-            if required:
-                lbl_text = f"<b>{lbl_text}</b>"
+            item = QTableWidgetItem(col_name)
+            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            table.setItem(row, 0, item)
 
-            combo = QComboBox()
-            combo.setMinimumWidth(200)
-            combo.addItem("(선택 안 함)", "")
-            for h in self.roster_headers:
-                combo.addItem(h, h)
-            combo.setCurrentIndex(0)
+            combo = self._make_combo()
+            table.setCellWidget(row, 1, combo)
+            self._combo_map[col_name] = combo
+            row += 1
 
-            # 도움말
-            tip = self.COLUMN_HELP.get(key, "")
+        # 구분선
+        table.insertRow(row)
+        sep = QTableWidgetItem("── 배송일 계산용 ──")
+        sep.setFlags(sep.flags() & ~Qt.ItemFlag.ItemIsEditable)
+        sep.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        f = sep.font()
+        f.setBold(True)
+        sep.setFont(f)
+        table.setItem(row, 0, sep)
+        table.setSpan(row, 0, 1, 2)
+        row += 1
+
+        # 플래그
+        for key, label, tip in _FLAG_FIELDS:
+            table.insertRow(row)
+
+            item = QTableWidgetItem(label)
+            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            table.setItem(row, 0, item)
+
+            combo = self._make_combo()
             if tip:
                 combo.setToolTip(tip)
-
+            table.setCellWidget(row, 1, combo)
             self._combo_map[key] = combo
-            form.addRow(QLabel(lbl_text), combo)
-            if tip:
-                hint = QLabel(f'<span style="color:#888; font-size:10px;">{tip}</span>')
-                form.addRow("", hint)
+            row += 1
 
-        layout.addWidget(form_group, stretch=1)
+        layout.addWidget(table, stretch=1)
 
-        # 버튼
+        # ── 버튼 ──
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
         reset_btn = QPushButton("기본값으로 초기화")
@@ -122,35 +134,45 @@ class MappingDialog(QDialog):
         btn_layout.addWidget(cancel_btn)
         layout.addLayout(btn_layout)
 
-        # (초기화 안 함 — InvoiceTab._open_mapping()에서 set_values()로 현재 설정을 채움)
+    def _make_combo(self) -> QComboBox:
+        combo = _NoWheelComboBox()
+        combo.setMinimumWidth(200)
+        combo.addItem("(선택 안 함)", "")
+        for h in self.roster_headers:
+            combo.addItem(h, h)
+        return combo
 
     def _reset_defaults(self):
-        """자동 추천: 헤더명 기반으로 가장 비슷한 컬럼 찾아 선택"""
-        from ..config import DEFAULT_ROSTER_TO_TEMPLATE
-
-        auto_map = {}
-        for key, _, _ in self.FIELDS:
-            if not key:
-                continue
-            default_hint = DEFAULT_ROSTER_TO_TEMPLATE.get(key, "")
-            if default_hint:
-                best = self._find_best_match(default_hint)
-                auto_map[key] = best
-            else:
-                auto_map[key] = ""
-        self.set_values(auto_map)
-
-    def _find_best_match(self, hint: str) -> str:
-        """hint 문자열과 가장 유사한 헤더 찾기"""
+        """템플릿 컬럼명/플래그와 유사한 명단 헤더 자동 선택"""
         import difflib
 
-        if hint in self.roster_headers:
-            return hint
-        matches = difflib.get_close_matches(hint, self.roster_headers, n=1, cutoff=0.5)
-        return matches[0] if matches else ""
+        auto_map = {}
+        for key in self._combo_map:
+            if key.startswith("__"):
+                terms = _FLAG_SEARCH_TERMS.get(key, [key])
+                best = ""
+                for t in terms:
+                    if t in self.roster_headers:
+                        best = t
+                        break
+                    matches = difflib.get_close_matches(
+                        t, self.roster_headers, n=1, cutoff=0.5
+                    )
+                    if matches:
+                        best = matches[0]
+                        break
+            else:
+                if key in self.roster_headers:
+                    best = key
+                else:
+                    matches = difflib.get_close_matches(
+                        key, self.roster_headers, n=1, cutoff=0.5
+                    )
+                    best = matches[0] if matches else ""
+            auto_map[key] = best
+        self.set_values(auto_map)
 
     def set_values(self, mapping: dict):
-        """외부에서 매핑값 주입"""
         for key, value in mapping.items():
             combo = self._combo_map.get(key)
             if combo:
@@ -159,27 +181,7 @@ class MappingDialog(QDialog):
                     combo.setCurrentIndex(idx)
 
     def get_values(self) -> dict:
-        """{설정키: 명단컬럼명} 반환"""
-        result = {}
-        for key, combo in self._combo_map.items():
-            result[key] = combo.currentData()
-        return result
+        return {key: combo.currentData() for key, combo in self._combo_map.items()}
 
     def _accept(self):
-        # required 체크
-        missing = []
-        for key, label, required in self.FIELDS:
-            if not key:
-                continue
-            if required:
-                val = self._combo_map[key].currentData()
-                if not val:
-                    missing.append(label)
-        if missing:
-            QMessageBox.warning(
-                self,
-                "필수 항목",
-                f"다음 필수 항목을 선택하세요:\n" + "\n".join(missing),
-            )
-            return
         self.accept()

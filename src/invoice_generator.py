@@ -198,9 +198,9 @@ def make_invoice(
     template_path: str,
     year: int = 2026,
     month: int = 6,
-    unit_price_breakfast: int = 4000,
-    unit_price_dinner: int = 2000,
-    unit_price_lunch: int = 4000,
+    unit_price_breakfast: int = 9500,
+    unit_price_dinner: int = 9500,
+    unit_price_lunch: int = 9500,
     provider: str = "",
     excluded_dates: set[date] | None = None,
 ):
@@ -277,50 +277,19 @@ def _to_bool(val) -> bool:
 def _map_person_to_row(person: dict, mapping: dict, seq: int) -> dict:
     """person dict + mapping → {template_col_name: value}"""
     row = {"연번": seq}
-    tmpl_cols = {
-        "구분": mapping.get("roster_category_col", ""),
-        "학교명": mapping.get("roster_dept_col", ""),
-        "학년": mapping.get("roster_grade_col", ""),
-        "성명": mapping.get("roster_name_col", ""),
-        "생년월일": mapping.get("roster_birth_col", ""),
-        "세대주성명": mapping.get("roster_head_col", ""),
-        "아동과의관계": mapping.get("roster_relation_col", ""),
-        "관할동": mapping.get("roster_dong_col", ""),
-        "주소": mapping.get("roster_addr_col", ""),
-        "핸드폰": mapping.get("roster_phone_col", ""),
-        "비고": mapping.get("roster_note_col", ""),
-    }
-    for tmpl_col, roster_key in tmpl_cols.items():
-        if roster_key:
-            row[tmpl_col] = person.get(roster_key, "")
-        else:
-            row[tmpl_col] = ""
+    for col in DEFAULT_TEMPLATE_COLUMNS:
+        if col == "연번":
+            continue
+        roster_key = mapping.get(col, "")
+        row[col] = person.get(roster_key, "") if roster_key else ""
     return row
 
 
 def _col_name_to_letter(name: str) -> str:
     """DEFAULT_TEMPLATE_COLUMNS 인덱스 → 엑셀 컬럼 문자"""
-    idx_map = {
-        "연번": "A",
-        "구분": "B",
-        "학교명": "C",
-        "학년": "D",
-        "성명": "E",
-        "생년월일": "F",
-        "세대주성명": "G",
-        "아동과의관계": "H",
-        "관할동": "I",
-        "주소": "J",
-        "핸드폰": "K",
-        "조식": "L",
-        "석식": "M",
-        "중식": "N",
-        "계": "O",
-        "청구금액": "P",
-        "제공기관": "Q",
-        "비고": "R",
-    }
-    return idx_map.get(name, "A")
+    if name not in DEFAULT_TEMPLATE_COLUMNS:
+        return ""
+    return chr(ord("A") + DEFAULT_TEMPLATE_COLUMNS.index(name))
 
 
 # ── 확인서: 주간 배송 계산 ──────────────────────────────
@@ -476,12 +445,10 @@ def make_confirm(
     from collections import OrderedDict
     from copy import copy
 
-    addr_col = col_mapping.get("roster_addr_col", "주소")
-    name_col = col_mapping.get("roster_name_col", "성명")
-    head_col = col_mapping.get("roster_head_col", "세대주성명")
-    phone_col = col_mapping.get("roster_phone_col", "핸드폰")
-    dept_col = col_mapping.get("roster_dept_col", "학교명")
-    dong_col = col_mapping.get("roster_dong_col", "관할동")
+    _LOOKUP = ["주소", "성명", "세대주성명", "핸드폰", "학교명", "관할동"]
+    addr_col, name_col, head_col, phone_col, dept_col, dong_col = (
+        col_mapping.get(k, k) for k in _LOOKUP
+    )
 
     # 1. 주소 줄바꿈 → 공백
     for p in roster_data:
