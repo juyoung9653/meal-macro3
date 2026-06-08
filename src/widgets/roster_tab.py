@@ -22,6 +22,8 @@ from PyQt6.QtWidgets import (
 )
 from python_calamine import CalamineWorkbook, PasswordError
 
+from ..settings import get_settings
+
 
 class RosterTab(QWidget):
     """명단 파일 선택 및 조회 탭"""
@@ -31,7 +33,10 @@ class RosterTab(QWidget):
         self.roster_path = None
         self.roster_data = []
         self.roster_headers = []
-        self._settings = QSettings("분당구", "급식비정산")
+        s = get_settings()
+        org = s.get("app", "organization", default="분당구")
+        title = s.get("app", "title", default="급식비정산")
+        self._settings = QSettings(org, title)
         self._setup_ui()
         self._restore_state()
 
@@ -256,7 +261,12 @@ class RosterTab(QWidget):
     @staticmethod
     def _resolve_name_col(header: list) -> int:
         """이름 컬럼 인덱스 찾기"""
-        keywords = ["성명", "이름", "성함", "학생명", "학생", "name", "Name"]
+        s = get_settings()
+        keywords = s.get(
+            "roster",
+            "name_keywords",
+            default=["성명", "이름", "성함", "학생명", "학생", "name", "Name"],
+        )
         for i, col in enumerate(header):
             c = str(col).strip()
             if any(c == kw or c.startswith(kw) for kw in keywords):
@@ -282,12 +292,15 @@ class RosterTab(QWidget):
         self.info_label.setText(f"총 {len(self.roster_data)}명")
 
     def _resolve_preview_cols(self) -> dict:
+        s = get_settings()
         if not self.roster_headers:
             return {"name": "성명", "dept": "학교명", "note": "비고"}
         h = self.roster_headers
-        name_kw = ["성명", "이름", "성함"]
-        dept_kw = ["학교명", "학교", "소속"]
-        note_kw = ["학기중 비고", "비고", "특이사항"]
+        name_kw = s.get("roster", "preview_name_kw", default=["성명", "이름", "성함"])
+        dept_kw = s.get("roster", "preview_dept_kw", default=["학교명", "학교", "소속"])
+        note_kw = s.get(
+            "roster", "preview_note_kw", default=["학기중 비고", "비고", "특이사항"]
+        )
         name = next(
             (c for c in h if any(c.startswith(k) for k in name_kw)),
             h[0] if h else "성명",

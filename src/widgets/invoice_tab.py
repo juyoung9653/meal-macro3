@@ -28,6 +28,7 @@ from ..config import auto_detect_semantic_columns, read_template_columns
 from ..form_cache import load_form_cache, save_form_cache
 from ..holiday_fetcher import get_kr_holidays
 from ..invoice_generator import _to_bool, calc_delivery_days, make_invoice
+from ..settings import get_settings
 from .mapping_dialog import MappingDialog
 
 
@@ -41,7 +42,10 @@ class InvoiceTab(QWidget):
         self._roster_data = []
         self._roster_headers = []
         self._roster_path = None
-        self._template_path = "assets/청구서템플릿.xlsx"
+        self._s = get_settings()
+        self._template_path = self._s.get(
+            "templates", "invoice_path", default="assets/청구서템플릿.xlsx"
+        )
         self._template_columns = read_template_columns(self._template_path)
         # 템플릿 컬럼 → 명단 컬럼 매핑
         self._col_mapping = {col: "" for col in self._template_columns}
@@ -54,7 +58,9 @@ class InvoiceTab(QWidget):
         )
         self._excluded_dates: set[date] = set()
         self._per_file_mode = True  # default: per-file cache on
-        self._settings = QSettings("분당구", "급식비정산")
+        org = self._s.get("app", "organization", default="분당구")
+        app_title = self._s.get("app", "title", default="급식비정산")
+        self._settings = QSettings(org, app_title)
         self._setup_ui()
         self._restore_state()
         self._load_default_excluded_dates()
@@ -92,21 +98,21 @@ class InvoiceTab(QWidget):
         config_row.addWidget(QLabel("조식단가:"))
         self.breakfast_price = QSpinBox()
         self.breakfast_price.setRange(0, 99999)
-        self.breakfast_price.setValue(9500)
+        self.breakfast_price.setValue(self._s.get("pricing", "breakfast", default=9500))
         self.breakfast_price.setSuffix("원")
         config_row.addWidget(self.breakfast_price)
 
         config_row.addWidget(QLabel("석식단가:"))
         self.dinner_price = QSpinBox()
         self.dinner_price.setRange(0, 99999)
-        self.dinner_price.setValue(9500)
+        self.dinner_price.setValue(self._s.get("pricing", "dinner", default=9500))
         self.dinner_price.setSuffix("원")
         config_row.addWidget(self.dinner_price)
 
         config_row.addWidget(QLabel("중식단가:"))
         self.lunch_price = QSpinBox()
         self.lunch_price.setRange(0, 99999)
-        self.lunch_price.setValue(9500)
+        self.lunch_price.setValue(self._s.get("pricing", "lunch", default=9500))
         self.lunch_price.setSuffix("원")
         config_row.addWidget(self.lunch_price)
 
@@ -527,7 +533,11 @@ class InvoiceTab(QWidget):
             state = self._collect_form_state()
             save_form_cache(self._roster_path, state, "invoice")
 
-        fname = f"청구서_{year:04d}{month:02d}.xlsx"
+        fname = self._s.get(
+            "invoice",
+            "output_filename_format",
+            default="청구서_{year:04d}{month:02d}.xlsx",
+        ).format(year=year, month=month)
         out = f"{self.output_dir}/{fname}"
 
         # 템플릿 파일 존재 여부 확인
@@ -550,7 +560,7 @@ class InvoiceTab(QWidget):
                 unit_price_breakfast=self.breakfast_price.value(),
                 unit_price_dinner=self.dinner_price.value(),
                 unit_price_lunch=self.lunch_price.value(),
-                provider="분당구",
+                provider=self._s.get("invoice", "default_provider", default="분당구"),
                 excluded_dates=self._excluded_dates.copy()
                 if self._excluded_dates
                 else None,

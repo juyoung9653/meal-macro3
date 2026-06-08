@@ -18,6 +18,7 @@ from PyQt6.QtWidgets import (
 
 from ..form_cache import load_form_cache, save_form_cache
 from ..invoice_generator import make_confirm
+from ..settings import get_settings
 
 
 class ConfirmTab(QWidget):
@@ -35,7 +36,10 @@ class ConfirmTab(QWidget):
         self._roster_headers: list[str] = []
         self._roster_path = None
         self._per_file_mode = True
-        self._settings = QSettings("분당구", "급식비정산")
+        self._s = get_settings()
+        org = self._s.get("app", "organization", default="분당구")
+        app_title = self._s.get("app", "title", default="급식비정산")
+        self._settings = QSettings(org, app_title)
         self._setup_ui()
         self._restore_state()
 
@@ -267,7 +271,9 @@ class ConfirmTab(QWidget):
                 roster_data=self._invoices,
                 col_mapping=self._col_mapping,
                 output_dir=self.output_dir,
-                template_path="assets/확인서템플릿.xlsx",
+                template_path=self._s.get(
+                    "templates", "confirm_path", default="assets/확인서템플릿.xlsx"
+                ),
                 year=self._year,
                 month=self._month,
                 delivery_person=delivery_person,

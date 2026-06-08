@@ -1,29 +1,39 @@
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QMainWindow, QMessageBox, QStatusBar, QTabWidget
+from PyQt6.QtGui import QAction
+from PyQt6.QtWidgets import QMainWindow, QMenuBar, QMessageBox, QStatusBar, QTabWidget
 
+from src.settings import get_settings
 from src.widgets.confirm_tab import ConfirmTab
 from src.widgets.invoice_tab import InvoiceTab
 from src.widgets.roster_tab import RosterTab
+from src.widgets.settings_dialog import SettingsDialog
 
 
 class MainWindow(QMainWindow):
     """급식비 정산 프로그램 메인 윈도우"""
 
-    APP_TITLE = "급식비 정산 프로그램"
-    WINDOW_WIDTH = 1000
-    WINDOW_HEIGHT = 700
-
     def __init__(self):
         super().__init__()
+        self._s = get_settings()
         self._setup_window()
+        self._setup_menu()
         self._setup_tabs()
         self._connect_signals()
         self._setup_statusbar()
 
     def _setup_window(self):
-        self.setWindowTitle(self.APP_TITLE)
-        self.setMinimumSize(self.WINDOW_WIDTH, self.WINDOW_HEIGHT)
-        self.resize(self.WINDOW_WIDTH, self.WINDOW_HEIGHT)
+        self.setWindowTitle(self._s.get("app", "title", default="급식비 정산 프로그램"))
+        w = self._s.get("app", "window_width", default=1000)
+        h = self._s.get("app", "window_height", default=700)
+        self.setMinimumSize(w, h)
+        self.resize(w, h)
+
+    def _setup_menu(self):
+        menubar = self.menuBar()
+        file_menu = menubar.addMenu("파일")
+        settings_action = QAction("설정", self)
+        settings_action.triggered.connect(self._open_settings)
+        file_menu.addAction(settings_action)
 
     def _setup_tabs(self):
         self.tab_widget = QTabWidget()
@@ -74,3 +84,7 @@ class MainWindow(QMainWindow):
             2: "청구서 기반 확인서 생성",
         }
         self.statusbar.showMessage(messages.get(index, ""))
+
+    def _open_settings(self):
+        dlg = SettingsDialog(self)
+        dlg.exec()

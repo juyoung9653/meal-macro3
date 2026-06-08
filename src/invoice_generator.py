@@ -8,15 +8,28 @@ import openpyxl
 from openpyxl.styles import Alignment, Font
 
 from .config import (
-    TEMPLATE_DATA_START_ROW,
-    TEMPLATE_SHEET_NAME,
+    _get_template_data_start_row,
+    _get_template_sheet_name,
     col_name_to_letter,
     read_template_columns,
 )
 from .holiday_fetcher import get_kr_holidays
+from .settings import get_settings
 
 # ── 요일 상수 ──
 MON, TUE, WED, THU, FRI, SAT, SUN = range(7)
+
+
+def _get_schedule():
+    """설정에서 배송 스케줄 로드."""
+    s = get_settings()
+    return {
+        "breakfast": set(s.get("schedule", "breakfast_days", default=[FRI])),
+        "dinner": set(s.get("schedule", "dinner_days", default=[MON, TUE, WED, THU])),
+        "lunch": set(
+            s.get("schedule", "lunch_days", default=[MON, TUE, WED, THU, FRI])
+        ),
+    }
 
 
 def _is_holiday(d: date) -> bool:
@@ -52,14 +65,6 @@ def count_weekdays_in_range(
     return total
 
 
-# ── 배송 스케줄 (요일 집합) ──
-SCHEDULE = {
-    "breakfast": {FRI},  # 조식: 금
-    "dinner": {MON, TUE, WED, THU},  # 석식: 월~목
-    "lunch": {MON, TUE, WED, THU, FRI},  # 중식(방학): 월~금
-}
-
-
 # ── 비고 파서 ──────────────────────────────────────
 
 
@@ -74,7 +79,7 @@ def parse_note(note: str, ref_year: int) -> list[dict]:
     results = []
     remaining = note.strip()
 
-    # 1. 일시중지 (범위): "4/27~5/4 일시중지" / "4.27∼5.4 일시중지"
+    # 1. 일시중지 (범위)
     range_pat = re.compile(
         r"(\d{1,2})[./](\d{1,2})\s*[~∼]\s*(\d{1,2})[./](\d{1,2})\s*일시중지"
     )
@@ -95,7 +100,7 @@ def parse_note(note: str, ref_year: int) -> list[dict]:
         )
         remaining = remaining[: m.start()] + remaining[m.end() :]
 
-    # 2. 일시중지 (단일): "4/27 일시중지"
+    # 2. 일시중지 (단일)
     single_pat = re.compile(r"(\d{1,2})[./](\d{1,2})\s*일시중지")
     while True:
         m = single_pat.search(remaining)
@@ -114,8 +119,7 @@ def parse_note(note: str, ref_year: int) -> list[dict]:
         )
         remaining = remaining[: m.start()] + remaining[m.end() :]
 
-    # 3. 신규: "6/1 신규" / "신규 6/1부터" / "6.1부터"
-    # NOTE: month=1..12 보장, 실제 일시중지 제거 후 남은 텍스트에서만 동작
+    # 3. 신규
     new_pat = re.compile(r"(\d{1,2})[./](\d{1,2})\s*(?:부터|신규)")
     while True:
         m = new_pat.search(remaining)
@@ -140,28 +144,23 @@ def calc_delivery_days(
     note: str = "",
     excluded_dates: set[date] | None = None,
 ) -> dict:
-    """
-    한 사람의 월별 배송일 수 계산.
-    flag_*: 명단에서 해당 급식 이용 여부 (1.0=True)
-    excluded_dates: 배송 제외일 집합
-    """
+    """한 사람의 월별 배송일 수 계산."""
+    schedule = _get_schedule()
     base = {
-        "breakfast": count_weekdays(year, month, SCHEDULE["breakfast"], excluded_dates)
+        "breakfast": count_weekdays(year, month, schedule["breakfast"], excluded_dates)
         if flag_breakfast
         else 0,
-        "dinner": count_weekdays(year, month, SCHEDULE["dinner"], excluded_dates)
+        "dinner": count_weekdays(year, month, schedule["dinner"], excluded_dates)
         if flag_dinner
         else 0,
-        "lunch": count_weekdays(year, month, SCHEDULE["lunch"], excluded_dates)
+        "lunch": count_weekdays(year, month, schedule["lunch"], excluded_dates)
         if flag_lunch
         else 0,
     }
 
-    # 비고 조정
     pauses = parse_note(note, year)
     for p in pauses:
         if p["type"] == "pause":
-            # pause 구간과 겹치는 배송일 차감
             p_start = max(p["start"], date(year, month, 1))
             p_end = min(
                 p["end"], date(year, month, calendar.monthrange(year, month)[1])
@@ -169,17 +168,10 @@ def calc_delivery_days(
             if p_start <= p_end:
                 for meal in ["breakfast", "dinner", "lunch"]:
                     deducted = count_weekdays_in_range(
-                        p_start, p_end, SCHEDULE[meal], excluded_dates
+                        p_start, p_end, schedule[meal], excluded_dates
                     )
                     base[meal] = max(0, base[meal] - deducted)
-
         elif p["type"] == "new":
-            # 해당 월 이전에 시작했으면 영향 없음, 이후면 0
-            # 신규 시작일 전날까지는 배송 안 한 걸로
-            # 이미 flag_*로 걸러졌으므로 추가 처리 생략 가능
-            # 실제로는 신규일 이전 날짜를 제외해야 하지만
-            # flag가 True면 해당월 전체 배송으로 계산된 상태
-            # TODO: 세밀한 조정 필요시 구현
             pass
 
     return base
@@ -187,8 +179,23 @@ def calc_delivery_days(
 
 # ── 청구서 생성 ────────────────────────────────────
 
-INVOICE_FONT = Font(name="맑은 고딕", size=9)
-INVOICE_FONT_BOLD = Font(name="맑은 고딕", size=9, bold=True)
+
+def _make_invoice_fonts():
+    """설정에서 폰트 객체 생성."""
+    s = get_settings()
+    fn = s.get("display", "font_name", default="맑은 고딕")
+    sz = s.get("display", "invoice_font_size", default=9)
+    return Font(name=fn, size=sz), Font(name=fn, size=sz, bold=True)
+
+
+def _make_confirm_fonts():
+    s = get_settings()
+    fn = s.get("display", "font_name", default="맑은 고딕")
+    sz = s.get("display", "confirm_font_size", default=11)
+    sz_s = s.get("display", "confirm_font_size_small", default=10)
+    return Font(name=fn, size=sz), Font(name=fn, size=sz_s)
+
+
 CENTER_ALIGN = Alignment(horizontal="center", vertical="center")
 
 
@@ -197,24 +204,18 @@ def make_invoice(
     col_mapping: dict,
     output_path: str,
     template_path: str,
-    year: int = 2026,
-    month: int = 6,
-    unit_price_breakfast: int = 9500,
-    unit_price_dinner: int = 9500,
-    unit_price_lunch: int = 9500,
+    year: int,
+    month: int,
+    unit_price_breakfast: int,
+    unit_price_dinner: int,
+    unit_price_lunch: int,
     provider: str = "",
     excluded_dates: set[date] | None = None,
 ):
-    """
-    roster_data → 청구서템플릿 채워서 output_path 에 저장.
-
-    template_path 의 실제 헤더를 읽어 컬럼명을 동적으로 결정.
-    col_mapping 의 key 는 템플릿 컬럼명과 일치해야 함.
-    """
-    # ── 템플릿 컬럼명 동적 읽기 ──
+    """roster_data → 청구서템플릿 채워서 output_path 에 저장."""
     template_columns = read_template_columns(template_path)
+    invoice_font, invoice_font_bold = _make_invoice_fonts()
 
-    # col_mapping 에서 의미론적 컬럼명 읽기 (auto-detect → GUI override)
     bf_col = col_mapping.get("__calc_breakfast", "조식")
     dn_col = col_mapping.get("__calc_dinner", "석식")
     lh_col = col_mapping.get("__calc_lunch", "중식")
@@ -222,13 +223,13 @@ def make_invoice(
     price_col = col_mapping.get("__calc_price", "청구금액")
     prov_col = col_mapping.get("__calc_provider", "제공기관")
 
+    sheet_name = _get_template_sheet_name()
     wb = openpyxl.load_workbook(template_path)
-    ws = wb[TEMPLATE_SHEET_NAME]
+    ws = wb[sheet_name]
 
-    row_idx = TEMPLATE_DATA_START_ROW
+    row_idx = _get_template_data_start_row()
 
     for i, person in enumerate(roster_data):
-        # 배송일 계산
         flags = {
             "breakfast": _to_bool(person.get("_breakfast", 0)),
             "dinner": _to_bool(person.get("_dinner", 0)),
@@ -245,7 +246,6 @@ def make_invoice(
             excluded_dates,
         )
 
-        # 조식: 배송일*3, 단 excluded_dates 중 금요일은 -1만 적용 (현재 -3이므로 +2 보정)
         breakfast_cnt = days["breakfast"] * 3
         if excluded_dates and flags["breakfast"]:
             excluded_fridays = sum(
@@ -258,14 +258,12 @@ def make_invoice(
         dinner_cnt = days["dinner"]
         lunch_cnt = days["lunch"]
 
-        # 템플릿 매핑
         row_data = _map_person_to_row(person, col_mapping, i + 1, template_columns)
 
         row_data[bf_col] = breakfast_cnt
         row_data[dn_col] = dinner_cnt
         row_data[lh_col] = lunch_cnt
 
-        # 계, 청구금액 → 엑셀 수식 (실제 컬럼 문자 사용)
         bf_letter = col_name_to_letter(bf_col, template_columns)
         dn_letter = col_name_to_letter(dn_col, template_columns)
         lh_letter = col_name_to_letter(lh_col, template_columns)
@@ -281,18 +279,17 @@ def make_invoice(
         if provider:
             row_data[prov_col] = provider
 
-        # 엑셀 쓰기
         for col_name, value in row_data.items():
             col_letter = col_name_to_letter(col_name, template_columns)
             cell = ws[f"{col_letter}{row_idx}"]
             cell.value = value
-            cell.font = INVOICE_FONT
+            cell.font = invoice_font
             cell.alignment = CENTER_ALIGN
 
         row_idx += 1
 
     wb.save(output_path)
-    return row_idx - TEMPLATE_DATA_START_ROW  # 생성 건수
+    return row_idx - _get_template_data_start_row()
 
 
 def _to_bool(val) -> bool:
@@ -319,25 +316,23 @@ def _map_person_to_row(
 
 # ── 확인서: 주간 배송 계산 ──────────────────────────────
 
-CONFIRM_FONT = Font(name="맑은 고딕", size=11)
-CONFIRM_FONT_SMALL = Font(name="맑은 고딕", size=10)
-
 
 def _get_week_ranges(year: int, month: int) -> list[tuple[int, date, date]]:
-    """해당 월을 주차별로 분할. [(week_num, start, end), ...]
-    Week1: 1일~2일, Week2: 3일~9일, Week3: 10일~16일,
-    Week4: 17일~23일, Week5: 24일~말일
-    """
+    """설정 기반으로 해당 월을 주차별로 분할."""
+    s = get_settings()
     last_day = calendar.monthrange(year, month)[1]
+    week1_end = s.get("week_ranges", "week1_end_day", default=2)
+    week_duration = s.get("week_ranges", "week_duration", default=7)
+    start_days = s.get("week_ranges", "week_start_days", default=[3, 10, 17, 24])
+
     weeks = []
-    # 1주: 1일~2일
-    end_1 = min(2, last_day)
+    end_1 = min(week1_end, last_day)
     weeks.append((1, date(year, month, 1), date(year, month, end_1)))
-    # 2~5주: 7일 간격
-    for start_day in (3, 10, 17, 24):
+
+    for start_day in start_days:
         if start_day > last_day:
             break
-        end_day = min(start_day + 6, last_day)
+        end_day = min(start_day + week_duration - 1, last_day)
         weeks.append(
             (len(weeks) + 1, date(year, month, start_day), date(year, month, end_day))
         )
@@ -353,28 +348,26 @@ def calc_weekly_breakdown(
     note: str = "",
     excluded_dates: set[date] | None = None,
 ) -> list[dict]:
-    """
-    주차별 배송 건수 계산.
-    반환: [{"week":1, "start":date, "end":date, "breakfast":N, "dinner":N, "lunch":N}, ...]
-    """
+    """주차별 배송 건수 계산."""
+    schedule = _get_schedule()
     weeks = _get_week_ranges(year, month)
     pauses = parse_note(note, year)
 
     result = []
     for wn, wstart, wend in weeks:
         b = (
-            count_weekdays_in_range(wstart, wend, SCHEDULE["breakfast"], excluded_dates)
+            count_weekdays_in_range(wstart, wend, schedule["breakfast"], excluded_dates)
             * 3
             if flag_breakfast
             else 0
         )
         d = (
-            count_weekdays_in_range(wstart, wend, SCHEDULE["dinner"], excluded_dates)
+            count_weekdays_in_range(wstart, wend, schedule["dinner"], excluded_dates)
             if flag_dinner
             else 0
         )
         l = (
-            count_weekdays_in_range(wstart, wend, SCHEDULE["lunch"], excluded_dates)
+            count_weekdays_in_range(wstart, wend, schedule["lunch"], excluded_dates)
             if flag_lunch
             else 0
         )
@@ -387,17 +380,17 @@ def calc_weekly_breakdown(
                     if flag_breakfast:
                         b -= (
                             count_weekdays_in_range(
-                                ps, pe, SCHEDULE["breakfast"], excluded_dates
+                                ps, pe, schedule["breakfast"], excluded_dates
                             )
                             * 3
                         )
                     if flag_dinner:
                         d -= count_weekdays_in_range(
-                            ps, pe, SCHEDULE["dinner"], excluded_dates
+                            ps, pe, schedule["dinner"], excluded_dates
                         )
                     if flag_lunch:
                         l -= count_weekdays_in_range(
-                            ps, pe, SCHEDULE["lunch"], excluded_dates
+                            ps, pe, schedule["lunch"], excluded_dates
                         )
 
         result.append(
@@ -414,7 +407,6 @@ def calc_weekly_breakdown(
 
 
 def _week_date_str(w_start: date, w_end: date) -> str:
-    """주차 날짜 범위 문자열 "05.01~05.02"""
     return f"{w_start.month:02d}.{w_start.day:02d}~{w_end.month:02d}.{w_end.day:02d}"
 
 
@@ -451,24 +443,20 @@ def make_confirm(
     roster_data: list[dict],
     col_mapping: dict,
     output_dir: str,
-    template_path: str = "확인서템플릿.xlsx",
-    year: int = 2026,
-    month: int = 6,
+    template_path: str,
+    year: int,
+    month: int,
     title_prefix: str = "",
     delivery_person: str = "",
     delivery_phone: str = "",
     excluded_dates: set[date] | None = None,
 ) -> list[dict]:
-    """
-    명단 데이터 → 확인서템플릿 채워서 **단일 엑셀 파일** 생성.
-    관할동 → 시트, 세대(주소)별 n명 템플릿을 시트 내에 수직 적층.
-    주소 줄바꿈 → 공백 치환.
-    해당급식 0 → 빈 셀.
-    반환: [{"name":..., "dept":..., "amount":..., "file":...}, ...]
-    """
+    """명단 데이터 → 확인서템플릿 채워서 단일 엑셀 파일 생성."""
     import os
     from collections import OrderedDict
     from copy import copy
+
+    s = get_settings()
 
     _LOOKUP = ["주소", "성명", "세대주성명", "핸드폰", "학교명", "관할동"]
     addr_col, name_col, head_col, phone_col, dept_col, dong_col = (
@@ -480,7 +468,7 @@ def make_confirm(
         raw = str(p.get(addr_col, ""))
         p[addr_col] = raw.replace("\n", " ").replace("\r", " ").strip()
 
-    # 2. 관할동별 그룹핑 (순서 유지)
+    # 2. 관할동별 그룹핑
     dong_groups = OrderedDict()
     for p in roster_data:
         dong = str(p.get(dong_col, "")).strip()
@@ -493,13 +481,14 @@ def make_confirm(
 
     weeks = _get_week_ranges(year, month)
     created = []
-    seq_total = 0
 
-    # 3. 템플릿 워크북 로드 (최초 1회)
+    # 3. 템플릿 워크북 로드
     wb = openpyxl.load_workbook(template_path)
+    data_cols = s.get("templates", "data_columns", default=11)
+    confirm_font, _ = _make_confirm_fonts()
 
     for dong, persons_in_dong in dong_groups.items():
-        # 3a. 세대(주소)별 그룹핑
+        # 세대(주소)별 그룹핑
         hh_groups = OrderedDict()
         for p in persons_in_dong:
             addr = p.get(addr_col, "")
@@ -507,13 +496,12 @@ def make_confirm(
                 hh_groups[addr] = []
             hh_groups[addr].append(p)
 
-        # 3b. 관할동 시트 생성
-        import re
+        # 시트 생성
+        import re as _re
 
-        safe_dong = re.sub(r"[\\/?*\[\]:]", "", dong.replace(" ", "_"))[:20]
+        safe_dong = _re.sub(r"[\\/?*\[\]:]", "", dong.replace(" ", "_"))[:20]
         if not safe_dong:
             safe_dong = "기타"
-        # 시트명 중복 방지
         sheet_name = safe_dong
         if sheet_name in wb.sheetnames:
             for i in range(2, 100):
@@ -524,54 +512,58 @@ def make_confirm(
 
         ws = wb.create_sheet(title=sheet_name)
 
-        # 페이지 설정: 가로방향, 여백 0.3cm, 한 페이지에 모든 열 맞춤
+        # 페이지 설정
         ws.page_setup.orientation = "landscape"
         ws.page_setup.fitToWidth = 1
         ws.page_setup.fitToHeight = 0
         ws.page_setup.fitToPage = True
-        ws.page_setup.paperSize = 9  # A4
+        ws.page_setup.paperSize = 9
         for side in ("left", "right", "top", "bottom"):
             setattr(ws.page_margins, side, 0.3 / 2.54)
         ws.page_margins.header = 0
         ws.page_margins.footer = 0
 
-        current_row = 1  # 현 시트에서 다음 템플릿을 붙일 시작 행
-        sheet_seq = 0  # 시트별 연번
+        current_row = 1
+        sheet_seq = 0
         col_widths_set = False
 
         for addr, members in hh_groups.items():
             n = len(members)
             tpl_key = f"{min(n, 5)}명"
             src = wb[tpl_key]
-            tpl_rows = src.max_row  # 1명=13, 2명=18, 3명=23, 4명=28, 5명=33
+            tpl_rows = src.max_row
 
-            # 3c. 컬럼 너비 복사 (첫 템플릿만)
+            # 컬럼 너비 복사 + 설정된 값 적용
             if not col_widths_set:
                 for col_letter in src.column_dimensions:
                     if src.column_dimensions[col_letter].width:
                         ws.column_dimensions[col_letter].width = copy(
                             src.column_dimensions[col_letter].width
                         )
-                # G(7), H(8), I(9) 열 너비 11.8 고정
-                for col_letter in ("G", "H", "I", "J"):
-                    ws.column_dimensions[col_letter].width = 12.5
+                col_w_map = {
+                    "G": s.get("confirm", "col_width_g", default=12.5),
+                    "H": s.get("confirm", "col_width_h", default=12.5),
+                    "I": s.get("confirm", "col_width_i", default=12.5),
+                    "J": s.get("confirm", "col_width_j", default=12.5),
+                }
+                for cl, w_val in col_w_map.items():
+                    ws.column_dimensions[cl].width = w_val
                 col_widths_set = True
 
-            # 3d. 템플릿 행 복사 (값 + 서식)
+            # 템플릿 행 복사
             for src_r in range(1, tpl_rows + 1):
                 dst_r = current_row + src_r - 1
-                for src_c in range(1, 12):  # A~K = 11열
+                for src_c in range(1, data_cols + 1):
                     _copy_cell(
                         src.cell(row=src_r, column=src_c),
                         ws.cell(row=dst_r, column=src_c),
                     )
-                # 행 높이 복사
                 if src_r in src.row_dimensions:
                     ws.row_dimensions[dst_r].height = copy(
                         src.row_dimensions[src_r].height
                     )
 
-            # 3e. 병합 셀 복사 (오프셋 적용)
+            # 병합 셀 복사
             for mr in src.merged_cells.ranges:
                 ws.merge_cells(
                     start_row=current_row + mr.min_row - 1,
@@ -580,42 +572,37 @@ def make_confirm(
                     end_column=mr.max_col,
                 )
 
-            # 3f. Formula 행 번호 보정
+            # Formula 행 번호 보정
             for src_r in range(1, tpl_rows + 1):
                 dst_r = current_row + src_r - 1
-                for src_c in range(1, 12):
+                for src_c in range(1, data_cols + 1):
                     cell = ws.cell(row=dst_r, column=src_c)
                     if cell.value and str(cell.value).startswith("="):
                         cell.value = _adjust_formula(cell.value, current_row - 1)
 
-            # ── 데이터 채움 ──
-            # 공통 정보 (상대 행: 1=title, 2=agency, 3=addr, 4=header, 5=subheader)
-            ws.cell(
-                row=current_row, column=1
-            ).value = f"{title_prefix} 분당구 급식확인서"
+            # 공통 정보 채움
+            title_suffix = s.get("confirm", "title_suffix", default="분당구 급식확인서")
+            ws.cell(row=current_row, column=1).value = f"{title_prefix} {title_suffix}"
             if delivery_person:
                 ws.cell(row=current_row + 2, column=11).value = delivery_person
             if delivery_phone:
                 ws.cell(row=current_row + 3, column=11).value = delivery_phone
             ws.cell(row=current_row + 2, column=3).value = addr
 
-            # 각 아동별 채움 (상대 행: 첫 아동=6, 이후 +5)
+            # 각 아동별 채움
             for ci, person in enumerate(members[:5]):
-                seq_total += 1
                 sheet_seq += 1
-                child_idx = ci + 1
-                base_row = current_row + 5 + ci * 5  # 6, 11, 16, ...
+                base_row = current_row + 5 + ci * 5
 
                 name = str(person.get(name_col, ""))
                 head = str(person.get(head_col, ""))
                 phone = str(person.get(phone_col, ""))
 
-                ws.cell(row=base_row, column=1).value = sheet_seq  # A: 연번
-                ws.cell(row=base_row, column=2).value = name  # B: 아동명
-                ws.cell(row=base_row, column=3).value = head  # C: 보호자(세대주성명)
-                ws.cell(row=base_row, column=4).value = phone  # D: 연락처
+                ws.cell(row=base_row, column=1).value = sheet_seq
+                ws.cell(row=base_row, column=2).value = name
+                ws.cell(row=base_row, column=3).value = head
+                ws.cell(row=base_row, column=4).value = phone
 
-                # 주간 배송 계산
                 flags = {
                     "breakfast": _to_bool(person.get("_breakfast", 0)),
                     "dinner": _to_bool(person.get("_dinner", 0)),
@@ -632,7 +619,6 @@ def make_confirm(
                     excluded_dates,
                 )
 
-                # 조식 주간값 보정: excluded_dates 중 금요일은 -1만 적용 (현재 -3이므로 +2)
                 if excluded_dates and flags["breakfast"]:
                     for wi, wdata in enumerate(weeks):
                         if wi >= len(weekly):
@@ -657,7 +643,6 @@ def make_confirm(
                     ws.cell(row=row, column=6).value = _week_date_str(
                         wdata[1], wdata[2]
                     )
-                    # 0 → 빈 셀
                     ws.cell(row=row, column=7).value = (
                         wd["breakfast"] if wd["breakfast"] else ""
                     )
@@ -668,38 +653,41 @@ def make_confirm(
                         wd["lunch"] if wd["lunch"] else ""
                     )
 
-                # 폰트 적용
                 for wi in range(len(weeks)):
                     row = base_row + wi
                     for col_idx in (1, 2, 3, 4, 6, 7, 8, 9, 10, 11):
                         cell = ws.cell(row=row, column=col_idx)
                         if cell.value is not None:
-                            cell.font = CONFIRM_FONT
+                            cell.font = confirm_font
                             cell.alignment = Alignment(
                                 horizontal="center", vertical="center"
                             )
 
-                # 결과 저장용
                 dept = str(person.get(dept_col, ""))
                 created.append({"name": name, "dept": dept, "amount": 0, "file": ""})
 
-            # 다음 세대로 오프셋 이동
             current_row += tpl_rows
 
-        # file명 업데이트 (중간 저장용)
-        n_persons = len(persons_in_dong)
-
     # 4. 원본 템플릿 시트 제거
+    tpl_sheets = set(
+        s.get(
+            "templates",
+            "confirm_sheet_names",
+            default=["1명", "2명", "3명", "4명", "5명"],
+        )
+    )
     for sn in list(wb.sheetnames):
-        if sn in ("1명", "2명", "3명", "4명", "5명"):
+        if sn in tpl_sheets:
             del wb[sn]
 
     # 5. 단일 파일 저장
-    fname = f"확인서_{year:04d}{month:02d}.xlsx"
+    fname_fmt = s.get(
+        "confirm", "output_filename_format", default="확인서_{year:04d}{month:02d}.xlsx"
+    )
+    fname = fname_fmt.format(year=year, month=month)
     out_path = os.path.join(output_dir, fname)
     wb.save(out_path)
 
-    # 모든 결과에 동일 파일명
     for item in created:
         item["file"] = fname
 

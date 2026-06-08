@@ -14,7 +14,8 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
 )
 
-from ..config import SEMANTIC_COLUMN_ROLES, auto_detect_semantic_columns
+from ..config import auto_detect_semantic_columns
+from ..settings import get_settings
 
 
 class _NoWheelComboBox(QComboBox):
@@ -24,21 +25,35 @@ class _NoWheelComboBox(QComboBox):
         event.ignore()
 
 
-# 배송일 계산용 플래그 — 템플릿 컬럼과 별도 섹션
-_FLAG_FIELDS = [
-    ("__breakfast", "조식 여부", "1.0=해당, 0/공란=미해당 (금요일 배송)"),
-    ("__dinner", "석식 여부", "1.0=해당, 0/공란=미해당 (월~목 배송)"),
-    ("__vacation", "방중 여부", "1.0=해당, 0/공란=미해당 (방학중 월~금 배송)"),
-    ("__note", "비고 (일시중지 등)", ""),
-]
+# 배송일 계산용 플래그 — 설정에서 동적 로드
+_FLAG_FIELDS = None  # 런타임 로드
+_FLAG_SEARCH_TERMS = None
 
-# 플래그 키별 자동 탐색할 명단 컬럼명 후보
-_FLAG_SEARCH_TERMS = {
-    "__breakfast": ["조식"],
-    "__dinner": ["석식"],
-    "__vacation": ["중식", "방중"],
-    "__note": ["비고"],
-}
+
+def _get_flag_fields():
+    s = get_settings()
+    fields = s.get("flag_fields", default={})
+    if not fields:
+        return [
+            ("__breakfast", "조식 여부", "1.0=해당, 0/공란=미해당 (금요일 배송)"),
+            ("__dinner", "석식 여부", "1.0=해당, 0/공란=미해당 (월~목 배송)"),
+            ("__vacation", "방중 여부", "1.0=해당, 0/공란=미해당 (방학중 월~금 배송)"),
+            ("__note", "비고 (일시중지 등)", ""),
+        ]
+    return [(k, v.get("label", k), v.get("tooltip", "")) for k, v in fields.items()]
+
+
+def _get_flag_search_terms():
+    s = get_settings()
+    terms = s.get("flag_search_terms", default={})
+    if not terms:
+        return {
+            "__breakfast": ["조식"],
+            "__dinner": ["석식"],
+            "__vacation": ["중식", "방중"],
+            "__note": ["비고"],
+        }
+    return terms
 
 
 class MappingDialog(QDialog):
@@ -111,7 +126,7 @@ class MappingDialog(QDialog):
 
         _semantic_defaults = auto_detect_semantic_columns(self._template_columns)
 
-        for key, info in SEMANTIC_COLUMN_ROLES.items():
+        for key, info in get_settings().get("semantic_columns", default={}).items():
             table.insertRow(row)
 
             item = QTableWidgetItem(info["label"])
@@ -141,7 +156,7 @@ class MappingDialog(QDialog):
         table.setSpan(row, 0, 1, 2)
         row += 1
 
-        for key, label, tip in _FLAG_FIELDS:
+        for key, label, tip in _get_flag_fields():
             table.insertRow(row)
 
             item = QTableWidgetItem(label)
@@ -200,7 +215,7 @@ class MappingDialog(QDialog):
                 auto_map[key] = detected.get(key, "")
             elif key.startswith("__"):
                 # 플래그: 명단 헤더에서 검색
-                terms = _FLAG_SEARCH_TERMS.get(key, [key])
+                terms = _get_flag_search_terms().get(key, [key])
                 best = ""
                 for t in terms:
                     if t in self.roster_headers:
