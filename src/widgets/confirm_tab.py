@@ -23,8 +23,6 @@ from ..settings import get_settings
 class ConfirmTab(QWidget):
     """확인서 생성 탭"""
 
-    MAX_RESULT_ROWS = 10
-
     def __init__(self):
         super().__init__()
         self.confirms = []
@@ -114,9 +112,9 @@ class ConfirmTab(QWidget):
         table_layout = QVBoxLayout(table_group)
 
         self.confirm_table = QTableWidget()
-        self.confirm_table.setColumnCount(5)
+        self.confirm_table.setColumnCount(7)
         self.confirm_table.setHorizontalHeaderLabels(
-            ["번호", "이름", "소속", "청구금액", "파일명"]
+            ["시트명", "총 가구 수", "1명", "2명", "3명", "4명", "5명"]
         )
         hdr2 = self.confirm_table.horizontalHeader()
         hdr2.setStretchLastSection(True)
@@ -261,18 +259,18 @@ class ConfirmTab(QWidget):
             QMessageBox.critical(self, "생성 오류", f"확인서 생성 실패:\n{e}")
 
     def _update_table(self):
-        show = self.confirms[: self.MAX_RESULT_ROWS]
+        show = self.confirms
         self.confirm_table.setRowCount(len(show))
         for i, cf in enumerate(show):
-            self.confirm_table.setItem(i, 0, QTableWidgetItem(str(i + 1)))
-            self.confirm_table.setItem(i, 1, QTableWidgetItem(cf["name"]))
-            self.confirm_table.setItem(i, 2, QTableWidgetItem(cf["dept"]))
-            self.confirm_table.setItem(i, 3, QTableWidgetItem(f"{cf['amount']:,}원"))
-            self.confirm_table.setItem(i, 4, QTableWidgetItem(cf["file"]))
+            self.confirm_table.setItem(i, 0, QTableWidgetItem(cf["sheet_name"]))
+            self.confirm_table.setItem(i, 1, QTableWidgetItem(str(cf["total_hh"])))
+            self.confirm_table.setItem(i, 2, QTableWidgetItem(str(cf["count_1"])))
+            self.confirm_table.setItem(i, 3, QTableWidgetItem(str(cf["count_2"])))
+            self.confirm_table.setItem(i, 4, QTableWidgetItem(str(cf["count_3"])))
+            self.confirm_table.setItem(i, 5, QTableWidgetItem(str(cf["count_4"])))
+            self.confirm_table.setItem(i, 6, QTableWidgetItem(str(cf["count_5"])))
 
-        self.info_label.setText(
-            f"생성된 확인서: {len(self.confirms)}건 (처음 {len(show)}건 표시)"
-        )
+        self.info_label.setText(f"생성된 확인서: {len(self.confirms)}건")
 
     def _clear(self):
         self.confirms.clear()

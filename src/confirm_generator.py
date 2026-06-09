@@ -67,8 +67,8 @@ def make_confirm(
     """명단 데이터 → 확인서템플릿 채워서 단일 엑셀 파일 생성."""
     s = get_settings()
 
-    _LOOKUP = ["주소", "성명", "세대주성명", "핸드폰", "학교명", "관할동"]
-    addr_col, name_col, head_col, phone_col, dept_col, dong_col = (
+    _LOOKUP = ["주소", "성명", "세대주성명", "핸드폰", "관할동"]
+    addr_col, name_col, head_col, phone_col, dong_col = (
         col_mapping.get(k, k) for k in _LOOKUP
     )
 
@@ -123,6 +123,21 @@ def make_confirm(
         for p in persons_in_dong:
             addr = p.get(addr_col, "")
             hh_groups.setdefault(addr, []).append(p)
+
+        # 가구원 수 통계
+        hh_1 = hh_2 = hh_3 = hh_4 = hh_5 = 0
+        for addr, members in hh_groups.items():
+            n = len(members)
+            if n == 1:
+                hh_1 += 1
+            elif n == 2:
+                hh_2 += 1
+            elif n == 3:
+                hh_3 += 1
+            elif n == 4:
+                hh_4 += 1
+            else:
+                hh_5 += 1
 
         # 시트 생성
         import re as _re
@@ -311,9 +326,6 @@ def make_confirm(
                         tpl_anchor_map,
                     )
 
-                dept = str(person.get(dept_col, ""))
-                created.append({"name": name, "dept": dept, "amount": 0, "file": ""})
-
             # ── 폰트·정렬: 플레이스홀더 있던 모든 셀에 적용 ──
             for _, pos_list in ph_map.items():
                 for ph_row, ph_col in pos_list:
@@ -326,6 +338,20 @@ def make_confirm(
                         cell.alignment = CENTER_ALIGN
 
             current_row += tpl_rows
+
+        # 시트별 통계 추가
+        created.append(
+            {
+                "sheet_name": sheet_name,
+                "total_hh": hh_1 + hh_2 + hh_3 + hh_4 + hh_5,
+                "count_1": hh_1,
+                "count_2": hh_2,
+                "count_3": hh_3,
+                "count_4": hh_4,
+                "count_5": hh_5,
+                "file": "",
+            }
+        )
 
     # 4. 원본 템플릿 시트 제거
     tpl_sheets = set(
