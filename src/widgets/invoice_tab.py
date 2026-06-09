@@ -30,8 +30,9 @@ from PyQt6.QtWidgets import (
 from python_calamine import CalamineWorkbook, PasswordError
 
 from ..config import auto_detect_semantic_columns, read_template_columns
+from ..delivery_calculator import _to_bool, count_delivery_days
 from ..holiday_fetcher import get_kr_holidays
-from ..invoice_generator import _to_bool, calc_delivery_days, make_invoice
+from ..invoice_generator import make_invoice
 from ..settings import get_settings
 from .mapping_dialog import MappingDialog
 
@@ -614,7 +615,8 @@ class InvoiceTab(QWidget):
             if "중지" in val_y or "중단" in val_y:
                 continue
             note_val = str(person.get(note_col, ""))
-            if not re.search(r"\d{1,2}[/.]\d{1,2}", note_val):
+            # 비고에 날짜 또는 매주패턴이 없으면 계산 대상 아님
+            if not re.search(r"\d{1,2}[/.]\d{1,2}|매주", note_val):
                 note_val = ""
             enriched.append(
                 {
@@ -676,7 +678,7 @@ class InvoiceTab(QWidget):
                 "dinner": _to_bool(p.get("_dinner", 0)),
                 "lunch": _to_bool(p.get("_lunch", 0)),
             }
-            days = calc_delivery_days(
+            days = count_delivery_days(
                 year,
                 month,
                 flags["breakfast"],
@@ -687,7 +689,7 @@ class InvoiceTab(QWidget):
                 if self._excluded_dates
                 else None,
             )
-            b_cnt = days["breakfast"] * 3
+            b_cnt = days["breakfast"]
             d_cnt = days["dinner"]
             l_cnt = days["lunch"]
             p["_total"] = b_cnt + d_cnt + l_cnt

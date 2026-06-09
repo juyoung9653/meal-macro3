@@ -20,7 +20,7 @@
     "lunch": 9500
   },
   "schedule": {
-    "breakfast_days": [4],
+    "breakfast_days": [4, 5, 6],
     "dinner_days": [0, 1, 2, 3],
     "lunch_days": [0, 1, 2, 3, 4]
   },

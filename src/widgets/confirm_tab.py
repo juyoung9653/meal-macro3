@@ -16,7 +16,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from ..invoice_generator import make_confirm
+from ..confirm_generator import make_confirm
 from ..settings import get_settings
 
 

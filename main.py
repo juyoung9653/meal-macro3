@@ -1,9 +1,15 @@
+import logging
 import sys
 
 from PyQt6.QtWidgets import QApplication
 
 from src.main_window import MainWindow
 from src.settings import get_settings
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(levelname)s | %(name)s | %(message)s",
+)
 
 
 def main():
