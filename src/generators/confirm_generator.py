@@ -5,30 +5,21 @@ from copy import copy
 from datetime import date
 
 import openpyxl
-from openpyxl.styles import Font
 
-from .delivery_calculator import (
-    _get_week_ranges,
-    _to_bool,
-    _week_date_str,
-    calc_weekly_breakdown,
-)
-from .excel_utils import (
-    CENTER_ALIGN,
-    _build_merged_anchor_map,
+from ..core.meal_types import MealType
+from ..core.settings import get_settings
+from ..excel.excel_utils import (
     adjust_formula,
+    build_merged_anchor_map,
     copy_cell,
 )
-from .settings import get_settings
-from .template_scanner import scan_placeholders, validate_placeholders
-
-
-def _make_confirm_fonts():
-    s = get_settings()
-    fn = s.get("display", "font_name", default="맑은 고딕")
-    sz = s.get("display", "confirm_font_size", default=11)
-    sz_s = s.get("display", "confirm_font_size_small", default=10)
-    return Font(name=fn, size=sz), Font(name=fn, size=sz_s)
+from ..services.delivery_calculator import (
+    calc_weekly_breakdown,
+    get_week_ranges,
+    to_bool,
+    week_date_str,
+)
+from ..templates.template_scanner import scan_placeholders, validate_placeholders
 
 
 def _set_ph(ws, ph_map, key, current_row, value, tpl_anchor_map=None):
@@ -48,7 +39,7 @@ def _pre_build_anchor_maps(wb, tpl_sheet_names: list[str]) -> dict[str, dict]:
     maps = {}
     for sn in tpl_sheet_names:
         if sn in wb.sheetnames:
-            maps[sn] = _build_merged_anchor_map(wb[sn])
+            maps[sn] = build_merged_anchor_map(wb[sn])
     return maps
 
 
@@ -86,13 +77,12 @@ def make_confirm(
     if not title_prefix:
         title_prefix = f"{year}년 {month}월"
 
-    weeks = _get_week_ranges(year, month)
+    weeks = get_week_ranges(year, month)
     created = []
 
     # 3. 템플릿 워크북 로드
     wb = openpyxl.load_workbook(template_path)
     data_cols = s.get("templates", "data_columns", default=11)
-    confirm_font, _ = _make_confirm_fonts()
 
     # 플레이스홀더 위치 스캔 (mtime + 파일 캐시)
     tpl_sheet_names = s.get(
@@ -107,7 +97,7 @@ def make_confirm(
     )
 
     # ── 템플릿 시트별 MergedCell 앵커맵 사전 빌드 ──
-    tpl_anchor_maps = _pre_build_anchor_maps(wb, tpl_sheet_names)
+    tpl_anchor_maps = _pre_build_anchor_maps(wb, tpl_sheet_names)  # keep private
 
     ph_warnings = validate_placeholders(all_placeholders)
     if ph_warnings:
@@ -268,9 +258,9 @@ def make_confirm(
                 )
 
                 flags = {
-                    "breakfast": _to_bool(person.get("_breakfast", 0)),
-                    "dinner": _to_bool(person.get("_dinner", 0)),
-                    "lunch": _to_bool(person.get("_lunch", 0)),
+                    MealType.BREAKFAST: to_bool(person.get("_breakfast", 0)),
+                    MealType.DINNER: to_bool(person.get("_dinner", 0)),
+                    MealType.LUNCH: to_bool(person.get("_lunch", 0)),
                 }
                 note_text = str(person.get("_note", ""))
                 weekly = calc_weekly_breakdown(
@@ -287,7 +277,11 @@ def make_confirm(
                     wd = (
                         weekly[wi]
                         if wi < len(weekly)
-                        else {"breakfast": 0, "dinner": 0, "lunch": 0}
+                        else {
+                            MealType.BREAKFAST: 0,
+                            MealType.DINNER: 0,
+                            MealType.LUNCH: 0,
+                        }
                     )
                     # 주차 날짜 (예: {week1})
                     _set_ph(
@@ -295,7 +289,7 @@ def make_confirm(
                         ph_map,
                         f"week{wi + 1}",
                         current_row,
-                        _week_date_str(wdata[1], wdata[2]),
+                        week_date_str(wdata[1], wdata[2]),
                         tpl_anchor_map,
                     )
                     # 조식 건수
@@ -304,7 +298,7 @@ def make_confirm(
                         ph_map,
                         f"sum_b_{ci + 1}_{wi + 1}",
                         current_row,
-                        wd["breakfast"] if wd["breakfast"] else "",
+                        wd[MealType.BREAKFAST] if wd[MealType.BREAKFAST] else "",
                         tpl_anchor_map,
                     )
                     # 석식 건수
@@ -313,7 +307,7 @@ def make_confirm(
                         ph_map,
                         f"sum_d_{ci + 1}_{wi + 1}",
                         current_row,
-                        wd["dinner"] if wd["dinner"] else "",
+                        wd[MealType.DINNER] if wd[MealType.DINNER] else "",
                         tpl_anchor_map,
                     )
                     # 중식 건수
@@ -322,20 +316,9 @@ def make_confirm(
                         ph_map,
                         f"sum_l_{ci + 1}_{wi + 1}",
                         current_row,
-                        wd["lunch"] if wd["lunch"] else "",
+                        wd[MealType.LUNCH] if wd[MealType.LUNCH] else "",
                         tpl_anchor_map,
                     )
-
-            # ── 폰트·정렬: 플레이스홀더 있던 모든 셀에 적용 ──
-            for _, pos_list in ph_map.items():
-                for ph_row, ph_col in pos_list:
-                    if (ph_row, ph_col) in tpl_anchor_map:
-                        continue  # 비앵커 MergedCell → 건너뜀
-                    out_row = current_row + ph_row - 1
-                    cell = ws.cell(row=out_row, column=ph_col)
-                    if cell.value is not None:
-                        cell.font = confirm_font
-                        cell.alignment = CENTER_ALIGN
 
             current_row += tpl_rows
 

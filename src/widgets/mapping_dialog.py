@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
 )
 
-from ..settings import get_settings
+from ..core.settings import get_settings
 
 
 class _NoWheelComboBox(QComboBox):
@@ -33,9 +33,22 @@ def _get_flag_fields():
     s = get_settings()
     fields = s.get("flag_fields", default={})
     if not fields:
-        from ..settings import DEFAULTS
-
-        fields = DEFAULTS.get("flag_fields", {})
+        # 기본값 fallback (순환 import 방지)
+        fields = {
+            "__breakfast": {
+                "label": "조식 여부",
+                "tooltip": "1.0=해당, 0/공란=미해당 (금요일 배송)",
+            },
+            "__dinner": {
+                "label": "석식 여부",
+                "tooltip": "1.0=해당, 0/공란=미해당 (월~목 배송)",
+            },
+            "__vacation": {
+                "label": "방중 여부",
+                "tooltip": "1.0=해당, 0/공란=미해당 (방학중 월~금 배송)",
+            },
+            "__note": {"label": "비고 (일시중지 등)", "tooltip": ""},
+        }
     return [(k, v.get("label", k), v.get("tooltip", "")) for k, v in fields.items()]
 
 
@@ -43,9 +56,13 @@ def _get_flag_search_terms():
     s = get_settings()
     terms = s.get("flag_search_terms", default={})
     if not terms:
-        from ..settings import DEFAULTS
-
-        terms = DEFAULTS.get("flag_search_terms", {})
+        # 기본값 fallback (순환 import 방지)
+        terms = {
+            "__breakfast": ["조식"],
+            "__dinner": ["석식"],
+            "__vacation": ["중식", "방중"],
+            "__note": ["비고"],
+        }
     return terms
 
 

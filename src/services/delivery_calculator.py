@@ -3,7 +3,7 @@
 Public API:
   - count_delivery_days(year, month, flags, note, excluded) -> dict
   - calc_weekly_breakdown(year, month, flags, note, excluded) -> list[dict]
-  - _to_bool(val) -> bool
+  - to_bool(val) -> bool
 
 
 비고 파싱은 note_parser 모듈 위임.
@@ -13,10 +13,11 @@ import calendar
 import logging
 from datetime import date, timedelta
 
-from .excel_utils import FRI, MON, SAT, SUN, THU, TUE, WED, date_range
+from ..core.date_utils import FRI, MON, SAT, SUN, THU, TUE, WED, date_range
+from ..core.meal_types import MEAL_KEYS, MealType
+from ..core.settings import get_settings
 from .holiday_fetcher import get_kr_holidays
 from .note_parser import apply_note_to_month, expand_note_dates
-from .settings import get_settings
 
 log = logging.getLogger(__name__)
 
@@ -27,9 +28,11 @@ def _get_schedule():
     """설정에서 배송 스케줄 로드."""
     s = get_settings()
     return {
-        "breakfast": set(s.get("schedule", "breakfast_days", default=[FRI])),
-        "dinner": set(s.get("schedule", "dinner_days", default=[MON, TUE, WED, THU])),
-        "lunch": set(
+        MealType.BREAKFAST: set(s.get("schedule", "breakfast_days", default=[FRI])),
+        MealType.DINNER: set(
+            s.get("schedule", "dinner_days", default=[MON, TUE, WED, THU])
+        ),
+        MealType.LUNCH: set(
             s.get("schedule", "lunch_days", default=[MON, TUE, WED, THU, FRI])
         ),
     }
@@ -94,7 +97,7 @@ def count_weekdays_in_range(
 # expand_note_dates, apply_note_to_month 는 note_parser 모듈에서 import
 
 
-def _to_bool(val) -> bool:
+def to_bool(val) -> bool:
     if isinstance(val, (int, float)):
         return val > 0
     if isinstance(val, str):
@@ -130,18 +133,20 @@ def count_delivery_days(
 
     # ── 기본 배송일 수 ──
     base = {}
-    base["breakfast"] = (
-        count_weekdays(year, month, schedule["breakfast"], excluded_dates, _WEEKEND)
+    base[MealType.BREAKFAST] = (
+        count_weekdays(
+            year, month, schedule[MealType.BREAKFAST], excluded_dates, _WEEKEND
+        )
         if flag_breakfast
         else 0
     )
-    base["dinner"] = (
-        count_weekdays(year, month, schedule["dinner"], excluded_dates)
+    base[MealType.DINNER] = (
+        count_weekdays(year, month, schedule[MealType.DINNER], excluded_dates)
         if flag_dinner
         else 0
     )
-    base["lunch"] = (
-        count_weekdays(year, month, schedule["lunch"], excluded_dates)
+    base[MealType.LUNCH] = (
+        count_weekdays(year, month, schedule[MealType.LUNCH], excluded_dates)
         if flag_lunch
         else 0
     )
@@ -152,9 +157,11 @@ def count_delivery_days(
     )
 
     result = {
-        "breakfast": max(0, base["breakfast"] - reduction["breakfast"]),
-        "dinner": max(0, base["dinner"] - reduction["dinner"]),
-        "lunch": max(0, base["lunch"] - reduction["lunch"]),
+        MealType.BREAKFAST: max(
+            0, base[MealType.BREAKFAST] - reduction[MealType.BREAKFAST]
+        ),
+        MealType.DINNER: max(0, base[MealType.DINNER] - reduction[MealType.DINNER]),
+        MealType.LUNCH: max(0, base[MealType.LUNCH] - reduction[MealType.LUNCH]),
     }
 
     if note and note.strip():
@@ -162,15 +169,15 @@ def count_delivery_days(
             "[Delivery] %04d-%02d base=(bf=%d dn=%d lh=%d) note_reduction=(bf=%d dn=%d lh=%d) -> final=(bf=%d dn=%d lh=%d)",
             year,
             month,
-            base["breakfast"],
-            base["dinner"],
-            base["lunch"],
-            reduction["breakfast"],
-            reduction["dinner"],
-            reduction["lunch"],
-            result["breakfast"],
-            result["dinner"],
-            result["lunch"],
+            base[MealType.BREAKFAST],
+            base[MealType.DINNER],
+            base[MealType.LUNCH],
+            reduction[MealType.BREAKFAST],
+            reduction[MealType.DINNER],
+            reduction[MealType.LUNCH],
+            result[MealType.BREAKFAST],
+            result[MealType.DINNER],
+            result[MealType.LUNCH],
         )
     return result
 
@@ -178,7 +185,7 @@ def count_delivery_days(
 # ── 주간 배송 계산 ──────────────────────────────
 
 
-def _get_week_ranges(year: int, month: int) -> list[tuple[int, date, date]]:
+def get_week_ranges(year: int, month: int) -> list[tuple[int, date, date]]:
     """해당 월을 일(요일)~토(요일) 주차 단위로 분할."""
     last_day = calendar.monthrange(year, month)[1]
     weeks = []
@@ -198,7 +205,7 @@ def _get_week_ranges(year: int, month: int) -> list[tuple[int, date, date]]:
     return weeks
 
 
-def _week_date_str(w_start: date, w_end: date) -> str:
+def week_date_str(w_start: date, w_end: date) -> str:
     return f"{w_start.month:02d}.{w_start.day:02d}~{w_end.month:02d}.{w_end.day:02d}"
 
 
@@ -209,7 +216,7 @@ def _is_excluded_for_meal(
     조식 주말(토·일)은 공휴일이어도 제외하지 않음."""
     if d not in all_excluded:
         return False
-    if flags.get("breakfast") and d.weekday() in weekend:
+    if flags.get(MealType.BREAKFAST) and d.weekday() in weekend:
         return False
     return True
 
@@ -235,20 +242,24 @@ def calc_weekly_breakdown(
             "breakfast": int, "dinner": int, "lunch": int}, ...]
     """
     schedule = _get_schedule()
-    weeks = _get_week_ranges(year, month)
+    weeks = get_week_ranges(year, month)
     holidays = get_kr_holidays(year)
     all_excluded = set(holidays) | (excluded_dates or set())
 
     # ── Step 1-2: 비고 날짜 확장 ──
     expanded = expand_note_dates(note, year, month)
 
-    flags = {"breakfast": flag_breakfast, "dinner": flag_dinner, "lunch": flag_lunch}
-    meal_keys = ["breakfast", "dinner", "lunch"]
+    flags = {
+        MealType.BREAKFAST: flag_breakfast,
+        MealType.DINNER: flag_dinner,
+        MealType.LUNCH: flag_lunch,
+    }
+    meal_keys = MEAL_KEYS
 
     result = []
     for wn, wstart, wend in weeks:
         # ── 주차별 기본 배송일 수 (raw) ──
-        week_base = {"breakfast": 0, "dinner": 0, "lunch": 0}
+        week_base = {MealType.BREAKFAST: 0, MealType.DINNER: 0, MealType.LUNCH: 0}
         for d in date_range(wstart, wend):
             if _is_excluded_for_meal(d, all_excluded, flags, _WEEKEND):
                 continue
@@ -257,7 +268,7 @@ def calc_weekly_breakdown(
                     week_base[mk] += 1
 
         # ── 주차별 비고 차감 건수 (raw) ──
-        week_reduction = {"breakfast": 0, "dinner": 0, "lunch": 0}
+        week_reduction = {MealType.BREAKFAST: 0, MealType.DINNER: 0, MealType.LUNCH: 0}
         for d, meals in expanded:
             if not (wstart <= d <= wend):
                 continue
@@ -274,14 +285,19 @@ def calc_weekly_breakdown(
                 "start": wstart,
                 "end": wend,
                 "breakfast": max(
-                    0, week_base["breakfast"] - week_reduction["breakfast"]
+                    0,
+                    week_base[MealType.BREAKFAST] - week_reduction[MealType.BREAKFAST],
                 )
                 if flag_breakfast
                 else 0,
-                "dinner": max(0, week_base["dinner"] - week_reduction["dinner"])
+                "dinner": max(
+                    0, week_base[MealType.DINNER] - week_reduction[MealType.DINNER]
+                )
                 if flag_dinner
                 else 0,
-                "lunch": max(0, week_base["lunch"] - week_reduction["lunch"])
+                "lunch": max(
+                    0, week_base[MealType.LUNCH] - week_reduction[MealType.LUNCH]
+                )
                 if flag_lunch
                 else 0,
             }

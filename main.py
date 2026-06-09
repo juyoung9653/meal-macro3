@@ -3,8 +3,8 @@ import sys
 
 from PyQt6.QtWidgets import QApplication
 
+from src.core.settings import get_settings
 from src.main_window import MainWindow
-from src.settings import get_settings
 
 logging.basicConfig(
     level=logging.INFO,

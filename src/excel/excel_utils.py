@@ -1,15 +1,11 @@
-"""Excel 조작 유틸리티 — 셀 복사, 병합셀 처리, 수식 조정 + 공통 유틸."""
+"""Excel 조작 유틸리티 — 셀 복사, 병합셀 처리, 수식 조정."""
 
 from copy import copy
-from datetime import date, timedelta
 
 from openpyxl.styles import Alignment
 
 # ── 상수 ──
 CENTER_ALIGN = Alignment(horizontal="center", vertical="center")
-
-# ── 요일 상수 ──
-MON, TUE, WED, THU, FRI, SAT, SUN = range(7)
 
 
 def copy_cell(src, dst):
@@ -24,7 +20,7 @@ def copy_cell(src, dst):
         dst.alignment = copy(src.alignment)
 
 
-def _build_merged_anchor_map(ws) -> dict[tuple[int, int], tuple[int, int]]:
+def build_merged_anchor_map(ws) -> dict[tuple[int, int], tuple[int, int]]:
     """워크시트의 모든 MergedCell → 앵커셀 (row, col) 매핑.
 
     한 번 빌드하면 safe_set_cell_value_fast 에서 O(1) 조회.
@@ -63,14 +59,6 @@ def safe_set_cell_value_fast(ws, row, column, value, anchor_map: dict | None = N
         ws.cell(row=r, column=c).value = value
     else:
         ws.cell(row=row, column=column).value = value
-
-
-def date_range(start: date, end: date):
-    """start~end 사이 날짜 생성기."""
-    current = start
-    while current <= end:
-        yield current
-        current += timedelta(days=1)
 
 
 def adjust_formula(formula: str, row_offset: int) -> str:

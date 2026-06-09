@@ -1,4 +1,13 @@
-"""중앙 설정 관리자 — JSON 파일 기반, 모든 하드코딩 상수를 대체."""
+"""중앙 설정 관리자 — JSON 파일 기반, 모든 하드코딩 상수를 대체.
+
+Note: schedule/pricing dict keys ("breakfast"/"dinner"/"lunch") correspond
+to ``MealType`` enum values in ``src.meal_types``.
+
+Persistence separation:
+  - SettingsManager (.settings.json) → app config (pricing, paths, schedule, display)
+  - QSettings (per-tab) → ephemeral UI state (last file, window position, col mapping)
+  Use SettingsManager for anything that should survive a settings reset.
+"""
 
 import copy
 import json
@@ -34,12 +43,6 @@ DEFAULTS: dict[str, Any] = {
         "breakfast_days": [4],  # 금요일 (0=월, 6=일)
         "dinner_days": [0, 1, 2, 3],  # 월~목
         "lunch_days": [0, 1, 2, 3, 4],  # 월~금
-    },
-    "display": {
-        "font_name": "맑은 고딕",
-        "invoice_font_size": 9,
-        "confirm_font_size": 11,
-        "confirm_font_size_small": 10,
     },
     "confirm": {
         "title_suffix": "분당구 급식확인서",
@@ -114,7 +117,7 @@ class SettingsManager:
 
     Usage::
 
-        from src.settings import get_settings
+        from src.core.settings import get_settings
         s = get_settings()
         title = s.get("app", "title")
         schedule = s.get("schedule")  # 전체 dict

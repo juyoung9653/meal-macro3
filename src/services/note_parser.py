@@ -16,10 +16,12 @@ Public API:
 import logging
 import re
 from datetime import date, timedelta
+from typing import Callable
 
-from .excel_utils import FRI, MON, SAT, SUN, THU, TUE, WED, date_range
+from ..core.date_utils import FRI, MON, SAT, SUN, THU, TUE, WED, date_range
+from ..core.meal_types import ALL_MEALS, MealType
+from ..core.settings import get_settings
 from .holiday_fetcher import get_kr_holidays
-from .settings import get_settings
 
 log = logging.getLogger(__name__)
 
@@ -35,7 +37,6 @@ _KOREAN_WEEKDAY: dict[str, int] = {
     "일": SUN,
 }
 
-_ALL_MEALS = {"breakfast", "dinner", "lunch"}
 
 # ── 날짜 유틸 ──
 
@@ -48,12 +49,12 @@ def _detect_meals(text: str) -> set[str]:
     """텍스트에서 급식 종류 탐지. 없으면 전체 반환."""
     found: set[str] = set()
     if "조식" in text:
-        found.add("breakfast")
+        found.add(MealType.BREAKFAST)
     if "석식" in text:
-        found.add("dinner")
+        found.add(MealType.DINNER)
     if "중식" in text or "방중" in text:
-        found.add("lunch")
-    return found if found else _ALL_MEALS
+        found.add(MealType.LUNCH)
+    return found if found else ALL_MEALS
 
 
 # ── 무시할 내용 필터 ──
@@ -376,46 +377,96 @@ def _parse_segment(seg: str, ref_year: int) -> list[dict]:
     return results
 
 
-def _parse_date_patterns(text: str, ref_year: int) -> list[dict]:
-    """날짜 기반 액션 파싱.
+# ── 날짜 패턴 정규식 (모듈 레벨로 미리 컴파일) ──
 
-    각 매치의 급식 종류는 matched text에서만 감지.
-    명시된 급식이 없으면 전체(all meals)로 간주.
+# 4a. "M/D1,D2,... 액션" (다중 날짜, 쉼표로 구분)
+_RE_MULTI_DATE = re.compile(
+    r"(?:(\d{2,4})[./])?(\d{1,2})[./](\d{1,2})"
+    r"((?:,\s*\d{1,2})+)"  # ,D ,D ...
+    r"\s*(조식|석식|중식|방중)?\s*"
+    r"(일시\s*중지|일시중지|중지|배송)"
+)
+
+# 4b. "YY/M/D~M/D 액션" (범위, 연도포함)
+_RE_YR_RANGE = re.compile(
+    r"(?:(\d{2,4})[./])?(\d{1,2})[./](\d{1,2})"  # start date
+    r"\s*(?:[~∼]|부터)\s*"
+    r"(?:(?:(\d{2,4})[./])?(\d{1,2})[./](\d{1,2})\s*)?"  # optional end date
+    r"((?:조식|석식|중식|방중)(?:,\s*(?:조식|석식|중식|방중))*)?\s*"
+    r"(일시\s*중지|일시중지|중지|재배송|신규\s*배송|신규|추가\s*배송|배송)"
+)
+
+# 4b2. "YY/M/D~요일1,요일2(meal) 액션" (날짜범위 + 요일필터)
+_RE_RANGE_WK = re.compile(
+    r"(?:(\d{2,4})[./])?(\d{1,2})[./](\d{1,2})"  # start date
+    r"\s*[~∼]\s*"
+    r"([월화수목금토일]+(?:,\s*[월화수목금토일]+)*)"  # weekdays
+    r"\s*(?:요일)?\s*"
+    r"(?:\(([^)]*)\))?\s*"  # optional meal in parens
+    r"((?:조식|석식|중식|방중)(?:,\s*(?:조식|석식|중식|방중))*)?\s*"  # optional inline meal
+    r"(일시\s*중지|일시중지|중지)"  # action
+)
+
+# 4c. "M/D~D 액션" (같은 달 축약형)
+_RE_RANGE_ABBREV = re.compile(
+    r"(?:(\d{2,4})[./])?(\d{1,2})[./](\d{1,2})"
+    r"\s*[~∼]\s*(\d{1,2})"
+    r"\s*((?:조식|석식|중식|방중)(?:,\s*(?:조식|석식|중식|방중))*)?\s*"
+    r"(일시\s*중지|일시중지|중지|재배송)"
+)
+
+# 4d. "~M/D 액션" (종료일만 지정, 시작일 없음)
+_RE_TILDE_END = re.compile(
+    r"~\s*(?:(\d{2,4})[./])?(\d{1,2})[./](\d{1,2})"
+    r"\s*((?:조식|석식|중식|방중)(?:,\s*(?:조식|석식|중식|방중))*)?\s*"
+    r"(일시\s*중지|일시중지|중지|재배송|신규\s*배송|신규|추가\s*배송|배송)"
+)
+
+# 4e. 단일 날짜 + 액션 (가장 일반적)
+_RE_SINGLE_DATE = re.compile(
+    r"(?:(\d{2,4})[./])?(\d{1,2})[./](\d{1,2})"
+    r"\s*(?:[~∼]|부터)?\s*"
+    r"((?:조식|석식|중식|방중)(?:,\s*(?:조식|석식|중식|방중))*)?\s*"
+    r"(?:\(([^)]*)\))?\s*"
+    r"(?:만\s*)?(일시\s*중지|일시중지|중지(?!\s*배송)|재배송|신규\s*배송|신규|추가\s*배송|배송)"
+)
+
+
+# ── 개별 날짜 패턴 파서 함수들 ──
+# 각 함수: (text, ref_year) → (results, remaining_text)
+#   - results: 해당 패턴으로 추출한 결과 dict 목록
+#   - remaining_text: 매치된 부분이 제거된 나머지 텍스트
+
+
+def _parse_multi_date(text: str, ref_year: int) -> tuple[list[dict], str]:
+    r""" "M/D1,D2,... 액션" — 다중 날짜 (쉼표 구분).
+
+    예: 12/2,3,5,6,7,8,9,10,...일시중지
+    예: 4/9,14 석식 일시중지
+    예: 5/7,8,9,10,... 배송요청
+
+    pause/stop: 각 날짜를 개별 차감일로 등록.
+    배송(신규/재배송/추가): 명시된 날짜만 배송일 whitelist.
     """
     results: list[dict] = []
     remaining = text
 
-    # 패턴 우선순위로 매칭 (가장 구체적인 것부터)
-
-    # 4a. "M/D1,D2,... 액션" (다중 날짜, 쉼표로 구분)
-    #     예: 12/2,3,5,6,7,8,9,10,...일시중지
-    #     예: 4/9,14 석식 일시중지
-    #     예: 5/7,8,9,10,... 배송요청
-    pattern_multi = re.compile(
-        r"(?:(\d{2,4})[./])?(\d{1,2})[./](\d{1,2})"
-        r"((?:,\s*\d{1,2})+)"  # ,D ,D ...
-        r"\s*(조식|석식|중식|방중)?\s*"
-        r"(일시\s*중지|일시중지|중지|배송)"
-    )
     while True:
-        m = pattern_multi.search(remaining)
+        m = _RE_MULTI_DATE.search(remaining)
         if not m:
             break
         matched = m.group(0)
         y_str, mo_str, d1_str = m.group(1), m.group(2), m.group(3)
-        extra_days_str = m.group(4)  # ",14" or ",3,5,6,..."
+        extra_days_str = m.group(4)
         meal_str = m.group(5) or ""
         action_str = m.group(6)
 
         month = int(mo_str)
         year = _resolve_year(int(y_str), ref_year) if y_str else ref_year
-        # 모든 day 숫자 추출
         day_strs = [d1_str] + re.findall(r"(\d{1,2})", extra_days_str)
         meals = _detect_meals(meal_str) if meal_str else _detect_meals(matched)
         action = _action_type(action_str)
 
-        # pause/stop: 각 날짜를 개별 차감일로 등록
-        # 배송(신규/재배송/추가): 명시된 날짜만 배송, 나머지 전부 차감 (whitelist)
         if action in ("pause", "stop"):
             for ds in day_strs:
                 try:
@@ -433,7 +484,6 @@ def _parse_date_patterns(text: str, ref_year: int) -> list[dict]:
                     }
                 )
         else:
-            # 배송/신규/재배송/추가: 명시된 날짜들만 배송일 → 나머지는 차감
             allowed: set[date] = set()
             for ds in day_strs:
                 try:
@@ -453,18 +503,22 @@ def _parse_date_patterns(text: str, ref_year: int) -> list[dict]:
             )
         remaining = remaining[: m.start()] + remaining[m.end() :]
 
-    # 4b. "YY/M/D~M/D 액션" (범위, 연도포함)
-    #     예: 25/7/7~신규배송, 26/2/24~신규배송
-    #     예: 23/11/20~석식일시중지
-    pattern_yr_range = re.compile(
-        r"(?:(\d{2,4})[./])?(\d{1,2})[./](\d{1,2})"  # start date
-        r"\s*(?:[~∼]|부터)\s*"
-        r"(?:(?:(\d{2,4})[./])?(\d{1,2})[./](\d{1,2})\s*)?"  # optional end date
-        r"((?:조식|석식|중식|방중)(?:,\s*(?:조식|석식|중식|방중))*)?\s*"
-        r"(일시\s*중지|일시중지|중지|재배송|신규\s*배송|신규|추가\s*배송|배송)"
-    )
+    return results, remaining
+
+
+def _parse_yr_range(text: str, ref_year: int) -> tuple[list[dict], str]:
+    r""" "YY/M/D~M/D 액션" — 범위 (연도 포함).
+
+    예: 25/7/7~신규배송, 26/2/24~신규배송
+    예: 23/11/20~석식일시중지
+
+    종료일이 있으면 start~end, 없으면 start~ (open-ended).
+    """
+    results: list[dict] = []
+    remaining = text
+
     while True:
-        m = pattern_yr_range.search(remaining)
+        m = _RE_YR_RANGE.search(remaining)
         if not m:
             break
         matched = m.group(0)
@@ -479,7 +533,6 @@ def _parse_date_patterns(text: str, ref_year: int) -> list[dict]:
         meals = _detect_meals(meal_str) if meal_str else _detect_meals(matched)
         action = _action_type(action_str)
 
-        # Check if this was a 부터 match (no tilde)
         has_tilde = bool(re.search(r"[~∼]", matched[:20]))
 
         if m2s and d2s and has_tilde:
@@ -500,7 +553,6 @@ def _parse_date_patterns(text: str, ref_year: int) -> list[dict]:
                 }
             )
         else:
-            # open-ended: start~ (no end date)
             results.append(
                 {
                     "type": action,
@@ -513,19 +565,21 @@ def _parse_date_patterns(text: str, ref_year: int) -> list[dict]:
             )
         remaining = remaining[: m.start()] + remaining[m.end() :]
 
-    # 4b2. "YY/M/D~요일1,요일2(meal) 액션" (날짜범위 + 요일필터)
-    #     예: 26/3/12~화,목(석식) 중지
-    pattern_range_wk = re.compile(
-        r"(?:(\d{2,4})[./])?(\d{1,2})[./](\d{1,2})"  # start date
-        r"\s*[~∼]\s*"
-        r"([월화수목금토일]+(?:,\s*[월화수목금토일]+)*)"  # weekdays
-        r"\s*(?:요일)?\s*"
-        r"(?:\(([^)]*)\))?\s*"  # optional meal in parens
-        r"((?:조식|석식|중식|방중)(?:,\s*(?:조식|석식|중식|방중))*)?\s*"  # optional inline meal
-        r"(일시\s*중지|일시중지|중지)"  # action
-    )
+    return results, remaining
+
+
+def _parse_range_wk(text: str, ref_year: int) -> tuple[list[dict], str]:
+    r""" "YY/M/D~요일1,요일2(meal) 액션" — 날짜범위 + 요일필터.
+
+    예: 26/3/12~화,목(석식) 중지
+
+    요일 파싱 실패 시 매치는 제거되지만 결과는 생성하지 않음.
+    """
+    results: list[dict] = []
+    remaining = text
+
     while True:
-        m = pattern_range_wk.search(remaining)
+        m = _RE_RANGE_WK.search(remaining)
         if not m:
             break
         matched = m.group(0)
@@ -540,11 +594,9 @@ def _parse_date_patterns(text: str, ref_year: int) -> list[dict]:
 
         weekdays = {_KOREAN_WEEKDAY[ch] for ch in wk_str if ch in _KOREAN_WEEKDAY}
         if not weekdays:
-            # weekday 파싱 실패면 이 매치 건너뛰고 다음 패턴으로
             remaining = remaining[: m.start()] + remaining[m.end() :]
             continue
 
-        # meals: paren 우선, 없으면 inline_meal, 둘 다 없으면 matched 에서 감지
         meal_source = paren or inline_meal
         meals = _detect_meals(meal_source) if meal_source else _detect_meals(matched)
         action = _action_type(action_str)
@@ -562,16 +614,21 @@ def _parse_date_patterns(text: str, ref_year: int) -> list[dict]:
         )
         remaining = remaining[: m.start()] + remaining[m.end() :]
 
-    # 4c. "M/D~D 액션" (같은 달 축약형)
-    #     예: 12/5~9중지
-    pattern_range_abbrev = re.compile(
-        r"(?:(\d{2,4})[./])?(\d{1,2})[./](\d{1,2})"
-        r"\s*[~∼]\s*(\d{1,2})"
-        r"\s*((?:조식|석식|중식|방중)(?:,\s*(?:조식|석식|중식|방중))*)?\s*"
-        r"(일시\s*중지|일시중지|중지|재배송)"
-    )
+    return results, remaining
+
+
+def _parse_range_abbrev(text: str, ref_year: int) -> tuple[list[dict], str]:
+    r""" "M/D~D 액션" — 같은 달 축약형.
+
+    예: 12/5~9중지
+
+    동일 월 내에서 start일~end일 범위를 나타냄.
+    """
+    results: list[dict] = []
+    remaining = text
+
     while True:
-        m = pattern_range_abbrev.search(remaining)
+        m = _RE_RANGE_ABBREV.search(remaining)
         if not m:
             break
         matched = m.group(0)
@@ -599,15 +656,21 @@ def _parse_date_patterns(text: str, ref_year: int) -> list[dict]:
         )
         remaining = remaining[: m.start()] + remaining[m.end() :]
 
-    # 4d. "~M/D 액션" (종료일만 지정, 시작일 없음)
-    #     예: ~3/16 신규
-    pattern_tilde_end = re.compile(
-        r"~\s*(?:(\d{2,4})[./])?(\d{1,2})[./](\d{1,2})"
-        r"\s*((?:조식|석식|중식|방중)(?:,\s*(?:조식|석식|중식|방중))*)?\s*"
-        r"(일시\s*중지|일시중지|중지|재배송|신규\s*배송|신규|추가\s*배송|배송)"
-    )
+    return results, remaining
+
+
+def _parse_tilde_end(text: str, ref_year: int) -> tuple[list[dict], str]:
+    r""" "~M/D 액션" — 종료일만 지정.
+
+    예: ~3/16 신규
+
+    start=None, end=d 로 결과 생성.
+    """
+    results: list[dict] = []
+    remaining = text
+
     while True:
-        m = pattern_tilde_end.search(remaining)
+        m = _RE_TILDE_END.search(remaining)
         if not m:
             break
         matched = m.group(0)
@@ -632,18 +695,22 @@ def _parse_date_patterns(text: str, ref_year: int) -> list[dict]:
         )
         remaining = remaining[: m.start()] + remaining[m.end() :]
 
-    # 4e. 단일 날짜 + 액션 (가장 일반적)
-    #     예: 4/2석식일시중지, 4/14석식중지, 3/5~재배송
-    #     예: 8/1부터 조식만배송희망
-    pattern_single = re.compile(
-        r"(?:(\d{2,4})[./])?(\d{1,2})[./](\d{1,2})"
-        r"\s*(?:[~∼]|부터)?\s*"
-        r"((?:조식|석식|중식|방중)(?:,\s*(?:조식|석식|중식|방중))*)?\s*"
-        r"(?:\(([^)]*)\))?\s*"
-        r"(?:만\s*)?(일시\s*중지|일시중지|중지(?!\s*배송)|재배송|신규\s*배송|신규|추가\s*배송|배송)"
-    )
+    return results, remaining
+
+
+def _parse_single_date(text: str, ref_year: int) -> tuple[list[dict], str]:
+    r"""단일 날짜 + 액션 (가장 일반적).
+
+    예: 4/2석식일시중지, 4/14석식중지, 3/5~재배송
+    예: 8/1부터 조식만배송희망
+
+    ~ 또는 부터 가 있으면 open-ended (start only).
+    """
+    results: list[dict] = []
+    remaining = text
+
     while True:
-        m = pattern_single.search(remaining)
+        m = _RE_SINGLE_DATE.search(remaining)
         if not m:
             break
         matched = m.group(0)
@@ -652,22 +719,14 @@ def _parse_date_patterns(text: str, ref_year: int) -> list[dict]:
         paren_str = m.group(5) or ""
         action_str = m.group(6)
 
-        # paren의 식사 종류도 meals에 추가
         if paren_str:
             meal_str = meal_str + paren_str
-
-        # 이미 처리된 패턴인지 확인
-        already = any(r["raw"] == matched for r in results)
-        if already:
-            remaining = remaining[: m.start()] + remaining[m.end() :]
-            continue
 
         year = _resolve_year(int(y_s), ref_year) if y_s else ref_year
         month, day = int(m_s), int(d_s)
         meals = _detect_meals(meal_str) if meal_str else _detect_meals(matched)
         action = _action_type(action_str)
 
-        # open-ended check: ~ 또는 부터가 있으면 start-only
         has_open = bool(re.search(r"[~∼]|부터", matched[:15]))
 
         if has_open:
@@ -694,6 +753,44 @@ def _parse_date_patterns(text: str, ref_year: int) -> list[dict]:
             )
         remaining = remaining[: m.start()] + remaining[m.end() :]
 
+    return results, remaining
+
+
+def _parse_irrelevant(results: list[dict]) -> list[dict]:
+    """`_is_irrelevant` 필터: raw 텍스트가 무시할 내용인 결과 제거.
+
+    개명, 흰우유, 별도메뉴, 주소 변경 등 급식 갯수와 무관한 항목 필터링.
+    """
+    return [r for r in results if not _is_irrelevant(r.get("raw", ""))]
+
+
+# ── 패턴 디스크립터 테이블 (우선순위 순) ──
+
+_DATE_PATTERNS: list[tuple[str, Callable]] = [
+    ("multi_date", _parse_multi_date),
+    ("yr_range", _parse_yr_range),
+    ("range_wk", _parse_range_wk),
+    ("range_abbrev", _parse_range_abbrev),
+    ("tilde_end", _parse_tilde_end),
+    ("single_date", _parse_single_date),
+]
+
+
+def _parse_date_patterns(text: str, ref_year: int) -> list[dict]:
+    """날짜 기반 액션 파싱 (오케스트레이터).
+
+    우선순위 순서로 각 패턴 파서를 순차 실행.
+    각 파서는 처리한 부분을 remaining에서 제거하므로
+    중복 매칭 없이 각 패턴이 독립적으로 동작.
+
+    각 매치의 급식 종류는 matched text에서만 감지.
+    명시된 급식이 없으면 전체(all meals)로 간주.
+    """
+    results: list[dict] = []
+    remaining = text
+    for _name, parse_fn in _DATE_PATTERNS:
+        sub_results, remaining = parse_fn(remaining, ref_year)
+        results.extend(sub_results)
     return results
 
 
@@ -745,20 +842,30 @@ def apply_note_to_month(
     # ── Step 4: count by schedule ──
     s = get_settings()
     schedule = {
-        "breakfast": set(s.get("schedule", "breakfast_days", default=[FRI])),
-        "dinner": set(s.get("schedule", "dinner_days", default=[MON, TUE, WED, THU])),
-        "lunch": set(
+        MealType.BREAKFAST: set(s.get("schedule", "breakfast_days", default=[FRI])),
+        MealType.DINNER: set(
+            s.get("schedule", "dinner_days", default=[MON, TUE, WED, THU])
+        ),
+        MealType.LUNCH: set(
             s.get("schedule", "lunch_days", default=[MON, TUE, WED, THU, FRI])
         ),
     }
 
-    flags = {"breakfast": flag_breakfast, "dinner": flag_dinner, "lunch": flag_lunch}
-    counts: dict[str, int] = {"breakfast": 0, "dinner": 0, "lunch": 0}
+    flags = {
+        MealType.BREAKFAST: flag_breakfast,
+        MealType.DINNER: flag_dinner,
+        MealType.LUNCH: flag_lunch,
+    }
+    counts: dict[str, int] = {
+        MealType.BREAKFAST: 0,
+        MealType.DINNER: 0,
+        MealType.LUNCH: 0,
+    }
 
     for d, meals in date_meals:
         if d in blocked:
             # 조식 + 주말(토·일)이면 공휴일이어도 차감 대상
-            if not ("breakfast" in meals and d.weekday() in {SAT, SUN}):
+            if not (MealType.BREAKFAST in meals and d.weekday() in {SAT, SUN}):
                 log.debug("[Memo] skip blocked date %s", d)
                 continue
         for meal_type in meals:
@@ -771,9 +878,9 @@ def apply_note_to_month(
     if date_meals:
         log.info(
             "[Memo] reduction: bf=%d dn=%d lh=%d (flags: bf=%s dn=%s lh=%s)",
-            counts["breakfast"],
-            counts["dinner"],
-            counts["lunch"],
+            counts[MealType.BREAKFAST],
+            counts[MealType.DINNER],
+            counts[MealType.LUNCH],
             flag_breakfast,
             flag_dinner,
             flag_lunch,

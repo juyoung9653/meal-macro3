@@ -23,7 +23,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from ..settings import get_settings, save_settings
+from ..core.settings import get_settings, save_settings
 
 WEEKDAY_NAMES = ["월", "화", "수", "목", "금", "토", "일"]
 
@@ -55,9 +55,8 @@ class SettingsDialog(QDialog):
         tabs = QTabWidget()
         tabs.addTab(self._make_general_tab(), "일반")
         tabs.addTab(self._make_template_tab(), "템플릿")
-        tabs.addTab(self._make_pricing_tab(), "단가")
+
         tabs.addTab(self._make_schedule_tab(), "배송 요일")
-        tabs.addTab(self._make_display_tab(), "표시")
         tabs.addTab(self._make_confirm_tab(), "확인서")
         layout.addWidget(tabs)
 
@@ -136,23 +135,6 @@ class SettingsDialog(QDialog):
         layout.addWidget(sheet_group)
         return self._wrap_scroll(w)
 
-    def _make_pricing_tab(self):
-        w = QWidget()
-        form = QFormLayout(w)
-        self._bf_price_spin = _NoWheelSpinBox()
-        self._bf_price_spin.setRange(0, 999999)
-        self._bf_price_spin.setSuffix(" 원")
-        form.addRow("조식 단가:", self._bf_price_spin)
-        self._dn_price_spin = _NoWheelSpinBox()
-        self._dn_price_spin.setRange(0, 999999)
-        self._dn_price_spin.setSuffix(" 원")
-        form.addRow("석식 단가:", self._dn_price_spin)
-        self._lh_price_spin = _NoWheelSpinBox()
-        self._lh_price_spin.setRange(0, 999999)
-        self._lh_price_spin.setSuffix(" 원")
-        form.addRow("중식 단가:", self._lh_price_spin)
-        return self._wrap_scroll(w)
-
     def _make_schedule_tab(self):
         w = QWidget()
         layout = QVBoxLayout(w)
@@ -177,22 +159,6 @@ class SettingsDialog(QDialog):
             glayout.addStretch()
             setattr(self, f"_{key}_checks", checks)
             layout.addWidget(group)
-        return self._wrap_scroll(w)
-
-    def _make_display_tab(self):
-        w = QWidget()
-        form = QFormLayout(w)
-        self._font_name_edit = QLineEdit()
-        form.addRow("폰트명:", self._font_name_edit)
-        self._inv_font_size_spin = _NoWheelSpinBox()
-        self._inv_font_size_spin.setRange(6, 20)
-        form.addRow("청구서 폰트 크기:", self._inv_font_size_spin)
-        self._cnf_font_size_spin = _NoWheelSpinBox()
-        self._cnf_font_size_spin.setRange(6, 20)
-        form.addRow("확인서 폰트 크기:", self._cnf_font_size_spin)
-        self._cnf_font_small_spin = _NoWheelSpinBox()
-        self._cnf_font_small_spin.setRange(6, 20)
-        form.addRow("확인서 작은 폰트 크기:", self._cnf_font_small_spin)
         return self._wrap_scroll(w)
 
     def _make_confirm_tab(self):
@@ -263,26 +229,11 @@ class SettingsDialog(QDialog):
         for name in s.get("templates", "confirm_sheet_names", default=[]):
             self._confirm_sheets_list.addItem(name)
 
-        self._bf_price_spin.setValue(s.get("pricing", "breakfast", default=9500))
-        self._dn_price_spin.setValue(s.get("pricing", "dinner", default=9500))
-        self._lh_price_spin.setValue(s.get("pricing", "lunch", default=9500))
-
         for meal_key in ["breakfast_days", "dinner_days", "lunch_days"]:
             days = set(s.get("schedule", meal_key, default=[]))
             checks = getattr(self, f"_{meal_key}_checks", [])
             for cb in checks:
                 cb.setChecked(cb.property("day_idx") in days)
-
-        self._font_name_edit.setText(s.get("display", "font_name", default=""))
-        self._inv_font_size_spin.setValue(
-            s.get("display", "invoice_font_size", default=9)
-        )
-        self._cnf_font_size_spin.setValue(
-            s.get("display", "confirm_font_size", default=11)
-        )
-        self._cnf_font_small_spin.setValue(
-            s.get("display", "confirm_font_size_small", default=10)
-        )
 
         self._confirm_title_suffix_edit.setText(
             s.get("confirm", "title_suffix", default="")
@@ -314,23 +265,10 @@ class SettingsDialog(QDialog):
         ]
         s.set("templates", "confirm_sheet_names", value=sheets)
 
-        s.set("pricing", "breakfast", value=self._bf_price_spin.value())
-        s.set("pricing", "dinner", value=self._dn_price_spin.value())
-        s.set("pricing", "lunch", value=self._lh_price_spin.value())
-
         for meal_key in ["breakfast_days", "dinner_days", "lunch_days"]:
             checks = getattr(self, f"_{meal_key}_checks", [])
             days = [cb.property("day_idx") for cb in checks if cb.isChecked()]
             s.set("schedule", meal_key, value=days)
-
-        s.set("display", "font_name", value=self._font_name_edit.text())
-        s.set("display", "invoice_font_size", value=self._inv_font_size_spin.value())
-        s.set("display", "confirm_font_size", value=self._cnf_font_size_spin.value())
-        s.set(
-            "display",
-            "confirm_font_size_small",
-            value=self._cnf_font_small_spin.value(),
-        )
 
         s.set("confirm", "title_suffix", value=self._confirm_title_suffix_edit.text())
         s.set(

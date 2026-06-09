@@ -1,7 +1,7 @@
 from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import QMainWindow, QStatusBar, QTabWidget
 
-from src.settings import get_settings
+from src.core.settings import get_settings
 from src.widgets.confirm_tab import ConfirmTab
 from src.widgets.invoice_tab import InvoiceTab
 from src.widgets.settings_dialog import SettingsDialog
@@ -51,15 +51,7 @@ class MainWindow(QMainWindow):
 
     def _on_tab_changed(self, index: int):
         if index >= 1:
-            self.confirm_tab.set_invoices(
-                self.invoice_tab.get_invoices(),
-                self.invoice_tab.get_col_mapping(),
-                self.invoice_tab.get_year(),
-                self.invoice_tab.get_month(),
-                self.invoice_tab.get_excluded_dates(),
-                self.invoice_tab.get_roster_headers(),
-                self.invoice_tab.get_roster_path(),
-            )
+            self.confirm_tab.set_invoice_data(self.invoice_tab.get_invoice_data())
 
         self.statusbar.showMessage(
             {

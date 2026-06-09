@@ -4,26 +4,50 @@ import functools
 
 import openpyxl
 
-from .settings import get_settings
+from ..core.settings import get_settings
 
 # ── 설정에서 값 조회 (설정 없으면 기본값 fallback) ──
 
 
-def _get_template_sheet_name():
+def get_template_sheet_name():
     return get_settings().get("templates", "sheet_name", default="학기중")
 
 
-def _get_template_data_start_row():
+def get_template_data_start_row():
     return get_settings().get("templates", "data_start_row", default=4)
 
 
 def _get_semantic_column_roles():
     roles = get_settings().get("semantic_columns", default={})
     if not roles:
-        # 기본값 fallback (settings.DEFAULTS 참조)
-        from .settings import DEFAULTS
-
-        return DEFAULTS.get("semantic_columns", {})
+        # 기본값 fallback
+        return {
+            "__calc_breakfast": {
+                "label": "조식 건수 입력",
+                "patterns": ["조식"],
+                "default": "조식",
+            },
+            "__calc_dinner": {
+                "label": "석식 건수 입력",
+                "patterns": ["석식"],
+                "default": "석식",
+            },
+            "__calc_lunch": {
+                "label": "중식 건수 입력",
+                "patterns": ["중식"],
+                "default": "중식",
+            },
+            "__calc_total": {
+                "label": "합계(계) 수식",
+                "patterns": ["계"],
+                "default": "계",
+            },
+            "__calc_price": {
+                "label": "청구금액 수식",
+                "patterns": ["청구금액"],
+                "default": "청구금액",
+            },
+        }
     return roles
 
 
@@ -59,7 +83,7 @@ def read_template_columns(template_path: str) -> list[str]:
 
     머지된 셀 처리, 개행 제거, 괄호 접미사 제거 자동 처리.
     """
-    sheet_name = _get_template_sheet_name()
+    sheet_name = get_template_sheet_name()
     wb = openpyxl.load_workbook(template_path)
     ws = wb[sheet_name]
 

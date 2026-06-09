@@ -16,8 +16,9 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from ..confirm_generator import make_confirm
-from ..settings import get_settings
+from ..core.invoice_data import InvoiceData
+from ..core.settings import get_settings
+from ..generators.confirm_generator import make_confirm
 
 
 class ConfirmTab(QWidget):
@@ -277,28 +278,19 @@ class ConfirmTab(QWidget):
         self.confirm_table.setRowCount(0)
         self.info_label.setText("생성된 확인서: 0건")
 
-    def set_invoices(
-        self,
-        invoices: list[dict],
-        col_mapping: dict | None = None,
-        year: int = 2026,
-        month: int = 6,
-        excluded_dates: set[date] | None = None,
-        roster_headers: list[str] | None = None,
-        roster_path: str | None = None,
-    ):
-        """청구서 데이터 + 매핑 + 제외일 전달받기"""
-        self._invoices = invoices
-        if col_mapping:
-            self._col_mapping = col_mapping
-        self._year = year
-        self._month = month
-        self._excluded_dates = excluded_dates or set()
-        self._roster_path = roster_path
-        self.generate_btn.setEnabled(bool(invoices))
+    def set_invoice_data(self, data: InvoiceData):
+        """InvoiceData 객체로 모든 상태 한 번에 설정"""
+        self._invoices = data.invoices
+        if data.col_mapping:
+            self._col_mapping = data.col_mapping
+        self._year = data.year
+        self._month = data.month
+        self._excluded_dates = data.excluded_dates or set()
+        self._roster_path = data.roster_path
+        self.generate_btn.setEnabled(bool(data.invoices))
 
         # 배송담당자 컬럼 콤보박스 채우기
-        self._delivery_col_combo_update(roster_headers)
+        self._delivery_col_combo_update(data.roster_headers)
 
         # 저장된 배송담당자 컬럼/전화번호 복원
         saved_col = self._settings.value("confirm/delivery_col", "")
@@ -319,10 +311,36 @@ class ConfirmTab(QWidget):
                     )
         self.delivery_table.blockSignals(False)
 
-        if invoices:
+        if data.invoices:
             self.info_label.setText(
-                f"청구서 {len(invoices)}건 로드됨. 생성 버튼을 누르면 확인서를 만듭니다."
+                f"청구서 {len(data.invoices)}건 로드됨. 생성 버튼을 누르면 확인서를 만듭니다."
             )
+
+    def set_invoices(
+        self,
+        invoices: list[dict],
+        col_mapping: dict | None = None,
+        year: int = 2026,
+        month: int = 6,
+        excluded_dates: set[date] | None = None,
+        roster_headers: list[str] | None = None,
+        roster_path: str | None = None,
+    ):
+        """
+        Deprecated: use set_invoice_data() instead.
+        Kept for backward compatibility.
+        """
+        self.set_invoice_data(
+            InvoiceData(
+                invoices=invoices,
+                col_mapping=col_mapping or {},
+                year=year,
+                month=month,
+                excluded_dates=excluded_dates or set(),
+                roster_headers=roster_headers or [],
+                roster_path=roster_path,
+            )
+        )
 
     def _delivery_col_combo_update(self, roster_headers: list[str] | None = None):
         """콤보박스 아이템 채우기"""

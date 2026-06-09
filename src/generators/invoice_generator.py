@@ -3,17 +3,38 @@
 from datetime import date
 
 import openpyxl
-from openpyxl.styles import Font
 
-from .config import (
-    _get_template_data_start_row,
-    _get_template_sheet_name,
+from ..core.meal_types import MEAL_KEYS
+from ..excel.excel_utils import CENTER_ALIGN, copy_cell
+from ..services.delivery_calculator import count_delivery_days, to_bool
+from ..templates.config import (
     col_name_to_index,
+    get_template_data_start_row,
+    get_template_sheet_name,
     read_template_columns,
 )
-from .delivery_calculator import _to_bool, count_delivery_days
-from .excel_utils import CENTER_ALIGN, copy_cell
-from .settings import get_settings
+
+# ── 숫자 변환 헬퍼 ────────────────────────────────
+
+
+def _to_numeric(val):
+    """str → int/float 변환 가능하면 변환, 아니면 원본 반환.
+
+    "3" → 3, "3.14" → 3.14, "010-1234" → "010-1234" (그대로)
+    """
+    if isinstance(val, (int, float)):
+        return val
+    if not isinstance(val, str) or not val.strip():
+        return val
+    s = val.strip()
+    try:
+        return int(s)
+    except ValueError:
+        pass
+    try:
+        return float(s)
+    except ValueError:
+        return val
 
 
 # ── 엑셀 컬럼 인덱스 → 문자 (A, B, ..., Z, AA, AB, ...) ──
@@ -24,17 +45,6 @@ def _col_idx_to_letter(idx: int) -> str:
         idx, rem = divmod(idx - 1, 26)
         letters = chr(ord("A") + rem) + letters
     return letters
-
-
-# ── 폰트 ──────────────────────────────────────────
-
-
-def _make_invoice_fonts():
-    """설정에서 폰트 객체 생성."""
-    s = get_settings()
-    fn = s.get("display", "font_name", default="맑은 고딕")
-    sz = s.get("display", "invoice_font_size", default=9)
-    return Font(name=fn, size=sz), Font(name=fn, size=sz, bold=True)
 
 
 # ── 청구서 생성 ────────────────────────────────────
@@ -68,8 +78,6 @@ def make_invoice(
     """roster_data → 청구서템플릿 채워서 output_path 에 저장."""
 
     template_columns = read_template_columns(template_path)
-    invoice_font, invoice_font_bold = _make_invoice_fonts()
-
     # ── 사전 계산: 컬럼명 → 1-based 인덱스 (list.index() 반복 호출 제거) ──
     col_idx_map = col_name_to_index(template_columns)
 
@@ -86,11 +94,11 @@ def make_invoice(
     dn_letter = _col_idx_to_letter(dn_col_idx)
     lh_letter = _col_idx_to_letter(lh_col_idx)
 
-    sheet_name = _get_template_sheet_name()
+    sheet_name = get_template_sheet_name()
     wb = openpyxl.load_workbook(template_path)
     ws = wb[sheet_name]
 
-    row_idx = _get_template_data_start_row()
+    row_idx = get_template_data_start_row()
     data_start_row = row_idx
 
     # 첫 데이터 행 셀 참조·높이 저장 (값+서식+수식 복사용)
@@ -103,10 +111,7 @@ def make_invoice(
     _data_col_idxs: set[int] = set()
 
     for i, person in enumerate(roster_data):
-        flags = {
-            k: _to_bool(person.get(f"_{k}", 0))
-            for k in ("breakfast", "dinner", "lunch")
-        }
+        flags = {k: to_bool(person.get(f"_{k}", 0)) for k in MEAL_KEYS}
         note_text = person.get("_note", "")
         days = count_delivery_days(
             year,
@@ -136,6 +141,12 @@ def make_invoice(
             f"+{lh_letter}{row_idx}*{unit_price_lunch}"
         )
 
+        # Return computed data for result display
+        person["_total"] = breakfast_cnt + dinner_cnt + lunch_cnt
+        person["_amount"] = (
+            f"{breakfast_cnt * unit_price_breakfast + dinner_cnt * unit_price_dinner + lunch_cnt * unit_price_lunch:,}원"
+        )
+
         # ── 템플릿 행 복사 (데이터 컬럼 제외 → 덮어쓰기 낭비 방지) ──
         if i > 0:
             for _col_idx in range(1, len(_template_row_cells) + 1):
@@ -153,12 +164,11 @@ def make_invoice(
             if c_idx is None:
                 continue
             cell = ws.cell(row=row_idx, column=c_idx)
-            cell.value = value
-            cell.font = invoice_font
+            cell.value = _to_numeric(value)
             cell.alignment = CENTER_ALIGN
             _data_col_idxs.add(c_idx)
 
         row_idx += 1
 
     wb.save(output_path)
-    return row_idx - _get_template_data_start_row()
+    return row_idx - get_template_data_start_row(), roster_data
