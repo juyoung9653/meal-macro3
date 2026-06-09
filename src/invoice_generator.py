@@ -33,16 +33,13 @@ def _map_person_to_row(
     person: dict, mapping: dict, seq: int, template_columns: list[str]
 ) -> dict:
     """person dict + mapping → {template_col_name: value}"""
-    row: dict[str, str | int] = {}
+    row_data: dict[str, str | int] = {}
     for col in template_columns:
-        if col == "연번":
-            row[col] = seq
-        else:
-            roster_key = mapping.get(col, "")
-            if not roster_key:
-                continue  # 매핑 없는 컬럼은 템플릿 값 유지
-            row[col] = person.get(roster_key, "")
-    return row
+        roster_key = mapping.get(col, "")
+        row_data[col] = (
+            seq if col == "연번" else person.get(roster_key, "") if roster_key else ""
+        )
+    return row_data
 
 
 def make_invoice(
@@ -83,9 +80,8 @@ def make_invoice(
 
     for i, person in enumerate(roster_data):
         flags = {
-            "breakfast": _to_bool(person.get("_breakfast", 0)),
-            "dinner": _to_bool(person.get("_dinner", 0)),
-            "lunch": _to_bool(person.get("_lunch", 0)),
+            k: _to_bool(person.get(f"_{k}", 0))
+            for k in ("breakfast", "dinner", "lunch")
         }
         note_text = person.get("_note", "")
         days = count_delivery_days(
@@ -98,10 +94,11 @@ def make_invoice(
             excluded_dates,
         )
 
-        breakfast_cnt = days["breakfast"]
-
-        dinner_cnt = days["dinner"]
-        lunch_cnt = days["lunch"]
+        breakfast_cnt, dinner_cnt, lunch_cnt = (
+            days["breakfast"],
+            days["dinner"],
+            days["lunch"],
+        )
 
         row_data = _map_person_to_row(person, col_mapping, i + 1, template_columns)
 

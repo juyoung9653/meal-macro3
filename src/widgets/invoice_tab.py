@@ -366,27 +366,24 @@ class InvoiceTab(QWidget):
 
     @staticmethod
     def _col_letter(idx: int) -> str:
+        """0-based column index → Excel letter (A, B, ..., Z, AA, ...)."""
         result = ""
-        i = idx
         while True:
-            result = chr(i % 26 + 65) + result
-            i = i // 26 - 1
-            if i < 0:
+            result = chr(idx % 26 + 65) + result
+            idx = idx // 26 - 1
+            if idx < 0:
                 break
         return result
 
     @staticmethod
     def _is_name(v: str) -> bool:
-        if not v or not v.strip():
-            return False
-        v = v.strip()
-        if re.fullmatch(r"\d+(\.\d+)?", v):
-            return False
-        if re.fullmatch(r"\d{2}\.\d{2}(\.\d{2,4})?", v):
-            return False
-        if len(v) <= 1:
-            return False
-        return True
+        return bool(
+            v
+            and v.strip()
+            and not re.fullmatch(r"\d+(\.\d+)?", v.strip())
+            and not re.fullmatch(r"\d{2}\.\d{2}(\.\d{2,4})?", v.strip())
+            and len(v.strip()) > 1
+        )
 
     def _parse_rows(self, rows: list) -> tuple:
         if not rows:
@@ -424,8 +421,7 @@ class InvoiceTab(QWidget):
 
     @staticmethod
     def _resolve_name_col(header: list) -> int:
-        s = get_settings()
-        keywords = s.get(
+        keywords = get_settings().get(
             "roster",
             "name_keywords",
             default=["성명", "이름", "성함", "학생명", "학생", "name", "Name"],
@@ -674,9 +670,7 @@ class InvoiceTab(QWidget):
         # 결과 표시용 계산
         for p in enriched:
             flags = {
-                "breakfast": _to_bool(p.get("_breakfast", 0)),
-                "dinner": _to_bool(p.get("_dinner", 0)),
-                "lunch": _to_bool(p.get("_lunch", 0)),
+                k: _to_bool(p.get(f"_{k}", 0)) for k in ("breakfast", "dinner", "lunch")
             }
             days = count_delivery_days(
                 year,
@@ -689,9 +683,7 @@ class InvoiceTab(QWidget):
                 if self._excluded_dates
                 else None,
             )
-            b_cnt = days["breakfast"]
-            d_cnt = days["dinner"]
-            l_cnt = days["lunch"]
+            b_cnt, d_cnt, l_cnt = days["breakfast"], days["dinner"], days["lunch"]
             p["_total"] = b_cnt + d_cnt + l_cnt
             p["_amount"] = (
                 f"{b_cnt * self.breakfast_price.value() + d_cnt * self.dinner_price.value() + l_cnt * self.lunch_price.value():,}원"

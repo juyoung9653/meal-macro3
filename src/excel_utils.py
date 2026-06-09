@@ -1,11 +1,15 @@
-"""Excel 조작 유틸리티 — 셀 복사, 병합셀 처리, 수식 조정."""
+"""Excel 조작 유틸리티 — 셀 복사, 병합셀 처리, 수식 조정 + 공통 유틸."""
 
 from copy import copy
+from datetime import date, timedelta
 
 from openpyxl.styles import Alignment
 
 # ── 상수 ──
 CENTER_ALIGN = Alignment(horizontal="center", vertical="center")
+
+# ── 요일 상수 ──
+MON, TUE, WED, THU, FRI, SAT, SUN = range(7)
 
 
 def copy_cell(src, dst):
@@ -32,6 +36,14 @@ def safe_set_cell_value(ws, row, column, value):
                 return
         return
     cell.value = value
+
+
+def date_range(start: date, end: date):
+    """start~end 사이 날짜 생성기."""
+    current = start
+    while current <= end:
+        yield current
+        current += timedelta(days=1)
 
 
 def adjust_formula(formula: str, row_offset: int) -> str:

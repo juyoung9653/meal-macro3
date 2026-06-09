@@ -51,28 +51,22 @@ class MainWindow(QMainWindow):
 
     def _on_tab_changed(self, index: int):
         if index >= 1:
-            invoices = self.invoice_tab.get_invoices()
-            col_mapping = self.invoice_tab.get_col_mapping()
-            year = self.invoice_tab.get_year()
-            month = self.invoice_tab.get_month()
-            excluded_dates = self.invoice_tab.get_excluded_dates()
-            roster_headers = self.invoice_tab.get_roster_headers()
-            roster_path = self.invoice_tab.get_roster_path()
             self.confirm_tab.set_invoices(
-                invoices,
-                col_mapping,
-                year,
-                month,
-                excluded_dates,
-                roster_headers,
-                roster_path,
+                self.invoice_tab.get_invoices(),
+                self.invoice_tab.get_col_mapping(),
+                self.invoice_tab.get_year(),
+                self.invoice_tab.get_month(),
+                self.invoice_tab.get_excluded_dates(),
+                self.invoice_tab.get_roster_headers(),
+                self.invoice_tab.get_roster_path(),
             )
 
-        messages = {
-            0: "명단 로드 완료. 컬럼 매핑 후 청구서 생성",
-            1: "청구서 기반 확인서 생성",
-        }
-        self.statusbar.showMessage(messages.get(index, ""))
+        self.statusbar.showMessage(
+            {
+                0: "명단 로드 완료. 컬럼 매핑 후 청구서 생성",
+                1: "청구서 기반 확인서 생성",
+            }.get(index, "")
+        )
 
     def _open_settings(self):
         dlg = SettingsDialog(self)

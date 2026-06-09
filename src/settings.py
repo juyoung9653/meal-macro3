@@ -167,13 +167,12 @@ class SettingsManager:
 
         Example: ``s.get("app", "title")`` → ``"급식비 정산 프로그램"``
         """
-        node = self._data
-        for k in keys:
-            if isinstance(node, dict) and k in node:
-                node = node[k]
-            else:
-                return default
-        return node
+        from functools import reduce
+
+        try:
+            return reduce(lambda d, k: d[k], keys, self._data)
+        except (KeyError, TypeError):
+            return default
 
     def set(self, *keys: str, value: Any):
         """중첩 키로 설정값 변경.

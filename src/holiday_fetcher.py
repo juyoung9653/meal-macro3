@@ -48,15 +48,15 @@ def _fetch_naver_search(year: int) -> set[date] | None:
             "https://search.naver.com/search.naver?where=nexearch"
             "&sm=top_hty&fbm=0&ie=utf8&query=" + urllib.parse.quote(f"{year}년 공휴일")
         )
-        html = _fetch_url(url)
-        if html is None:
+        if (html := _fetch_url(url)) is None:
             return None
 
         # holiday_list div 찾기
-        m = re.search(
-            r'<div class="holiday_list">(.+?)</div>\s*</div>', html, re.DOTALL
-        )
-        if not m:
+        if not (
+            m := re.search(
+                r'<div class="holiday_list">(.+?)</div>\s*</div>', html, re.DOTALL
+            )
+        ):
             return None
         table_html = m.group(1)
 

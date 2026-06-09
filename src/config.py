@@ -20,34 +20,10 @@ def _get_template_data_start_row():
 def _get_semantic_column_roles():
     roles = get_settings().get("semantic_columns", default={})
     if not roles:
-        # 기본값 fallback
-        return {
-            "__calc_breakfast": {
-                "label": "조식 건수 입력",
-                "patterns": ["조식"],
-                "default": "조식",
-            },
-            "__calc_dinner": {
-                "label": "석식 건수 입력",
-                "patterns": ["석식"],
-                "default": "석식",
-            },
-            "__calc_lunch": {
-                "label": "중식 건수 입력",
-                "patterns": ["중식"],
-                "default": "중식",
-            },
-            "__calc_total": {
-                "label": "합계(계) 수식",
-                "patterns": ["계"],
-                "default": "계",
-            },
-            "__calc_price": {
-                "label": "청구금액 수식",
-                "patterns": ["청구금액"],
-                "default": "청구금액",
-            },
-        }
+        # 기본값 fallback (settings.DEFAULTS 참조)
+        from .settings import DEFAULTS
+
+        return DEFAULTS.get("semantic_columns", {})
     return roles
 
 
@@ -62,9 +38,8 @@ def auto_detect_semantic_columns(template_columns: list[str]) -> dict[str, str]:
 
     def find(patterns: list[str]) -> str:
         for col in template_columns:
-            for p in patterns:
-                if col == p:
-                    return col
+            if col in patterns:
+                return col
         for col in template_columns:
             for p in patterns:
                 if p in col:

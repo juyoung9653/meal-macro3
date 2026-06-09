@@ -17,10 +17,13 @@ import logging
 import re
 from datetime import date, timedelta
 
+from .excel_utils import FRI, MON, SAT, SUN, THU, TUE, WED, date_range
+from .holiday_fetcher import get_kr_holidays
+from .settings import get_settings
+
 log = logging.getLogger(__name__)
 
-# ── 요일 상수 ──
-MON, TUE, WED, THU, FRI, SAT, SUN = range(7)
+# ── 요일 alias (하위 호환) ──
 
 _KOREAN_WEEKDAY: dict[str, int] = {
     "월": MON,
@@ -38,9 +41,7 @@ _ALL_MEALS = {"breakfast", "dinner", "lunch"}
 
 
 def _resolve_year(yy: int, ref_year: int) -> int:
-    if yy == 0:
-        return ref_year
-    return 2000 + yy if yy < 100 else yy
+    return ref_year if yy == 0 else 2000 + yy if yy < 100 else yy
 
 
 def _detect_meals(text: str) -> set[str]:
@@ -255,7 +256,7 @@ def expand_note_dates(
             continue
 
         # ── 날짜 확장 ──
-        for d in _date_range(r_start, r_end):
+        for d in date_range(r_start, r_end):
             # weekday_only: 지정 요일만 허용 → 나머지는 차감 대상
             if adj_type == "weekday_only" and weekdays:
                 if d.weekday() in weekdays:
@@ -725,9 +726,6 @@ def apply_note_to_month(
         실제 배송일 = 기본배송일 - 이 값.
         조식: 주말(토·일)은 공휴일이어도 차감 대상에서 제외하지 않음.
     """
-    from .holiday_fetcher import get_kr_holidays
-    from .settings import get_settings
-
     # ── Steps 1-2: expand note dates ──
     date_meals = expand_note_dates(note, ref_year, month)
 
@@ -781,10 +779,3 @@ def apply_note_to_month(
             flag_lunch,
         )
     return counts
-
-
-def _date_range(start: date, end: date):
-    current = start
-    while current <= end:
-        yield current
-        current += timedelta(days=1)

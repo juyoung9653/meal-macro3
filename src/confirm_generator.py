@@ -1,7 +1,6 @@
 """확인서 생성기 — 템플릿 채우기 (배송일 계산은 delivery_calculator 위임)."""
 
 import os
-from collections import OrderedDict
 from copy import copy
 from datetime import date
 
@@ -25,6 +24,12 @@ def _make_confirm_fonts():
     sz = s.get("display", "confirm_font_size", default=11)
     sz_s = s.get("display", "confirm_font_size_small", default=10)
     return Font(name=fn, size=sz), Font(name=fn, size=sz_s)
+
+
+def _set_ph(ws, ph_map, key, current_row, value):
+    """ph_map[key] 위치들에 value 쓰기."""
+    for ph_row, ph_col in ph_map.get(key, []):
+        safe_set_cell_value(ws, current_row + ph_row - 1, ph_col, value)
 
 
 def make_confirm(
@@ -53,12 +58,10 @@ def make_confirm(
         p[addr_col] = raw.replace("\n", " ").replace("\r", " ").strip()
 
     # 2. 관할동별 그룹핑
-    dong_groups = OrderedDict()
+    dong_groups = {}
     for p in roster_data:
         dong = str(p.get(dong_col, "")).strip()
-        if dong not in dong_groups:
-            dong_groups[dong] = []
-        dong_groups[dong].append(p)
+        dong_groups.setdefault(dong, []).append(p)
 
     if not title_prefix:
         title_prefix = f"{year}년 {month}월"
@@ -93,12 +96,10 @@ def make_confirm(
 
     for dong, persons_in_dong in dong_groups.items():
         # 세대(주소)별 그룹핑
-        hh_groups = OrderedDict()
+        hh_groups = {}
         for p in persons_in_dong:
             addr = p.get(addr_col, "")
-            if addr not in hh_groups:
-                hh_groups[addr] = []
-            hh_groups[addr].append(p)
+            hh_groups.setdefault(addr, []).append(p)
 
         # 시트 생성
         import re as _re
@@ -194,32 +195,12 @@ def make_confirm(
 
             # 공통 정보 채움 (플레이스홀더 기반)
             title_suffix = s.get("confirm", "title_suffix", default="분당구 급식확인서")
-            for ph_row, ph_col in ph_map.get("title", []):
-                safe_set_cell_value(
-                    ws,
-                    current_row + ph_row - 1,
-                    ph_col,
-                    f"{title_prefix} {title_suffix}",
-                )
+            _set_ph(ws, ph_map, "title", current_row, f"{title_prefix} {title_suffix}")
             if delivery_person:
-                for ph_row, ph_col in ph_map.get("delivery", []):
-                    safe_set_cell_value(
-                        ws,
-                        current_row + ph_row - 1,
-                        ph_col,
-                        delivery_person,
-                    )
+                _set_ph(ws, ph_map, "delivery", current_row, delivery_person)
             if delivery_phone:
-                for ph_row, ph_col in ph_map.get("d_phone", []):
-                    safe_set_cell_value(
-                        ws,
-                        current_row + ph_row - 1,
-                        ph_col,
-                        delivery_phone,
-                    )
-            # 주소
-            for ph_row, ph_col in ph_map.get("addr", []):
-                safe_set_cell_value(ws, current_row + ph_row - 1, ph_col, addr)
+                _set_ph(ws, ph_map, "d_phone", current_row, delivery_phone)
+            _set_ph(ws, ph_map, "addr", current_row, addr)
 
             # 각 아동별 채움 (플레이스홀더 기반)
             for ci, person in enumerate(members[:5]):
@@ -230,14 +211,10 @@ def make_confirm(
                 phone = str(person.get(phone_col, ""))
 
                 # 개인정보
-                for ph_row, ph_col in ph_map.get(f"num{ci + 1}", []):
-                    safe_set_cell_value(ws, current_row + ph_row - 1, ph_col, sheet_seq)
-                for ph_row, ph_col in ph_map.get(f"child{ci + 1}", []):
-                    safe_set_cell_value(ws, current_row + ph_row - 1, ph_col, name)
-                for ph_row, ph_col in ph_map.get(f"carer{ci + 1}", []):
-                    safe_set_cell_value(ws, current_row + ph_row - 1, ph_col, head)
-                for ph_row, ph_col in ph_map.get(f"phone{ci + 1}", []):
-                    safe_set_cell_value(ws, current_row + ph_row - 1, ph_col, phone)
+                _set_ph(ws, ph_map, f"num{ci + 1}", current_row, sheet_seq)
+                _set_ph(ws, ph_map, f"child{ci + 1}", current_row, name)
+                _set_ph(ws, ph_map, f"carer{ci + 1}", current_row, head)
+                _set_ph(ws, ph_map, f"phone{ci + 1}", current_row, phone)
 
                 flags = {
                     "breakfast": _to_bool(person.get("_breakfast", 0)),
@@ -262,37 +239,37 @@ def make_confirm(
                         else {"breakfast": 0, "dinner": 0, "lunch": 0}
                     )
                     # 주차 날짜 (예: {week1})
-                    for ph_row, ph_col in ph_map.get(f"week{wi + 1}", []):
-                        safe_set_cell_value(
-                            ws,
-                            current_row + ph_row - 1,
-                            ph_col,
-                            _week_date_str(wdata[1], wdata[2]),
-                        )
-                    # 조식 건수 (예: {sum_b_1_1})
-                    for ph_row, ph_col in ph_map.get(f"sum_b_{ci + 1}_{wi + 1}", []):
-                        safe_set_cell_value(
-                            ws,
-                            current_row + ph_row - 1,
-                            ph_col,
-                            wd["breakfast"] if wd["breakfast"] else "",
-                        )
-                    # 석식 건수 (예: {sum_d_1_1})
-                    for ph_row, ph_col in ph_map.get(f"sum_d_{ci + 1}_{wi + 1}", []):
-                        safe_set_cell_value(
-                            ws,
-                            current_row + ph_row - 1,
-                            ph_col,
-                            wd["dinner"] if wd["dinner"] else "",
-                        )
-                    # 중식 건수 (예: {sum_l_1_1})
-                    for ph_row, ph_col in ph_map.get(f"sum_l_{ci + 1}_{wi + 1}", []):
-                        safe_set_cell_value(
-                            ws,
-                            current_row + ph_row - 1,
-                            ph_col,
-                            wd["lunch"] if wd["lunch"] else "",
-                        )
+                    _set_ph(
+                        ws,
+                        ph_map,
+                        f"week{wi + 1}",
+                        current_row,
+                        _week_date_str(wdata[1], wdata[2]),
+                    )
+                    # 조식 건수
+                    _set_ph(
+                        ws,
+                        ph_map,
+                        f"sum_b_{ci + 1}_{wi + 1}",
+                        current_row,
+                        wd["breakfast"] if wd["breakfast"] else "",
+                    )
+                    # 석식 건수
+                    _set_ph(
+                        ws,
+                        ph_map,
+                        f"sum_d_{ci + 1}_{wi + 1}",
+                        current_row,
+                        wd["dinner"] if wd["dinner"] else "",
+                    )
+                    # 중식 건수
+                    _set_ph(
+                        ws,
+                        ph_map,
+                        f"sum_l_{ci + 1}_{wi + 1}",
+                        current_row,
+                        wd["lunch"] if wd["lunch"] else "",
+                    )
 
                 dept = str(person.get(dept_col, ""))
                 created.append({"name": name, "dept": dept, "amount": 0, "file": ""})

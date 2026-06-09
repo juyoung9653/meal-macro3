@@ -67,7 +67,6 @@ class ConfirmTab(QWidget):
         delivery_group = QGroupBox("배송담당 정보")
         delivery_layout = QVBoxLayout(delivery_group)
 
-        # 컬럼 선택
         col_row = QHBoxLayout()
         col_row.addWidget(QLabel("배송담당자 컬럼:"))
         self.delivery_col_combo = QComboBox()
@@ -79,17 +78,15 @@ class ConfirmTab(QWidget):
         col_row.addWidget(self.delivery_col_combo)
         col_row.addStretch()
 
-        # 테이블: 고유 배송담당자명 → 연락처
         map_label = QLabel("※ 고유 배송담당자명 목록 — 연락처를 직접 입력하세요")
         map_label.setStyleSheet("color: #555; font-size: 11px;")
 
         self.delivery_table = QTableWidget()
         self.delivery_table.setColumnCount(2)
         self.delivery_table.setHorizontalHeaderLabels(["배송담당자명", "연락처"])
-        self.delivery_table.horizontalHeader().setStretchLastSection(True)
-        self.delivery_table.horizontalHeader().setSectionResizeMode(
-            QHeaderView.ResizeMode.Stretch
-        )
+        hdr = self.delivery_table.horizontalHeader()
+        hdr.setStretchLastSection(True)
+        hdr.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.delivery_table.setMinimumHeight(100)
         self.delivery_table.setMaximumHeight(200)
 
@@ -121,10 +118,9 @@ class ConfirmTab(QWidget):
         self.confirm_table.setHorizontalHeaderLabels(
             ["번호", "이름", "소속", "청구금액", "파일명"]
         )
-        self.confirm_table.horizontalHeader().setStretchLastSection(True)
-        self.confirm_table.horizontalHeader().setSectionResizeMode(
-            QHeaderView.ResizeMode.Stretch
-        )
+        hdr2 = self.confirm_table.horizontalHeader()
+        hdr2.setStretchLastSection(True)
+        hdr2.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.confirm_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.confirm_table.setAlternatingRowColors(True)
 

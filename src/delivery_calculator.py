@@ -13,14 +13,14 @@ import calendar
 import logging
 from datetime import date, timedelta
 
+from .excel_utils import FRI, MON, SAT, SUN, THU, TUE, WED, date_range
 from .holiday_fetcher import get_kr_holidays
 from .note_parser import apply_note_to_month, expand_note_dates
 from .settings import get_settings
 
 log = logging.getLogger(__name__)
 
-# ── 요일 상수 ──
-MON, TUE, WED, THU, FRI, SAT, SUN = range(7)
+# ── 요일 alias (하위 호환) ──
 
 
 def _get_schedule():
@@ -54,9 +54,9 @@ def count_weekdays(
         d = date(year, month, day)
         if d.weekday() not in dow_set:
             continue
-        if holiday_exempt_days and d.weekday() in holiday_exempt_days:
-            pass  # 주말 등은 공휴일 체크 생략
-        elif _is_holiday(d):
+        if not (
+            holiday_exempt_days and d.weekday() in holiday_exempt_days
+        ) and _is_holiday(d):
             continue
         if excluded_dates and d in excluded_dates:
             continue
@@ -79,9 +79,9 @@ def count_weekdays_in_range(
         if d.weekday() not in dow_set:
             d += timedelta(days=1)
             continue
-        if holiday_exempt_days and d.weekday() in holiday_exempt_days:
-            pass
-        elif _is_holiday(d):
+        if not (
+            holiday_exempt_days and d.weekday() in holiday_exempt_days
+        ) and _is_holiday(d):
             d += timedelta(days=1)
             continue
         if not (excluded_dates and d in excluded_dates):
@@ -129,19 +129,22 @@ def count_delivery_days(
     schedule = _get_schedule()
 
     # ── 기본 배송일 수 ──
-    base = {
-        "breakfast": count_weekdays(
-            year, month, schedule["breakfast"], excluded_dates, _WEEKEND
-        )
+    base = {}
+    base["breakfast"] = (
+        count_weekdays(year, month, schedule["breakfast"], excluded_dates, _WEEKEND)
         if flag_breakfast
-        else 0,
-        "dinner": count_weekdays(year, month, schedule["dinner"], excluded_dates)
+        else 0
+    )
+    base["dinner"] = (
+        count_weekdays(year, month, schedule["dinner"], excluded_dates)
         if flag_dinner
-        else 0,
-        "lunch": count_weekdays(year, month, schedule["lunch"], excluded_dates)
+        else 0
+    )
+    base["lunch"] = (
+        count_weekdays(year, month, schedule["lunch"], excluded_dates)
         if flag_lunch
-        else 0,
-    }
+        else 0
+    )
 
     # ── 비고 기반 차감 건수 (Pipeline Steps 1-4) ──
     reduction = apply_note_to_month(
@@ -246,7 +249,7 @@ def calc_weekly_breakdown(
     for wn, wstart, wend in weeks:
         # ── 주차별 기본 배송일 수 (raw) ──
         week_base = {"breakfast": 0, "dinner": 0, "lunch": 0}
-        for d in _date_range(wstart, wend):
+        for d in date_range(wstart, wend):
             if _is_excluded_for_meal(d, all_excluded, flags, _WEEKEND):
                 continue
             for mk in meal_keys:
@@ -284,11 +287,3 @@ def calc_weekly_breakdown(
             }
         )
     return result
-
-
-def _date_range(start: date, end: date):
-    """start~end 사이 날짜 생성기."""
-    current = start
-    while current <= end:
-        yield current
-        current += timedelta(days=1)
