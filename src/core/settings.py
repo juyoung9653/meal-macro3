@@ -131,14 +131,34 @@ class SettingsManager:
 
     def _get_path(self) -> str:
         if self._path is None:
+            # settings.py → core/ → src/ → project root
             self._path = os.path.join(
-                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                os.path.dirname(
+                    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                ),
                 ".settings.json",
             )
         return self._path
 
+    def _migrate_legacy(self):
+        """src/.settings.json → 루트 .settings.json 으로 마이그레이션 (1회 실행)."""
+        legacy_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            ".settings.json",
+        )
+        target_path = self._get_path()
+        if os.path.exists(legacy_path) and not os.path.exists(target_path):
+            try:
+                import shutil
+
+                shutil.copy2(legacy_path, target_path)
+                os.remove(legacy_path)
+            except OSError:
+                pass
+
     def load(self):
         """JSON 파일에서 설정 로드 (없으면 기본값 유지)."""
+        self._migrate_legacy()
         path = self._get_path()
         try:
             if os.path.exists(path):
