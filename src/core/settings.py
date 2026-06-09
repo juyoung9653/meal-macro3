@@ -1,10 +1,10 @@
 """중앙 설정 관리자 — JSON 파일 기반, 모든 하드코딩 상수를 대체.
 
-Note: schedule/pricing dict keys ("breakfast"/"dinner"/"lunch") correspond
+"schedule" dict keys ("breakfast"/"dinner"/"lunch") correspond
 to ``MealType`` enum values in ``src.meal_types``.
 
 Persistence separation:
-  - SettingsManager (.settings.json) → app config (pricing, paths, schedule, display)
+  - SettingsManager (.settings.json) → app config (paths, schedule, display)
   - QSettings (per-tab) → ephemeral UI state (last file, window position, col mapping)
   Use SettingsManager for anything that should survive a settings reset.
 """
@@ -34,13 +34,8 @@ DEFAULTS: dict[str, Any] = {
         "confirm_sheet_names": ["1명", "2명", "3명", "4명", "5명"],
         "data_columns": 11,
     },
-    "pricing": {
-        "breakfast": 9500,
-        "dinner": 9500,
-        "lunch": 9500,
-    },
     "schedule": {
-        "breakfast_days": [4],  # 금요일 (0=월, 6=일)
+        "breakfast_days": [4, 5, 6],  # 금요일 (0=월, 6=일)
         "dinner_days": [0, 1, 2, 3],  # 월~목
         "lunch_days": [0, 1, 2, 3, 4],  # 월~금
     },
@@ -200,7 +195,7 @@ class SettingsManager:
     def set(self, *keys: str, value: Any):
         """중첩 키로 설정값 변경.
 
-        Example: ``s.set("pricing", "breakfast", value=10000)``
+        Example: ``s.set("app", "title", value="")``
         """
         node = self._data
         for k in keys[:-1]:

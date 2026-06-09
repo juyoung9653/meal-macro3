@@ -17,11 +17,6 @@
     "confirm_sheet_names": ["1명", "2명", "3명", "4명", "5명"],
     "data_columns": 11
   },
-  "pricing": {
-    "breakfast": 9500,
-    "dinner": 9500,
-    "lunch": 9500
-  },
   "schedule": {
     "breakfast_days": [4, 5, 6],
     "dinner_days": [0, 1, 2, 3],
