@@ -5,7 +5,7 @@ from datetime import date
 import openpyxl
 
 from ..core.meal_types import MEAL_KEYS
-from ..excel.excel_utils import CENTER_ALIGN, copy_cell
+from ..excel.excel_utils import CENTER_ALIGN, copy_style
 from ..services.delivery_calculator import count_delivery_days, to_bool
 from ..templates.config import (
     col_name_to_index,
@@ -101,15 +101,6 @@ def make_invoice(
     row_idx = get_template_data_start_row()
     data_start_row = row_idx
 
-    # 첫 데이터 행 셀 참조·높이 저장 (값+서식+수식 복사용)
-    _template_row_cells = [
-        ws.cell(row=data_start_row, column=c) for c in range(1, ws.max_column + 1)
-    ]
-    _tmpl_row_height = ws.row_dimensions[data_start_row].height
-
-    # ── 덮어쓸 데이터 컬럼 인덱스 집합 ──
-    _data_col_idxs: set[int] = set()
-
     for i, person in enumerate(roster_data):
         flags = {k: to_bool(person.get(f"_{k}", 0)) for k in MEAL_KEYS}
         note_text = person.get("_note", "")
@@ -147,18 +138,7 @@ def make_invoice(
             f"{breakfast_cnt * unit_price_breakfast + dinner_cnt * unit_price_dinner + lunch_cnt * unit_price_lunch:,}원"
         )
 
-        # ── 템플릿 행 복사 (데이터 컬럼 제외 → 덮어쓰기 낭비 방지) ──
-        if i > 0:
-            for _col_idx in range(1, len(_template_row_cells) + 1):
-                if _col_idx in _data_col_idxs:
-                    continue
-                copy_cell(
-                    _template_row_cells[_col_idx - 1],
-                    ws.cell(row=row_idx, column=_col_idx),
-                )
-            ws.row_dimensions[row_idx].height = _tmpl_row_height
-
-        # ── 데이터 쓰기 (ws.cell() 직접 접근, string 파싱 회피) ──
+        # ── 데이터 값 쓰기 (Phase 1) ──
         for col_name, value in row_data.items():
             c_idx = col_idx_map.get(col_name)
             if c_idx is None:
@@ -166,9 +146,21 @@ def make_invoice(
             cell = ws.cell(row=row_idx, column=c_idx)
             cell.value = _to_numeric(value)
             cell.alignment = CENTER_ALIGN
-            _data_col_idxs.add(c_idx)
 
         row_idx += 1
+
+    # ── Phase 2: 첫 데이터 행 서식 → 이후 모든 행 일괄 적용 ──
+    data_end_row = row_idx - 1
+    if data_end_row > data_start_row:
+        _tmpl_cells = [
+            ws.cell(row=data_start_row, column=c) for c in range(1, ws.max_column + 1)
+        ]
+        _tmpl_height = ws.row_dimensions[data_start_row].height
+
+        for r in range(data_start_row + 1, data_end_row + 1):
+            for c_idx in range(1, len(_tmpl_cells) + 1):
+                copy_style(_tmpl_cells[c_idx - 1], ws.cell(row=r, column=c_idx))
+            ws.row_dimensions[r].height = _tmpl_height
 
     wb.save(output_path)
     return row_idx - get_template_data_start_row(), roster_data

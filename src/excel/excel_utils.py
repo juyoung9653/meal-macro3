@@ -20,6 +20,21 @@ def copy_cell(src, dst):
         dst.alignment = copy(src.alignment)
 
 
+def copy_style(src, dst):
+    """셀 서식만 복사 (값/수식 제외).
+
+    border, font, fill, number_format, alignment, protection 을
+    src → dst 로 복사하되 dst.value 는 건드리지 않음.
+    """
+    if src.has_style:
+        dst.font = copy(src.font)
+        dst.border = copy(src.border)
+        dst.fill = copy(src.fill)
+        dst.number_format = copy(src.number_format)
+        dst.protection = copy(src.protection)
+        dst.alignment = copy(src.alignment)
+
+
 def build_merged_anchor_map(ws) -> dict[tuple[int, int], tuple[int, int]]:
     """워크시트의 모든 MergedCell → 앵커셀 (row, col) 매핑.
 
