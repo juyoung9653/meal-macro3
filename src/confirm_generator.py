@@ -16,6 +16,7 @@ from .delivery_calculator import (
 )
 from .excel_utils import CENTER_ALIGN, adjust_formula, copy_cell, safe_set_cell_value
 from .settings import get_settings
+from .template_scanner import scan_placeholders, validate_placeholders
 
 
 def _make_confirm_fonts():
@@ -69,6 +70,26 @@ def make_confirm(
     wb = openpyxl.load_workbook(template_path)
     data_cols = s.get("templates", "data_columns", default=11)
     confirm_font, _ = _make_confirm_fonts()
+
+    # 플레이스홀더 위치 스캔 (mtime + 파일 캐시)
+    tpl_sheet_names = s.get(
+        "templates",
+        "confirm_sheet_names",
+        default=["1명", "2명", "3명", "4명", "5명"],
+    )
+    all_placeholders = scan_placeholders(
+        template_path,
+        tpl_sheet_names,
+        cache_path=s.get("cache", "placeholder_cache", default="") or None,
+    )
+
+    ph_warnings = validate_placeholders(all_placeholders)
+    if ph_warnings:
+        msg = "템플릿에 필수 플레이스홀더가 누락되었습니다:\n\n" + "\n".join(
+            ph_warnings
+        )
+        msg += "\n\n확인서템플릿.xlsx 파일을 확인 후 다시 실행하세요."
+        raise ValueError(msg)
 
     for dong, persons_in_dong in dong_groups.items():
         # 세대(주소)별 그룹핑
@@ -168,28 +189,55 @@ def make_confirm(
                             adjust_formula(cell.value, current_row - 1),
                         )
 
-            # 공통 정보 채움
-            title_suffix = s.get("confirm", "title_suffix", default="분당구 급식확인서")
-            safe_set_cell_value(ws, current_row, 1, f"{title_prefix} {title_suffix}")
-            if delivery_person:
-                safe_set_cell_value(ws, current_row + 2, 11, delivery_person)
-            if delivery_phone:
-                safe_set_cell_value(ws, current_row + 3, 11, delivery_phone)
-            safe_set_cell_value(ws, current_row + 2, 3, addr)
+            # 현재 시트의 플레이스홀더 위치 맵
+            ph_map = all_placeholders.get(tpl_key, {})
 
-            # 각 아동별 채움
+            # 공통 정보 채움 (플레이스홀더 기반)
+            title_suffix = s.get("confirm", "title_suffix", default="분당구 급식확인서")
+            for ph_row, ph_col in ph_map.get("title", []):
+                safe_set_cell_value(
+                    ws,
+                    current_row + ph_row - 1,
+                    ph_col,
+                    f"{title_prefix} {title_suffix}",
+                )
+            if delivery_person:
+                for ph_row, ph_col in ph_map.get("delivery", []):
+                    safe_set_cell_value(
+                        ws,
+                        current_row + ph_row - 1,
+                        ph_col,
+                        delivery_person,
+                    )
+            if delivery_phone:
+                for ph_row, ph_col in ph_map.get("d_phone", []):
+                    safe_set_cell_value(
+                        ws,
+                        current_row + ph_row - 1,
+                        ph_col,
+                        delivery_phone,
+                    )
+            # 주소
+            for ph_row, ph_col in ph_map.get("addr", []):
+                safe_set_cell_value(ws, current_row + ph_row - 1, ph_col, addr)
+
+            # 각 아동별 채움 (플레이스홀더 기반)
             for ci, person in enumerate(members[:5]):
                 sheet_seq += 1
-                base_row = current_row + 5 + ci * 5
 
                 name = str(person.get(name_col, ""))
                 head = str(person.get(head_col, ""))
                 phone = str(person.get(phone_col, ""))
 
-                safe_set_cell_value(ws, base_row, 1, sheet_seq)
-                safe_set_cell_value(ws, base_row, 2, name)
-                safe_set_cell_value(ws, base_row, 3, head)
-                safe_set_cell_value(ws, base_row, 4, phone)
+                # 개인정보
+                for ph_row, ph_col in ph_map.get(f"num{ci + 1}", []):
+                    safe_set_cell_value(ws, current_row + ph_row - 1, ph_col, sheet_seq)
+                for ph_row, ph_col in ph_map.get(f"child{ci + 1}", []):
+                    safe_set_cell_value(ws, current_row + ph_row - 1, ph_col, name)
+                for ph_row, ph_col in ph_map.get(f"carer{ci + 1}", []):
+                    safe_set_cell_value(ws, current_row + ph_row - 1, ph_col, head)
+                for ph_row, ph_col in ph_map.get(f"phone{ci + 1}", []):
+                    safe_set_cell_value(ws, current_row + ph_row - 1, ph_col, phone)
 
                 flags = {
                     "breakfast": _to_bool(person.get("_breakfast", 0)),
@@ -208,31 +256,55 @@ def make_confirm(
                 )
 
                 for wi, wdata in enumerate(weeks):
-                    row = base_row + wi
                     wd = (
                         weekly[wi]
                         if wi < len(weekly)
                         else {"breakfast": 0, "dinner": 0, "lunch": 0}
                     )
-                    safe_set_cell_value(ws, row, 6, _week_date_str(wdata[1], wdata[2]))
-                    safe_set_cell_value(
-                        ws, row, 7, wd["breakfast"] if wd["breakfast"] else ""
-                    )
-                    safe_set_cell_value(
-                        ws, row, 8, wd["dinner"] if wd["dinner"] else ""
-                    )
-                    safe_set_cell_value(ws, row, 9, wd["lunch"] if wd["lunch"] else "")
-
-                for wi in range(len(weeks)):
-                    row = base_row + wi
-                    for col_idx in (1, 2, 3, 4, 6, 7, 8, 9, 10, 11):
-                        cell = ws.cell(row=row, column=col_idx)
-                        if cell.value is not None:
-                            cell.font = confirm_font
-                            cell.alignment = CENTER_ALIGN
+                    # 주차 날짜 (예: {week1})
+                    for ph_row, ph_col in ph_map.get(f"week{wi + 1}", []):
+                        safe_set_cell_value(
+                            ws,
+                            current_row + ph_row - 1,
+                            ph_col,
+                            _week_date_str(wdata[1], wdata[2]),
+                        )
+                    # 조식 건수 (예: {sum_b_1_1})
+                    for ph_row, ph_col in ph_map.get(f"sum_b_{ci + 1}_{wi + 1}", []):
+                        safe_set_cell_value(
+                            ws,
+                            current_row + ph_row - 1,
+                            ph_col,
+                            wd["breakfast"] if wd["breakfast"] else "",
+                        )
+                    # 석식 건수 (예: {sum_d_1_1})
+                    for ph_row, ph_col in ph_map.get(f"sum_d_{ci + 1}_{wi + 1}", []):
+                        safe_set_cell_value(
+                            ws,
+                            current_row + ph_row - 1,
+                            ph_col,
+                            wd["dinner"] if wd["dinner"] else "",
+                        )
+                    # 중식 건수 (예: {sum_l_1_1})
+                    for ph_row, ph_col in ph_map.get(f"sum_l_{ci + 1}_{wi + 1}", []):
+                        safe_set_cell_value(
+                            ws,
+                            current_row + ph_row - 1,
+                            ph_col,
+                            wd["lunch"] if wd["lunch"] else "",
+                        )
 
                 dept = str(person.get(dept_col, ""))
                 created.append({"name": name, "dept": dept, "amount": 0, "file": ""})
+
+            # ── 폰트·정렬: 플레이스홀더 있던 모든 셀에 적용 ──
+            for _, pos_list in ph_map.items():
+                for ph_row, ph_col in pos_list:
+                    out_row = current_row + ph_row - 1
+                    cell = ws.cell(row=out_row, column=ph_col)
+                    if cell.value is not None:
+                        cell.font = confirm_font
+                        cell.alignment = CENTER_ALIGN
 
             current_row += tpl_rows
 

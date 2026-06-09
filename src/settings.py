@@ -7,6 +7,9 @@ from typing import Any
 
 # ── 기본 설정값 ──────────────────────────────────────
 DEFAULTS: dict[str, Any] = {
+    "cache": {
+        "placeholder_cache": ".cache.json",
+    },
     "app": {
         "title": "급식비 정산 프로그램",
         "organization": "분당구",
@@ -127,7 +130,7 @@ class SettingsManager:
         if self._path is None:
             self._path = os.path.join(
                 os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                "settings.json",
+                ".settings.json",
             )
         return self._path
 

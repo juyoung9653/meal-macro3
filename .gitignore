@@ -22,4 +22,4 @@ venv/
 output/
 
 # Cache
-cahce/
+.cache.json

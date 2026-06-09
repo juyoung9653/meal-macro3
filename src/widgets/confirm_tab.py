@@ -259,6 +259,8 @@ class ConfirmTab(QWidget):
             QMessageBox.information(
                 self, "완료", f"확인서 {len(self.confirms)}건 생성 완료!"
             )
+        except ValueError as e:
+            QMessageBox.warning(self, "템플릿 오류", str(e))
         except Exception as e:
             QMessageBox.critical(self, "생성 오류", f"확인서 생성 실패:\n{e}")
 
