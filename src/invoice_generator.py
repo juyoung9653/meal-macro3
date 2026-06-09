@@ -8,12 +8,23 @@ from openpyxl.styles import Font
 from .config import (
     _get_template_data_start_row,
     _get_template_sheet_name,
-    col_name_to_letter,
+    col_name_to_index,
     read_template_columns,
 )
 from .delivery_calculator import _to_bool, count_delivery_days
 from .excel_utils import CENTER_ALIGN, copy_cell
 from .settings import get_settings
+
+
+# ── 엑셀 컬럼 인덱스 → 문자 (A, B, ..., Z, AA, AB, ...) ──
+def _col_idx_to_letter(idx: int) -> str:
+    """1-based 컬럼 인덱스 → 엑셀 컬럼 문자."""
+    letters = ""
+    while idx > 0:
+        idx, rem = divmod(idx - 1, 26)
+        letters = chr(ord("A") + rem) + letters
+    return letters
+
 
 # ── 폰트 ──────────────────────────────────────────
 
@@ -55,15 +66,25 @@ def make_invoice(
     excluded_dates: set[date] | None = None,
 ):
     """roster_data → 청구서템플릿 채워서 output_path 에 저장."""
-    from datetime import date
 
     template_columns = read_template_columns(template_path)
     invoice_font, invoice_font_bold = _make_invoice_fonts()
+
+    # ── 사전 계산: 컬럼명 → 1-based 인덱스 (list.index() 반복 호출 제거) ──
+    col_idx_map = col_name_to_index(template_columns)
 
     bf_col = col_mapping.get("__calc_breakfast", "조식")
     dn_col = col_mapping.get("__calc_dinner", "석식")
     lh_col = col_mapping.get("__calc_lunch", "중식")
     price_col = col_mapping.get("__calc_price", "청구금액")
+
+    # ── 수식용 컬럼 문자 사전 계산 ──
+    bf_col_idx = col_idx_map.get(bf_col, 1)
+    dn_col_idx = col_idx_map.get(dn_col, 1)
+    lh_col_idx = col_idx_map.get(lh_col, 1)
+    bf_letter = _col_idx_to_letter(bf_col_idx)
+    dn_letter = _col_idx_to_letter(dn_col_idx)
+    lh_letter = _col_idx_to_letter(lh_col_idx)
 
     sheet_name = _get_template_sheet_name()
     wb = openpyxl.load_workbook(template_path)
@@ -77,6 +98,9 @@ def make_invoice(
         ws.cell(row=data_start_row, column=c) for c in range(1, ws.max_column + 1)
     ]
     _tmpl_row_height = ws.row_dimensions[data_start_row].height
+
+    # ── 덮어쓸 데이터 컬럼 인덱스 집합 ──
+    _data_col_idxs: set[int] = set()
 
     for i, person in enumerate(roster_data):
         flags = {
@@ -106,27 +130,33 @@ def make_invoice(
         row_data[dn_col] = dinner_cnt
         row_data[lh_col] = lunch_cnt
 
-        bf_letter = col_name_to_letter(bf_col, template_columns)
-        dn_letter = col_name_to_letter(dn_col, template_columns)
-        lh_letter = col_name_to_letter(lh_col, template_columns)
-
         row_data[price_col] = (
             f"={bf_letter}{row_idx}*{unit_price_breakfast}"
             f"+{dn_letter}{row_idx}*{unit_price_dinner}"
             f"+{lh_letter}{row_idx}*{unit_price_lunch}"
         )
 
-        # 두 번째 행부턴 첫 데이터 행 전체 복사 (값+서식+수식+높이)
+        # ── 템플릿 행 복사 (데이터 컬럼 제외 → 덮어쓰기 낭비 방지) ──
         if i > 0:
-            for _col_idx, _src_cell in enumerate(_template_row_cells, start=1):
-                copy_cell(_src_cell, ws.cell(row=row_idx, column=_col_idx))
+            for _col_idx in range(1, len(_template_row_cells) + 1):
+                if _col_idx in _data_col_idxs:
+                    continue
+                copy_cell(
+                    _template_row_cells[_col_idx - 1],
+                    ws.cell(row=row_idx, column=_col_idx),
+                )
             ws.row_dimensions[row_idx].height = _tmpl_row_height
+
+        # ── 데이터 쓰기 (ws.cell() 직접 접근, string 파싱 회피) ──
         for col_name, value in row_data.items():
-            col_letter = col_name_to_letter(col_name, template_columns)
-            cell = ws[f"{col_letter}{row_idx}"]
+            c_idx = col_idx_map.get(col_name)
+            if c_idx is None:
+                continue
+            cell = ws.cell(row=row_idx, column=c_idx)
             cell.value = value
             cell.font = invoice_font
             cell.alignment = CENTER_ALIGN
+            _data_col_idxs.add(c_idx)
 
         row_idx += 1
 

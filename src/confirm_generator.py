@@ -5,7 +5,7 @@ from copy import copy
 from datetime import date
 
 import openpyxl
-from openpyxl.styles import Alignment, Font
+from openpyxl.styles import Font
 
 from .delivery_calculator import (
     _get_week_ranges,
@@ -13,7 +13,12 @@ from .delivery_calculator import (
     _week_date_str,
     calc_weekly_breakdown,
 )
-from .excel_utils import CENTER_ALIGN, adjust_formula, copy_cell, safe_set_cell_value
+from .excel_utils import (
+    CENTER_ALIGN,
+    _build_merged_anchor_map,
+    adjust_formula,
+    copy_cell,
+)
 from .settings import get_settings
 from .template_scanner import scan_placeholders, validate_placeholders
 
@@ -26,10 +31,25 @@ def _make_confirm_fonts():
     return Font(name=fn, size=sz), Font(name=fn, size=sz_s)
 
 
-def _set_ph(ws, ph_map, key, current_row, value):
-    """ph_map[key] 위치들에 value 쓰기."""
+def _set_ph(ws, ph_map, key, current_row, value, tpl_anchor_map=None):
+    """ph_map[key] 위치들에 value 쓰기. tpl_anchor_map 있으면 O(1) 병합셀 처리."""
     for ph_row, ph_col in ph_map.get(key, []):
-        safe_set_cell_value(ws, current_row + ph_row - 1, ph_col, value)
+        out_row = current_row + ph_row - 1
+        out_col = ph_col
+        if tpl_anchor_map and (ph_row, ph_col) in tpl_anchor_map:
+            ar, ac = tpl_anchor_map[(ph_row, ph_col)]
+            ws.cell(row=current_row + ar - 1, column=ac).value = value
+        else:
+            ws.cell(row=out_row, column=out_col).value = value
+
+
+def _pre_build_anchor_maps(wb, tpl_sheet_names: list[str]) -> dict[str, dict]:
+    """템플릿 시트별 MergedCell → 앵커 매핑 사전 빌드."""
+    maps = {}
+    for sn in tpl_sheet_names:
+        if sn in wb.sheetnames:
+            maps[sn] = _build_merged_anchor_map(wb[sn])
+    return maps
 
 
 def make_confirm(
@@ -85,6 +105,9 @@ def make_confirm(
         tpl_sheet_names,
         cache_path=s.get("cache", "placeholder_cache", default="") or None,
     )
+
+    # ── 템플릿 시트별 MergedCell 앵커맵 사전 빌드 ──
+    tpl_anchor_maps = _pre_build_anchor_maps(wb, tpl_sheet_names)
 
     ph_warnings = validate_placeholders(all_placeholders)
     if ph_warnings:
@@ -177,30 +200,39 @@ def make_confirm(
                     end_column=mr.max_col,
                 )
 
-            # Formula 행 번호 보정
+            # Formula 행 번호 보정 (tpl_anchor_map으로 O(1) MergedCell 회피)
+            tpl_anchor_map = tpl_anchor_maps.get(tpl_key, {})
             for src_r in range(1, tpl_rows + 1):
                 dst_r = current_row + src_r - 1
                 for src_c in range(1, data_cols + 1):
+                    if (src_r, src_c) in tpl_anchor_map:
+                        continue  # 비앵커 MergedCell → 건너뜀
                     cell = ws.cell(row=dst_r, column=src_c)
                     if cell.value and str(cell.value).startswith("="):
-                        safe_set_cell_value(
-                            ws,
-                            dst_r,
-                            src_c,
-                            adjust_formula(cell.value, current_row - 1),
-                        )
+                        cell.value = adjust_formula(str(cell.value), current_row - 1)
 
             # 현재 시트의 플레이스홀더 위치 맵
             ph_map = all_placeholders.get(tpl_key, {})
 
-            # 공통 정보 채움 (플레이스홀더 기반)
+            # 공통 정보 채움 (플레이스홀더 기반, tpl_anchor_map으로 O(1))
             title_suffix = s.get("confirm", "title_suffix", default="분당구 급식확인서")
-            _set_ph(ws, ph_map, "title", current_row, f"{title_prefix} {title_suffix}")
+            _set_ph(
+                ws,
+                ph_map,
+                "title",
+                current_row,
+                f"{title_prefix} {title_suffix}",
+                tpl_anchor_map,
+            )
             if delivery_person:
-                _set_ph(ws, ph_map, "delivery", current_row, delivery_person)
+                _set_ph(
+                    ws, ph_map, "delivery", current_row, delivery_person, tpl_anchor_map
+                )
             if delivery_phone:
-                _set_ph(ws, ph_map, "d_phone", current_row, delivery_phone)
-            _set_ph(ws, ph_map, "addr", current_row, addr)
+                _set_ph(
+                    ws, ph_map, "d_phone", current_row, delivery_phone, tpl_anchor_map
+                )
+            _set_ph(ws, ph_map, "addr", current_row, addr, tpl_anchor_map)
 
             # 각 아동별 채움 (플레이스홀더 기반)
             for ci, person in enumerate(members[:5]):
@@ -211,10 +243,14 @@ def make_confirm(
                 phone = str(person.get(phone_col, ""))
 
                 # 개인정보
-                _set_ph(ws, ph_map, f"num{ci + 1}", current_row, sheet_seq)
-                _set_ph(ws, ph_map, f"child{ci + 1}", current_row, name)
-                _set_ph(ws, ph_map, f"carer{ci + 1}", current_row, head)
-                _set_ph(ws, ph_map, f"phone{ci + 1}", current_row, phone)
+                _set_ph(
+                    ws, ph_map, f"num{ci + 1}", current_row, sheet_seq, tpl_anchor_map
+                )
+                _set_ph(ws, ph_map, f"child{ci + 1}", current_row, name, tpl_anchor_map)
+                _set_ph(ws, ph_map, f"carer{ci + 1}", current_row, head, tpl_anchor_map)
+                _set_ph(
+                    ws, ph_map, f"phone{ci + 1}", current_row, phone, tpl_anchor_map
+                )
 
                 flags = {
                     "breakfast": _to_bool(person.get("_breakfast", 0)),
@@ -245,6 +281,7 @@ def make_confirm(
                         f"week{wi + 1}",
                         current_row,
                         _week_date_str(wdata[1], wdata[2]),
+                        tpl_anchor_map,
                     )
                     # 조식 건수
                     _set_ph(
@@ -253,6 +290,7 @@ def make_confirm(
                         f"sum_b_{ci + 1}_{wi + 1}",
                         current_row,
                         wd["breakfast"] if wd["breakfast"] else "",
+                        tpl_anchor_map,
                     )
                     # 석식 건수
                     _set_ph(
@@ -261,6 +299,7 @@ def make_confirm(
                         f"sum_d_{ci + 1}_{wi + 1}",
                         current_row,
                         wd["dinner"] if wd["dinner"] else "",
+                        tpl_anchor_map,
                     )
                     # 중식 건수
                     _set_ph(
@@ -269,6 +308,7 @@ def make_confirm(
                         f"sum_l_{ci + 1}_{wi + 1}",
                         current_row,
                         wd["lunch"] if wd["lunch"] else "",
+                        tpl_anchor_map,
                     )
 
                 dept = str(person.get(dept_col, ""))
@@ -277,6 +317,8 @@ def make_confirm(
             # ── 폰트·정렬: 플레이스홀더 있던 모든 셀에 적용 ──
             for _, pos_list in ph_map.items():
                 for ph_row, ph_col in pos_list:
+                    if (ph_row, ph_col) in tpl_anchor_map:
+                        continue  # 비앵커 MergedCell → 건너뜀
                     out_row = current_row + ph_row - 1
                     cell = ws.cell(row=out_row, column=ph_col)
                     if cell.value is not None:
