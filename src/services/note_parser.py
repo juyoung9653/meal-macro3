@@ -76,7 +76,8 @@ def _is_irrelevant(text: str) -> bool:
 
 
 def _split_segments(text: str) -> list[str]:
-    """개행, 쌍반점, 마침표+공백 기준 분할. 쉼표는 날짜 구분자로 유지."""
+    """개행, 쌍반점 기준 분할. 쉼표는 날짜 구분자로 유지.
+    ``//`` 포함된 줄은 주석으로 간주하여 무시."""
     # 쌍따옴표 블록 보호
     protected: dict[str, str] = {}
 
@@ -100,6 +101,9 @@ def _split_segments(text: str) -> list[str]:
         # 보호 복원
         for tok, orig in protected.items():
             p = p.replace(tok, orig)
+        # ``//`` 이후는 주석 처리 (인라인)
+        if "//" in p:
+            p = p.split("//", 1)[0].strip()
         if p and p not in ("0", "", '"'):
             result.append(p)
     return result

@@ -48,6 +48,7 @@ class InvoiceTab(QWidget):
         org = self._s.get("app", "organization", default="분당구")
         app_title = self._s.get("app", "title", default="급식비정산")
         self._settings = QSettings(org, app_title)
+        self._lunch_enabled = False  # 중식 파일 로드 여부 (캐시 안 함)
         self._setup_ui()
         self._restore_state()
         self._load_default_excluded_dates()
@@ -67,6 +68,17 @@ class InvoiceTab(QWidget):
         import_layout.addWidget(self.file_label, stretch=1)
         import_layout.addWidget(self.select_btn)
         layout.addWidget(import_group)
+
+        # ── 중식 명단 파일 임포트 ──
+        lunch_group = QGroupBox("중식 명단 파일 임포트 (선택)")
+        lunch_layout = QHBoxLayout(lunch_group)
+        self.lunch_file_label = QLabel("불러오지 않음")
+        self.lunch_file_label.setStyleSheet("color: #888;")
+        self.lunch_file_btn = QPushButton("중식 파일 탐색")
+        self.lunch_file_btn.clicked.connect(self._select_lunch_file)
+        lunch_layout.addWidget(self.lunch_file_label, stretch=1)
+        lunch_layout.addWidget(self.lunch_file_btn)
+        layout.addWidget(lunch_group)
 
         # ── 청구 기준 ──
         config_group = QGroupBox("② 청구 기준")
@@ -201,6 +213,21 @@ class InvoiceTab(QWidget):
                     self.info_label.setText(
                         f"명단 {len(data)}명 로드됨. 컬럼 매핑 → 생성"
                     )
+
+    # ── 중식 파일 로드 ──
+
+    def _select_lunch_file(self):
+        """중식 명단 파일 로드 (선택사항). 캐시 저장 안 함."""
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "중식 명단 파일 선택",
+            "",
+            "지원 파일 (*.xlsx *.xls *.csv *.txt);;Excel (*.xlsx *.xls);;CSV (*.csv);;텍스트 (*.txt);;모든 파일 (*.*)",
+        )
+        if path:
+            self.lunch_file_label.setText(os.path.basename(path))
+            self.lunch_file_label.setStyleSheet("color: #000;")
+            self._lunch_enabled = True
 
     # ── 설정 저장/복원 ──
 
@@ -454,6 +481,7 @@ class InvoiceTab(QWidget):
             dinner_price=self.dinner_price.value(),
             lunch_price=self.lunch_price.value(),
             template_path=self._template_path,
+            has_lunch_file=self._lunch_enabled,
         )
         if not success:
             return
@@ -481,6 +509,9 @@ class InvoiceTab(QWidget):
         self._controller.invoices.clear()
         self.result_table.setRowCount(0)
         self.info_label.setText("생성된 청구서: 0건")
+        self._lunch_enabled = False
+        self.lunch_file_label.setText("불러오지 않음")
+        self.lunch_file_label.setStyleSheet("color: #888;")
 
     # ── 외부 접근 ──
 

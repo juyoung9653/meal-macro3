@@ -46,9 +46,12 @@ class InvoiceController:
         dinner_price: int,
         lunch_price: int,
         template_path: str,
+        has_lunch_file: bool = False,
     ) -> tuple[bool, int, list[dict]]:
         """명단 데이터 → 보강 → make_invoice → (성공여부, 건수, 보강데이터).
 
+        has_lunch_file=True → 중식 파일 로드됨, 기존 중식 컬럼 기준 계산.
+        has_lunch_file=False → 중식 미사용 (flag_lunch=0).
         실패 시 에러 대화상자를 표시하고 (False, 0, []) 반환.
         """
         self._year = year
@@ -84,7 +87,9 @@ class InvoiceController:
                 person=rp,
                 flag_breakfast=to_bool(person.get(breakfast_col, 0)),
                 flag_dinner=to_bool(person.get(dinner_col, 0)),
-                flag_lunch=to_bool(person.get(vacation_col, 0)),
+                flag_lunch=(
+                    to_bool(person.get(vacation_col, 0)) if has_lunch_file else False
+                ),
                 note=note_val,
             )
             enriched.append(person_to_dict(ep))
