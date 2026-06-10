@@ -12,7 +12,7 @@
     "invoice_path": "assets/청구서템플릿.xlsx",
     "confirm_path": "assets/확인서템플릿.xlsx",
     "roster_example_path": "assets/명단예시.xlsx",
-    "sheet_name": "학기중",
+    "sheet_name": "학기_총괄",
     "data_start_row": 4,
     "confirm_sheet_names": ["1명", "2명", "3명", "4명", "5명"],
     "data_columns": 11

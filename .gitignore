@@ -25,3 +25,5 @@ output/
 .cache.json
 
 nul
+main.spec
+main.exe

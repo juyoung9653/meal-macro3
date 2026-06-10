@@ -82,6 +82,72 @@ class LunchRoster:
                 unmatched.add(name)
         return unmatched
 
+    def is_vacation_month(self, year: int, month: int) -> bool:
+        """해당 월이 하나라도 학교의 방학 배송 기간에 걸치는지 확인.
+
+        방학 배송 기간: 방학식+1일 ~ 개학식-1일.
+        어느 한 학교라도 기간에 포함되면 True.
+        """
+        import calendar as _cal
+        import logging
+        from datetime import timedelta
+
+        _log = logging.getLogger(__name__)
+
+        last_day = _cal.monthrange(year, month)[1]
+        month_start = date(year, month, 1)
+        month_end = date(year, month, last_day)
+
+        _log.debug(
+            "[VacCheck] %04d-%02d 검사 (총 %d개 학교)",
+            year,
+            month,
+            len(self.entries),
+        )
+
+        for entry in self.entries:
+            if not entry.vacation_meal and not entry.opening_meal:
+                _log.debug(
+                    "[VacCheck] %s: meal 둘 다 False → 건너뜀", entry.school_name
+                )
+                continue
+
+            eff_start: date | None = None
+            eff_end: date | None = None
+
+            if entry.vacation_meal and entry.vacation_date:
+                eff_start = entry.vacation_date + timedelta(days=1)
+            if entry.opening_meal and entry.opening_date:
+                eff_end = entry.opening_date - timedelta(days=1)
+
+            if eff_start is None:
+                eff_start = month_start
+            if eff_end is None:
+                eff_end = month_end
+
+            _log.debug(
+                "[VacCheck] %s: vac_d=%s open_d=%s → range=%s~%s (month=%s~%s)",
+                entry.school_name,
+                entry.vacation_date,
+                entry.opening_date,
+                eff_start,
+                eff_end,
+                month_start,
+                month_end,
+            )
+
+            if eff_start <= month_end and eff_end >= month_start:
+                _log.info(
+                    "[VacCheck] %s: 방학 기간 겹침! (%s~%s)",
+                    entry.school_name,
+                    eff_start,
+                    eff_end,
+                )
+                return True
+
+        _log.info("[VacCheck] %04d-%02d: 방학 기간 아님", year, month)
+        return False
+
 
 def _shorten_school_name(name: str) -> str:
     """학교명 축약: '분당초등학교' → '분당초', '구미중학교' → '구미중'."""

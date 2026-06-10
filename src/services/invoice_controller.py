@@ -186,6 +186,28 @@ class InvoiceController:
             _sem = auto_detect_semantic_columns(self._template_columns)
             col_mapping = {**self._col_mapping, **_sem}
 
+            # ── 중식명단 기반 방학 월 판단 ──
+            is_vacation_month = (
+                lunch_available
+                and self._lunch_roster is not None
+                and self._lunch_roster.is_vacation_month(year, month)
+            )
+            log.info(
+                "[Invoice] lunch_available=%s is_vacation_month=%s",
+                lunch_available,
+                is_vacation_month,
+            )
+
+            # 중식명단 없는데 방중 플래그 있는 경우 경고
+            if not lunch_available and vacation_col:
+                has_vac_flag = any(
+                    to_bool(person.get(vacation_col, 0)) for person in roster_data
+                )
+                if has_vac_flag:
+                    log.warning(
+                        "[Invoice] 방중 플래그 있으나 중식명단 미로드 → 학기_ 시트 사용"
+                    )
+
             cnt, enriched = make_invoice(
                 enriched,
                 col_mapping,
@@ -199,6 +221,7 @@ class InvoiceController:
                 excluded_dates=self._excluded_dates.copy()
                 if self._excluded_dates
                 else None,
+                is_vacation_month=is_vacation_month,
             )
         except Exception as e:
             QMessageBox.critical(self._parent, "생성 오류", f"청구서 생성 실패:\n{e}")

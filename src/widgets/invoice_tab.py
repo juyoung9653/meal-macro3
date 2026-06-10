@@ -243,6 +243,11 @@ class InvoiceTab(QWidget):
             self._lunch_file_path = path
             self._lunch_enabled = True
             self.lunch_mapping_btn.setEnabled(True)
+            # 저장된 매핑 있으면 자동 로드, 없으면 매핑 버튼 눌러야 함
+            saved_mapping = self._settings.value("lunch/col_mapping", None)
+            if saved_mapping and isinstance(saved_mapping, dict):
+                self._lunch_mapping = saved_mapping
+                self._reload_lunch_roster()
 
     def _open_lunch_mapping(self):
         """중식 명단 컬럼 매핑 다이얼로그 열기."""
@@ -281,8 +286,8 @@ class InvoiceTab(QWidget):
             if not school_name or school_name in ("학교명", "구분"):
                 continue
 
-            vac_date_str = str(row.get(lunch_vac_date_col, "")).strip().rstrip(".")
-            open_date_str = str(row.get(lunch_open_date_col, "")).strip().rstrip(".")
+            vac_date_str = row.get(lunch_vac_date_col, "")
+            open_date_str = row.get(lunch_open_date_col, "")
 
             vac_date = _parse_lunch_date(vac_date_str)
             open_date = _parse_lunch_date(open_date_str)
@@ -330,6 +335,87 @@ class InvoiceTab(QWidget):
             self,
             "로드 완료",
             f"중식 명단 {len(roster.entries)}개 학교 정보를 불러왔습니다.",
+        )
+
+    def _reload_lunch_roster(self):
+        """저장된 매핑으로 중식명단 재로드 (프로그램 재시작 시 자동 복원)."""
+        if not self._lunch_file_path:
+            log.debug("[Lunch] 재로드 건너뜀: lunch_file_path 없음")
+            return
+        if not os.path.exists(self._lunch_file_path):
+            log.warning("[Lunch] 재로드 실패: 파일 없음 — %s", self._lunch_file_path)
+            return
+        if not self._lunch_mapping:
+            log.debug("[Lunch] 재로드 건너뜀: lunch_mapping 없음")
+            return
+
+        lunch_headers, lunch_data = _load_lunch_file(self._lunch_file_path)
+        if not lunch_headers:
+            log.warning("[Lunch] 재로드 실패: 헤더 없음")
+            return
+
+        lunch_school_col = self._lunch_mapping.get("lunch_school_name", "")
+        lunch_vac_date_col = self._lunch_mapping.get("lunch_vacation_date", "")
+        lunch_open_date_col = self._lunch_mapping.get("lunch_opening_date", "")
+        lunch_vac_meal_col = self._lunch_mapping.get("lunch_vacation_meal", "")
+        lunch_open_meal_col = self._lunch_mapping.get("lunch_opening_meal", "")
+        lunch_note_col = self._lunch_mapping.get("lunch_note", "")
+
+        roster = LunchRoster(headers=lunch_headers, file_path=self._lunch_file_path)
+
+        for row in lunch_data:
+            school_name = str(row.get(lunch_school_col, "")).strip()
+            if not school_name or school_name in ("학교명", "구분"):
+                continue
+
+            vac_date_str = row.get(lunch_vac_date_col, "")
+            open_date_str = row.get(lunch_open_date_col, "")
+
+            vac_date = _parse_lunch_date(vac_date_str)
+            open_date = _parse_lunch_date(open_date_str)
+
+            vac_meal = parse_lunch_boolean(row.get(lunch_vac_meal_col, ""))
+            open_meal = parse_lunch_boolean(row.get(lunch_open_meal_col, ""))
+
+            note_raw = str(row.get(lunch_note_col, "")).strip()
+            if note_raw in (" ", "비고", ""):
+                note_raw = ""
+
+            type_from_first = str(
+                row.get(lunch_headers[0] if lunch_headers else "", "")
+            ).strip()
+
+            entry = LunchSchoolEntry(
+                school_name=school_name,
+                school_type=type_from_first,
+                vacation_date=vac_date,
+                opening_date=open_date,
+                vacation_meal=vac_meal,
+                opening_meal=open_meal,
+                note_raw=note_raw,
+            )
+
+            ref_year = self.year_spin.value()
+            parse_lunch_note(entry, ref_year)
+            roster.entries.append(entry)
+
+            log.debug(
+                "[Lunch] %s: vac=%s open=%s v_meal=%s o_meal=%s",
+                school_name,
+                vac_date,
+                open_date,
+                vac_meal,
+                open_meal,
+            )
+
+        self._lunch_roster = roster
+        self._controller.set_lunch_roster(
+            roster, self._lunch_mapping, self._lunch_file_path
+        )
+        log.info(
+            "[Lunch] 재로드 완료: %d개 학교 (파일: %s)",
+            len(roster.entries),
+            os.path.basename(self._lunch_file_path),
         )
 
     # ── 설정 저장/복원 ──
@@ -401,7 +487,7 @@ class InvoiceTab(QWidget):
         self.dinner_price.blockSignals(False)
         self.lunch_price.blockSignals(False)
 
-        # 중식 매핑 복원
+        # 중식 매핑 복원 + 자동 재로드
         lunch_mapping = self._settings.value("lunch/col_mapping", None)
         if lunch_mapping and isinstance(lunch_mapping, dict):
             self._lunch_mapping = lunch_mapping
@@ -412,6 +498,9 @@ class InvoiceTab(QWidget):
             self.lunch_file_label.setText(os.path.basename(lunch_file))
             self.lunch_file_label.setStyleSheet("color: #000;")
             self.lunch_mapping_btn.setEnabled(True)
+            # 자동으로 중식명단 재로드 (매핑 정보 있으면)
+            if lunch_mapping and isinstance(lunch_mapping, dict):
+                self._reload_lunch_roster()
 
         self._save_settings()
 
@@ -674,6 +763,7 @@ class InvoiceTab(QWidget):
 def _load_lunch_file(file_path: str) -> tuple[list[str], list[dict]] | None:
     """중식 명단 파일을 이름 필터 없이 로드. 타이틀 행 자동 감지."""
     import re
+
     from python_calamine import CalamineWorkbook
 
     ext = os.path.splitext(file_path)[1].lower()
@@ -723,17 +813,46 @@ def _load_lunch_file(file_path: str) -> tuple[list[str], list[dict]] | None:
         # 빈 행 건너뛰기
         if all(not v or v == " " for v in vals):
             continue
-        entry = {headers[i]: vals[i] if i < len(vals) else "" for i in range(len(headers))}
+        entry = {
+            headers[i]: vals[i] if i < len(vals) else "" for i in range(len(headers))
+        }
         data.append(entry)
 
     return headers, data
 
 
-def _parse_lunch_date(s: str) -> date | None:
-    """'2025.12.31' 또는 '2025.12.31.' -> date."""
+def _parse_lunch_date(val) -> date | None:
+    """셀 값을 date로 변환. datetime 객체, '2025.12.31', '2025-12-31' 등 지원."""
+    import datetime as _dt
+
+    if val is None:
+        return None
+
+    # datetime/date 객체 직접 처리
+    if isinstance(val, _dt.datetime):
+        return val.date()
+    if isinstance(val, _dt.date):
+        return val
+
+    # float → 엑셀 시리얼 넘버 가능성 (1900-01-01 = 1)
+    if isinstance(val, (int, float)):
+        if 40000 < val < 80000:  # 대략 2009~2118 범위
+            try:
+                from datetime import timedelta
+
+                return _dt.date(1899, 12, 30) + timedelta(days=int(val))
+            except (ValueError, OverflowError):
+                pass
+        return None
+
+    # 문자열 처리
+    s = str(val).strip().rstrip(".")
     if not s:
         return None
-    s = s.strip().rstrip(".")
+
+    # "2025-01-10 00:00:00" → "2025-01-10"
+    s = s.split()[0] if " " in s else s
+
     for sep in (".", "-", "/"):
         parts = s.split(sep)
         if len(parts) == 3:
