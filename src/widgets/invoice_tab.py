@@ -1,6 +1,7 @@
 """청구서 탭 — UI 셸. 파일 로드 + 생성 로직은 RosterLoader/InvoiceController 위임."""
 
 import calendar
+import logging
 import os
 from datetime import date
 
@@ -26,9 +27,14 @@ from PyQt6.QtWidgets import (
 from ..core.settings import get_settings
 from ..services.holiday_fetcher import get_kr_holidays
 from ..services.invoice_controller import InvoiceController
+from ..services.lunch_data import LunchRoster, LunchSchoolEntry, parse_lunch_boolean
+from ..services.lunch_parser import parse_lunch_note
 from ..services.roster_loader import RosterLoader
 from ..templates.config import auto_detect_semantic_columns, read_template_columns
+from .lunch_mapping_dialog import LunchMappingDialog
 from .mapping_dialog import MappingDialog
+
+log = logging.getLogger(__name__)
 
 
 class InvoiceTab(QWidget):
@@ -48,7 +54,10 @@ class InvoiceTab(QWidget):
         org = self._s.get("app", "organization", default="분당구")
         app_title = self._s.get("app", "title", default="급식비정산")
         self._settings = QSettings(org, app_title)
-        self._lunch_enabled = False  # 중식 파일 로드 여부 (캐시 안 함)
+        self._lunch_enabled = False
+        self._lunch_roster: LunchRoster | None = None
+        self._lunch_mapping: dict = {}
+        self._lunch_file_path: str = ""
         self._setup_ui()
         self._restore_state()
         self._load_default_excluded_dates()
@@ -76,8 +85,12 @@ class InvoiceTab(QWidget):
         self.lunch_file_label.setStyleSheet("color: #888;")
         self.lunch_file_btn = QPushButton("중식 파일 탐색")
         self.lunch_file_btn.clicked.connect(self._select_lunch_file)
+        self.lunch_mapping_btn = QPushButton("중식 컬럼 매핑")
+        self.lunch_mapping_btn.setEnabled(False)
+        self.lunch_mapping_btn.clicked.connect(self._open_lunch_mapping)
         lunch_layout.addWidget(self.lunch_file_label, stretch=1)
         lunch_layout.addWidget(self.lunch_file_btn)
+        lunch_layout.addWidget(self.lunch_mapping_btn)
         layout.addWidget(lunch_group)
 
         # ── 청구 기준 ──
@@ -217,7 +230,7 @@ class InvoiceTab(QWidget):
     # ── 중식 파일 로드 ──
 
     def _select_lunch_file(self):
-        """중식 명단 파일 로드 (선택사항). 캐시 저장 안 함."""
+        """중식 명단 파일 로드. 로드 후 컬럼 매핑 버튼 활성화."""
         path, _ = QFileDialog.getOpenFileName(
             self,
             "중식 명단 파일 선택",
@@ -227,7 +240,97 @@ class InvoiceTab(QWidget):
         if path:
             self.lunch_file_label.setText(os.path.basename(path))
             self.lunch_file_label.setStyleSheet("color: #000;")
+            self._lunch_file_path = path
             self._lunch_enabled = True
+            self.lunch_mapping_btn.setEnabled(True)
+
+    def _open_lunch_mapping(self):
+        """중식 명단 컬럼 매핑 다이얼로그 열기."""
+        if not self._lunch_file_path:
+            QMessageBox.warning(self, "알림", "먼저 중식 명단 파일을 불러오세요.")
+            return
+
+        # 중식 명단 전용 로딩 (RosterLoader는 이름 필터가 있어서 적합하지 않음)
+        lunch_headers, lunch_data = _load_lunch_file(self._lunch_file_path)
+
+        roster_headers = self._controller.roster_headers or []
+        dlg = LunchMappingDialog(lunch_headers, roster_headers, self)
+
+        saved = self._settings.value("lunch/col_mapping", None)
+        if saved and isinstance(saved, dict):
+            dlg.set_values(saved)
+        else:
+            dlg._reset_defaults()
+
+        if not dlg.exec():
+            return
+
+        self._lunch_mapping = dlg.get_values()
+
+        lunch_school_col = self._lunch_mapping.get("lunch_school_name", "")
+        lunch_vac_date_col = self._lunch_mapping.get("lunch_vacation_date", "")
+        lunch_open_date_col = self._lunch_mapping.get("lunch_opening_date", "")
+        lunch_vac_meal_col = self._lunch_mapping.get("lunch_vacation_meal", "")
+        lunch_open_meal_col = self._lunch_mapping.get("lunch_opening_meal", "")
+        lunch_note_col = self._lunch_mapping.get("lunch_note", "")
+
+        roster = LunchRoster(headers=lunch_headers, file_path=self._lunch_file_path)
+
+        for row in lunch_data:
+            school_name = str(row.get(lunch_school_col, "")).strip()
+            if not school_name or school_name in ("학교명", "구분"):
+                continue
+
+            vac_date_str = str(row.get(lunch_vac_date_col, "")).strip().rstrip(".")
+            open_date_str = str(row.get(lunch_open_date_col, "")).strip().rstrip(".")
+
+            vac_date = _parse_lunch_date(vac_date_str)
+            open_date = _parse_lunch_date(open_date_str)
+
+            vac_meal = parse_lunch_boolean(row.get(lunch_vac_meal_col, ""))
+            open_meal = parse_lunch_boolean(row.get(lunch_open_meal_col, ""))
+
+            note_raw = str(row.get(lunch_note_col, "")).strip()
+            if note_raw in (" ", "비고", ""):
+                note_raw = ""
+
+            type_from_first = str(
+                row.get(lunch_headers[0] if lunch_headers else "", "")
+            ).strip()
+
+            entry = LunchSchoolEntry(
+                school_name=school_name,
+                school_type=type_from_first,
+                vacation_date=vac_date,
+                opening_date=open_date,
+                vacation_meal=vac_meal,
+                opening_meal=open_meal,
+                note_raw=note_raw,
+            )
+
+            ref_year = self.year_spin.value()
+            parse_lunch_note(entry, ref_year)
+            roster.entries.append(entry)
+
+        self._lunch_roster = roster
+        self._controller.set_lunch_roster(
+            roster, self._lunch_mapping, self._lunch_file_path
+        )
+
+        self._settings.setValue("lunch/col_mapping", self._lunch_mapping)
+        self._settings.setValue("lunch/file_path", self._lunch_file_path)
+        self._settings.sync()
+
+        log.info(
+            "[Lunch] 중식 명단 %d개 학교 로드 완료 (파일: %s)",
+            len(roster.entries),
+            os.path.basename(self._lunch_file_path),
+        )
+        QMessageBox.information(
+            self,
+            "로드 완료",
+            f"중식 명단 {len(roster.entries)}개 학교 정보를 불러왔습니다.",
+        )
 
     # ── 설정 저장/복원 ──
 
@@ -297,6 +400,18 @@ class InvoiceTab(QWidget):
         self.breakfast_price.blockSignals(False)
         self.dinner_price.blockSignals(False)
         self.lunch_price.blockSignals(False)
+
+        # 중식 매핑 복원
+        lunch_mapping = self._settings.value("lunch/col_mapping", None)
+        if lunch_mapping and isinstance(lunch_mapping, dict):
+            self._lunch_mapping = lunch_mapping
+        lunch_file = self._settings.value("lunch/file_path", "")
+        if lunch_file and os.path.exists(lunch_file):
+            self._lunch_file_path = lunch_file
+            self._lunch_enabled = True
+            self.lunch_file_label.setText(os.path.basename(lunch_file))
+            self.lunch_file_label.setStyleSheet("color: #000;")
+            self.lunch_mapping_btn.setEnabled(True)
 
         self._save_settings()
 
@@ -510,8 +625,11 @@ class InvoiceTab(QWidget):
         self.result_table.setRowCount(0)
         self.info_label.setText("생성된 청구서: 0건")
         self._lunch_enabled = False
+        self._lunch_roster = None
+        self._lunch_mapping = {}
         self.lunch_file_label.setText("불러오지 않음")
         self.lunch_file_label.setStyleSheet("color: #888;")
+        self.lunch_mapping_btn.setEnabled(False)
 
     # ── 외부 접근 ──
 
@@ -548,3 +666,81 @@ class InvoiceTab(QWidget):
             roster_headers=self.get_roster_headers(),
             roster_path=self.get_roster_path(),
         )
+
+
+# ── 모듈 레벨 헬퍼 ──
+
+
+def _load_lunch_file(file_path: str) -> tuple[list[str], list[dict]] | None:
+    """중식 명단 파일을 이름 필터 없이 로드. 타이틀 행 자동 감지."""
+    import re
+    from python_calamine import CalamineWorkbook
+
+    ext = os.path.splitext(file_path)[1].lower()
+    if ext not in (".xlsx", ".xls", ".xlsb", ".ods"):
+        return None
+
+    try:
+        wb = CalamineWorkbook.from_path(file_path)
+    except Exception:
+        return None
+
+    sheet = wb.get_sheet_by_index(0)
+    rows = list(sheet.iter_rows())
+    if len(rows) < 2:
+        return None
+
+    # 타이틀 행 감지: 첫 셀이 "■"로 시작하거나 30자 이상
+    first_cell = str(rows[0][0]).strip() if rows[0] else ""
+    is_title_row = first_cell.startswith("■") or len(first_cell) > 30
+
+    if is_title_row:
+        # 두 번째 행이 실제 헤더
+        header_row = rows[1]
+        data_start = 2
+    else:
+        header_row = rows[0]
+        data_start = 1
+
+    # 헤더 정규화
+    raw_headers = [str(c).replace(chr(10), " ").strip() for c in header_row]
+    headers = []
+    seen = {}
+    for h in raw_headers:
+        if not h:
+            h = chr(65 + len(headers)) if len(headers) < 26 else f"Col{len(headers)}"
+        if h in seen:
+            seen[h] += 1
+            h = f"{h}_{seen[h]}"
+        else:
+            seen[h] = 1
+        headers.append(h)
+
+    # 데이터 파싱 (이름 필터 없음)
+    data = []
+    for row in rows[data_start:]:
+        vals = [str(c).strip() for c in row]
+        # 빈 행 건너뛰기
+        if all(not v or v == " " for v in vals):
+            continue
+        entry = {headers[i]: vals[i] if i < len(vals) else "" for i in range(len(headers))}
+        data.append(entry)
+
+    return headers, data
+
+
+def _parse_lunch_date(s: str) -> date | None:
+    """'2025.12.31' 또는 '2025.12.31.' -> date."""
+    if not s:
+        return None
+    s = s.strip().rstrip(".")
+    for sep in (".", "-", "/"):
+        parts = s.split(sep)
+        if len(parts) == 3:
+            try:
+                y, m, d = int(parts[0]), int(parts[1]), int(parts[2])
+                if 2000 <= y <= 2100 and 1 <= m <= 12 and 1 <= d <= 31:
+                    return date(y, m, d)
+            except (ValueError, OverflowError):
+                pass
+    return None

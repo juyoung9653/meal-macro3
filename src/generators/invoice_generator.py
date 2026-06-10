@@ -107,12 +107,17 @@ def make_invoice(
     for i, person in enumerate(roster_data):
         flags = {k: to_bool(person.get(f"_{k}", 0)) for k in MEAL_KEYS}
         note_text = person.get("_note", "")
+
+        # ── 중식 배송일: _lunch_days가 있으면 그것 사용, 없으면 count_delivery_days로 계산 ──
+        lunch_days_override = person.get("_lunch_days", None)
+        lunch_flag_for_calc = flags["lunch"] and lunch_days_override is None
+
         days = count_delivery_days(
             year,
             month,
             flags["breakfast"],
             flags["dinner"],
-            flags["lunch"],
+            lunch_flag_for_calc,
             note_text,
             excluded_dates,
         )
@@ -120,7 +125,7 @@ def make_invoice(
         breakfast_cnt, dinner_cnt, lunch_cnt = (
             days["breakfast"],
             days["dinner"],
-            days["lunch"],
+            days["lunch"] if lunch_days_override is None else lunch_days_override,
         )
 
         row_data = _map_person_to_row(person, col_mapping, i + 1, template_columns)
