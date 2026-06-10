@@ -57,9 +57,11 @@ def _map_person_to_row(
     row_data: dict[str, str | int] = {}
     for col in template_columns:
         roster_key = mapping.get(col, "")
-        row_data[col] = (
-            seq if col == "연번" else person.get(roster_key, "") if roster_key else ""
-        )
+        if col == "연번":
+            row_data[col] = seq
+        elif roster_key:
+            row_data[col] = person.get(roster_key, "")
+        # roster_key 없으면(=선택 안함) row_data에 추가 안 함 → 쓰기 단계에서 스킵
     return row_data
 
 
@@ -100,6 +102,7 @@ def make_invoice(
 
     row_idx = get_template_data_start_row()
     data_start_row = row_idx
+    written_cols: set[int] = set()
 
     for i, person in enumerate(roster_data):
         flags = {k: to_bool(person.get(f"_{k}", 0)) for k in MEAL_KEYS}
@@ -143,13 +146,15 @@ def make_invoice(
             c_idx = col_idx_map.get(col_name)
             if c_idx is None:
                 continue
+            written_cols.add(c_idx)
             cell = ws.cell(row=row_idx, column=c_idx)
-            cell.value = _to_numeric(value)
+            v = _to_numeric(value)
+            cell.value = None if isinstance(v, (int, float)) and v == 0 else v
             cell.alignment = CENTER_ALIGN
 
         row_idx += 1
 
-    # ── Phase 2: 첫 데이터 행 서식 → 이후 모든 행 일괄 적용 ──
+    # ── Phase 2: 첫 데이터 행 값/수식 + 서식 → 이후 모든 행 일괄 적용 ──
     data_end_row = row_idx - 1
     if data_end_row > data_start_row:
         _tmpl_cells = [
@@ -159,7 +164,12 @@ def make_invoice(
 
         for r in range(data_start_row + 1, data_end_row + 1):
             for c_idx in range(1, len(_tmpl_cells) + 1):
-                copy_style(_tmpl_cells[c_idx - 1], ws.cell(row=r, column=c_idx))
+                src_cell = _tmpl_cells[c_idx - 1]
+                dst_cell = ws.cell(row=r, column=c_idx)
+                # 쓰지 않은 컬럼은 첫 행의 값/수식을 복사
+                if c_idx not in written_cols and src_cell.value is not None:
+                    dst_cell.value = src_cell.value
+                copy_style(src_cell, dst_cell)
             ws.row_dimensions[r].height = _tmpl_height
 
     wb.save(output_path)
