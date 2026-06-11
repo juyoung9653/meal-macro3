@@ -335,27 +335,55 @@ class ConfirmTab(QWidget):
         self._data = data
         self.generate_btn.setEnabled(bool(data.invoices))
 
+        # ── 초기화 중 signal flood → QSettings 덮어쓰기 방지 ──
+        # 전화번호 맵은 _delivery_col_combo_update가 _save_settings로 덮어쓰기 전에 미리 확보
+        saved_phone_map = self._settings.value("confirm/delivery_phone_map", None)
+        self.delivery_col_combo.blockSignals(True)
+        self.delivery_table.blockSignals(True)
+
         # 배송담당자 컬럼 콤보박스 채우기
         self._delivery_col_combo_update(data.roster_headers)
 
-        # 저장된 배송담당자 컬럼/전화번호 복원
+        # 저장된 배송담당자 컬럼 복원
         saved_col = self._settings.value("confirm/delivery_col", "")
         if saved_col:
             idx = self.delivery_col_combo.findData(saved_col)
             if idx >= 0:
                 self.delivery_col_combo.setCurrentIndex(idx)
 
-        # 테이블이 채워진 후 전화번호 복원 (cellChanged signal flood 방지)
-        self.delivery_table.blockSignals(True)
-        phone_map = self._settings.value("confirm/delivery_phone_map", None)
-        if isinstance(phone_map, dict) and phone_map:
+        # 테이블 수동 채우기 (_on_delivery_col_changed 호출 대체)
+        col = self.delivery_col_combo.currentData()
+        if col and self._data.invoices:
+            seen = set()
+            unique_names = []
+            for inv in self._data.invoices:
+                val = str(inv.get(col, "")).strip()
+                if val and val not in seen:
+                    seen.add(val)
+                    unique_names.append(val)
+            self.delivery_table.setRowCount(len(unique_names))
+            for i, name in enumerate(unique_names):
+                name_item = QTableWidgetItem(name)
+                name_item.setFlags(name_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                self.delivery_table.setItem(i, 0, name_item)
+                self.delivery_table.setItem(i, 1, QTableWidgetItem(""))
+        else:
+            self.delivery_table.setRowCount(0)
+
+        # 미리 확보한 전화번호 맵으로 복원
+        if isinstance(saved_phone_map, dict) and saved_phone_map:
             for row in range(self.delivery_table.rowCount()):
                 name_item = self.delivery_table.item(row, 0)
-                if name_item and name_item.text() in phone_map:
+                if name_item and name_item.text() in saved_phone_map:
                     self.delivery_table.setItem(
-                        row, 1, QTableWidgetItem(phone_map[name_item.text()])
+                        row, 1, QTableWidgetItem(saved_phone_map[name_item.text()])
                     )
+
         self.delivery_table.blockSignals(False)
+        self.delivery_col_combo.blockSignals(False)
+
+        # 복원된 상태를 QSettings에 확정 저장
+        self._save_settings()
 
         if data.invoices:
             self.info_label.setText(
