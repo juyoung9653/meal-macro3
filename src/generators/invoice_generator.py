@@ -120,6 +120,12 @@ def _fill_invoice_sheet(
     dn_col = col_mapping.get("__calc_dinner", "석식")
     lh_col = col_mapping.get("__calc_lunch", "중식")
     price_col = col_mapping.get("__calc_price", "청구금액")
+    del_start_col = col_mapping.get("__delivery_start", "")
+    del_end_col = col_mapping.get("__delivery_end", "")
+    # 날짜 텍스트 컬럼 — _to_numeric 변환 방지 + 셀 서식 텍스트
+    _text_cols = {
+        col_idx_map[c] for c in (del_start_col, del_end_col) if c and c in col_idx_map
+    }
 
     ws = wb[sheet_name]
     row_idx = get_template_data_start_row()
@@ -140,6 +146,12 @@ def _fill_invoice_sheet(
             row_data[dn_col] = dinner_cnt
         if lh_col in col_idx_map:
             row_data[lh_col] = lunch_cnt
+
+        # 배송시작일/종료일: 시트에 컬럼이 있을 때만 기록
+        if del_start_col and del_start_col in col_idx_map:
+            row_data[del_start_col] = person.get("_delivery_start", "")
+        if del_end_col and del_end_col in col_idx_map:
+            row_data[del_end_col] = person.get("_delivery_end", "")
 
         # 청구금액 수식: 시트에 존재하는 컬럼만 포함
         if price_col in col_idx_map:
@@ -167,8 +179,13 @@ def _fill_invoice_sheet(
                 continue
             written_cols.add(c_idx)
             cell = ws.cell(row=row_idx, column=c_idx)
-            v = _to_numeric(value)
-            cell.value = None if isinstance(v, (int, float)) and v == 0 else v
+            if c_idx in _text_cols:
+                # 날짜 텍스트 컬럼: 숫자 변환 없이 문자열 그대로
+                cell.value = str(value) if value else ""
+                cell.number_format = "@"
+            else:
+                v = _to_numeric(value)
+                cell.value = None if isinstance(v, (int, float)) and v == 0 else v
             cell.alignment = CENTER_ALIGN
 
         row_idx += 1
@@ -192,6 +209,12 @@ def _fill_invoice_sheet(
                     dst_cell.value = val
                 copy_style(src_cell, dst_cell)
             ws.row_dimensions[r].height = _tmpl_height
+
+    # Phase 2.5: 텍스트 컬럼 number_format 복구 (copy_style이 덮어씀)
+    if _text_cols and data_end_row >= data_start_row:
+        for r in range(data_start_row, data_end_row + 1):
+            for c_idx in _text_cols:
+                ws.cell(row=r, column=c_idx).number_format = "@"
 
     return data_end_row - data_start_row + 1
 

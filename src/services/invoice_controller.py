@@ -9,6 +9,7 @@ from typing import Any
 
 from PyQt6.QtWidgets import QMessageBox, QWidget
 
+from ..core.meal_types import MealType
 from ..core.models import EnrichedPerson, RosterPerson, person_to_dict
 from ..generators.invoice_generator import make_invoice
 from ..templates.config import auto_detect_semantic_columns
@@ -17,8 +18,10 @@ from .delivery_calculator import (
     count_lunch_vacation_days_with_note,
     to_bool,
 )
+from .holiday_fetcher import get_kr_holidays
 from .lunch_data import LunchRoster
 from .lunch_parser import parse_lunch_note
+from .schedule_counter import _get_schedule
 
 log = logging.getLogger(__name__)
 
@@ -47,6 +50,81 @@ class InvoiceResult:
 
 
 # ── Pure business logic (no UI dependencies) ──
+
+
+def _calc_delivery_dates(
+    year: int,
+    month: int,
+    entry,  # LunchSchoolEntry
+    grade: int = 0,
+    excluded_dates: set[date] | None = None,
+) -> tuple[date | None, date | None]:
+    """개인별 방학 배송시작일/종료일 계산 (실제 첫/마지막 배송일).
+
+    배송기간: 방학식+1일 ~ 개학식-1일 (급식여부 무관, 월 경계 무관).
+    급식여부 + 학년제외로 배송 없음 판정 시 None 반환.
+    """
+    import calendar
+    from datetime import timedelta
+
+    # 급식여부 + 학년제외 → 배송 발생 여부만 판단
+    vacation_meal = entry.vacation_meal
+    opening_meal = entry.opening_meal
+    if grade > 0:
+        if (
+            entry.all_grades_excluded_vacation
+            or grade in entry.excluded_grades_vacation
+        ):
+            vacation_meal = False
+        if entry.all_grades_excluded_opening or grade in entry.excluded_grades_opening:
+            opening_meal = False
+
+    # 배송 없음: 학년제외로 양쪽 모두 미급식 → 배송일 없음
+    if not vacation_meal and not opening_meal:
+        return None, None
+
+    # ── 배송기간: 날짜 기준, 월 clamping 없음 ──
+    if entry.vacation_date:
+        eff_start = entry.vacation_date + timedelta(days=1)
+    else:
+        return None, None  # 방학일 없으면 배송 시작일 알 수 없음
+
+    if entry.opening_date:
+        eff_end = entry.opening_date - timedelta(days=1)
+    else:
+        # 개학일 미정이면 해당 월 말까지
+        last_day = calendar.monthrange(year, month)[1]
+        eff_end = date(year, month, last_day)
+
+    if eff_start > eff_end:
+        return None, None
+
+    # 공휴일: 배송기간이 걸치는 모든 연도 수집
+    holidays: set[date] = set()
+    for y in range(eff_start.year, eff_end.year + 1):
+        holidays.update(get_kr_holidays(y))
+    blocked = set(holidays) | (excluded_dates or set())
+    schedule = _get_schedule()[MealType.LUNCH]
+
+    # 첫 배송일 찾기
+    first_delivery = None
+    d = eff_start
+    while d <= eff_end:
+        if d.weekday() in schedule and d not in blocked:
+            first_delivery = d
+            break
+        d += timedelta(days=1)
+
+    # 마지막 배송일 찾기
+    last_delivery = None
+    d = eff_end
+    while d >= eff_start:
+        if d.weekday() in schedule and d not in blocked:
+            last_delivery = d
+            break
+        d -= timedelta(days=1)
+
+    return first_delivery, last_delivery
 
 
 class InvoiceService:
@@ -84,6 +162,16 @@ class InvoiceService:
 
         if not roster_data:
             return InvoiceResult(success=False, error="명단 데이터가 없습니다.")
+
+        # ── lunch_mapping의 delivery 컬럼 → col_mapping 동기화 ──
+        if lunch_mapping:
+            for lunch_key, col_key in [
+                ("delivery_start_col", "__delivery_start"),
+                ("delivery_end_col", "__delivery_end"),
+            ]:
+                col_name = lunch_mapping.get(lunch_key, "")
+                if col_name and col_key not in col_mapping:
+                    col_mapping[col_key] = col_name
 
         breakfast_col = col_mapping.get("__breakfast", "")
         dinner_col = col_mapping.get("__dinner", "")
@@ -195,11 +283,28 @@ class InvoiceService:
                 flag_lunch=lunch_days > 0,
                 note=note_val,
             )
+            # ── 배송시작일/종료일 계산 ──
+            del_start = None
+            del_end = None
+            if lunch_available and has_lunch_flag and lunch_entry is not None:
+                del_start, del_end = _calc_delivery_dates(
+                    year,
+                    month,
+                    lunch_entry,
+                    grade=grade
+                    if lunch_mapping and lunch_mapping.get("roster_grade_col", "")
+                    else 0,
+                    excluded_dates=excluded_dates.copy() if excluded_dates else None,
+                )
+
             ep_dict = person_to_dict(ep)
             # 사전 계산된 배송일 수 저장 (재계산 불필요)
             ep_dict["_bf_cnt"] = days["breakfast"]
             ep_dict["_dn_cnt"] = days["dinner"]
             ep_dict["_lh_cnt"] = lh_cnt
+            # 배송시작일/종료일 (YYYY-MM-DD)
+            ep_dict["_delivery_start"] = del_start.isoformat() if del_start else ""
+            ep_dict["_delivery_end"] = del_end.isoformat() if del_end else ""
             enriched.append(ep_dict)
 
         # ── 중식 미매칭 학교 경고 (방학 기간에만 표시) ──

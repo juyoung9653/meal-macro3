@@ -1,4 +1,7 @@
-from PyQt6.QtCore import QSettings, Qt
+import os
+
+from PyQt6.QtCore import QSettings, Qt, QUrl
+from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (
     QComboBox,
     QFileDialog,
@@ -26,6 +29,7 @@ class ConfirmTab(QWidget):
         super().__init__()
         self.confirms = []
         self.output_dir = None
+        self._last_output_path: str | None = None
         self._data = InvoiceData()
         self._per_file_mode = True
         self._s = get_settings()
@@ -93,11 +97,16 @@ class ConfirmTab(QWidget):
         self.generate_btn.setEnabled(False)
         self.generate_btn.clicked.connect(self._generate_confirms)
 
+        self.open_file_btn = QPushButton("파일 열기")
+        self.open_file_btn.setEnabled(False)
+        self.open_file_btn.clicked.connect(self._open_output_file)
+
         self.clear_btn = QPushButton("초기화")
         self.clear_btn.clicked.connect(self._clear)
 
         btn_layout.addStretch()
         btn_layout.addWidget(self.generate_btn)
+        btn_layout.addWidget(self.open_file_btn)
         btn_layout.addWidget(self.clear_btn)
 
         # ── 확인서 목록 ──
@@ -139,6 +148,35 @@ class ConfirmTab(QWidget):
         )
         self._settings.sync()
 
+    def _load_cached_invoice_data(self) -> "InvoiceData | None":
+        import json
+        from datetime import date as dt_date
+
+        out_dir = self._settings.value(
+            "invoice/output_dir", ""
+        ) or self._settings.value("confirm/output_dir", "")
+        if not out_dir:
+            return None
+        cache_path = os.path.join(out_dir, ".invoice_data_cache.json")
+        if not os.path.exists(cache_path):
+            return None
+        try:
+            with open(cache_path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            return InvoiceData(
+                invoices=payload.get("invoices", []),
+                col_mapping=payload.get("col_mapping", {}),
+                year=payload.get("year", 0),
+                month=payload.get("month", 0),
+                excluded_dates={
+                    dt_date.fromisoformat(d) for d in payload.get("excluded_dates", [])
+                },
+                roster_headers=payload.get("roster_headers", []),
+                roster_path=payload.get("roster_path"),
+            )
+        except (OSError, json.JSONDecodeError, ValueError):
+            return None
+
     def _restore_state(self):
         raw = self._settings.value("confirm/output_dir", "")
         if raw:
@@ -147,6 +185,11 @@ class ConfirmTab(QWidget):
             self.path_label.setStyleSheet("color: #000;")
 
         # 배송담당자 컬럼/전화번호는 set_invoice_data()에서 복원 (콤보박스 채워진 후)
+
+        # 캐시된 InvoiceData 미리 복원 시도
+        cached = self._load_cached_invoice_data()
+        if cached:
+            self.set_invoice_data(cached)
 
     def _on_delivery_col_changed(self):
         """배송담당자 컬럼 변경 → 고유 이름 목록 테이블 갱신"""
@@ -240,6 +283,10 @@ class ConfirmTab(QWidget):
                 if self._data.excluded_dates
                 else None,
             )
+            if self.confirms:
+                fname = self.confirms[0].get("file", "")
+                self._last_output_path = os.path.join(self.output_dir, fname)
+                self.open_file_btn.setEnabled(True)
             self._update_table()
             QMessageBox.information(
                 self, "완료", f"확인서 {len(self.confirms)}건 생성 완료!"
@@ -263,13 +310,28 @@ class ConfirmTab(QWidget):
 
         self.info_label.setText(f"생성된 확인서: {len(self.confirms)}건")
 
+    def _open_output_file(self):
+        if self._last_output_path and os.path.exists(self._last_output_path):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(self._last_output_path))
+        else:
+            QMessageBox.warning(
+                self, "알림", "열 파일이 없습니다. 먼저 확인서를 생성하세요."
+            )
+
     def _clear(self):
         self.confirms.clear()
         self.confirm_table.setRowCount(0)
         self.info_label.setText("생성된 확인서: 0건")
+        self._last_output_path = None
+        self.open_file_btn.setEnabled(False)
 
     def set_invoice_data(self, data: InvoiceData):
         """InvoiceData 객체로 모든 상태 한 번에 설정"""
+        # 빈 데이터면 캐시에서 복원 시도
+        if not data.invoices:
+            cached = self._load_cached_invoice_data()
+            if cached and cached.invoices:
+                data = cached
         self._data = data
         self.generate_btn.setEnabled(bool(data.invoices))
 

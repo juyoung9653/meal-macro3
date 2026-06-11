@@ -5,8 +5,8 @@ import logging
 import os
 from datetime import date
 
-from PyQt6.QtCore import QDate, QSettings, Qt
-from PyQt6.QtGui import QTextCharFormat
+from PyQt6.QtCore import QDate, QSettings, Qt, QUrl
+from PyQt6.QtGui import QDesktopServices, QTextCharFormat
 from PyQt6.QtWidgets import (
     QCalendarWidget,
     QDialog,
@@ -56,6 +56,7 @@ class InvoiceTab(QWidget):
         self._lunch_roster: LunchRoster | None = None
         self._lunch_mapping: dict = {}
         self._lunch_file_path: str = ""
+        self._last_output_path: str | None = None
         self._setup_ui()
         self._restore_ui_state()
         self._load_default_excluded_dates()
@@ -162,10 +163,14 @@ class InvoiceTab(QWidget):
         self.generate_btn = QPushButton("청구서 생성")
         self.generate_btn.setEnabled(False)
         self.generate_btn.clicked.connect(self._generate_invoices)
+        self.open_file_btn = QPushButton("파일 열기")
+        self.open_file_btn.setEnabled(False)
+        self.open_file_btn.clicked.connect(self._open_output_file)
         self.clear_btn = QPushButton("초기화")
         self.clear_btn.clicked.connect(self._clear)
         btn_layout.addStretch()
         btn_layout.addWidget(self.generate_btn)
+        btn_layout.addWidget(self.open_file_btn)
         btn_layout.addWidget(self.clear_btn)
         layout.addLayout(btn_layout)
 
@@ -257,7 +262,21 @@ class InvoiceTab(QWidget):
         lunch_headers, lunch_data = _load_lunch_file(self._lunch_file_path)
 
         roster_headers = self._controller.get_roster_headers() or []
-        dlg = LunchMappingDialog(lunch_headers, roster_headers, self)
+
+        # 방학_ 시트 컬럼도 포함 (배송시작/종료 컬럼은 방학 시트에만 있을 수 있음)
+        all_tpl_cols = list(self._template_columns)
+        for vac_sheet in ("방학_총괄", "방학_학기중", "방학_방중"):
+            try:
+                vac_cols = read_template_columns(
+                    self._template_path, sheet_name=vac_sheet
+                )
+                for c in vac_cols:
+                    if c not in all_tpl_cols:
+                        all_tpl_cols.append(c)
+            except Exception:
+                pass
+
+        dlg = LunchMappingDialog(lunch_headers, roster_headers, all_tpl_cols, self)
 
         saved = self._settings.value("lunch/col_mapping", None)
         if saved and isinstance(saved, dict):
@@ -269,6 +288,7 @@ class InvoiceTab(QWidget):
             return
 
         self._lunch_mapping = dlg.get_values()
+        self._sync_delivery_cols_to_mapping()
 
         roster = _build_lunch_roster(
             lunch_headers,
@@ -298,6 +318,18 @@ class InvoiceTab(QWidget):
             f"중식 명단 {len(roster.entries)}개 학교 정보를 불러왔습니다.",
         )
 
+    def _sync_delivery_cols_to_mapping(self):
+        """lunch_mapping의 delivery_start_col/end_col → controller col_mapping 동기화."""
+        if not self._lunch_mapping:
+            return
+        for lunch_key, col_key in [
+            ("delivery_start_col", "__delivery_start"),
+            ("delivery_end_col", "__delivery_end"),
+        ]:
+            col_name = self._lunch_mapping.get(lunch_key, "")
+            if col_name:
+                self._controller._col_mapping[col_key] = col_name
+
     def _reload_lunch_roster(self):
         """저장된 매핑으로 중식명단 재로드 (프로그램 재시작 시 자동 복원)."""
         if not self._lunch_file_path:
@@ -324,6 +356,7 @@ class InvoiceTab(QWidget):
         )
 
         self._lunch_roster = roster
+        self._sync_delivery_cols_to_mapping()
         self._controller.set_lunch_roster(
             roster, self._lunch_mapping, self._lunch_file_path
         )
@@ -408,6 +441,19 @@ class InvoiceTab(QWidget):
 
         self._save_settings()
 
+        # ── 캐시된 InvoiceData 복원 (청구서 재생성 없이 확인서 탭 사용 가능) ──
+        cached = self._load_cached_invoice_data()
+        if cached and cached.invoices:
+            self._controller.invoices = cached.invoices
+            self._controller.set_col_mapping(cached.col_mapping)
+            self._controller._year = cached.year
+            self._controller._month = cached.month
+            self._controller.set_excluded_dates(cached.excluded_dates)
+            self._controller.roster_headers = cached.roster_headers
+            self._controller.roster_path = cached.roster_path
+            self._update_result(cached.invoices)
+            self._update_exclude_label()
+
     def _try_auto_load_roster(self):
         """저장된 명단 자동 로드 (I/O 가능, 생성 후 호출)."""
         last = self._settings.value("roster/last_path", "")
@@ -448,6 +494,58 @@ class InvoiceTab(QWidget):
         if self._controller.output_dir:
             self._settings.setValue("invoice/output_dir", self._controller.output_dir)
         self._settings.sync()
+
+    def _cache_invoice_data(self):
+        """생성된 InvoiceData를 JSON 캐시 파일로 저장 (확인서 탭 재사용)."""
+        import json
+
+        data = self.get_invoice_data()
+        cache_path = os.path.join(
+            self._controller.output_dir, ".invoice_data_cache.json"
+        )
+        try:
+            payload = {
+                "invoices": data.invoices,
+                "col_mapping": data.col_mapping,
+                "year": data.year,
+                "month": data.month,
+                "excluded_dates": [d.isoformat() for d in data.excluded_dates],
+                "roster_headers": data.roster_headers,
+                "roster_path": data.roster_path,
+            }
+            with open(cache_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+        except OSError:
+            pass
+
+    def _load_cached_invoice_data(self):  # -> InvoiceData | None
+        """캐시 파일에서 InvoiceData 복원. 없으면 None."""
+        import json
+
+        out_dir = self._settings.value("invoice/output_dir", "")
+        if not out_dir:
+            return None
+        cache_path = os.path.join(out_dir, ".invoice_data_cache.json")
+        if not os.path.exists(cache_path):
+            return None
+        try:
+            with open(cache_path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            from ..core.invoice_data import InvoiceData
+
+            return InvoiceData(
+                invoices=payload.get("invoices", []),
+                col_mapping=payload.get("col_mapping", {}),
+                year=payload.get("year", 0),
+                month=payload.get("month", 0),
+                excluded_dates={
+                    date.fromisoformat(d) for d in payload.get("excluded_dates", [])
+                },
+                roster_headers=payload.get("roster_headers", []),
+                roster_path=payload.get("roster_path"),
+            )
+        except (OSError, json.JSONDecodeError, ValueError):
+            return None
 
     def _select_output_dir(self):
         d = QFileDialog.getExistingDirectory(self, "출력 폴더 선택")
@@ -618,7 +716,13 @@ class InvoiceTab(QWidget):
         if not success:
             return
 
+        self._last_output_path = out
+        self.open_file_btn.setEnabled(True)
         self._update_result(enriched)
+
+        # ── InvoiceData 캐시 저장 (확인서 탭에서 재사용) ──
+        self._cache_invoice_data()
+
         QMessageBox.information(self, "완료", f"청구서 {cnt}건 생성 완료!\n{out}")
 
     def _update_result(self, data: list[dict]):
@@ -637,10 +741,20 @@ class InvoiceTab(QWidget):
             f"생성된 청구서: {len(data)}건 (처음 {len(show)}건 표시)"
         )
 
+    def _open_output_file(self):
+        if self._last_output_path and os.path.exists(self._last_output_path):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(self._last_output_path))
+        else:
+            QMessageBox.warning(
+                self, "알림", "열 파일이 없습니다. 먼저 청구서를 생성하세요."
+            )
+
     def _clear(self):
         self._controller.invoices.clear()
         self.result_table.setRowCount(0)
         self.info_label.setText("생성된 청구서: 0건")
+        self._last_output_path = None
+        self.open_file_btn.setEnabled(False)
         self._lunch_enabled = False
         self._lunch_roster = None
         self._lunch_mapping = {}

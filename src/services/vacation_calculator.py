@@ -18,6 +18,30 @@ from .schedule_counter import _get_schedule
 log = logging.getLogger(__name__)
 
 
+def _calc_effective_range(
+    vacation_date: date | None,
+    opening_date: date | None,
+    vacation_meal: bool,
+    opening_meal: bool,
+) -> tuple[date | None, date | None]:
+    """방학식/개학식 + 급식여부 → 유효 배송 기간 (시작일, 종료일).
+
+    Returns (effective_start, effective_end). 둘 다 None이면 배송 없음.
+    """
+    if not vacation_meal and not opening_meal:
+        return None, None
+
+    eff_start: date | None = None
+    eff_end: date | None = None
+
+    if vacation_meal and vacation_date:
+        eff_start = vacation_date + timedelta(days=1)
+    if opening_meal and opening_date:
+        eff_end = opening_date - timedelta(days=1)
+
+    return eff_start, eff_end
+
+
 def count_lunch_vacation_days(
     year: int,
     month: int,
@@ -37,7 +61,10 @@ def count_lunch_vacation_days(
 
     배송 요일: 월~금 (lunch_days). 공휴일/제외일 제외.
     """
-    if not vacation_meal and not opening_meal:
+    effective_start, effective_end = _calc_effective_range(
+        vacation_date, opening_date, vacation_meal, opening_meal
+    )
+    if effective_start is None and effective_end is None:
         return 0
 
     last_day = calendar.monthrange(year, month)[1]
@@ -46,16 +73,6 @@ def count_lunch_vacation_days(
     holidays = get_kr_holidays(year)
     blocked = set(holidays) | (excluded_dates or set())
     schedule = _get_schedule()[MealType.LUNCH]
-
-    # ── 배송 기간 결정 ──
-    effective_start: date | None = None
-    effective_end: date | None = None
-
-    if vacation_meal and vacation_date:
-        effective_start = vacation_date + timedelta(days=1)
-
-    if opening_meal and opening_date:
-        effective_end = opening_date - timedelta(days=1)
 
     # 기간 보정
     if effective_start is None:

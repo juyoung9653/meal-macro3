@@ -1,4 +1,4 @@
-"""중식 명단 컬럼 매핑 다이얼로그 — 중식 명단 컬럼 ↔ 필수 필드 + 교차 참조."""
+"""중식 명단 컬럼 매핑 다이얼로그 — 중식 명단 컬럼 ↔ 필수 필드 + 교차 참조 + 청구서 컬럼."""
 
 from .base_mapping_dialog import (
     BaseMappingDialog,
@@ -39,6 +39,18 @@ _CROSS_REF_SEARCH_TERMS = {
     "roster_grade_col": ["학년", "학년도", "grade", "Grade"],
 }
 
+# ── 청구서 컬럼 매핑 (방학 계산 결과 → 청구서 템플릿) ──
+
+_INVOICE_COL_FIELDS = [
+    ("delivery_start_col", "배송시작일 컬럼", "청구서 템플릿의 배송시작일 컬럼"),
+    ("delivery_end_col", "배송종료일 컬럼", "청구서 템플릿의 배송종료일 컬럼"),
+]
+
+_INVOICE_COL_SEARCH_TERMS = {
+    "delivery_start_col": ["배송시작", "배송시작일", "배송 시작일"],
+    "delivery_end_col": ["배송종료", "배송종료일", "배송 종료일"],
+}
+
 
 class LunchMappingDialog(BaseMappingDialog):
     """중식 명단 컬럼 매핑 다이얼로그.
@@ -46,24 +58,31 @@ class LunchMappingDialog(BaseMappingDialog):
     섹션:
       1. 중식 명단 컬럼 매핑 (6개 필수 필드)
       2. 교차 참조 (명단의 학교명/학년 컬럼)
+      3. 청구서 컬럼 매핑 (배송시작일/종료일 → 청구서 템플릿)
     """
 
     def __init__(
         self,
         lunch_headers: list[str],
         roster_headers: list[str] | None = None,
+        template_columns: list[str] | None = None,
         parent=None,
     ):
         lunch_headers = [h.strip() for h in lunch_headers if h.strip()]
         roster_headers = (
             [h.strip() for h in roster_headers if h.strip()] if roster_headers else []
         )
+        template_columns = (
+            [h.strip() for h in template_columns if h.strip()]
+            if template_columns
+            else []
+        )
 
         rows = self._build_rows()
         super().__init__(
             title="중식 명단 컬럼 매핑",
             rows=rows,
-            headers_list=[lunch_headers, roster_headers],
+            headers_list=[lunch_headers, roster_headers, template_columns],
             column_labels=["값 선택"],
             difflib_cutoff=0.4,
             parent=parent,
@@ -103,10 +122,26 @@ class LunchMappingDialog(BaseMappingDialog):
                 )
             )
 
+        # ── 섹션 3: 청구서 컬럼 매핑 ──
+        rows.append(MappingSection("청구서 컬럼 매핑 (계산 결과 → 템플릿)"))
+        for key, label, tip in _INVOICE_COL_FIELDS:
+            terms = _INVOICE_COL_SEARCH_TERMS.get(key, [key])
+            rows.append(
+                MappingFieldDef(
+                    key=key,
+                    label=label,
+                    tooltip=tip,
+                    search_terms=terms,
+                    combo_column=0,
+                    source_index=2,
+                )
+            )
+
         return rows
 
     def _info_text(self) -> str:
         return (
             "중식 명단 파일의 각 컬럼을 아래 항목에 매핑하세요.\n"
-            "교차 참조 항목은 명단 파일의 컬럼에서 선택합니다."
+            "교차 참조 항목은 명단 파일의 컬럼에서 선택합니다.\n"
+            "청구서 컬럼 매핑은 청구서 템플릿의 컬럼에서 선택합니다."
         )
