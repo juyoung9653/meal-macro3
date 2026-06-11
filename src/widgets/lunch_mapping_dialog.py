@@ -64,7 +64,7 @@ class LunchMappingDialog(BaseMappingDialog):
             title="중식 명단 컬럼 매핑",
             rows=rows,
             headers_list=[lunch_headers, roster_headers],
-            column_labels=["중식 명단 컬럼", "명단 컬럼 (교차참조)"],
+            column_labels=["값 선택"],
             difflib_cutoff=0.4,
             parent=parent,
         )
@@ -98,7 +98,7 @@ class LunchMappingDialog(BaseMappingDialog):
                     label=label,
                     tooltip=tip,
                     search_terms=terms,
-                    combo_column=1,
+                    combo_column=0,
                     source_index=1,
                 )
             )
@@ -108,5 +108,5 @@ class LunchMappingDialog(BaseMappingDialog):
     def _info_text(self) -> str:
         return (
             "중식 명단 파일의 각 컬럼을 아래 항목에 매핑하세요.\n"
-            "하단의 '교차 참조'는 명단과 중식 명단 간 학교명 매칭에 사용됩니다."
+            "교차 참조 항목은 명단 파일의 컬럼에서 선택합니다."
         )

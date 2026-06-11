@@ -72,8 +72,12 @@ class InvoiceTab(QWidget):
         self.file_label.setStyleSheet("color: #888;")
         self.select_btn = QPushButton("파일 탐색")
         self.select_btn.clicked.connect(self._select_file)
+        self.mapping_btn = QPushButton("컬럼 매핑")
+        self.mapping_btn.setEnabled(False)
+        self.mapping_btn.clicked.connect(self._open_mapping)
         import_layout.addWidget(self.file_label, stretch=1)
         import_layout.addWidget(self.select_btn)
+        import_layout.addWidget(self.mapping_btn)
         layout.addWidget(import_group)
 
         # ── 중식 명단 파일 임포트 ──
@@ -155,15 +159,11 @@ class InvoiceTab(QWidget):
 
         # ── 버튼 ──
         btn_layout = QHBoxLayout()
-        self.mapping_btn = QPushButton("컬럼 매핑")
-        self.mapping_btn.setEnabled(False)
-        self.mapping_btn.clicked.connect(self._open_mapping)
         self.generate_btn = QPushButton("청구서 생성")
         self.generate_btn.setEnabled(False)
         self.generate_btn.clicked.connect(self._generate_invoices)
         self.clear_btn = QPushButton("초기화")
         self.clear_btn.clicked.connect(self._clear)
-        btn_layout.addWidget(self.mapping_btn)
         btn_layout.addStretch()
         btn_layout.addWidget(self.generate_btn)
         btn_layout.addWidget(self.clear_btn)
