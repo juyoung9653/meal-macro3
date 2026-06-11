@@ -9,6 +9,8 @@ Persistence separation:
   Use SettingsManager for anything that should survive a settings reset.
 """
 
+from __future__ import annotations
+
 import copy
 import json
 import os
@@ -203,6 +205,105 @@ class SettingsManager:
                 node[k] = {}
             node = node[k]
         node[keys[-1]] = value
+
+    # ── Typed accessors ──
+
+    def get_app_title(self) -> str:
+        return str(self.get("app", "title", default="급식비 정산 프로그램"))
+
+    def get_app_organization(self) -> str:
+        return str(self.get("app", "organization", default="분당구"))
+
+    def get_app_window_size(self) -> tuple[int, int]:
+        return (
+            int(self.get("app", "window_width", default=1000)),
+            int(self.get("app", "window_height", default=700)),
+        )
+
+    def get_invoice_template_path(self) -> str:
+        return str(
+            self.get("templates", "invoice_path", default="assets/청구서템플릿.xlsx")
+        )
+
+    def get_confirm_template_path(self) -> str:
+        return str(
+            self.get("templates", "confirm_path", default="assets/확인서템플릿.xlsx")
+        )
+
+    def get_template_sheet_name(self) -> str:
+        return str(self.get("templates", "sheet_name", default="학기_총괄"))
+
+    def get_data_start_row(self) -> int:
+        return int(self.get("templates", "data_start_row", default=4))
+
+    def get_data_columns(self) -> int:
+        return int(self.get("templates", "data_columns", default=11))
+
+    def get_confirm_sheet_names(self) -> list[str]:
+        return list(
+            self.get(
+                "templates",
+                "confirm_sheet_names",
+                default=["1명", "2명", "3명", "4명", "5명"],
+            )
+        )
+
+    def get_schedule_days(self, meal_type: str) -> set[int]:
+        """배송 요일 설정 조회. meal_type: 'breakfast', 'dinner', 'lunch' (또는 'breakfast_days' 등)"""
+        key = f"{meal_type}_days" if "_days" not in meal_type else meal_type
+        return set(self.get("schedule", key, default=[]))
+
+    def get_roster_name_keywords(self) -> list[str]:
+        return list(
+            self.get(
+                "roster",
+                "name_keywords",
+                default=["성명", "이름", "성함", "학생명", "학생", "name", "Name"],
+            )
+        )
+
+    def get_flag_fields(self) -> dict:
+        return dict(self.get("flag_fields", default={}))
+
+    def get_flag_search_terms(self) -> dict:
+        return dict(self.get("flag_search_terms", default={}))
+
+    def get_confirm_title_suffix(self) -> str:
+        return str(self.get("confirm", "title_suffix", default="분당구 급식확인서"))
+
+    def get_confirm_output_filename_format(self) -> str:
+        return str(
+            self.get(
+                "confirm",
+                "output_filename_format",
+                default="확인서_{year:04d}{month:02d}.xlsx",
+            )
+        )
+
+    def get_roster_example_path(self) -> str:
+        return str(
+            self.get("templates", "roster_example_path", default="assets/명단예시.xlsx")
+        )
+
+    def get_confirm_col_widths(self) -> dict[str, float]:
+        return {
+            "G": float(self.get("confirm", "col_width_g", default=12.5)),
+            "H": float(self.get("confirm", "col_width_h", default=12.5)),
+            "I": float(self.get("confirm", "col_width_i", default=12.5)),
+            "J": float(self.get("confirm", "col_width_j", default=12.5)),
+        }
+
+    def get_invoice_output_filename_format(self) -> str:
+        return str(
+            self.get(
+                "invoice",
+                "output_filename_format",
+                default="청구서_{year:04d}{month:02d}.xlsx",
+            )
+        )
+
+    def get_semantic_columns(self) -> dict:
+        return dict(self.get("semantic_columns", default={}))
 
     def get_all(self) -> dict:
         """전체 설정 dict 반환 (복사본)."""

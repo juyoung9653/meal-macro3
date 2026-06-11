@@ -82,14 +82,10 @@ def make_confirm(
 
     # 3. 템플릿 워크북 로드
     wb = openpyxl.load_workbook(template_path)
-    data_cols = s.get("templates", "data_columns", default=11)
+    data_cols = s.get_data_columns()
 
     # 플레이스홀더 위치 스캔 (mtime + 파일 캐시)
-    tpl_sheet_names = s.get(
-        "templates",
-        "confirm_sheet_names",
-        default=["1명", "2명", "3명", "4명", "5명"],
-    )
+    tpl_sheet_names = s.get_confirm_sheet_names()
     all_placeholders = scan_placeholders(
         template_path,
         tpl_sheet_names,
@@ -173,12 +169,7 @@ def make_confirm(
                         ws.column_dimensions[col_letter].width = copy(
                             src.column_dimensions[col_letter].width
                         )
-                col_w_map = {
-                    "G": s.get("confirm", "col_width_g", default=12.5),
-                    "H": s.get("confirm", "col_width_h", default=12.5),
-                    "I": s.get("confirm", "col_width_i", default=12.5),
-                    "J": s.get("confirm", "col_width_j", default=12.5),
-                }
+                col_w_map = s.get_confirm_col_widths()
                 for cl, w_val in col_w_map.items():
                     ws.column_dimensions[cl].width = w_val
                 col_widths_set = True
@@ -220,7 +211,7 @@ def make_confirm(
             ph_map = all_placeholders.get(tpl_key, {})
 
             # 공통 정보 채움 (플레이스홀더 기반, tpl_anchor_map으로 O(1))
-            title_suffix = s.get("confirm", "title_suffix", default="분당구 급식확인서")
+            title_suffix = s.get_confirm_title_suffix()
             _set_ph(
                 ws,
                 ph_map,
@@ -337,21 +328,13 @@ def make_confirm(
         )
 
     # 4. 원본 템플릿 시트 제거
-    tpl_sheets = set(
-        s.get(
-            "templates",
-            "confirm_sheet_names",
-            default=["1명", "2명", "3명", "4명", "5명"],
-        )
-    )
+    tpl_sheets = set(s.get_confirm_sheet_names())
     for sn in list(wb.sheetnames):
         if sn in tpl_sheets:
             del wb[sn]
 
     # 5. 단일 파일 저장
-    fname_fmt = s.get(
-        "confirm", "output_filename_format", default="확인서_{year:04d}{month:02d}.xlsx"
-    )
+    fname_fmt = s.get_confirm_output_filename_format()
     fname = fname_fmt.format(year=year, month=month)
     out_path = os.path.join(output_dir, fname)
     wb.save(out_path)

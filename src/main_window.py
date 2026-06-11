@@ -20,9 +20,8 @@ class MainWindow(QMainWindow):
         self._setup_statusbar()
 
     def _setup_window(self):
-        self.setWindowTitle(self._s.get("app", "title", default="급식비 정산 프로그램"))
-        w = self._s.get("app", "window_width", default=1000)
-        h = self._s.get("app", "window_height", default=700)
+        self.setWindowTitle(self._s.get_app_title())
+        w, h = self._s.get_app_window_size()
         self.setMinimumSize(w, h)
         self.resize(w, h)
 

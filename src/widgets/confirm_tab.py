@@ -1,5 +1,3 @@
-from datetime import date
-
 from PyQt6.QtCore import QSettings, Qt
 from PyQt6.QtWidgets import (
     QComboBox,
@@ -28,17 +26,11 @@ class ConfirmTab(QWidget):
         super().__init__()
         self.confirms = []
         self.output_dir = None
-        self._invoices = []
-        self._col_mapping = {}
-        self._year = 2026
-        self._month = 6
-        self._excluded_dates: set[date] = set()
-        self._roster_headers: list[str] = []
-        self._roster_path = None
+        self._data = InvoiceData()
         self._per_file_mode = True
         self._s = get_settings()
-        org = self._s.get("app", "organization", default="분당구")
-        app_title = self._s.get("app", "title", default="급식비정산")
+        org = self._s.get_app_organization()
+        app_title = self._s.get_app_title()
         self._settings = QSettings(org, app_title)
         self._setup_ui()
         self._restore_state()
@@ -154,20 +146,20 @@ class ConfirmTab(QWidget):
             self.path_label.setText(raw)
             self.path_label.setStyleSheet("color: #000;")
 
-        # 배송담당자 컬럼/전화번호는 set_invoices()에서 복원 (콤보박스 채워진 후)
+        # 배송담당자 컬럼/전화번호는 set_invoice_data()에서 복원 (콤보박스 채워진 후)
 
     def _on_delivery_col_changed(self):
         """배송담당자 컬럼 변경 → 고유 이름 목록 테이블 갱신"""
         self._save_settings()
         col = self.delivery_col_combo.currentData()
-        if not col or not self._invoices:
+        if not col or not self._data.invoices:
             self.delivery_table.setRowCount(0)
             return
 
         # 고유 이름 추출 (비어있지 않은 값, 순서 유지)
         seen = set()
         unique_names = []
-        for inv in self._invoices:
+        for inv in self._data.invoices:
             val = str(inv.get(col, "")).strip()
             if val and val not in seen:
                 seen.add(val)
@@ -210,7 +202,7 @@ class ConfirmTab(QWidget):
         if not self.output_dir:
             QMessageBox.warning(self, "알림", "출력 경로를 먼저 선택하세요.")
             return
-        if not self._invoices:
+        if not self._data.invoices:
             QMessageBox.warning(
                 self, "알림", "청구서 데이터가 없습니다. 청구서 탭에서 먼저 생성하세요."
             )
@@ -223,9 +215,9 @@ class ConfirmTab(QWidget):
         # 첫 번째 고유명의 연락처를 대표값으로 사용
         delivery_person = ""
         delivery_phone = ""
-        if delivery_col and self._invoices:
+        if delivery_col and self._data.invoices:
             # 첫 번째 인보이스에서 배송담당자명 읽기
-            delivery_person = str(self._invoices[0].get(delivery_col, "")).strip()
+            delivery_person = str(self._data.invoices[0].get(delivery_col, "")).strip()
             if delivery_person in phone_map:
                 delivery_phone = phone_map[delivery_person]
             elif phone_map:
@@ -236,18 +228,16 @@ class ConfirmTab(QWidget):
             self._save_settings()
 
             self.confirms = make_confirm(
-                roster_data=self._invoices,
-                col_mapping=self._col_mapping,
+                roster_data=self._data.invoices,
+                col_mapping=self._data.col_mapping,
                 output_dir=self.output_dir,
-                template_path=self._s.get(
-                    "templates", "confirm_path", default="assets/확인서템플릿.xlsx"
-                ),
-                year=self._year,
-                month=self._month,
+                template_path=self._s.get_confirm_template_path(),
+                year=self._data.year,
+                month=self._data.month,
                 delivery_person=delivery_person,
                 delivery_phone=delivery_phone,
-                excluded_dates=self._excluded_dates.copy()
-                if self._excluded_dates
+                excluded_dates=self._data.excluded_dates.copy()
+                if self._data.excluded_dates
                 else None,
             )
             self._update_table()
@@ -280,13 +270,7 @@ class ConfirmTab(QWidget):
 
     def set_invoice_data(self, data: InvoiceData):
         """InvoiceData 객체로 모든 상태 한 번에 설정"""
-        self._invoices = data.invoices
-        if data.col_mapping:
-            self._col_mapping = data.col_mapping
-        self._year = data.year
-        self._month = data.month
-        self._excluded_dates = data.excluded_dates or set()
-        self._roster_path = data.roster_path
+        self._data = data
         self.generate_btn.setEnabled(bool(data.invoices))
 
         # 배송담당자 컬럼 콤보박스 채우기
@@ -316,32 +300,6 @@ class ConfirmTab(QWidget):
                 f"청구서 {len(data.invoices)}건 로드됨. 생성 버튼을 누르면 확인서를 만듭니다."
             )
 
-    def set_invoices(
-        self,
-        invoices: list[dict],
-        col_mapping: dict | None = None,
-        year: int = 2026,
-        month: int = 6,
-        excluded_dates: set[date] | None = None,
-        roster_headers: list[str] | None = None,
-        roster_path: str | None = None,
-    ):
-        """
-        Deprecated: use set_invoice_data() instead.
-        Kept for backward compatibility.
-        """
-        self.set_invoice_data(
-            InvoiceData(
-                invoices=invoices,
-                col_mapping=col_mapping or {},
-                year=year,
-                month=month,
-                excluded_dates=excluded_dates or set(),
-                roster_headers=roster_headers or [],
-                roster_path=roster_path,
-            )
-        )
-
     def _delivery_col_combo_update(self, roster_headers: list[str] | None = None):
         """콤보박스 아이템 채우기"""
         self.delivery_col_combo.blockSignals(True)
@@ -352,7 +310,7 @@ class ConfirmTab(QWidget):
         cols = (
             roster_headers
             if roster_headers
-            else (list(self._invoices[0].keys()) if self._invoices else [])
+            else (list(self._data.invoices[0].keys()) if self._data.invoices else [])
         )
         for c in cols:
             # 내부 키 제외
@@ -362,8 +320,8 @@ class ConfirmTab(QWidget):
         self.delivery_col_combo.blockSignals(False)
 
         # 기존 col_mapping에 배송담당 컬럼이 있으면 자동 선택
-        if self._col_mapping.get("roster_delivery_person_col"):
-            old = self._col_mapping["roster_delivery_person_col"]
+        if self._data.col_mapping.get("roster_delivery_person_col"):
+            old = self._data.col_mapping["roster_delivery_person_col"]
             idx = self.delivery_col_combo.findData(old)
             if idx >= 0:
                 self.delivery_col_combo.setCurrentIndex(idx)

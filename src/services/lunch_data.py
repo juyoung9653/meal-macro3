@@ -4,8 +4,12 @@ LunchSchoolEntry: 중식 명단의 학교별 방학 정보
 LunchRoster: 전체 중식 명단 데이터
 """
 
+import calendar as _cal
+import logging
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
+
+_log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -88,12 +92,6 @@ class LunchRoster:
         방학 배송 기간: 방학식+1일 ~ 개학식-1일.
         어느 한 학교라도 기간에 포함되면 True.
         """
-        import calendar as _cal
-        import logging
-        from datetime import timedelta
-
-        _log = logging.getLogger(__name__)
-
         last_day = _cal.monthrange(year, month)[1]
         month_start = date(year, month, 1)
         month_end = date(year, month, last_day)

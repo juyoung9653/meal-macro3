@@ -216,38 +216,32 @@ class SettingsDialog(QDialog):
 
     def _load_settings(self):
         s = self._s
-        self._win_w_spin.setValue(s.get("app", "window_width", default=1000))
-        self._win_h_spin.setValue(s.get("app", "window_height", default=700))
+        w, h = s.get_app_window_size()
+        self._win_w_spin.setValue(w)
+        self._win_h_spin.setValue(h)
 
-        self._invoice_tpl_edit.setText(s.get("templates", "invoice_path", default=""))
-        self._confirm_tpl_edit.setText(s.get("templates", "confirm_path", default=""))
-        self._sheet_name_edit.setText(s.get("templates", "sheet_name", default=""))
-        self._data_start_row_spin.setValue(
-            s.get("templates", "data_start_row", default=4)
-        )
-        self._data_cols_spin.setValue(s.get("templates", "data_columns", default=11))
-        for name in s.get("templates", "confirm_sheet_names", default=[]):
+        self._invoice_tpl_edit.setText(s.get_invoice_template_path())
+        self._confirm_tpl_edit.setText(s.get_confirm_template_path())
+        self._sheet_name_edit.setText(s.get_template_sheet_name())
+        self._data_start_row_spin.setValue(s.get_data_start_row())
+        self._data_cols_spin.setValue(s.get_data_columns())
+        for name in s.get_confirm_sheet_names():
             self._confirm_sheets_list.addItem(name)
 
         for meal_key in ["breakfast_days", "dinner_days", "lunch_days"]:
-            days = set(s.get("schedule", meal_key, default=[]))
+            days = s.get_schedule_days(meal_key)
             checks = getattr(self, f"_{meal_key}_checks", [])
             for cb in checks:
                 cb.setChecked(cb.property("day_idx") in days)
 
-        self._confirm_title_suffix_edit.setText(
-            s.get("confirm", "title_suffix", default="")
-        )
-        self._confirm_filename_edit.setText(
-            s.get("confirm", "output_filename_format", default="")
-        )
-        self._invoice_filename_edit.setText(
-            s.get("invoice", "output_filename_format", default="")
-        )
-        self._col_w_g_spin.setValue(s.get("confirm", "col_width_g", default=12.5))
-        self._col_w_h_spin.setValue(s.get("confirm", "col_width_h", default=12.5))
-        self._col_w_i_spin.setValue(s.get("confirm", "col_width_i", default=12.5))
-        self._col_w_j_spin.setValue(s.get("confirm", "col_width_j", default=12.5))
+        self._confirm_title_suffix_edit.setText(s.get_confirm_title_suffix())
+        self._confirm_filename_edit.setText(s.get_confirm_output_filename_format())
+        self._invoice_filename_edit.setText(s.get_invoice_output_filename_format())
+        col_widths = s.get_confirm_col_widths()
+        self._col_w_g_spin.setValue(col_widths["G"])
+        self._col_w_h_spin.setValue(col_widths["H"])
+        self._col_w_i_spin.setValue(col_widths["I"])
+        self._col_w_j_spin.setValue(col_widths["J"])
 
     def _collect_settings(self):
         s = self._s

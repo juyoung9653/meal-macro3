@@ -4,111 +4,43 @@ Public API:
   - count_delivery_days(year, month, flags, note, excluded) -> dict
   - calc_weekly_breakdown(year, month, flags, note, excluded) -> list[dict]
   - to_bool(val) -> bool
-
+  - count_weekdays(year, month, dow_set, ...) -> int
+  - count_weekdays_in_range(start, end, dow_set, ...) -> int
+  - count_lunch_vacation_days(...) -> int
+  - count_lunch_vacation_days_with_note(...) -> int
 
 비고 파싱은 note_parser 모듈 위임.
+순수 요일/공휴일 계산은 schedule_counter 모듈 위임.
+방학 중식 계산은 vacation_calculator 모듈 위임.
 """
 
 import calendar
 import logging
 from datetime import date, timedelta
 
-from ..core.date_utils import FRI, MON, SAT, SUN, THU, TUE, WED, date_range
+from ..core.date_utils import SAT, SUN, date_range
 from ..core.meal_types import MEAL_KEYS, MealType
-from ..core.settings import get_settings
 from .holiday_fetcher import get_kr_holidays
 from .note_parser import apply_note_to_month, expand_note_dates
 
+# ── 임포트 + 재익스포트 (하위 호환 보장) ──────────────
+from .schedule_counter import (
+    _WEEKEND,
+    _get_schedule,
+    _is_holiday,
+    count_weekdays,
+    count_weekdays_in_range,
+    to_bool,
+)
+from .vacation_calculator import (
+    count_lunch_vacation_days,
+    count_lunch_vacation_days_with_note,
+)
+
 log = logging.getLogger(__name__)
-
-# ── 요일 alias (하위 호환) ──
-
-
-def _get_schedule():
-    """설정에서 배송 스케줄 로드."""
-    s = get_settings()
-    return {
-        MealType.BREAKFAST: set(s.get("schedule", "breakfast_days", default=[FRI])),
-        MealType.DINNER: set(
-            s.get("schedule", "dinner_days", default=[MON, TUE, WED, THU])
-        ),
-        MealType.LUNCH: set(
-            s.get("schedule", "lunch_days", default=[MON, TUE, WED, THU, FRI])
-        ),
-    }
-
-
-def _is_holiday(d: date) -> bool:
-    return d in get_kr_holidays(d.year)
-
-
-def count_weekdays(
-    year: int,
-    month: int,
-    dow_set: set[int],
-    excluded_dates: set[date] | None = None,
-    holiday_exempt_days: set[int] | None = None,
-) -> int:
-    """해당 월에서 특정 요일(dow_set)에 속하고 공휴일 아닌 날짜 수.
-    excluded_dates 제외. holiday_exempt_days 에 속한 요일은 공휴일 체크 생략."""
-    total = 0
-    last_day = calendar.monthrange(year, month)[1]
-    for day in range(1, last_day + 1):
-        d = date(year, month, day)
-        if d.weekday() not in dow_set:
-            continue
-        if not (
-            holiday_exempt_days and d.weekday() in holiday_exempt_days
-        ) and _is_holiday(d):
-            continue
-        if excluded_dates and d in excluded_dates:
-            continue
-        total += 1
-    return total
-
-
-def count_weekdays_in_range(
-    start: date,
-    end: date,
-    dow_set: set[int],
-    excluded_dates: set[date] | None = None,
-    holiday_exempt_days: set[int] | None = None,
-) -> int:
-    """기간 내 특정 요일 중 공휴일 아닌 날짜 수.
-    excluded_dates 제외. holiday_exempt_days 에 속한 요일은 공휴일 체크 생략."""
-    total = 0
-    d = start
-    while d <= end:
-        if d.weekday() not in dow_set:
-            d += timedelta(days=1)
-            continue
-        if not (
-            holiday_exempt_days and d.weekday() in holiday_exempt_days
-        ) and _is_holiday(d):
-            d += timedelta(days=1)
-            continue
-        if not (excluded_dates and d in excluded_dates):
-            total += 1
-        d += timedelta(days=1)
-    return total
-
-
-# ── 비고 파서 (note_parser 위임) ──
-# expand_note_dates, apply_note_to_month 는 note_parser 모듈에서 import
-
-
-def to_bool(val) -> bool:
-    if isinstance(val, (int, float)):
-        return val > 0
-    if isinstance(val, str):
-        return val.strip() in ("1", "1.0", "Y", "y", "예", "있음")
-    return bool(val)
 
 
 # ── 배송일 수 계산 (note_parser 기반) ──
-
-# 조식: 주말(토·일)은 공휴일이어도 금요일 배송분으로 간주 → 공휴일 체크 생략
-_WEEKEND = {SAT, SUN}
 
 
 def count_delivery_days(
@@ -303,150 +235,3 @@ def calc_weekly_breakdown(
             }
         )
     return result
-
-
-# ── 중식 방학 기간 배송일 계산 ──────────────────────
-
-
-def count_lunch_vacation_days(
-    year: int,
-    month: int,
-    vacation_date: date | None,
-    opening_date: date | None,
-    vacation_meal: bool,
-    opening_meal: bool,
-    excluded_dates: set[date] | None = None,
-) -> int:
-    """중식 방학 기간 중 해당 월의 배송일 수 계산.
-
-    규칙:
-      - 방학식 급식 제공: 방학일 다음날부터 배송
-      - 개학식 급식 제공: 개학일 전날까지 배송
-      - 둘 다 O: 방학+1 ~ 개학-1
-      - 둘 다 X: 0
-
-    배송 요일: 월~금 (lunch_days). 공휴일/제외일 제외.
-    """
-    if not vacation_meal and not opening_meal:
-        return 0
-
-    last_day = calendar.monthrange(year, month)[1]
-    month_start = date(year, month, 1)
-    month_end = date(year, month, last_day)
-    holidays = get_kr_holidays(year)
-    blocked = set(holidays) | (excluded_dates or set())
-    schedule = _get_schedule()[MealType.LUNCH]
-
-    # ── 배송 기간 결정 ──
-    effective_start: date | None = None
-    effective_end: date | None = None
-
-    if vacation_meal and vacation_date:
-        effective_start = vacation_date + timedelta(days=1)
-
-    if opening_meal and opening_date:
-        effective_end = opening_date - timedelta(days=1)
-
-    # 기간 보정
-    if effective_start is None:
-        effective_start = month_start
-    if effective_end is None:
-        effective_end = month_end
-
-    # 월과 교차
-    if effective_start > month_end or effective_end < month_start:
-        return 0
-
-    range_start = max(effective_start, month_start)
-    range_end = min(effective_end, month_end)
-
-    # ── 배송일 카운트 ──
-    total = 0
-    d = range_start
-    while d <= range_end:
-        if d.weekday() in schedule and d not in blocked:
-            total += 1
-        d += timedelta(days=1)
-
-    return total
-
-
-def count_lunch_vacation_days_with_note(
-    year: int,
-    month: int,
-    entry,  # LunchSchoolEntry
-    grade: int = 0,
-    excluded_dates: set[date] | None = None,
-) -> int:
-    """중식 방학 기간 배송일 수 계산 (비고에 따른 학년 제외 적용).
-
-    entry: LunchSchoolEntry (방학/개학 일정 + 파싱된 비고)
-    grade: 학생 학년 (0 → 학년 정보 없음, 제외 로직 무시)
-    """
-    vacation_meal = entry.vacation_meal
-    opening_meal = entry.opening_meal
-
-    # ── 학년 제외 적용 ──
-    if grade > 0:
-        # 전학년 제외
-        if entry.all_grades_excluded_vacation:
-            vacation_meal = False
-        elif grade in entry.excluded_grades_vacation:
-            vacation_meal = False
-
-        if entry.all_grades_excluded_opening:
-            opening_meal = False
-        elif grade in entry.excluded_grades_opening:
-            opening_meal = False
-
-    # ── 기본 배송일 계산 ──
-    base_days = count_lunch_vacation_days(
-        year,
-        month,
-        entry.vacation_date,
-        entry.opening_date,
-        vacation_meal,
-        opening_meal,
-        excluded_dates,
-    )
-
-    # ── 특수 일정 적용 ──
-    if entry.special_schedules:
-        for sched in entry.special_schedules:
-            sched_start = sched.get("start")
-            sched_end = sched.get("end")
-            meals_provided = sched.get("meals", True)
-            if not sched_start or not sched_end:
-                continue
-
-            # 월과 교차
-            last_day = calendar.monthrange(year, month)[1]
-            month_start = date(year, month, 1)
-            month_end = date(year, month, last_day)
-
-            if sched_start > month_end or sched_end < month_start:
-                continue
-
-            r_start = max(sched_start, month_start)
-            r_end = min(sched_end, month_end)
-
-            schedule = _get_schedule()[MealType.LUNCH]
-            holidays = get_kr_holidays(year)
-            blocked = set(holidays) | (excluded_dates or set())
-
-            if meals_provided:
-                # 급식 제공 → 해당 기간에 배송일 추가
-                d = r_start
-                while d <= r_end:
-                    if d.weekday() in schedule and d not in blocked:
-                        base_days += 1
-                    d += timedelta(days=1)
-            else:
-                # 미급식 → 해당 기간에 배송일 제외
-                d = r_start
-                while d <= r_end:
-                    if d.weekday() in schedule and d not in blocked:
-                        base_days = max(0, base_days - 1)
-                    d += timedelta(days=1)
-
-    return base_days

@@ -45,21 +45,19 @@ class InvoiceTab(QWidget):
     def __init__(self):
         super().__init__()
         self._s = get_settings()
-        self._template_path = self._s.get(
-            "templates", "invoice_path", default="assets/청구서템플릿.xlsx"
-        )
+        self._template_path = self._s.get_invoice_template_path()
         self._template_columns = read_template_columns(self._template_path)
         self._controller = InvoiceController(self, self._template_columns)
         self._loader = RosterLoader(self)
-        org = self._s.get("app", "organization", default="분당구")
-        app_title = self._s.get("app", "title", default="급식비정산")
+        org = self._s.get_app_organization()
+        app_title = self._s.get_app_title()
         self._settings = QSettings(org, app_title)
         self._lunch_enabled = False
         self._lunch_roster: LunchRoster | None = None
         self._lunch_mapping: dict = {}
         self._lunch_file_path: str = ""
         self._setup_ui()
-        self._restore_state()
+        self._restore_ui_state()
         self._load_default_excluded_dates()
 
     # ── UI ──
@@ -213,8 +211,8 @@ class InvoiceTab(QWidget):
             result = self._loader.load(path)
             if result:
                 headers, data = result
-                self._controller.roster_headers = headers
-                self._controller.roster_path = path
+                self._controller.set_roster_headers(headers)
+                self._controller.set_roster_path(path)
                 self.file_label.setText(os.path.basename(path))
                 self.file_label.setStyleSheet("color: #000;")
                 self._settings.setValue("roster/last_path", path)
@@ -258,7 +256,7 @@ class InvoiceTab(QWidget):
         # 중식 명단 전용 로딩 (RosterLoader는 이름 필터가 있어서 적합하지 않음)
         lunch_headers, lunch_data = _load_lunch_file(self._lunch_file_path)
 
-        roster_headers = self._controller.roster_headers or []
+        roster_headers = self._controller.get_roster_headers() or []
         dlg = LunchMappingDialog(lunch_headers, roster_headers, self)
 
         saved = self._settings.value("lunch/col_mapping", None)
@@ -272,50 +270,13 @@ class InvoiceTab(QWidget):
 
         self._lunch_mapping = dlg.get_values()
 
-        lunch_school_col = self._lunch_mapping.get("lunch_school_name", "")
-        lunch_vac_date_col = self._lunch_mapping.get("lunch_vacation_date", "")
-        lunch_open_date_col = self._lunch_mapping.get("lunch_opening_date", "")
-        lunch_vac_meal_col = self._lunch_mapping.get("lunch_vacation_meal", "")
-        lunch_open_meal_col = self._lunch_mapping.get("lunch_opening_meal", "")
-        lunch_note_col = self._lunch_mapping.get("lunch_note", "")
-
-        roster = LunchRoster(headers=lunch_headers, file_path=self._lunch_file_path)
-
-        for row in lunch_data:
-            school_name = str(row.get(lunch_school_col, "")).strip()
-            if not school_name or school_name in ("학교명", "구분"):
-                continue
-
-            vac_date_str = row.get(lunch_vac_date_col, "")
-            open_date_str = row.get(lunch_open_date_col, "")
-
-            vac_date = _parse_lunch_date(vac_date_str)
-            open_date = _parse_lunch_date(open_date_str)
-
-            vac_meal = parse_lunch_boolean(row.get(lunch_vac_meal_col, ""))
-            open_meal = parse_lunch_boolean(row.get(lunch_open_meal_col, ""))
-
-            note_raw = str(row.get(lunch_note_col, "")).strip()
-            if note_raw in (" ", "비고", ""):
-                note_raw = ""
-
-            type_from_first = str(
-                row.get(lunch_headers[0] if lunch_headers else "", "")
-            ).strip()
-
-            entry = LunchSchoolEntry(
-                school_name=school_name,
-                school_type=type_from_first,
-                vacation_date=vac_date,
-                opening_date=open_date,
-                vacation_meal=vac_meal,
-                opening_meal=open_meal,
-                note_raw=note_raw,
-            )
-
-            ref_year = self.year_spin.value()
-            parse_lunch_note(entry, ref_year)
-            roster.entries.append(entry)
+        roster = _build_lunch_roster(
+            lunch_headers,
+            lunch_data,
+            self._lunch_mapping,
+            self._lunch_file_path,
+            self.year_spin.value(),
+        )
 
         self._lunch_roster = roster
         self._controller.set_lunch_roster(
@@ -354,59 +315,13 @@ class InvoiceTab(QWidget):
             log.warning("[Lunch] 재로드 실패: 헤더 없음")
             return
 
-        lunch_school_col = self._lunch_mapping.get("lunch_school_name", "")
-        lunch_vac_date_col = self._lunch_mapping.get("lunch_vacation_date", "")
-        lunch_open_date_col = self._lunch_mapping.get("lunch_opening_date", "")
-        lunch_vac_meal_col = self._lunch_mapping.get("lunch_vacation_meal", "")
-        lunch_open_meal_col = self._lunch_mapping.get("lunch_opening_meal", "")
-        lunch_note_col = self._lunch_mapping.get("lunch_note", "")
-
-        roster = LunchRoster(headers=lunch_headers, file_path=self._lunch_file_path)
-
-        for row in lunch_data:
-            school_name = str(row.get(lunch_school_col, "")).strip()
-            if not school_name or school_name in ("학교명", "구분"):
-                continue
-
-            vac_date_str = row.get(lunch_vac_date_col, "")
-            open_date_str = row.get(lunch_open_date_col, "")
-
-            vac_date = _parse_lunch_date(vac_date_str)
-            open_date = _parse_lunch_date(open_date_str)
-
-            vac_meal = parse_lunch_boolean(row.get(lunch_vac_meal_col, ""))
-            open_meal = parse_lunch_boolean(row.get(lunch_open_meal_col, ""))
-
-            note_raw = str(row.get(lunch_note_col, "")).strip()
-            if note_raw in (" ", "비고", ""):
-                note_raw = ""
-
-            type_from_first = str(
-                row.get(lunch_headers[0] if lunch_headers else "", "")
-            ).strip()
-
-            entry = LunchSchoolEntry(
-                school_name=school_name,
-                school_type=type_from_first,
-                vacation_date=vac_date,
-                opening_date=open_date,
-                vacation_meal=vac_meal,
-                opening_meal=open_meal,
-                note_raw=note_raw,
-            )
-
-            ref_year = self.year_spin.value()
-            parse_lunch_note(entry, ref_year)
-            roster.entries.append(entry)
-
-            log.debug(
-                "[Lunch] %s: vac=%s open=%s v_meal=%s o_meal=%s",
-                school_name,
-                vac_date,
-                open_date,
-                vac_meal,
-                open_meal,
-            )
+        roster = _build_lunch_roster(
+            lunch_headers,
+            lunch_data,
+            self._lunch_mapping,
+            self._lunch_file_path,
+            self.year_spin.value(),
+        )
 
         self._lunch_roster = roster
         self._controller.set_lunch_roster(
@@ -420,21 +335,8 @@ class InvoiceTab(QWidget):
 
     # ── 설정 저장/복원 ──
 
-    def _restore_state(self):
-        # 마지막 명단 경로 복원
-        last = self._settings.value("roster/last_path", "")
-        if last and os.path.exists(last):
-            self._controller.roster_path = last
-            self.file_label.setText(os.path.basename(last))
-            self.file_label.setStyleSheet("color: #000;")
-            result = self._loader.load(last)
-            if result:
-                headers, data = result
-                self._controller.roster_headers = headers
-                has = bool(data)
-                self.mapping_btn.setEnabled(has)
-                self.generate_btn.setEnabled(has)
-
+    def _restore_ui_state(self):
+        """복원 UI 상태 (I/O 없음, 위젯 생성 중 호출 가능)."""
         # 출력 경로 복원
         out = self._settings.value("invoice/output_dir", "")
         if out:
@@ -452,14 +354,19 @@ class InvoiceTab(QWidget):
         # 컬럼 매핑
         mapping = self._settings.value("invoice/col_mapping", None)
         if mapping is not None:
-            self._controller._col_mapping = {
-                k: mapping.get(k, v) for k, v in self._controller._col_mapping.items()
-            }
+            self._controller.set_col_mapping(
+                {
+                    k: mapping.get(k, v)
+                    for k, v in self._controller.get_col_mapping().items()
+                }
+            )
 
         # 제외일
         excluded = self._settings.value("invoice/excluded_dates", None)
         if excluded is not None and isinstance(excluded, list):
-            self._controller._excluded_dates = {date.fromisoformat(s) for s in excluded}
+            self._controller.set_excluded_dates(
+                {date.fromisoformat(s) for s in excluded}
+            )
             self._update_exclude_label()
 
         # 연월
@@ -487,7 +394,7 @@ class InvoiceTab(QWidget):
         self.dinner_price.blockSignals(False)
         self.lunch_price.blockSignals(False)
 
-        # 중식 매핑 복원 + 자동 재로드
+        # 중식 매핑/경로 복원 (로드는 post_init_load 에서)
         lunch_mapping = self._settings.value("lunch/col_mapping", None)
         if lunch_mapping and isinstance(lunch_mapping, dict):
             self._lunch_mapping = lunch_mapping
@@ -498,11 +405,32 @@ class InvoiceTab(QWidget):
             self.lunch_file_label.setText(os.path.basename(lunch_file))
             self.lunch_file_label.setStyleSheet("color: #000;")
             self.lunch_mapping_btn.setEnabled(True)
-            # 자동으로 중식명단 재로드 (매핑 정보 있으면)
-            if lunch_mapping and isinstance(lunch_mapping, dict):
-                self._reload_lunch_roster()
 
         self._save_settings()
+
+    def _try_auto_load_roster(self):
+        """저장된 명단 자동 로드 (I/O 가능, 생성 후 호출)."""
+        last = self._settings.value("roster/last_path", "")
+        if last and os.path.exists(last):
+            self._controller.set_roster_path(last)
+            self.file_label.setText(os.path.basename(last))
+            self.file_label.setStyleSheet("color: #000;")
+            result = self._loader.load(last)
+            if result:
+                headers, data = result
+                self._controller.set_roster_headers(headers)
+                has = bool(data)
+                self.mapping_btn.setEnabled(has)
+                self.generate_btn.setEnabled(has)
+
+        # 중식명단 자동 재로드
+        lunch_mapping = self._settings.value("lunch/col_mapping", None)
+        if lunch_mapping and isinstance(lunch_mapping, dict):
+            self._reload_lunch_roster()
+
+    def post_init_load(self):
+        """생성 후 I/O 로드. MainWindow show() 후 호출."""
+        self._try_auto_load_roster()
 
     def _save_settings(self):
         self._settings.setValue("invoice/year", self.year_spin.value())
@@ -510,10 +438,12 @@ class InvoiceTab(QWidget):
         self._settings.setValue("invoice/breakfast_price", self.breakfast_price.value())
         self._settings.setValue("invoice/dinner_price", self.dinner_price.value())
         self._settings.setValue("invoice/lunch_price", self.lunch_price.value())
-        self._settings.setValue("invoice/col_mapping", self._controller._col_mapping)
+        self._settings.setValue(
+            "invoice/col_mapping", self._controller.get_col_mapping()
+        )
         self._settings.setValue(
             "invoice/excluded_dates",
-            [d.isoformat() for d in self._controller._excluded_dates],
+            [d.isoformat() for d in self._controller.get_excluded_dates()],
         )
         if self._controller.output_dir:
             self._settings.setValue("invoice/output_dir", self._controller.output_dir)
@@ -529,23 +459,24 @@ class InvoiceTab(QWidget):
             self._settings.sync()
 
     def _open_mapping(self):
-        if not self._controller.roster_headers:
+        if not self._controller.get_roster_headers():
             QMessageBox.warning(self, "알림", "먼저 명단 파일을 불러오세요.")
             return
         dlg = MappingDialog(
-            self._controller.roster_headers, self._template_columns, self
+            self._controller.get_roster_headers(), self._template_columns, self
         )
-        dlg.set_values(self._controller._col_mapping)
+        dlg.set_values(self._controller.get_col_mapping())
         if not any(
             v
-            for k, v in self._controller._col_mapping.items()
+            for k, v in self._controller.get_col_mapping().items()
             if k in self._template_columns
         ):
             dlg._reset_defaults()
         if dlg.exec():
-            self._controller._col_mapping = dlg.get_values()
+            mapping = dlg.get_values()
             _sem = auto_detect_semantic_columns(self._template_columns)
-            self._controller._col_mapping.update(_sem)
+            mapping.update(_sem)
+            self._controller.set_col_mapping(mapping)
             self._save_settings()
             self.update()
 
@@ -558,12 +489,11 @@ class InvoiceTab(QWidget):
         y = self.year_spin.value()
         m = self.month_spin.value()
 
-        temp_excluded = {d for d in self._controller._excluded_dates if d.weekday() < 5}
+        temp_excluded = {
+            d for d in self._controller.get_excluded_dates() if d.weekday() < 5
+        }
         last_day = calendar.monthrange(y, m)[1]
-        for day in range(1, last_day + 1):
-            d = date(y, m, day)
-            if d in get_kr_holidays(y) and d.weekday() < 5:
-                temp_excluded.add(d)
+        # 공휴일은 _load_default_excluded_dates() 에서 이미 추가됨 — 중복 제거
 
         cal = QCalendarWidget()
         cal.setGridVisible(True)
@@ -628,17 +558,17 @@ class InvoiceTab(QWidget):
         layout.addLayout(btn_layout)
 
         dlg.exec()
-        self._controller._excluded_dates = temp_excluded
+        self._controller.set_excluded_dates(temp_excluded)
         self._update_exclude_label()
         self._save_settings()
 
     def _update_exclude_label(self):
-        if not self._controller._excluded_dates:
+        if not self._controller.get_excluded_dates():
             self.exclude_label.setText("선택된 제외일 없음")
             self.exclude_label.setStyleSheet("color: #888;")
         else:
             parts = []
-            for d in sorted(self._controller._excluded_dates):
+            for d in sorted(self._controller.get_excluded_dates()):
                 parts.append(
                     f"{d.month:02d}/{d.day:02d} ({['월', '화', '수', '목', '금', '토', '일'][d.weekday()]})"
                 )
@@ -651,11 +581,11 @@ class InvoiceTab(QWidget):
         for day in range(1, calendar.monthrange(y, m)[1] + 1):
             d = date(y, m, day)
             if d in get_kr_holidays(y) and d.weekday() < 5:
-                self._controller._excluded_dates.add(d)
+                self._controller.add_excluded_date(d)
         self._update_exclude_label()
 
     def _reload_excluded_dates(self):
-        self._controller._excluded_dates.clear()
+        self._controller.clear_excluded_dates()
         self._load_default_excluded_dates()
 
     # ── 청구서 생성 ──
@@ -669,11 +599,9 @@ class InvoiceTab(QWidget):
         month = self.month_spin.value()
         self._save_settings()
 
-        fname = self._s.get(
-            "invoice",
-            "output_filename_format",
-            default="청구서_{year:04d}{month:02d}.xlsx",
-        ).format(year=year, month=month)
+        fname = self._s.get_invoice_output_filename_format().format(
+            year=year, month=month
+        )
         out = os.path.join(self._controller.output_dir, fname)
 
         success, cnt, enriched = self._controller.generate(
@@ -819,6 +747,72 @@ def _load_lunch_file(file_path: str) -> tuple[list[str], list[dict]] | None:
         data.append(entry)
 
     return headers, data
+
+
+def _build_lunch_roster(
+    lunch_headers: list[str],
+    lunch_data: list[dict],
+    lunch_mapping: dict,
+    lunch_file_path: str,
+    ref_year: int,
+) -> LunchRoster:
+    """중식 명단 데이터 → LunchRoster 생성 (공통 헬퍼).
+
+    _open_lunch_mapping()과 _reload_lunch_roster()에서 중복 코드 제거.
+    """
+    lunch_school_col = lunch_mapping.get("lunch_school_name", "")
+    lunch_vac_date_col = lunch_mapping.get("lunch_vacation_date", "")
+    lunch_open_date_col = lunch_mapping.get("lunch_opening_date", "")
+    lunch_vac_meal_col = lunch_mapping.get("lunch_vacation_meal", "")
+    lunch_open_meal_col = lunch_mapping.get("lunch_opening_meal", "")
+    lunch_note_col = lunch_mapping.get("lunch_note", "")
+
+    roster = LunchRoster(headers=lunch_headers, file_path=lunch_file_path)
+    for row in lunch_data:
+        school_name = str(row.get(lunch_school_col, "")).strip()
+        if not school_name or school_name in ("학교명", "구분"):
+            continue
+
+        vac_date_str = row.get(lunch_vac_date_col, "")
+        open_date_str = row.get(lunch_open_date_col, "")
+
+        vac_date = _parse_lunch_date(vac_date_str)
+        open_date = _parse_lunch_date(open_date_str)
+
+        vac_meal = parse_lunch_boolean(row.get(lunch_vac_meal_col, ""))
+        open_meal = parse_lunch_boolean(row.get(lunch_open_meal_col, ""))
+
+        note_raw = str(row.get(lunch_note_col, "")).strip()
+        if note_raw in (" ", "비고", ""):
+            note_raw = ""
+
+        type_from_first = str(
+            row.get(lunch_headers[0] if lunch_headers else "", "")
+        ).strip()
+
+        entry = LunchSchoolEntry(
+            school_name=school_name,
+            school_type=type_from_first,
+            vacation_date=vac_date,
+            opening_date=open_date,
+            vacation_meal=vac_meal,
+            opening_meal=open_meal,
+            note_raw=note_raw,
+        )
+
+        parse_lunch_note(entry, ref_year)
+        roster.entries.append(entry)
+
+        log.debug(
+            "[Lunch] %s: vac=%s open=%s v_meal=%s o_meal=%s",
+            school_name,
+            vac_date,
+            open_date,
+            vac_meal,
+            open_meal,
+        )
+
+    return roster
 
 
 def _parse_lunch_date(val) -> date | None:

@@ -10,9 +10,7 @@ from datetime import date
 
 import openpyxl
 
-from ..core.meal_types import MEAL_KEYS
 from ..excel.excel_utils import CENTER_ALIGN, adjust_formula, copy_style
-from ..services.delivery_calculator import count_delivery_days, to_bool
 from ..templates.config import (
     col_name_to_index,
     get_template_data_start_row,
@@ -129,28 +127,9 @@ def _fill_invoice_sheet(
     written_cols: set[int] = set()
 
     for i, person in enumerate(people):
-        flags = {k: to_bool(person.get(f"_{k}", 0)) for k in MEAL_KEYS}
-        note_text = person.get("_note", "")
-
-        # ── 중식 배송일: _lunch_days override 우선 ──
-        lunch_days_override = person.get("_lunch_days", None)
-        lunch_flag_for_calc = flags["lunch"] and lunch_days_override is None
-
-        days = count_delivery_days(
-            year,
-            month,
-            flags["breakfast"],
-            flags["dinner"],
-            lunch_flag_for_calc,
-            note_text,
-            excluded_dates,
-        )
-
-        breakfast_cnt, dinner_cnt, lunch_cnt = (
-            days["breakfast"],
-            days["dinner"],
-            days["lunch"] if lunch_days_override is None else lunch_days_override,
-        )
+        breakfast_cnt = person.get("_bf_cnt", 0)
+        dinner_cnt = person.get("_dn_cnt", 0)
+        lunch_cnt = person.get("_lh_cnt", 0)
 
         row_data = _map_person_to_row(person, col_mapping, i + 1, template_columns)
 
@@ -283,37 +262,13 @@ def make_invoice(
     wb = openpyxl.load_workbook(template_path)
 
     # ── 실제 배송 건수 사전 계산 (플래그만 보지 않고 비고/제외일 반영) ──
-    n = len(roster_data)
-    bf_cnt = [0] * n
-    dn_cnt = [0] * n
-    lh_cnt = [0] * n
-    for i, p in enumerate(roster_data):
-        flags = {k: to_bool(p.get(f"_{k}", 0)) for k in MEAL_KEYS}
-        note_text = p.get("_note", "")
-
-        lunch_days_override = p.get("_lunch_days", None)
-        lunch_flag_for_calc = flags["lunch"] and lunch_days_override is None
-
-        days = count_delivery_days(
-            year,
-            month,
-            flags["breakfast"],
-            flags["dinner"],
-            lunch_flag_for_calc,
-            note_text,
-            excluded_dates,
-        )
-        bf_cnt[i] = days["breakfast"]
-        dn_cnt[i] = days["dinner"]
-        lh_cnt[i] = (
-            days["lunch"] if lunch_days_override is None else lunch_days_override
-        )
+    for p in roster_data:
         log.debug(
             "[Split] %s: bf=%d dn=%d lh=%d",
             p.get("성명", "?"),
-            bf_cnt[i],
-            dn_cnt[i],
-            lh_cnt[i],
+            p.get("_bf_cnt", 0),
+            p.get("_dn_cnt", 0),
+            p.get("_lh_cnt", 0),
         )
 
     if has_any_vacation:
@@ -322,13 +277,15 @@ def make_invoice(
         #    방중:   중식 실제 배송 건수 > 0 인원만
         #    총괄:   학기중 ∪ 방중 (합집합, 자동으로 셋 다 0이면 제외)
         school_people = [
-            roster_data[i] for i in range(n) if bf_cnt[i] > 0 or dn_cnt[i] > 0
+            p for p in roster_data if p.get("_bf_cnt", 0) > 0 or p.get("_dn_cnt", 0) > 0
         ]
-        vac_people = [roster_data[i] for i in range(n) if lh_cnt[i] > 0]
+        vac_people = [p for p in roster_data if p.get("_lh_cnt", 0) > 0]
         union_people = [
-            roster_data[i]
-            for i in range(n)
-            if bf_cnt[i] > 0 or dn_cnt[i] > 0 or lh_cnt[i] > 0
+            p
+            for p in roster_data
+            if p.get("_bf_cnt", 0) > 0
+            or p.get("_dn_cnt", 0) > 0
+            or p.get("_lh_cnt", 0) > 0
         ]
 
         _fill_invoice_sheet(
@@ -375,9 +332,11 @@ def make_invoice(
     else:
         # ── 일반 월: 아무 식사라도 실제 배송 건수 > 0 인원만 ──
         active_people = [
-            roster_data[i]
-            for i in range(n)
-            if bf_cnt[i] > 0 or dn_cnt[i] > 0 or lh_cnt[i] > 0
+            p
+            for p in roster_data
+            if p.get("_bf_cnt", 0) > 0
+            or p.get("_dn_cnt", 0) > 0
+            or p.get("_lh_cnt", 0) > 0
         ]
         _fill_invoice_sheet(
             wb,
