@@ -94,6 +94,11 @@ class InvoiceController:
                     roster_schools.add(school_name)
             unmatched_schools = self._lunch_roster.get_unmatched_schools(roster_schools)
 
+            # ── 중식명단 기반 방학 월 판단 (경고 조건에 사용) ──
+            is_vacation_month = self._lunch_roster.is_vacation_month(year, month)
+        else:
+            is_vacation_month = False
+
         enriched: list[dict] = []
         for person in roster_data:
             val_y = str(person.get(y_key, "")) if y_key else ""
@@ -162,8 +167,8 @@ class InvoiceController:
             ep_dict["_lunch_days"] = lunch_days
             enriched.append(ep_dict)
 
-        # ── 중식 미매칭 학교 경고 ──
-        if lunch_warned:
+        # ── 중식 미매칭 학교 경고 (방학 기간에만 표시) ──
+        if lunch_warned and is_vacation_month:
             school_list = "\n".join(f"  • {s}" for s in sorted(lunch_warned))
             QMessageBox.warning(
                 self._parent,
@@ -186,12 +191,6 @@ class InvoiceController:
             _sem = auto_detect_semantic_columns(self._template_columns)
             col_mapping = {**self._col_mapping, **_sem}
 
-            # ── 중식명단 기반 방학 월 판단 ──
-            is_vacation_month = (
-                lunch_available
-                and self._lunch_roster is not None
-                and self._lunch_roster.is_vacation_month(year, month)
-            )
             log.info(
                 "[Invoice] lunch_available=%s is_vacation_month=%s",
                 lunch_available,

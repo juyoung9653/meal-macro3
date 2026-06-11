@@ -7,7 +7,7 @@ from src.core.settings import get_settings
 from src.main_window import MainWindow
 
 logging.basicConfig(
-    level=logging.NOTSET,
+    level=logging.WARN,
     format="%(levelname)s | %(name)s | %(message)s",
 )
 
