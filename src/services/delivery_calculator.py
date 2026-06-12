@@ -18,7 +18,7 @@ import calendar
 import logging
 from datetime import date, timedelta
 
-from ..core.date_utils import SAT, SUN, date_range
+from ..core.date_utils import FRI, SAT, SUN, date_range
 from ..core.meal_types import MEAL_KEYS, MealType
 from .holiday_fetcher import get_kr_holidays
 from .note_parser import apply_note_to_month, expand_note_dates
@@ -118,8 +118,13 @@ def count_delivery_days(
 
 
 def get_week_ranges(year: int, month: int) -> list[tuple[int, date, date]]:
-    """해당 월을 일(요일)~토(요일) 주차 단위로 분할."""
+    """해당 월을 일(요일)~토(요일) 주차 단위로 분할.
+
+    31일 월 + 금요일 시작 → 마지막 2주 병합 (6주→5주).
+    31일 월 + 토요일 시작 → 처음 2주 병합 (6주→5주).
+    """
     last_day = calendar.monthrange(year, month)[1]
+    first_wday = date(year, month, 1).weekday()
     weeks = []
     week_start = None
 
@@ -133,6 +138,22 @@ def get_week_ranges(year: int, month: int) -> list[tuple[int, date, date]]:
         if d.weekday() == SAT or day == last_day:
             weeks.append((len(weeks) + 1, week_start, d))
             week_start = None
+
+    # ── 31일 월 6주 보정 ──
+    if last_day == 31 and len(weeks) == 6:
+        if first_wday == FRI:
+            # 마지막 2주 병합: 5주차 시작 ~ 6주차 종료
+            w5 = weeks[-2]
+            w6 = weeks[-1]
+            weeks = weeks[:-2] + [(w5[0], w5[1], w6[2])]
+        elif first_wday == SAT:
+            # 처음 2주 병합: 1주차 시작 ~ 2주차 종료
+            w1 = weeks[0]
+            w2 = weeks[1]
+            weeks = [(w1[0], w1[1], w2[2])] + weeks[2:]
+
+    # ── 주차 번호 재부여 ──
+    weeks = [(i + 1, ws, we) for i, (_, ws, we) in enumerate(weeks)]
 
     return weeks
 

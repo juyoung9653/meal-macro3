@@ -12,6 +12,7 @@ from src.core.settings import SettingsManager
 from src.services.delivery_calculator import (
     count_delivery_days,
     count_weekdays,
+    get_week_ranges,
     to_bool,
 )
 
@@ -298,3 +299,62 @@ class TestCountDeliveryDays:
         assert result["lunch"] == 0
         assert result["breakfast"] == 0
         assert result["dinner"] == 0
+
+
+# ══════════════════════════════════════════════════════
+#  get_week_ranges
+# ══════════════════════════════════════════════════════
+
+
+class TestGetWeekRanges:
+    """Tests for week division logic."""
+
+    def test_normal_5_weeks(self):
+        """April 2025 (30 days, starts Tue) → 5 weeks."""
+        weeks = get_week_ranges(2025, 4)
+        assert len(weeks) == 5
+        # Week 1: 4/1(Tue) ~ 4/5(Sat)
+        assert weeks[0] == (1, date(2025, 4, 1), date(2025, 4, 5))
+        # Week 5: 4/27(Sun) ~ 4/30(Wed, last_day)
+        assert weeks[4] == (5, date(2025, 4, 27), date(2025, 4, 30))
+
+    def test_31days_friday_start_merge_last(self):
+        """May 2026 (31 days, starts Fri) → 5 weeks, last 2 merged.
+
+        Without fix: 6 weeks (w5: 5/24~5/30, w6: 5/31 alone).
+        With fix: 5 weeks (w5: 5/24~5/31 merged).
+        """
+        weeks = get_week_ranges(2026, 5)
+        assert len(weeks) == 5
+        # Week 1: 5/1(Fri) ~ 5/2(Sat)
+        assert weeks[0] == (1, date(2026, 5, 1), date(2026, 5, 2))
+        # Week 2-4 should be normal Sun-Sat weeks
+        # Week 5: merged 5/24(Sun) ~ 5/31(Sun)
+        assert weeks[4] == (5, date(2026, 5, 24), date(2026, 5, 31))
+
+    def test_31days_saturday_start_merge_first(self):
+        """August 2026 (31 days, starts Sat) → 5 weeks, first 2 merged.
+
+        Without fix: 6 weeks (w1: 8/1 alone, w2: 8/2~8/8).
+        With fix: 5 weeks (w1: 8/1~8/8 merged).
+        """
+        weeks = get_week_ranges(2026, 8)
+        assert len(weeks) == 5
+        # Week 1: merged 8/1(Sat) ~ 8/8(Sat)
+        assert weeks[0] == (1, date(2026, 8, 1), date(2026, 8, 8))
+        # Week 5: 8/30(Sun) ~ 8/31(Mon)
+        assert weeks[4] == (5, date(2026, 8, 30), date(2026, 8, 31))
+
+    def test_30days_no_merge(self):
+        """June 2026 (30 days, starts Mon) → 5 weeks, no merge needed."""
+        weeks = get_week_ranges(2026, 6)
+        assert len(weeks) == 5
+        # Week 1: 6/1(Mon) ~ 6/6(Sat)
+        assert weeks[0] == (1, date(2026, 6, 1), date(2026, 6, 6))
+
+    def test_28days_february(self):
+        """February 2026 (28 days, starts Sun) → 4 weeks."""
+        weeks = get_week_ranges(2026, 2)
+        assert len(weeks) == 4
+        # Week 4: 2/22(Sun) ~ 2/28(Sat)
+        assert weeks[3] == (4, date(2026, 2, 22), date(2026, 2, 28))

@@ -270,8 +270,17 @@ class ConfirmTab(QWidget):
         try:
             self._save_settings()
 
+            # 청구서에 실제 포함된 인원만 확인서 대상 (건수 0인 인원 제외)
+            active_invoices = [
+                p
+                for p in self._data.invoices
+                if p.get("_bf_cnt", 0) > 0
+                or p.get("_dn_cnt", 0) > 0
+                or p.get("_lh_cnt", 0) > 0
+            ]
+
             self.confirms = make_confirm(
-                roster_data=self._data.invoices,
+                roster_data=active_invoices,
                 col_mapping=self._data.col_mapping,
                 output_dir=self.output_dir,
                 template_path=self._s.get_confirm_template_path(),
