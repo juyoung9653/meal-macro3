@@ -230,6 +230,15 @@ def make_confirm(
                 )
             _set_ph(ws, ph_map, "addr", current_row, addr, tpl_anchor_map)
 
+            # ── 세대 비고(메모) 취합 ──
+            hh_notes: list[str] = []
+            for p in members:
+                nt = str(p.get("_note", "")).strip()
+                if nt and nt not in hh_notes:
+                    hh_notes.append(nt)
+            combined_note = "\n".join(hh_notes)
+            _set_ph(ws, ph_map, "memo", current_row, combined_note, tpl_anchor_map)
+
             # 각 아동별 채움 (플레이스홀더 기반)
             for ci, person in enumerate(members[:5]):
                 sheet_seq += 1
