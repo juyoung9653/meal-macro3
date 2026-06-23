@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from src.services.invoice_controller import (
+    InvoiceGenerationConfig,
     InvoiceResult,
     InvoiceService,
     InvoiceWarning,
@@ -80,18 +81,20 @@ class TestInvoiceServiceGenerate:
 
     def test_빈_명단(self, svc, mock_reader):
         result = svc.generate(
-            roster_data=[],
-            output_path="/tmp/test.xlsx",
-            year=2026,
-            month=6,
-            breakfast_price=9500,
-            dinner_price=9500,
-            lunch_price=9500,
-            template_path="/fake/tpl.xlsx",
-            col_mapping={},
-            excluded_dates=set(),
-            roster_headers=[],
-            template_columns=[],
+            InvoiceGenerationConfig(
+                roster_data=[],
+                output_path="/tmp/test.xlsx",
+                year=2026,
+                month=6,
+                breakfast_price=9500,
+                dinner_price=9500,
+                lunch_price=9500,
+                template_path="/fake/tpl.xlsx",
+                col_mapping={},
+                excluded_dates=set(),
+                roster_headers=[],
+                template_columns=[],
+            )
         )
         assert not result.success
         assert "명단 데이터" in (result.error or "")
@@ -113,29 +116,31 @@ class TestInvoiceServiceGenerate:
         }
 
         result = svc.generate(
-            roster_data=[
-                {
-                    "ID": "P001",
-                    "성명": "홍길동",
-                    "학교명": "분당초",
-                    "조식 여부": "1",
-                    "석식 여부": "0",
-                    "중식 여부": "0",
-                    "핸드폰": "010-1234",
-                    "도로명주소": "서울",
-                }
-            ],
-            output_path="/tmp/test.xlsx",
-            year=2026,
-            month=6,
-            breakfast_price=9500,
-            dinner_price=9500,
-            lunch_price=9500,
-            template_path="/fake/tpl.xlsx",
-            col_mapping={},
-            excluded_dates=set(),
-            roster_headers=["ID", "성명", "조식 여부"],
-            template_columns=["성명"],
+            InvoiceGenerationConfig(
+                roster_data=[
+                    {
+                        "ID": "P001",
+                        "성명": "홍길동",
+                        "학교명": "분당초",
+                        "조식 여부": "1",
+                        "석식 여부": "0",
+                        "중식 여부": "0",
+                        "핸드폰": "010-1234",
+                        "도로명주소": "서울",
+                    }
+                ],
+                output_path="/tmp/test.xlsx",
+                year=2026,
+                month=6,
+                breakfast_price=9500,
+                dinner_price=9500,
+                lunch_price=9500,
+                template_path="/fake/tpl.xlsx",
+                col_mapping={},
+                excluded_dates=set(),
+                roster_headers=["ID", "성명", "조식 여부"],
+                template_columns=["성명"],
+            )
         )
         assert result.success
         assert len(result.enriched) == 1
@@ -154,31 +159,33 @@ class TestInvoiceServiceGenerate:
         reader.build_order_map.return_value = {}
 
         result = svc.generate(
-            roster_data=[
-                {
-                    "ID": "P001",
-                    "성명": "홍길동",
-                    "학교명": "분당초",
-                    "조식 여부": "1",
-                    "석식 여부": "0",
-                    "중식 여부": "0",
-                    "핸드폰": "",
-                    "도로명주소": "",
-                }
-            ],
-            output_path="/tmp/test.xlsx",
-            year=2026,
-            month=6,
-            breakfast_price=9500,
-            dinner_price=9500,
-            lunch_price=9500,
-            template_path="/fake/tpl.xlsx",
-            col_mapping={},
-            excluded_dates={
-                date(2026, 6, 1)
-            },  # 제외일 있어도 무시 (배송전체 이미 반영)
-            roster_headers=["ID", "성명", "조식 여부"],
-            template_columns=["성명"],
+            InvoiceGenerationConfig(
+                roster_data=[
+                    {
+                        "ID": "P001",
+                        "성명": "홍길동",
+                        "학교명": "분당초",
+                        "조식 여부": "1",
+                        "석식 여부": "0",
+                        "중식 여부": "0",
+                        "핸드폰": "",
+                        "도로명주소": "",
+                    }
+                ],
+                output_path="/tmp/test.xlsx",
+                year=2026,
+                month=6,
+                breakfast_price=9500,
+                dinner_price=9500,
+                lunch_price=9500,
+                template_path="/fake/tpl.xlsx",
+                col_mapping={},
+                excluded_dates={
+                    date(2026, 6, 1)
+                },  # 제외일 있어도 무시 (배송전체 이미 반영)
+                roster_headers=["ID", "성명", "조식 여부"],
+                template_columns=["성명"],
+            )
         )
         assert result.success
         assert result.enriched[0]["_bf_cnt"] == 3  # 배송전체 그대로 3
@@ -193,29 +200,31 @@ class TestInvoiceServiceGenerate:
         reader.build_order_map.return_value = {}
 
         result = svc.generate(
-            roster_data=[
-                {
-                    "ID": "P001",
-                    "성명": "홍길동",
-                    "학교명": "분당초",
-                    "조식 여부": "0",
-                    "석식 여부": "0",
-                    "중식 여부": "0",
-                    "핸드폰": "",
-                    "도로명주소": "",
-                }
-            ],
-            output_path="/tmp/test.xlsx",
-            year=2026,
-            month=6,
-            breakfast_price=9500,
-            dinner_price=9500,
-            lunch_price=9500,
-            template_path="/fake/tpl.xlsx",
-            col_mapping={},
-            excluded_dates=set(),
-            roster_headers=["ID", "성명", "조식 여부"],
-            template_columns=["성명"],
+            InvoiceGenerationConfig(
+                roster_data=[
+                    {
+                        "ID": "P001",
+                        "성명": "홍길동",
+                        "학교명": "분당초",
+                        "조식 여부": "0",
+                        "석식 여부": "0",
+                        "중식 여부": "0",
+                        "핸드폰": "",
+                        "도로명주소": "",
+                    }
+                ],
+                output_path="/tmp/test.xlsx",
+                year=2026,
+                month=6,
+                breakfast_price=9500,
+                dinner_price=9500,
+                lunch_price=9500,
+                template_path="/fake/tpl.xlsx",
+                col_mapping={},
+                excluded_dates=set(),
+                roster_headers=["ID", "성명", "조식 여부"],
+                template_columns=["성명"],
+            )
         )
         assert result.success
         assert result.enriched[0]["_bf_cnt"] == 0
@@ -232,29 +241,31 @@ class TestInvoiceServiceGenerate:
         reader.build_order_map.return_value = {}
 
         result = svc.generate(
-            roster_data=[
-                {
-                    "ID": "P001",
-                    "성명": "홍길동",
-                    "학교명": "분당초",
-                    "조식 여부": "0",
-                    "석식 여부": "1",
-                    "중식 여부": "0",
-                    "핸드폰": "",
-                    "도로명주소": "",
-                }
-            ],
-            output_path="/fake/test.xlsx",
-            year=2026,
-            month=6,
-            breakfast_price=9500,
-            dinner_price=9500,
-            lunch_price=9500,
-            template_path="/fake/tpl.xlsx",
-            col_mapping={},
-            excluded_dates=set(),
-            roster_headers=["ID", "성명", "석식 여부"],
-            template_columns=["성명"],
+            InvoiceGenerationConfig(
+                roster_data=[
+                    {
+                        "ID": "P001",
+                        "성명": "홍길동",
+                        "학교명": "분당초",
+                        "조식 여부": "0",
+                        "석식 여부": "1",
+                        "중식 여부": "0",
+                        "핸드폰": "",
+                        "도로명주소": "",
+                    }
+                ],
+                output_path="/fake/test.xlsx",
+                year=2026,
+                month=6,
+                breakfast_price=9500,
+                dinner_price=9500,
+                lunch_price=9500,
+                template_path="/fake/tpl.xlsx",
+                col_mapping={},
+                excluded_dates=set(),
+                roster_headers=["ID", "성명", "석식 여부"],
+                template_columns=["성명"],
+            )
         )
         assert result.success
         assert result.enriched[0]["_dn_cnt"] == 5  # 석식2 + 석식_BOX3

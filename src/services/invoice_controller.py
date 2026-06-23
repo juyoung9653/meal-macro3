@@ -18,6 +18,25 @@ log = logging.getLogger(__name__)
 
 
 @dataclass
+class InvoiceGenerationConfig:
+    """Configuration for invoice generation."""
+
+    roster_data: list[dict]
+    template_path: str
+    output_path: str
+    year: int
+    month: int
+    breakfast_price: int = 9500
+    dinner_price: int = 9500
+    lunch_price: int = 9500
+    col_mapping: dict = field(default_factory=dict)
+    excluded_dates: set[date] = field(default_factory=set)
+    roster_headers: list[str] = field(default_factory=list)
+    template_columns: list[str] = field(default_factory=list)
+    db_path: str | None = None
+
+
+@dataclass
 class InvoiceWarning:
     code: str
     message: str
@@ -47,28 +66,13 @@ def _count_delivery_from_row(row: dict) -> int:
 class InvoiceService:
     """Pure business logic. db.xlsx 배송전체 시트에서 직접 O/X 집계."""
 
-    def generate(
-        self,
-        roster_data: list[dict],
-        output_path: str,
-        year: int,
-        month: int,
-        breakfast_price: int,
-        dinner_price: int,
-        lunch_price: int,
-        template_path: str,
-        col_mapping: dict,
-        excluded_dates: set[date],
-        roster_headers: list[str],
-        template_columns: list[str],
-        db_path: str | None = None,
-    ) -> InvoiceResult:
+    def generate(self, config: InvoiceGenerationConfig) -> InvoiceResult:
         warnings: list[InvoiceWarning] = []
 
-        if not roster_data:
+        if not config.roster_data:
             return InvoiceResult(success=False, error="명단 데이터가 없습니다.")
 
-        reader = get_db_reader(db_path)
+        reader = get_db_reader(config.db_path)
         order_map = reader.build_order_map()
 
         # 명단 시트 기준 고정 컬럼명 (공백/개행 정규화)
@@ -85,15 +89,26 @@ class InvoiceService:
             return candidates[0] if candidates else ""
 
         breakfast_col = _find_col(
-            roster_data[0] if roster_data else {}, "조식 여부", "조식여부", "조식"
+            config.roster_data[0] if config.roster_data else {},
+            "조식 여부",
+            "조식여부",
+            "조식",
         )
         dinner_col = _find_col(
-            roster_data[0] if roster_data else {}, "석식 여부", "석식여부", "석식"
+            config.roster_data[0] if config.roster_data else {},
+            "석식 여부",
+            "석식여부",
+            "석식",
         )
         lunch_col = _find_col(
-            roster_data[0] if roster_data else {}, "중식 여부", "중식여부", "중식"
+            config.roster_data[0] if config.roster_data else {},
+            "중식 여부",
+            "중식여부",
+            "중식",
         )
-        note_col = _find_col(roster_data[0] if roster_data else {}, "비고")
+        note_col = _find_col(
+            config.roster_data[0] if config.roster_data else {}, "비고"
+        )
 
         # 배송전체 식종별 카운트 미리 집계: {ID: {"조식": cnt, "중식": cnt, "석식": cnt}}
         meal_counts_by_id: dict[str, dict[str, int]] = {}
@@ -109,10 +124,10 @@ class InvoiceService:
             prev = meal_counts_by_id[pid].get(meal, 0)
             meal_counts_by_id[pid][meal] = max(prev, cnt)
 
-        is_vacation_month = self._is_vacation_month(reader, year, month)
+        is_vacation_month = self._is_vacation_month(reader, config.year, config.month)
 
         enriched: list[dict] = []
-        for person in roster_data:
+        for person in config.roster_data:
             person_id = str(person.get("ID", "")).strip()
             if not person_id:
                 person_id = str(person.get("id", "")).strip()
@@ -185,24 +200,26 @@ class InvoiceService:
 
             enriched.append(ep_dict)
 
-        if not os.path.exists(template_path):
+        if not os.path.exists(config.template_path):
             return InvoiceResult(
                 success=False,
-                error=f"템플릿 파일 없음:\n{template_path}",
+                error=f"템플릿 파일 없음:\n{config.template_path}",
             )
 
         try:
             cnt, enriched = make_invoice(
                 enriched,
-                col_mapping,
-                output_path,
-                template_path=template_path,
-                year=year,
-                month=month,
-                unit_price_breakfast=breakfast_price,
-                unit_price_dinner=dinner_price,
-                unit_price_lunch=lunch_price,
-                excluded_dates=excluded_dates.copy() if excluded_dates else None,
+                config.col_mapping,
+                config.output_path,
+                template_path=config.template_path,
+                year=config.year,
+                month=config.month,
+                unit_price_breakfast=config.breakfast_price,
+                unit_price_dinner=config.dinner_price,
+                unit_price_lunch=config.lunch_price,
+                excluded_dates=config.excluded_dates.copy()
+                if config.excluded_dates
+                else None,
                 is_vacation_month=is_vacation_month,
             )
         except Exception as e:
@@ -280,7 +297,7 @@ class InvoiceController:
         self._year = year
         self._month = month
 
-        result = self._service.generate(
+        config = InvoiceGenerationConfig(
             roster_data=roster_data,
             output_path=output_path,
             year=year,
@@ -295,6 +312,7 @@ class InvoiceController:
             template_columns=self._template_columns,
             db_path=self._db_path,
         )
+        result = self._service.generate(config)
 
         for w in result.warnings:
             QMessageBox.warning(self._parent, w.code, w.message)
