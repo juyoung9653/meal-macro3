@@ -1,15 +1,8 @@
-"""중앙 설정 관리자 — JSON 파일 기반, 모든 하드코딩 상수를 대체.
-
-Persistence separation:
-  - SettingsManager (.settings.json) → app config (paths, display)
-  - QSettings (per-tab) → ephemeral UI state (last file, window position, col mapping)
-  Use SettingsManager for anything that should survive a settings reset."""
+"""중앙 설정 관리자 — DEFAULTS dict 기반, 모든 하드코딩 상수를 대체."""
 
 from __future__ import annotations
 
 import copy
-import json
-import os
 from typing import Any
 
 # ── 기본 설정값 ──────────────────────────────────────
@@ -84,55 +77,6 @@ class SettingsManager:
 
     def __init__(self):
         self._data: dict = copy.deepcopy(DEFAULTS)
-        self._path: str | None = None
-
-    def _get_path(self) -> str:
-        if self._path is None:
-            # settings.py → core/ → src/ → project root
-            self._path = os.path.join(
-                os.path.dirname(
-                    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                ),
-                ".settings.json",
-            )
-        return self._path
-
-    def _migrate_legacy(self):
-        """src/.settings.json → 루트 .settings.json 으로 마이그레이션 (1회 실행)."""
-        legacy_path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            ".settings.json",
-        )
-        target_path = self._get_path()
-        if os.path.exists(legacy_path) and not os.path.exists(target_path):
-            try:
-                import shutil
-
-                shutil.copy2(legacy_path, target_path)
-                os.remove(legacy_path)
-            except OSError:
-                pass
-
-    def load(self):
-        """JSON 파일에서 설정 로드 (없으면 기본값 유지)."""
-        self._migrate_legacy()
-        path = self._get_path()
-        try:
-            if os.path.exists(path):
-                with open(path, "r", encoding="utf-8") as f:
-                    loaded = json.load(f)
-                self._deep_merge(self._data, loaded)
-        except (json.JSONDecodeError, OSError):
-            pass
-
-    def save(self):
-        """현재 설정을 JSON 파일로 저장."""
-        path = self._get_path()
-        try:
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(self._data, f, ensure_ascii=False, indent=2)
-        except OSError:
-            pass
 
     def _deep_merge(self, base: dict, override: dict):
         """중첩 dict 재귀 병합."""
@@ -186,7 +130,6 @@ class SettingsManager:
         self.set(
             "templates", "confirm_path", value=f"assets/{meal_type}_확인서템플릿.xlsx"
         )
-        self.save()
 
     def get_all(self) -> dict:
         """전체 설정 dict 반환 (복사본)."""
@@ -198,14 +141,8 @@ class SettingsManager:
 
 
 def get_settings() -> SettingsManager:
-    """싱글턴 SettingsManager 반환 (최초 호출 시 자동 로드)."""
+    """싱글턴 SettingsManager 반환."""
     global SettingsManager
     if SettingsManager._instance is None:
         SettingsManager._instance = SettingsManager()
-        SettingsManager._instance.load()
     return SettingsManager._instance
-
-
-def save_settings():
-    """현재 설정을 파일로 저장."""
-    get_settings().save()

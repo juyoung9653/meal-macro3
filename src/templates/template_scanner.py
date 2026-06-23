@@ -105,18 +105,6 @@ def scan_placeholders(
     return result
 
 
-def clear_cache(template_path: str | None = None):
-    """인메모리 캐시 초기화.
-
-    Args:
-        template_path: 특정 템플릿만 초기화. None이면 전체.
-    """
-    if template_path is None:
-        _mem_cache.clear()
-    else:
-        _mem_cache.pop(template_path, None)
-
-
 # ── 플레이스홀더 검증 ──────────────────────────────
 
 # 필수 글로벌 플레이스홀더 (meal_type 별)

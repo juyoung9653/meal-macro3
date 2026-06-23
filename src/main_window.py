@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from src.core.settings import get_settings, save_settings
+from src.core.settings import get_settings
 from src.widgets.confirm_tab import ConfirmTab
 from src.widgets.invoice_tab import InvoiceTab
 

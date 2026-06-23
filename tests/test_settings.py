@@ -2,7 +2,7 @@
 
 import pytest
 
-from src.core.settings import DEFAULTS, SettingsManager, get_settings, save_settings
+from src.core.settings import DEFAULTS, SettingsManager, get_settings
 
 from .conftest import make_settings_manager
 
@@ -250,27 +250,8 @@ class TestSettingsSingleton:
 
 
 class TestSettingsSave:
-    def test_save_and_load_roundtrip(self, tmp_path):
-        """SettingsManager can save to a path and load back."""
-        import os
-
+    def test_no_persistence_methods(self):
+        """save/load methods removed entirely."""
         sm = make_settings_manager()
-        sm.set("app", "title", value="Roundtrip Test")
-
-        # Save to temp path by overriding _get_path
-        test_path = os.path.join(tmp_path, ".settings.json")
-        original_path = sm._path
-        try:
-            sm._path = test_path
-            sm.save()
-            assert os.path.exists(test_path)
-
-            # Create a new manager and load from the same path
-            sm2 = make_settings_manager()
-            sm2._path = test_path
-            sm2.load()
-            assert sm2.get("app", "title") == "Roundtrip Test"
-            # Other defaults preserved
-            assert sm2.get("app", "organization") == "분당구"
-        finally:
-            sm._path = original_path
+        assert not hasattr(sm, "save")
+        assert not hasattr(sm, "load")

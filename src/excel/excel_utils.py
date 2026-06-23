@@ -38,7 +38,7 @@ def copy_style(src, dst):
 def build_merged_anchor_map(ws) -> dict[tuple[int, int], tuple[int, int]]:
     """워크시트의 모든 MergedCell → 앵커셀 (row, col) 매핑.
 
-    한 번 빌드하면 safe_set_cell_value_fast 에서 O(1) 조회.
+    한 번 빌드하면 셀 값 쓰기 시 O(1) 조회.
     """
     anchor_map: dict[tuple[int, int], tuple[int, int]] = {}
     for mr in ws.merged_cells.ranges:
@@ -62,18 +62,6 @@ def safe_set_cell_value(ws, row, column, value):
                 return
         return
     cell.value = value
-
-
-def safe_set_cell_value_fast(ws, row, column, value, anchor_map: dict | None = None):
-    """safe_set_cell_value 의 O(1) 버전. anchor_map 필요."""
-    if anchor_map is None:
-        return safe_set_cell_value(ws, row, column, value)
-    key = (row, column)
-    if key in anchor_map:
-        r, c = anchor_map[key]
-        ws.cell(row=r, column=c).value = value
-    else:
-        ws.cell(row=row, column=column).value = value
 
 
 def adjust_formula(formula: str, row_offset: int) -> str:

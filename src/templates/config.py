@@ -132,10 +132,3 @@ def read_template_columns(
 def col_name_to_index(template_columns: list[str]) -> dict[str, int]:
     """컬럼명 → 1-based 컬럼 인덱스 dict (한 번만 계산)."""
     return {name: i + 1 for i, name in enumerate(template_columns)}
-
-
-def col_name_to_letter(name: str, template_columns: list[str]) -> str:
-    """컬럼명 → 엑셀 컬럼 문자 (A, B, C...)."""
-    if name not in template_columns:
-        return ""
-    return chr(ord("A") + template_columns.index(name))

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import date, datetime, timedelta
+from datetime import date
 from typing import Any
 
 import openpyxl
@@ -153,12 +153,6 @@ class DbReader(DataSource):
             self._cache["roster"] = self._read_sheet("명단")
         return self._cache["roster"]
 
-    def read_registrations(self) -> list[dict]:
-        """접수장 시트."""
-        if "registrations" not in self._cache:
-            self._cache["registrations"] = self._read_sheet("접수장")
-        return self._cache["registrations"]
-
     def read_delivery_matrix(self) -> list[dict]:
         """배송전체 시트 (Power Query 출력).
 
@@ -225,14 +219,6 @@ class DbReader(DataSource):
             self._cache["delivery_order"] = data
         return self._cache["delivery_order"]
 
-    def read_daily_meal_counts(self, meal_type: str) -> list[dict]:
-        """일일식수_조식/중식/석식 시트."""
-        sheet = f"일일식수_{meal_type}식"
-        key = f"daily_{meal_type}"
-        if key not in self._cache:
-            self._cache[key] = self._read_sheet(sheet)
-        return self._cache[key]
-
     # ── 기타 시트 내 테이블 ──
 
     def _read_from_gita(self, table_marker: str) -> list[dict]:
@@ -265,22 +251,6 @@ class DbReader(DataSource):
                         holidays.append(d)
             self._cache["holidays"] = holidays
         return self._cache["holidays"]
-
-    def read_meal_day_map(self) -> dict[str, str]:
-        """식종정보 (기타 시트 내 테이블) -> {식종: 요일문자열}."""
-        if "meal_day_map" not in self._cache:
-            data = self._read_from_gita("식종")
-            result: dict[str, str] = {}
-            for row in data:
-                keys = list(row.keys())
-                meal = row.get("식종", "") or (row.get(keys[0], "") if keys else "")
-                day = row.get("배송일", "") or (
-                    row.get(keys[1], "") if len(keys) > 1 else ""
-                )
-                if meal:
-                    result[meal] = day
-            self._cache["meal_day_map"] = result
-        return self._cache["meal_day_map"]
 
     def read_meal_prices(self) -> dict[str, int]:
         """식종정보 (기타 시트 내 테이블) -> {식종: 단가}."""
@@ -335,15 +305,6 @@ class DbReader(DataSource):
             pass
 
         return year, detected_month
-
-    def get_date_columns(self) -> list[str]:
-        """배송전체 날짜 컬럼명 정렬 리스트."""
-        matrix = self.read_delivery_matrix()
-        if not matrix:
-            return []
-        cols = [c for c in matrix[0].keys() if _is_date_col(c)]
-        cols.sort(key=lambda c: _parse_date_col(c) or (0, 0))
-        return cols
 
     # ── 편의 조회 ──
 

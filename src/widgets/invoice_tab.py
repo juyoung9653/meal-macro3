@@ -168,9 +168,6 @@ class InvoiceTab(QWidget):
             self._db_reader.db_path = path
             self._db_path = path
             self._s.set("db", "path", value=path)
-            from ..core.settings import save_settings
-
-            save_settings()
             self._load_db_data()
 
     def _auto_detect_month(self):

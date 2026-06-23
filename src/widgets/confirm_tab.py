@@ -225,6 +225,3 @@ class ConfirmTab(QWidget):
             self.info_label.setText(
                 f"청구서 {len(data.invoices)}건 로드됨. 생성 버튼을 누르면 확인서를 만듭니다."
             )
-
-    def get_confirms(self):
-        return self.confirms

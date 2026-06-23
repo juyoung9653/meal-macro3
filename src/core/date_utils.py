@@ -9,9 +9,6 @@ from datetime import date, timedelta
 # ── 요일 상수 ──
 MON, TUE, WED, THU, FRI, SAT, SUN = range(7)
 
-# ── 주말 상수 ──
-WEEKEND = {SAT, SUN}
-
 
 def date_range(start: date, end: date):
     """start~end 사이 날짜 생성기."""
