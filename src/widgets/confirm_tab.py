@@ -24,7 +24,7 @@ from ..generators.confirm_generator import make_confirm
 class ConfirmTab(QWidget):
     """확인서 생성 탭"""
 
-    def __init__(self):
+    def __init__(self, meal_type: str = ""):
         super().__init__()
         self.confirms = []
         self.output_dir = None
@@ -32,6 +32,7 @@ class ConfirmTab(QWidget):
         self._data = InvoiceData()
         self._per_file_mode = True
         self._s = get_settings()
+        self._meal_type = meal_type or self._s.get_meal_type()
         org = self._s.get("app", "organization")
         app_title = self._s.get("app", "title")
         self._settings = QSettings(org, app_title)
@@ -146,16 +147,18 @@ class ConfirmTab(QWidget):
                 or p.get("_lh_cnt", 0) > 0
             ]
 
+            template_path = self._s.get("templates", "confirm_path")
             self.confirms = make_confirm(
                 roster_data=active_invoices,
                 col_mapping=self._data.col_mapping,
                 output_dir=self.output_dir,
-                template_path=self._s.get("templates", "confirm_path"),
+                template_path=template_path,
                 year=self._data.year,
                 month=self._data.month,
                 excluded_dates=self._data.excluded_dates.copy()
                 if self._data.excluded_dates
                 else None,
+                meal_type=self._meal_type,
             )
             if self.confirms:
                 fname = self.confirms[0].get("file", "")
@@ -199,6 +202,12 @@ class ConfirmTab(QWidget):
             self.path_label.setText(path)
             self.path_label.setStyleSheet("color: #000;")
             self._save_settings()
+
+    def set_meal_type(self, meal_type: str):
+        """식사 유형 변경."""
+        if meal_type == self._meal_type:
+            return
+        self._meal_type = meal_type
 
     def _clear(self):
         self.confirms.clear()

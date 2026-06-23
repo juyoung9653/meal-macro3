@@ -28,6 +28,7 @@ class InvoiceGenerationConfig:
     roster_headers: list[str] = field(default_factory=list)
     template_columns: list[str] = field(default_factory=list)
     db_path: str | None = None
+    meal_type: str = "급식"
 
 
 @dataclass
@@ -221,6 +222,7 @@ class InvoiceService:
                 if config.excluded_dates
                 else None,
                 is_vacation_month=is_vacation_month,
+                meal_type=config.meal_type,
             )
         except Exception as e:
             return InvoiceResult(success=False, error=f"청구서 생성 실패:\n{e}")

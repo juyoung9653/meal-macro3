@@ -24,21 +24,6 @@ class TestTypedAccessors:
         assert w == 1200
         assert h == 800
 
-    def test_get_confirm_col_widths(self):
-        sm = make_settings_manager()
-        cw = sm.get_confirm_col_widths()
-        assert cw["G"] == 12.5
-        assert cw["H"] == 12.5
-        assert cw["I"] == 12.5
-        assert cw["J"] == 12.5
-
-    def test_get_confirm_col_widths_after_set(self):
-        sm = make_settings_manager()
-        sm.set("confirm", "col_width_g", value=20.0)
-        cw = sm.get_confirm_col_widths()
-        assert cw["G"] == 20.0
-        assert cw["H"] == 12.5  # unchanged
-
 
 class TestDirectGet:
     """Direct s.get("section", "key") replaces deleted typed accessors."""
@@ -53,11 +38,11 @@ class TestDirectGet:
 
     def test_invoice_template_path(self):
         sm = make_settings_manager()
-        assert sm.get("templates", "invoice_path") == "assets/청구서템플릿.xlsx"
+        assert sm.get("templates", "invoice_path") == "assets/급식_청구서템플릿.xlsx"
 
     def test_confirm_template_path(self):
         sm = make_settings_manager()
-        assert sm.get("templates", "confirm_path") == "assets/확인서템플릿.xlsx"
+        assert sm.get("templates", "confirm_path") == "assets/급식_확인서템플릿.xlsx"
 
     def test_template_sheet_name(self):
         sm = make_settings_manager()
@@ -81,24 +66,6 @@ class TestDirectGet:
             "5명",
         ]
 
-    def test_roster_name_keywords(self):
-        sm = make_settings_manager()
-        kw = sm.get("roster", "name_keywords")
-        assert "성명" in kw
-        assert "Name" in kw
-
-    def test_flag_fields(self):
-        sm = make_settings_manager()
-        fields = sm.get("flag_fields")
-        assert "__breakfast" in fields
-        assert "__dinner" in fields
-
-    def test_flag_search_terms(self):
-        sm = make_settings_manager()
-        terms = sm.get("flag_search_terms")
-        assert "__breakfast" in terms
-        assert terms["__breakfast"] == ["조식"]
-
     def test_confirm_title_suffix(self):
         sm = make_settings_manager()
         assert sm.get("confirm", "title_suffix") == "분당구 급식확인서"
@@ -118,10 +85,6 @@ class TestDirectGet:
         cols = sm.get("semantic_columns")
         assert "__calc_breakfast" in cols
         assert "__calc_total" in cols
-
-    def test_roster_example_path(self):
-        sm = make_settings_manager()
-        assert sm.get("templates", "roster_example_path") == "assets/명단예시.xlsx"
 
     def test_db_path(self):
         sm = make_settings_manager()
@@ -148,10 +111,7 @@ class TestSettingsDefaults:
         assert "templates" in DEFAULTS
         assert "confirm" in DEFAULTS
         assert "invoice" in DEFAULTS
-        assert "roster" in DEFAULTS
         assert "semantic_columns" in DEFAULTS
-        assert "flag_fields" in DEFAULTS
-        assert "flag_search_terms" in DEFAULTS
 
     def test_default_app_title(self):
         assert DEFAULTS["app"]["title"] == "급식비 정산 프로그램"

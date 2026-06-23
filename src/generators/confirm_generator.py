@@ -108,6 +108,7 @@ def make_confirm(
     month: int,
     title_prefix: str = "",
     excluded_dates: set[date] | None = None,
+    meal_type: str = "급식",
 ) -> list[dict]:
     """명단 데이터 → 확인서템플릿 채워서 단일 엑셀 파일 생성."""
     s = get_settings()
@@ -146,7 +147,7 @@ def make_confirm(
 
     tpl_anchor_maps = _pre_build_anchor_maps(wb, tpl_sheet_names)
 
-    ph_warnings = validate_placeholders(all_placeholders)
+    ph_warnings = validate_placeholders(all_placeholders, meal_type=meal_type)
     if ph_warnings:
         msg = "템플릿에 필수 플레이스홀더가 누락되었습니다:\n\n" + "\n".join(
             ph_warnings
@@ -235,9 +236,6 @@ def make_confirm(
                         ws.column_dimensions[col_letter].width = copy(
                             src.column_dimensions[col_letter].width
                         )
-                col_w_map = s.get_confirm_col_widths()
-                for cl, w_val in col_w_map.items():
-                    ws.column_dimensions[cl].width = w_val
                 col_widths_set = True
 
             for src_r in range(1, tpl_rows + 1):
@@ -285,11 +283,15 @@ def make_confirm(
                 _set_ph(
                     ws, ph_map, "delivery", current_row, delivery_person, tpl_anchor_map
                 )
-            if delivery_phone:
+            if meal_type != "급식" and delivery_phone:
                 _set_ph(
                     ws, ph_map, "d_phone", current_row, delivery_phone, tpl_anchor_map
                 )
             _set_ph(ws, ph_map, "addr", current_row, addr, tpl_anchor_map)
+
+            # ── 급식 확인서: dong(관할동) 별도 플레이스홀더 ──
+            if meal_type == "급식":
+                _set_ph(ws, ph_map, "dong", current_row, dong, tpl_anchor_map)
 
             hh_notes: list[str] = []
             for p in members:
@@ -299,16 +301,29 @@ def make_confirm(
             combined_note = "\n".join(hh_notes)
             _set_ph(ws, ph_map, "memo", current_row, combined_note, tpl_anchor_map)
 
-            for ci, person in enumerate(members[:5]):
+            # ── 번호: 급식은 가구단위 1개(num1), 행복도시락은 사람별(num1~numN) ──
+            if meal_type == "급식":
                 sheet_seq += 1
+
+            for ci, person in enumerate(members[:5]):
+                if meal_type != "급식":
+                    sheet_seq += 1
 
                 name = str(person.get(name_col, ""))
                 head = str(person.get(head_col, ""))
                 phone = str(person.get(phone_col, ""))
 
-                _set_ph(
-                    ws, ph_map, f"num{ci + 1}", current_row, sheet_seq, tpl_anchor_map
-                )
+                if meal_type == "급식" and ci == 0:
+                    _set_ph(ws, ph_map, "num1", current_row, sheet_seq, tpl_anchor_map)
+                elif meal_type != "급식":
+                    _set_ph(
+                        ws,
+                        ph_map,
+                        f"num{ci + 1}",
+                        current_row,
+                        sheet_seq,
+                        tpl_anchor_map,
+                    )
                 _set_ph(ws, ph_map, f"child{ci + 1}", current_row, name, tpl_anchor_map)
                 _set_ph(ws, ph_map, f"carer{ci + 1}", current_row, head, tpl_anchor_map)
                 _set_ph(

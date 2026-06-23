@@ -34,11 +34,14 @@ class InvoiceTab(QWidget):
 
     MAX_RESULT_ROWS = 10
 
-    def __init__(self):
+    def __init__(self, meal_type: str = ""):
         super().__init__()
         self._s = get_settings()
+        self._meal_type = meal_type or self._s.get_meal_type()
         self._template_path = self._s.get("templates", "invoice_path")
-        self._template_columns = read_template_columns(self._template_path)
+        self._template_columns = read_template_columns(
+            self._template_path, meal_type=self._meal_type
+        )
         self._service = InvoiceService()
         self.invoices: list[dict] = []
         self.output_dir: str | None = None
@@ -47,9 +50,6 @@ class InvoiceTab(QWidget):
         self._col_mapping: dict = {col: "" for col in self._template_columns}
         _sem = auto_detect_semantic_columns(self._template_columns)
         self._col_mapping.update(_sem)
-        self._col_mapping.update(
-            {"__breakfast": "", "__dinner": "", "__vacation": "", "__note": ""}
-        )
         self._excluded_dates: set[date] = set()
         self._year: int = 0
         self._month: int = 0
@@ -69,18 +69,15 @@ class InvoiceTab(QWidget):
     def _setup_ui(self):
         layout = QVBoxLayout(self)
 
-        # ── db.xlsx 명단 로드 ──
+        # ── db.xlsx 명단 로드 (선택 즉시 자동 로드) ──
         import_group = QGroupBox("① db.xlsx 명단 불러오기")
         import_layout = QHBoxLayout(import_group)
         self.file_label = QLabel("db.xlsx 로드 대기 중")
         self.file_label.setStyleSheet("color: #888;")
         self.select_btn = QPushButton("db.xlsx 선택")
         self.select_btn.clicked.connect(self._select_db_file)
-        self.load_btn = QPushButton("데이터 로드")
-        self.load_btn.clicked.connect(self._load_db_data)
         import_layout.addWidget(self.file_label, stretch=1)
         import_layout.addWidget(self.select_btn)
-        import_layout.addWidget(self.load_btn)
         layout.addWidget(import_group)
 
         # ── 청구 기준 ──
@@ -160,7 +157,7 @@ class InvoiceTab(QWidget):
     # ── db.xlsx 파일 선택/로드 ──
 
     def _select_db_file(self):
-        """db.xlsx 파일 경로 선택."""
+        """db.xlsx 파일 경로 선택 → 자동 로드."""
         path, _ = QFileDialog.getOpenFileName(
             self,
             "db.xlsx 파일 선택",
@@ -170,16 +167,11 @@ class InvoiceTab(QWidget):
         if path:
             self._db_reader.db_path = path
             self._db_path = path
-            fname = os.path.basename(path)
-            self.file_label.setText(f"📁 {fname}")
-            self.file_label.setStyleSheet("color: #000;")
-            self._settings.setValue("db/last_path", path)
-            self._settings.sync()
-            # 설정에도 저장
             self._s.set("db", "path", value=path)
             from ..core.settings import save_settings
 
             save_settings()
+            self._load_db_data()
 
     def _auto_detect_month(self):
         """db.xlsx 배송전체 시트에서 연월 자동 감지 → 라벨 + 컨트롤러 설정."""
@@ -389,6 +381,7 @@ class InvoiceTab(QWidget):
             roster_headers=self.roster_headers,
             template_columns=self._template_columns,
             db_path=self._db_path,
+            meal_type=self._meal_type,
         )
         result = self._service.generate(config)
 
@@ -465,6 +458,20 @@ class InvoiceTab(QWidget):
             self.path_label.setText(path)
             self.path_label.setStyleSheet("color: #000;")
             self._save_settings()
+
+    def set_meal_type(self, meal_type: str):
+        """식사 유형 변경 → 템플릿 경로·컬럼 재로드."""
+        if meal_type == self._meal_type:
+            return
+        self._meal_type = meal_type
+        self._template_path = self._s.get("templates", "invoice_path")
+        self._template_columns = read_template_columns(
+            self._template_path, meal_type=self._meal_type
+        )
+        self._col_mapping = {col: "" for col in self._template_columns}
+        _sem = auto_detect_semantic_columns(self._template_columns)
+        self._col_mapping.update(_sem)
+        self._auto_map_columns()
 
     def get_invoice_data(self):
         return InvoiceData(

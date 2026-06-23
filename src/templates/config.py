@@ -9,11 +9,13 @@ from ..core.settings import get_settings
 # ── 설정에서 값 조회 (설정 없으면 기본값 fallback) ──
 
 
-def get_template_sheet_name(is_vacation: bool = False) -> str:
+def get_template_sheet_name(is_vacation: bool = False, meal_type: str = "급식") -> str:
     """청구서 템플릿 시트명 반환.
 
-    is_vacation=True → "학기_" prefix → "방학_" prefix 로 치환.
+    급식 → "청구서", 행복도시락 → "학기_총괄" (방학이면 "방학_총괄").
     """
+    if meal_type == "급식":
+        return "청구서"
     base = get_settings().get("templates", "sheet_name", default="학기_총괄")
     if not is_vacation:
         return base
@@ -89,15 +91,15 @@ def auto_detect_semantic_columns(template_columns: list[str]) -> dict[str, str]:
 
 @functools.lru_cache(maxsize=4)
 def read_template_columns(
-    template_path: str, sheet_name: str | None = None
+    template_path: str, sheet_name: str | None = None, meal_type: str = "급식"
 ) -> list[str]:
     """템플릿 파일 Row 1-2 헤더를 읽어 컬럼명 목록 반환.
 
     머지된 셀 처리, 개행 제거, 괄호 접미사 제거 자동 처리.
-    sheet_name이 None이면 get_template_sheet_name() 사용.
+    sheet_name이 None이면 get_template_sheet_name(meal_type=meal_type) 사용.
     """
     if sheet_name is None:
-        sheet_name = get_template_sheet_name()
+        sheet_name = get_template_sheet_name(meal_type=meal_type)
     wb = openpyxl.load_workbook(template_path)
     ws = wb[sheet_name]
 

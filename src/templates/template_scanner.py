@@ -119,11 +119,18 @@ def clear_cache(template_path: str | None = None):
 
 # ── 플레이스홀더 검증 ──────────────────────────────
 
-# 필수 글로벌 플레이스홀더 (모든 시트)
-_REQUIRED_GLOBAL = ["title", "delivery", "d_phone", "addr"]
+# 필수 글로벌 플레이스홀더 (meal_type 별)
+_REQUIRED_GLOBAL_BY_TYPE = {
+    "급식": ["title", "delivery", "addr", "dong"],
+    "행복도시락": ["title", "delivery", "d_phone", "addr", "memo"],
+}
 
-# 사람별 필수 플레이스홀더 접두사
-_REQUIRED_PERSON_PREFIXES = ["num", "child", "carer", "phone"]
+# 사람별 필수 플레이스홀더 접두사 (meal_type 별)
+# 급식: num은 가구단위 1개 (num1만), 행복도시락: 사람별 (num1~numN)
+_REQUIRED_PERSON_PREFIXES_BY_TYPE = {
+    "급식": ["child", "carer", "phone"],
+    "행복도시락": ["num", "child", "carer", "phone"],
+}
 
 # 주차별 필수 플레이스홀더 (1~5주, 모든 사람 공통)
 _REQUIRED_WEEK_PREFIXES = ["week"]
@@ -134,15 +141,24 @@ _REQUIRED_MEAL_PREFIXES = ["sum_b", "sum_d", "sum_l"]
 
 def validate_placeholders(
     placeholders: dict[str, dict[str, list[tuple[int, int]]]],
+    meal_type: str = "급식",
 ) -> list[str]:
     """플레이스홀더 맵 검증. 누락된 항목 있으면 경고 메시지 리스트 반환.
 
     Args:
         placeholders: scan_placeholders() 반환값.
+        meal_type: "급식" 또는 "행복도시락" — 템플릿별 필수 플레이스홀더 상이.
 
     Returns:
         누락 경고 문자열 리스트. 비어있으면 검증 통과.
     """
+    global_keys = _REQUIRED_GLOBAL_BY_TYPE.get(
+        meal_type, _REQUIRED_GLOBAL_BY_TYPE["급식"]
+    )
+    person_prefixes = _REQUIRED_PERSON_PREFIXES_BY_TYPE.get(
+        meal_type, _REQUIRED_PERSON_PREFIXES_BY_TYPE["급식"]
+    )
+
     warnings: list[str] = []
 
     for sheet_name, ph_map in placeholders.items():
@@ -155,16 +171,19 @@ def validate_placeholders(
         missing: list[str] = []
 
         # 글로벌
-        for key in _REQUIRED_GLOBAL:
+        for key in global_keys:
             if key not in ph_map:
                 missing.append(key)
 
         # 사람별
         for p in range(1, n_people + 1):
-            for prefix in _REQUIRED_PERSON_PREFIXES:
+            for prefix in person_prefixes:
                 key = f"{prefix}{p}"
                 if key not in ph_map:
                     missing.append(key)
+            # 급식: num은 가구단위 1개만 (num1)
+            if meal_type == "급식" and p == 1 and "num1" not in ph_map:
+                missing.append("num1")
             # 주차별 식종
             for w in range(1, 6):
                 for prefix in _REQUIRED_MEAL_PREFIXES:
@@ -178,6 +197,9 @@ def validate_placeholders(
                 key = f"{prefix}{w}"
                 if key not in ph_map:
                     missing.append(key)
+
+        # 행복도시락만: num 접두사는 사람별 person_prefixes에 포함되므로
+        # 여기서는 급식의 num1 추가만 처리하고 넘어감
 
         if missing:
             suffix = ""

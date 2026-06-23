@@ -19,11 +19,11 @@ DEFAULTS: dict[str, Any] = {
         "organization": "분당구",
         "window_width": 1000,
         "window_height": 700,
+        "meal_type": "급식",
     },
     "templates": {
-        "invoice_path": "assets/청구서템플릿.xlsx",
-        "confirm_path": "assets/확인서템플릿.xlsx",
-        "roster_example_path": "assets/명단예시.xlsx",
+        "invoice_path": "assets/급식_청구서템플릿.xlsx",
+        "confirm_path": "assets/급식_확인서템플릿.xlsx",
         "sheet_name": "학기_총괄",
         "data_start_row": 4,
         "confirm_sheet_names": ["1명", "2명", "3명", "4명", "5명"],
@@ -32,22 +32,12 @@ DEFAULTS: dict[str, Any] = {
     "confirm": {
         "title_suffix": "분당구 급식확인서",
         "output_filename_format": "확인서_{year:04d}{month:02d}.xlsx",
-        "col_width_g": 12.5,
-        "col_width_h": 12.5,
-        "col_width_i": 12.5,
-        "col_width_j": 12.5,
     },
     "invoice": {
         "output_filename_format": "청구서_{year:04d}{month:02d}.xlsx",
     },
     "db": {
         "path": "assets/db.xlsx",
-    },
-    "roster": {
-        "name_keywords": ["성명", "이름", "성함", "학생명", "학생", "name", "Name"],
-        "preview_name_kw": ["성명", "이름", "성함"],
-        "preview_dept_kw": ["학교명", "학교", "소속"],
-        "preview_note_kw": ["학기중 비고", "비고", "특이사항"],
     },
     "semantic_columns": {
         "__calc_breakfast": {
@@ -75,27 +65,6 @@ DEFAULTS: dict[str, Any] = {
             "patterns": ["청구금액"],
             "default": "청구금액",
         },
-    },
-    "flag_fields": {
-        "__breakfast": {
-            "label": "조식 여부",
-            "tooltip": "1.0=해당, 0/공란=미해당 (금요일 배송)",
-        },
-        "__dinner": {
-            "label": "석식 여부",
-            "tooltip": "1.0=해당, 0/공란=미해당 (월~목 배송)",
-        },
-        "__vacation": {
-            "label": "방중 여부",
-            "tooltip": "1.0=해당, 0/공란=미해당 (방학중 월~금 배송)",
-        },
-        "__note": {"label": "비고 (일시중지 등)", "tooltip": ""},
-    },
-    "flag_search_terms": {
-        "__breakfast": ["조식"],
-        "__dinner": ["석식"],
-        "__vacation": ["중식", "방중"],
-        "__note": ["비고"],
     },
 }
 
@@ -205,13 +174,19 @@ class SettingsManager:
             int(self.get("app", "window_height", default=700)),
         )
 
-    def get_confirm_col_widths(self) -> dict[str, float]:
-        return {
-            "G": float(self.get("confirm", "col_width_g", default=12.5)),
-            "H": float(self.get("confirm", "col_width_h", default=12.5)),
-            "I": float(self.get("confirm", "col_width_i", default=12.5)),
-            "J": float(self.get("confirm", "col_width_j", default=12.5)),
-        }
+    def get_meal_type(self) -> str:
+        return self.get("app", "meal_type", default="급식")
+
+    def set_meal_type(self, meal_type: str):
+        self.set("app", "meal_type", value=meal_type)
+        # Sync template paths
+        self.set(
+            "templates", "invoice_path", value=f"assets/{meal_type}_청구서템플릿.xlsx"
+        )
+        self.set(
+            "templates", "confirm_path", value=f"assets/{meal_type}_확인서템플릿.xlsx"
+        )
+        self.save()
 
     def get_all(self) -> dict:
         """전체 설정 dict 반환 (복사본)."""
