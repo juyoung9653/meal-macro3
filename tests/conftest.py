@@ -85,13 +85,7 @@ def make_settings_manager(overrides: dict | None = None) -> SettingsManager:
 
 @pytest.fixture
 def sample_settings() -> SettingsManager:
-    """Returns a SettingsManager with default schedule values.
-
-    Default schedule:
-      breakfast_days = {4, 5, 6}  # Thu, Fri, Sat (0=Mon)
-      dinner_days    = {0, 1, 2, 3}  # Mon-Thu
-      lunch_days     = {0, 1, 2, 3, 4}  # Mon-Fri
-    """
+    """Returns a SettingsManager with default settings values."""
     return make_settings_manager()
 
 

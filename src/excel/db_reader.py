@@ -422,6 +422,41 @@ class DbReader:
                 result[key] = row
         return result
 
+    def read_delivery_contacts(self) -> list[dict]:
+        """배송정보 시트 내 '배송연락처' 사이드 테이블 읽기.
+
+        배송정보 시트 오른쪽에 위치한 배송담당/연락처 컬럼을 찾아
+        [{배송담당: str, 연락처: str}, ...] 형태로 반환.
+        """
+        if "delivery_contacts" not in self._cache:
+            raw = self._read_sheet_raw("배송정보")
+            if not raw or len(raw) < 2:
+                self._cache["delivery_contacts"] = []
+                return self._cache["delivery_contacts"]
+
+            # 헤더 행에서 '연락처' 컬럼 위치 찾기 → 왼쪽 컬럼이 '배송담당'
+            header_row = raw[0]
+            contact_col = -1
+            for i, c in enumerate(header_row):
+                if _to_str(c) == "연락처":
+                    contact_col = i
+                    break
+
+            if contact_col < 1:
+                self._cache["delivery_contacts"] = []
+                return self._cache["delivery_contacts"]
+
+            person_col = contact_col - 1  # '배송담당' 컬럼
+            contacts: list[dict] = []
+            for row in raw[1:]:
+                person = _to_str(row[person_col]) if person_col < len(row) else ""
+                phone = _to_str(row[contact_col]) if contact_col < len(row) else ""
+                if person or phone:
+                    contacts.append({"배송담당": person, "연락처": phone})
+
+            self._cache["delivery_contacts"] = contacts
+        return self._cache["delivery_contacts"]
+
     def close(self):
         if self._wb:
             self._wb.close()

@@ -106,8 +106,6 @@ def make_confirm(
     year: int,
     month: int,
     title_prefix: str = "",
-    delivery_person: str = "",
-    delivery_phone: str = "",
     excluded_dates: set[date] | None = None,
 ) -> list[dict]:
     """명단 데이터 → 확인서템플릿 채워서 단일 엑셀 파일 생성."""
@@ -160,8 +158,21 @@ def make_confirm(
     try:
         reader = get_db_reader()
         delivery_map = reader.build_delivery_map()
+        delivery_contacts = reader.read_delivery_contacts()
     except Exception:
         delivery_map = {}
+        delivery_contacts = []
+
+    # 배송연락처: 첫 번째 유효한 항목 사용
+    delivery_person = ""
+    delivery_phone = ""
+    for dc in delivery_contacts:
+        p = dc.get("배송담당", "").strip()
+        ph = dc.get("연락처", "").strip()
+        if p or ph:
+            delivery_person = p
+            delivery_phone = ph
+            break
 
     for dong, persons_in_dong in dong_groups.items():
         hh_groups = {}

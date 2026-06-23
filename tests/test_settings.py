@@ -54,22 +54,6 @@ class TestTypedAccessors:
         sm = make_settings_manager()
         assert sm.get_confirm_sheet_names() == ["1명", "2명", "3명", "4명", "5명"]
 
-    def test_get_schedule_days_breakfast(self):
-        sm = make_settings_manager()
-        assert sm.get_schedule_days("breakfast") == {4, 5, 6}
-
-    def test_get_schedule_days_dinner(self):
-        sm = make_settings_manager()
-        assert sm.get_schedule_days("dinner") == {0, 1, 2, 3}
-
-    def test_get_schedule_days_lunch(self):
-        sm = make_settings_manager()
-        assert sm.get_schedule_days("lunch") == {0, 1, 2, 3, 4}
-
-    def test_get_schedule_days_with_days_suffix(self):
-        sm = make_settings_manager()
-        assert sm.get_schedule_days("breakfast_days") == {4, 5, 6}
-
     def test_get_roster_name_keywords(self):
         sm = make_settings_manager()
         assert "성명" in sm.get_roster_name_keywords()
@@ -129,7 +113,6 @@ class TestSettingsDefaults:
     def test_defaults_are_complete(self):
         """DEFAULTS has expected top-level keys."""
         assert "app" in DEFAULTS
-        assert "schedule" in DEFAULTS
         assert "templates" in DEFAULTS
         assert "confirm" in DEFAULTS
         assert "invoice" in DEFAULTS
@@ -141,11 +124,6 @@ class TestSettingsDefaults:
     def test_default_app_title(self):
         assert DEFAULTS["app"]["title"] == "급식비 정산 프로그램"
 
-    def test_default_schedule_keys(self):
-        assert "breakfast_days" in DEFAULTS["schedule"]
-        assert "dinner_days" in DEFAULTS["schedule"]
-        assert "lunch_days" in DEFAULTS["schedule"]
-
 
 class TestSettingsManagerGet:
     def test_get_single_key(self):
@@ -156,10 +134,6 @@ class TestSettingsManagerGet:
     def test_get_nested_key(self):
         sm = make_settings_manager()
         assert sm.get("app", "title") == "급식비 정산 프로그램"
-
-    def test_get_deep_nested(self):
-        sm = make_settings_manager()
-        assert sm.get("schedule", "breakfast_days") == [4, 5, 6]
 
     def test_get_with_default(self):
         sm = make_settings_manager()
@@ -247,12 +221,12 @@ class TestDeepMerge:
 
     def test_merge_overwrites_non_dict(self):
         sm = make_settings_manager()
-        merged = {"schedule": "not_a_dict"}
-        # Before merge: schedule is a dict
-        assert isinstance(sm._data["schedule"], dict)
-        # After merge: schedule becomes the override value
+        merged = {"app": "not_a_dict"}
+        # Before merge: app is a dict
+        assert isinstance(sm._data["app"], dict)
+        # After merge: app becomes the override value
         sm._deep_merge(sm._data, merged)
-        assert sm._data["schedule"] == "not_a_dict"
+        assert sm._data["app"] == "not_a_dict"
 
 
 class TestSettingsSingleton:

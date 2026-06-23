@@ -2,7 +2,6 @@
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
-    QCheckBox,
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
@@ -11,7 +10,6 @@ from PyQt6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QInputDialog,
-    QLabel,
     QLineEdit,
     QListWidget,
     QMessageBox,
@@ -24,8 +22,6 @@ from PyQt6.QtWidgets import (
 )
 
 from ..core.settings import get_settings, save_settings
-
-WEEKDAY_NAMES = ["월", "화", "수", "목", "금", "토", "일"]
 
 
 class _NoWheelSpinBox(QSpinBox):
@@ -56,7 +52,6 @@ class SettingsDialog(QDialog):
         tabs.addTab(self._make_general_tab(), "일반")
         tabs.addTab(self._make_template_tab(), "템플릿")
 
-        tabs.addTab(self._make_schedule_tab(), "배송 요일")
         tabs.addTab(self._make_confirm_tab(), "확인서")
         layout.addWidget(tabs)
 
@@ -153,32 +148,6 @@ class SettingsDialog(QDialog):
         layout.addWidget(sheet_group)
         return self._wrap_scroll(w)
 
-    def _make_schedule_tab(self):
-        w = QWidget()
-        layout = QVBoxLayout(w)
-        info = QLabel(
-            "각 급식 유형별 배송 요일을 선택하세요.\n선택된 요일만 배송일로 계산됩니다."
-        )
-        info.setStyleSheet("color: #555;")
-        layout.addWidget(info)
-        for meal, key in [
-            ("조식", "breakfast_days"),
-            ("석식", "dinner_days"),
-            ("중식", "lunch_days"),
-        ]:
-            group = QGroupBox(f"{meal} 배송 요일")
-            glayout = QHBoxLayout(group)
-            checks = []
-            for i, wname in enumerate(WEEKDAY_NAMES):
-                cb = QCheckBox(wname)
-                cb.setProperty("day_idx", i)
-                checks.append(cb)
-                glayout.addWidget(cb)
-            glayout.addStretch()
-            setattr(self, f"_{key}_checks", checks)
-            layout.addWidget(group)
-        return self._wrap_scroll(w)
-
     def _make_confirm_tab(self):
         w = QWidget()
         form = QFormLayout(w)
@@ -247,12 +216,6 @@ class SettingsDialog(QDialog):
         for name in s.get_confirm_sheet_names():
             self._confirm_sheets_list.addItem(name)
 
-        for meal_key in ["breakfast_days", "dinner_days", "lunch_days"]:
-            days = s.get_schedule_days(meal_key)
-            checks = getattr(self, f"_{meal_key}_checks", [])
-            for cb in checks:
-                cb.setChecked(cb.property("day_idx") in days)
-
         self._confirm_title_suffix_edit.setText(s.get_confirm_title_suffix())
         self._confirm_filename_edit.setText(s.get_confirm_output_filename_format())
         self._invoice_filename_edit.setText(s.get_invoice_output_filename_format())
@@ -278,11 +241,6 @@ class SettingsDialog(QDialog):
             for i in range(self._confirm_sheets_list.count())
         ]
         s.set("templates", "confirm_sheet_names", value=sheets)
-
-        for meal_key in ["breakfast_days", "dinner_days", "lunch_days"]:
-            checks = getattr(self, f"_{meal_key}_checks", [])
-            days = [cb.property("day_idx") for cb in checks if cb.isChecked()]
-            s.set("schedule", meal_key, value=days)
 
         s.set("confirm", "title_suffix", value=self._confirm_title_suffix_edit.text())
         s.set(

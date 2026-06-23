@@ -1,13 +1,9 @@
 """중앙 설정 관리자 — JSON 파일 기반, 모든 하드코딩 상수를 대체.
 
-"schedule" dict keys ("breakfast"/"dinner"/"lunch") correspond
-to ``MealType`` enum values in ``src.meal_types``.
-
 Persistence separation:
-  - SettingsManager (.settings.json) → app config (paths, schedule, display)
+  - SettingsManager (.settings.json) → app config (paths, display)
   - QSettings (per-tab) → ephemeral UI state (last file, window position, col mapping)
-  Use SettingsManager for anything that should survive a settings reset.
-"""
+  Use SettingsManager for anything that should survive a settings reset."""
 
 from __future__ import annotations
 
@@ -35,11 +31,6 @@ DEFAULTS: dict[str, Any] = {
         "data_start_row": 4,
         "confirm_sheet_names": ["1명", "2명", "3명", "4명", "5명"],
         "data_columns": 11,
-    },
-    "schedule": {
-        "breakfast_days": [4, 5, 6],  # 금요일 (0=월, 6=일)
-        "dinner_days": [0, 1, 2, 3],  # 월~목
-        "lunch_days": [0, 1, 2, 3, 4],  # 월~금
     },
     "confirm": {
         "title_suffix": "분당구 급식확인서",
@@ -250,11 +241,6 @@ class SettingsManager:
                 default=["1명", "2명", "3명", "4명", "5명"],
             )
         )
-
-    def get_schedule_days(self, meal_type: str) -> set[int]:
-        """배송 요일 설정 조회. meal_type: 'breakfast', 'dinner', 'lunch' (또는 'breakfast_days' 등)"""
-        key = f"{meal_type}_days" if "_days" not in meal_type else meal_type
-        return set(self.get("schedule", key, default=[]))
 
     def get_roster_name_keywords(self) -> list[str]:
         return list(
