@@ -1,0 +1,96 @@
+{
+  "cache": {
+    "placeholder_cache": ".cache.json"
+  },
+  "app": {
+    "title": "급식비 정산 프로그램",
+    "organization": "분당구",
+    "window_width": 1000,
+    "window_height": 700
+  },
+  "templates": {
+    "invoice_path": "assets/청구서템플릿.xlsx",
+    "confirm_path": "assets/확인서템플릿.xlsx",
+    "roster_example_path": "assets/명단예시.xlsx",
+    "sheet_name": "학기_총괄",
+    "data_start_row": 4,
+    "confirm_sheet_names": ["1명", "2명", "3명", "4명", "5명"],
+    "data_columns": 11
+  },
+  "schedule": {
+    "breakfast_days": [4, 5, 6],
+    "dinner_days": [0, 1, 2, 3],
+    "lunch_days": [0, 1, 2, 3, 4]
+  },
+  "confirm": {
+    "title_suffix": "분당구 급식확인서",
+    "output_filename_format": "확인서_{year:04d}{month:02d}.xlsx",
+    "col_width_g": 13.5,
+    "col_width_h": 13.5,
+    "col_width_i": 13.5,
+    "col_width_j": 13.5
+  },
+  "db": {
+    "path": "assets/db.xlsx"
+  },
+  "invoice": {
+    "output_filename_format": "청구서_{year:04d}{month:02d}.xlsx"
+  },
+  "roster": {
+    "name_keywords": ["성명", "이름", "성함", "학생명", "학생", "name", "Name"],
+    "preview_name_kw": ["성명", "이름", "성함"],
+    "preview_dept_kw": ["학교명", "학교", "소속"],
+    "preview_note_kw": ["학기중 비고", "비고", "특이사항"]
+  },
+  "semantic_columns": {
+    "__calc_breakfast": {
+      "label": "조식 건수 입력",
+      "patterns": ["조식"],
+      "default": "조식"
+    },
+    "__calc_dinner": {
+      "label": "석식 건수 입력",
+      "patterns": ["석식"],
+      "default": "석식"
+    },
+    "__calc_lunch": {
+      "label": "중식 건수 입력",
+      "patterns": ["중식", "방중"],
+      "default": "중식"
+    },
+    "__calc_total": {
+      "label": "합계(계) 수식",
+      "patterns": ["계"],
+      "default": "계"
+    },
+    "__calc_price": {
+      "label": "청구금액 수식",
+      "patterns": ["청구금액"],
+      "default": "청구금액"
+    }
+  },
+  "flag_fields": {
+    "__breakfast": {
+      "label": "조식 여부",
+      "tooltip": "1=해당, 0/공란=미해당 (금요일 배송)"
+    },
+    "__dinner": {
+      "label": "석식 여부",
+      "tooltip": "1=해당, 0/공란=미해당 (월~목 배송)"
+    },
+    "__vacation": {
+      "label": "방중 여부",
+      "tooltip": "1=해당, 0/공란=미해당 (방학중 월~금 배송)"
+    },
+    "__note": {
+      "label": "비고 (일시중지 등)",
+      "tooltip": ""
+    }
+  },
+  "flag_search_terms": {
+    "__breakfast": ["조식"],
+    "__dinner": ["석식"],
+    "__vacation": ["중식", "방중"],
+    "__note": ["비고"]
+  }
+}
