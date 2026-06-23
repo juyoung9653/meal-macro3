@@ -20,7 +20,7 @@ class MainWindow(QMainWindow):
         self._setup_statusbar()
 
     def _setup_window(self):
-        self.setWindowTitle(self._s.get_app_title())
+        self.setWindowTitle(self._s.get("app", "title"))
         w, h = self._s.get_app_window_size()
         self.setMinimumSize(w, h)
         self.resize(w, h)

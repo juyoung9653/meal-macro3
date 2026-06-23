@@ -135,9 +135,9 @@ def make_confirm(
 
     # 3. 템플릿 워크북 로드
     wb = openpyxl.load_workbook(template_path)
-    data_cols = s.get_data_columns()
+    data_cols = s.get("templates", "data_columns")
 
-    tpl_sheet_names = s.get_confirm_sheet_names()
+    tpl_sheet_names = s.get("templates", "confirm_sheet_names")
     all_placeholders = scan_placeholders(
         template_path,
         tpl_sheet_names,
@@ -272,7 +272,7 @@ def make_confirm(
 
             ph_map = all_placeholders.get(tpl_key, {})
 
-            title_suffix = s.get_confirm_title_suffix()
+            title_suffix = s.get("confirm", "title_suffix")
             _set_ph(
                 ws,
                 ph_map,
@@ -390,12 +390,12 @@ def make_confirm(
             }
         )
 
-    tpl_sheets = set(s.get_confirm_sheet_names())
+    tpl_sheets = set(s.get("templates", "confirm_sheet_names"))
     for sn in list(wb.sheetnames):
         if sn in tpl_sheets:
             del wb[sn]
 
-    fname_fmt = s.get_confirm_output_filename_format()
+    fname_fmt = s.get("confirm", "output_filename_format")
     fname = fname_fmt.format(year=year, month=month)
     out_path = os.path.join(output_dir, fname)
     wb.save(out_path)

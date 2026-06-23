@@ -37,7 +37,7 @@ class InvoiceTab(QWidget):
     def __init__(self):
         super().__init__()
         self._s = get_settings()
-        self._template_path = self._s.get_invoice_template_path()
+        self._template_path = self._s.get("templates", "invoice_path")
         self._template_columns = read_template_columns(self._template_path)
         self._service = InvoiceService()
         self.invoices: list[dict] = []
@@ -53,10 +53,10 @@ class InvoiceTab(QWidget):
         self._excluded_dates: set[date] = set()
         self._year: int = 0
         self._month: int = 0
-        self._db_path: str = self._s.get_db_path()
+        self._db_path: str = self._s.get("db", "path")
         self._db_reader = get_db_reader(self._db_path)
-        org = self._s.get_app_organization()
-        app_title = self._s.get_app_title()
+        org = self._s.get("app", "organization")
+        app_title = self._s.get("app", "title")
         self._settings = QSettings(org, app_title)
         self._last_output_path: str | None = None
         self._roster_loaded = False
@@ -309,8 +309,8 @@ class InvoiceTab(QWidget):
                 fname = os.path.basename(db_path)
                 self.file_label.setText(f"📁 {fname}")
                 self.file_label.setStyleSheet("color: #000;")
-            elif os.path.exists(self._s.get_db_path()):
-                fname = os.path.basename(self._s.get_db_path())
+            elif os.path.exists(self._s.get("db", "path")):
+                fname = os.path.basename(self._s.get("db", "path"))
                 self.file_label.setText(f"📁 {fname}")
                 self.file_label.setStyleSheet("color: #000;")
 
@@ -344,7 +344,7 @@ class InvoiceTab(QWidget):
         """저장된 db.xlsx 자동 로드."""
         db_path = self._settings.value("db/last_path", "")
         if not db_path:
-            db_path = self._s.get_db_path()
+            db_path = self._s.get("db", "path")
         if db_path and os.path.exists(db_path):
             self._db_reader.db_path = db_path
             self._db_path = db_path
@@ -482,7 +482,7 @@ class InvoiceTab(QWidget):
 
         self._save_settings()
 
-        fname = self._s.get_invoice_output_filename_format().format(
+        fname = self._s.get("invoice", "output_filename_format").format(
             year=self._year, month=self._month
         )
         out = os.path.join(self.output_dir, fname)

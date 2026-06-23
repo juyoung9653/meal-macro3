@@ -8,13 +8,7 @@ from .conftest import make_settings_manager
 
 
 class TestTypedAccessors:
-    def test_get_app_title(self):
-        sm = make_settings_manager()
-        assert sm.get_app_title() == "급식비 정산 프로그램"
-
-    def test_get_app_organization(self):
-        sm = make_settings_manager()
-        assert sm.get_app_organization() == "분당구"
+    """Tests for the 2 accessors with logic beyond simple get."""
 
     def test_get_app_window_size(self):
         sm = make_settings_manager()
@@ -30,56 +24,6 @@ class TestTypedAccessors:
         assert w == 1200
         assert h == 800
 
-    def test_get_invoice_template_path(self):
-        sm = make_settings_manager()
-        assert sm.get_invoice_template_path() == "assets/청구서템플릿.xlsx"
-
-    def test_get_confirm_template_path(self):
-        sm = make_settings_manager()
-        assert sm.get_confirm_template_path() == "assets/확인서템플릿.xlsx"
-
-    def test_get_template_sheet_name(self):
-        sm = make_settings_manager()
-        assert sm.get_template_sheet_name() == "학기_총괄"
-
-    def test_get_data_start_row(self):
-        sm = make_settings_manager()
-        assert sm.get_data_start_row() == 4
-
-    def test_get_data_columns(self):
-        sm = make_settings_manager()
-        assert sm.get_data_columns() == 11
-
-    def test_get_confirm_sheet_names(self):
-        sm = make_settings_manager()
-        assert sm.get_confirm_sheet_names() == ["1명", "2명", "3명", "4명", "5명"]
-
-    def test_get_roster_name_keywords(self):
-        sm = make_settings_manager()
-        assert "성명" in sm.get_roster_name_keywords()
-        assert "Name" in sm.get_roster_name_keywords()
-
-    def test_get_flag_fields(self):
-        sm = make_settings_manager()
-        fields = sm.get_flag_fields()
-        assert "__breakfast" in fields
-        assert "__dinner" in fields
-
-    def test_get_flag_search_terms(self):
-        sm = make_settings_manager()
-        terms = sm.get_flag_search_terms()
-        assert "__breakfast" in terms
-        assert terms["__breakfast"] == ["조식"]
-
-    def test_get_confirm_title_suffix(self):
-        sm = make_settings_manager()
-        assert sm.get_confirm_title_suffix() == "분당구 급식확인서"
-
-    def test_get_confirm_output_filename_format(self):
-        sm = make_settings_manager()
-        assert "{year:04d}" in sm.get_confirm_output_filename_format()
-        assert "{month:02d}" in sm.get_confirm_output_filename_format()
-
     def test_get_confirm_col_widths(self):
         sm = make_settings_manager()
         cw = sm.get_confirm_col_widths()
@@ -88,25 +32,113 @@ class TestTypedAccessors:
         assert cw["I"] == 12.5
         assert cw["J"] == 12.5
 
-    def test_get_invoice_output_filename_format(self):
+    def test_get_confirm_col_widths_after_set(self):
         sm = make_settings_manager()
-        assert "{year:04d}" in sm.get_invoice_output_filename_format()
+        sm.set("confirm", "col_width_g", value=20.0)
+        cw = sm.get_confirm_col_widths()
+        assert cw["G"] == 20.0
+        assert cw["H"] == 12.5  # unchanged
 
-    def test_get_semantic_columns(self):
+
+class TestDirectGet:
+    """Direct s.get("section", "key") replaces deleted typed accessors."""
+
+    def test_app_title(self):
         sm = make_settings_manager()
-        cols = sm.get_semantic_columns()
+        assert sm.get("app", "title") == "급식비 정산 프로그램"
+
+    def test_app_organization(self):
+        sm = make_settings_manager()
+        assert sm.get("app", "organization") == "분당구"
+
+    def test_invoice_template_path(self):
+        sm = make_settings_manager()
+        assert sm.get("templates", "invoice_path") == "assets/청구서템플릿.xlsx"
+
+    def test_confirm_template_path(self):
+        sm = make_settings_manager()
+        assert sm.get("templates", "confirm_path") == "assets/확인서템플릿.xlsx"
+
+    def test_template_sheet_name(self):
+        sm = make_settings_manager()
+        assert sm.get("templates", "sheet_name") == "학기_총괄"
+
+    def test_data_start_row(self):
+        sm = make_settings_manager()
+        assert sm.get("templates", "data_start_row") == 4
+
+    def test_data_columns(self):
+        sm = make_settings_manager()
+        assert sm.get("templates", "data_columns") == 11
+
+    def test_confirm_sheet_names(self):
+        sm = make_settings_manager()
+        assert sm.get("templates", "confirm_sheet_names") == [
+            "1명",
+            "2명",
+            "3명",
+            "4명",
+            "5명",
+        ]
+
+    def test_roster_name_keywords(self):
+        sm = make_settings_manager()
+        kw = sm.get("roster", "name_keywords")
+        assert "성명" in kw
+        assert "Name" in kw
+
+    def test_flag_fields(self):
+        sm = make_settings_manager()
+        fields = sm.get("flag_fields")
+        assert "__breakfast" in fields
+        assert "__dinner" in fields
+
+    def test_flag_search_terms(self):
+        sm = make_settings_manager()
+        terms = sm.get("flag_search_terms")
+        assert "__breakfast" in terms
+        assert terms["__breakfast"] == ["조식"]
+
+    def test_confirm_title_suffix(self):
+        sm = make_settings_manager()
+        assert sm.get("confirm", "title_suffix") == "분당구 급식확인서"
+
+    def test_confirm_output_filename_format(self):
+        sm = make_settings_manager()
+        fmt = sm.get("confirm", "output_filename_format")
+        assert "{year:04d}" in fmt
+        assert "{month:02d}" in fmt
+
+    def test_invoice_output_filename_format(self):
+        sm = make_settings_manager()
+        assert "{year:04d}" in sm.get("invoice", "output_filename_format")
+
+    def test_semantic_columns(self):
+        sm = make_settings_manager()
+        cols = sm.get("semantic_columns")
         assert "__calc_breakfast" in cols
         assert "__calc_total" in cols
 
-    def test_accessor_overridden_value(self):
+    def test_roster_example_path(self):
+        sm = make_settings_manager()
+        assert sm.get("templates", "roster_example_path") == "assets/명단예시.xlsx"
+
+    def test_db_path(self):
+        sm = make_settings_manager()
+        assert sm.get("db", "path") == "assets/db.xlsx"
+
+    def test_direct_get_overridden_value(self):
         sm = make_settings_manager()
         sm.set("app", "title", value="커스텀 타이틀")
-        assert sm.get_app_title() == "커스텀 타이틀"
+        assert sm.get("app", "title") == "커스텀 타이틀"
 
-    def test_accessor_default_when_missing(self):
+    def test_direct_get_default_when_missing(self):
         sm = make_settings_manager()
         sm._data.pop("app", None)
-        assert sm.get_app_title() == "급식비 정산 프로그램"
+        assert (
+            sm.get("app", "title", default="급식비 정산 프로그램")
+            == "급식비 정산 프로그램"
+        )
 
 
 class TestSettingsDefaults:

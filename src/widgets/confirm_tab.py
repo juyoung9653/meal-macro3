@@ -32,8 +32,8 @@ class ConfirmTab(QWidget):
         self._data = InvoiceData()
         self._per_file_mode = True
         self._s = get_settings()
-        org = self._s.get_app_organization()
-        app_title = self._s.get_app_title()
+        org = self._s.get("app", "organization")
+        app_title = self._s.get("app", "title")
         self._settings = QSettings(org, app_title)
         self._setup_ui()
         self._restore_state()
@@ -184,7 +184,7 @@ class ConfirmTab(QWidget):
                 roster_data=active_invoices,
                 col_mapping=self._data.col_mapping,
                 output_dir=self.output_dir,
-                template_path=self._s.get_confirm_template_path(),
+                template_path=self._s.get("templates", "confirm_path"),
                 year=self._data.year,
                 month=self._data.month,
                 excluded_dates=self._data.excluded_dates.copy()
