@@ -109,33 +109,12 @@ class ConfirmTab(QWidget):
         self._settings.sync()
 
     def _load_cached_invoice_data(self) -> "InvoiceData | None":
-        import json
-        from datetime import date as dt_date
-
         out_dir = self._settings.value(
             "invoice/output_dir", ""
         ) or self._settings.value("confirm/output_dir", "")
         if not out_dir:
             return None
-        cache_path = os.path.join(out_dir, ".invoice_data_cache.json")
-        if not os.path.exists(cache_path):
-            return None
-        try:
-            with open(cache_path, "r", encoding="utf-8") as f:
-                payload = json.load(f)
-            return InvoiceData(
-                invoices=payload.get("invoices", []),
-                col_mapping=payload.get("col_mapping", {}),
-                year=payload.get("year", 0),
-                month=payload.get("month", 0),
-                excluded_dates={
-                    dt_date.fromisoformat(d) for d in payload.get("excluded_dates", [])
-                },
-                roster_headers=payload.get("roster_headers", []),
-                roster_path=payload.get("roster_path"),
-            )
-        except (OSError, json.JSONDecodeError, ValueError):
-            return None
+        return InvoiceData.load_cache(out_dir)
 
     def _restore_state(self):
         raw = self._settings.value("confirm/output_dir", "")

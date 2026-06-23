@@ -21,6 +21,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from ..core.invoice_data import InvoiceData
 from ..core.settings import get_settings
 from ..excel.db_reader import get_db_reader
 from ..services.invoice_controller import InvoiceGenerationConfig, InvoiceService
@@ -385,52 +386,14 @@ class InvoiceTab(QWidget):
         self._settings.sync()
 
     def _cache_invoice_data(self):
-        import json
-
-        data = self.get_invoice_data()
-        cache_path = os.path.join(self.output_dir, ".invoice_data_cache.json")
-        try:
-            payload = {
-                "invoices": data.invoices,
-                "col_mapping": data.col_mapping,
-                "year": data.year,
-                "month": data.month,
-                "excluded_dates": [d.isoformat() for d in data.excluded_dates],
-                "roster_headers": data.roster_headers,
-                "roster_path": data.roster_path,
-            }
-            with open(cache_path, "w", encoding="utf-8") as f:
-                json.dump(payload, f, ensure_ascii=False, indent=2)
-        except OSError:
-            pass
+        if self.output_dir:
+            self.get_invoice_data().save_cache(self.output_dir)
 
     def _load_cached_invoice_data(self):
-        import json
-
         out_dir = self._settings.value("invoice/output_dir", "")
         if not out_dir:
             return None
-        cache_path = os.path.join(out_dir, ".invoice_data_cache.json")
-        if not os.path.exists(cache_path):
-            return None
-        try:
-            with open(cache_path, "r", encoding="utf-8") as f:
-                payload = json.load(f)
-            from ..core.invoice_data import InvoiceData
-
-            return InvoiceData(
-                invoices=payload.get("invoices", []),
-                col_mapping=payload.get("col_mapping", {}),
-                year=payload.get("year", 0),
-                month=payload.get("month", 0),
-                excluded_dates={
-                    date.fromisoformat(d) for d in payload.get("excluded_dates", [])
-                },
-                roster_headers=payload.get("roster_headers", []),
-                roster_path=payload.get("roster_path"),
-            )
-        except (OSError, json.JSONDecodeError, ValueError):
-            return None
+        return InvoiceData.load_cache(out_dir)
 
     def _select_output_dir(self):
         d = QFileDialog.getExistingDirectory(self, "출력 폴더 선택")
@@ -585,8 +548,6 @@ class InvoiceTab(QWidget):
     # ── 외부 접근 ──
 
     def get_invoice_data(self):
-        from ..core.invoice_data import InvoiceData
-
         return InvoiceData(
             invoices=self.invoices,
             col_mapping=dict(self._col_mapping),
