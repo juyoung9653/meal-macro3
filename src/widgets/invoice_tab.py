@@ -23,8 +23,8 @@ from PyQt6.QtWidgets import (
 
 from ..core.settings import get_settings
 from ..excel.db_reader import get_db_reader
-from ..services.invoice_controller import InvoiceController
-from ..templates.config import read_template_columns
+from ..services.invoice_controller import InvoiceGenerationConfig, InvoiceService
+from ..templates.config import auto_detect_semantic_columns, read_template_columns
 
 log = logging.getLogger(__name__)
 
@@ -39,8 +39,22 @@ class InvoiceTab(QWidget):
         self._s = get_settings()
         self._template_path = self._s.get_invoice_template_path()
         self._template_columns = read_template_columns(self._template_path)
-        self._controller = InvoiceController(self, self._template_columns)
-        self._db_reader = get_db_reader(self._s.get_db_path())
+        self._service = InvoiceService()
+        self.invoices: list[dict] = []
+        self.output_dir: str | None = None
+        self.roster_headers: list[str] = []
+        self.roster_path: str | None = None
+        self._col_mapping: dict = {col: "" for col in self._template_columns}
+        _sem = auto_detect_semantic_columns(self._template_columns)
+        self._col_mapping.update(_sem)
+        self._col_mapping.update(
+            {"__breakfast": "", "__dinner": "", "__vacation": "", "__note": ""}
+        )
+        self._excluded_dates: set[date] = set()
+        self._year: int = 0
+        self._month: int = 0
+        self._db_path: str = self._s.get_db_path()
+        self._db_reader = get_db_reader(self._db_path)
         org = self._s.get_app_organization()
         app_title = self._s.get_app_title()
         self._settings = QSettings(org, app_title)
@@ -180,7 +194,7 @@ class InvoiceTab(QWidget):
         )
         if path:
             self._db_reader.db_path = path
-            self._controller.set_db_path(path)
+            self._db_path = path
             fname = os.path.basename(path)
             self.file_label.setText(f"📁 {fname}")
             self.file_label.setStyleSheet("color: #000;")
@@ -196,8 +210,8 @@ class InvoiceTab(QWidget):
         """db.xlsx 배송전체 시트에서 연월 자동 감지 → 라벨 + 컨트롤러 설정."""
         try:
             y, m = self._db_reader.detect_month()
-            self._controller._year = y
-            self._controller._month = m
+            self._year = y
+            self._month = m
             self.year_label.setText(str(y))
             self.year_label.setStyleSheet(
                 "font-weight: bold; font-size: 14px; color: #0a0;"
@@ -224,8 +238,9 @@ class InvoiceTab(QWidget):
 
             # 헤더 추출
             headers = list(roster[0].keys()) if roster else []
-            self._controller.set_roster_headers(headers)
-            self._controller.set_roster_path(self._db_reader.db_path)
+            self.roster_headers = list(headers)
+            self.roster_path = self._db_reader.db_path
+            self._auto_map_columns()
 
             self._roster_loaded = True
             self.generate_btn.setEnabled(True)
@@ -255,7 +270,7 @@ class InvoiceTab(QWidget):
     def _restore_ui_state(self):
         out = self._settings.value("invoice/output_dir", "")
         if out:
-            self._controller.output_dir = out
+            self.output_dir = out
             self.path_label.setText(out)
             self.path_label.setStyleSheet("color: #000;")
 
@@ -266,12 +281,9 @@ class InvoiceTab(QWidget):
         # 컬럼 매핑
         mapping = self._settings.value("invoice/col_mapping", None)
         if mapping is not None:
-            self._controller.set_col_mapping(
-                {
-                    k: mapping.get(k, v)
-                    for k, v in self._controller.get_col_mapping().items()
-                }
-            )
+            self._col_mapping = {
+                k: mapping.get(k, v) for k, v in self._col_mapping.items()
+            }
 
         # 단가
         bp = self._settings.value("invoice/breakfast_price", None)
@@ -293,7 +305,7 @@ class InvoiceTab(QWidget):
         if db_path and db_path != self._db_reader.db_path:
             if os.path.exists(db_path):
                 self._db_reader.db_path = db_path
-                self._controller.set_db_path(db_path)
+                self._db_path = db_path
                 fname = os.path.basename(db_path)
                 self.file_label.setText(f"📁 {fname}")
                 self.file_label.setStyleSheet("color: #000;")
@@ -305,13 +317,13 @@ class InvoiceTab(QWidget):
         # 캐시된 InvoiceData 복원
         cached = self._load_cached_invoice_data()
         if cached and cached.invoices:
-            self._controller.invoices = cached.invoices
-            self._controller.set_col_mapping(cached.col_mapping)
-            self._controller._year = cached.year
-            self._controller._month = cached.month
-            self._controller.set_excluded_dates(cached.excluded_dates)
-            self._controller.roster_headers = cached.roster_headers
-            self._controller.roster_path = cached.roster_path
+            self.invoices = cached.invoices
+            self._col_mapping = dict(cached.col_mapping)
+            self._year = cached.year
+            self._month = cached.month
+            self._excluded_dates = set(cached.excluded_dates)
+            self.roster_headers = cached.roster_headers
+            self.roster_path = cached.roster_path
             self._roster_loaded = True
             self.generate_btn.setEnabled(True)
             self._update_result(cached.invoices)
@@ -335,7 +347,7 @@ class InvoiceTab(QWidget):
             db_path = self._s.get_db_path()
         if db_path and os.path.exists(db_path):
             self._db_reader.db_path = db_path
-            self._controller.set_db_path(db_path)
+            self._db_path = db_path
             fname = os.path.basename(db_path)
             self.file_label.setText(f"📁 {fname}")
             self.file_label.setStyleSheet("color: #000;")
@@ -344,8 +356,9 @@ class InvoiceTab(QWidget):
                 roster = self._db_reader.read_roster()
                 if roster:
                     headers = list(roster[0].keys()) if roster else []
-                    self._controller.set_roster_headers(headers)
-                    self._controller.set_roster_path(db_path)
+                    self.roster_headers = list(headers)
+                    self.roster_path = db_path
+                    self._auto_map_columns()
                     self._roster_loaded = True
                     self.generate_btn.setEnabled(True)
                     self.file_label.setText(f"✅ {fname} ({len(roster)}명)")
@@ -364,11 +377,9 @@ class InvoiceTab(QWidget):
         self._settings.setValue("invoice/breakfast_price", self.breakfast_price.value())
         self._settings.setValue("invoice/dinner_price", self.dinner_price.value())
         self._settings.setValue("invoice/lunch_price", self.lunch_price.value())
-        self._settings.setValue(
-            "invoice/col_mapping", self._controller.get_col_mapping()
-        )
-        if self._controller.output_dir:
-            self._settings.setValue("invoice/output_dir", self._controller.output_dir)
+        self._settings.setValue("invoice/col_mapping", dict(self._col_mapping))
+        if self.output_dir:
+            self._settings.setValue("invoice/output_dir", self.output_dir)
         if self._db_reader.db_path:
             self._settings.setValue("db/last_path", self._db_reader.db_path)
         self._settings.sync()
@@ -377,9 +388,7 @@ class InvoiceTab(QWidget):
         import json
 
         data = self.get_invoice_data()
-        cache_path = os.path.join(
-            self._controller.output_dir, ".invoice_data_cache.json"
-        )
+        cache_path = os.path.join(self.output_dir, ".invoice_data_cache.json")
         try:
             payload = {
                 "invoices": data.invoices,
@@ -426,7 +435,7 @@ class InvoiceTab(QWidget):
     def _select_output_dir(self):
         d = QFileDialog.getExistingDirectory(self, "출력 폴더 선택")
         if d:
-            self._controller.output_dir = d
+            self.output_dir = d
             self.path_label.setText(d)
             self.path_label.setStyleSheet("color: #000;")
             self._settings.setValue("invoice/output_dir", d)
@@ -434,17 +443,17 @@ class InvoiceTab(QWidget):
 
     def _load_default_excluded_dates(self):
         """db.xlsx 배송휴무 시트에서 제외일 로드 → 컨트롤러 + 라벨 표시."""
-        y = self._controller._year
-        m = self._controller._month
+        y = self._year
+        m = self._month
         if not y or not m:
             return
 
-        self._controller.clear_excluded_dates()
+        self._excluded_dates.clear()
         holidays = self._db_reader.get_holiday_set()
         month_excluded: list[date] = []
         for d in sorted(holidays):
             if d.year == y and d.month == m and d.weekday() < 5:
-                self._controller.add_excluded_date(d)
+                self._excluded_dates.add(d)
                 month_excluded.append(d)
 
         if month_excluded:
@@ -463,22 +472,20 @@ class InvoiceTab(QWidget):
     # ── 청구서 생성 ──
 
     def _generate_invoices(self):
-        if not self._controller.output_dir:
+        if not self.output_dir:
             QMessageBox.warning(self, "알림", "출력 경로를 먼저 선택하세요.")
             return
 
-        year = self._controller._year
-        month = self._controller._month
-        if not year or not month:
+        if not self._year or not self._month:
             QMessageBox.warning(self, "알림", "db.xlsx를 먼저 로드하세요.")
             return
 
         self._save_settings()
 
         fname = self._s.get_invoice_output_filename_format().format(
-            year=year, month=month
+            year=self._year, month=self._month
         )
-        out = os.path.join(self._controller.output_dir, fname)
+        out = os.path.join(self.output_dir, fname)
 
         try:
             roster = self._db_reader.read_roster()
@@ -492,31 +499,47 @@ class InvoiceTab(QWidget):
             )
             return
 
-        success, cnt, enriched = self._controller.generate(
+        config = InvoiceGenerationConfig(
             roster_data=roster,
             output_path=out,
-            year=year,
-            month=month,
+            year=self._year,
+            month=self._month,
             breakfast_price=self.breakfast_price.value(),
             dinner_price=self.dinner_price.value(),
             lunch_price=self.lunch_price.value(),
             template_path=self._template_path,
+            col_mapping=self._col_mapping,
+            excluded_dates=self._excluded_dates,
+            roster_headers=self.roster_headers,
+            template_columns=self._template_columns,
+            db_path=self._db_path,
         )
-        if not success:
+        result = self._service.generate(config)
+
+        for w in result.warnings:
+            QMessageBox.warning(self, w.code, w.message)
+
+        if not result.success:
+            if result.error:
+                QMessageBox.critical(self, "오류", result.error)
             return
+
+        self.invoices = result.enriched
 
         self._last_output_path = out
         self.open_file_btn.setEnabled(True)
-        self._update_result(enriched)
+        self._update_result(result.enriched)
 
         self._cache_invoice_data()
 
-        QMessageBox.information(self, "완료", f"청구서 {cnt}건 생성 완료!\n{out}")
+        QMessageBox.information(
+            self, "완료", f"청구서 {result.count}건 생성 완료!\n{out}"
+        )
 
     def _update_result(self, data: list[dict]):
         show = data[: self.MAX_RESULT_ROWS]
         self.result_table.setRowCount(len(show))
-        cm = self._controller.get_col_mapping()
+        cm = dict(self._col_mapping)
         name_col = cm.get("성명", "성명")
         dept_col = cm.get("학교명", "학교명")
         for i, p in enumerate(show):
@@ -537,7 +560,7 @@ class InvoiceTab(QWidget):
             )
 
     def _clear(self):
-        self._controller.invoices.clear()
+        self.invoices.clear()
         self.result_table.setRowCount(0)
         self.info_label.setText("db.xlsx에서 데이터를 불러오세요.")
         self._last_output_path = None
@@ -545,38 +568,31 @@ class InvoiceTab(QWidget):
         self._roster_loaded = False
         self.generate_btn.setEnabled(False)
 
+    def _auto_map_columns(self):
+        """템플릿 컬럼 ↔ 명단 컬럼 자동 매칭 (공백/개행 무시)."""
+        if not self.roster_headers:
+            return
+        roster_normalized = {
+            h.replace(" ", "").replace("\n", ""): h for h in self.roster_headers
+        }
+        for tcol in list(self._col_mapping.keys()):
+            if tcol.startswith("__"):
+                continue  # semantic keys are handled separately
+            tnorm = tcol.replace(" ", "").replace("\n", "")
+            if tnorm in roster_normalized:
+                self._col_mapping[tcol] = roster_normalized[tnorm]
+
     # ── 외부 접근 ──
-
-    def get_invoices(self):
-        return self._controller.get_invoices()
-
-    def get_col_mapping(self):
-        return self._controller.get_col_mapping()
-
-    def get_year(self):
-        return self._controller._year
-
-    def get_month(self):
-        return self._controller._month
-
-    def get_excluded_dates(self) -> set[date]:
-        return self._controller.get_excluded_dates()
-
-    def get_roster_headers(self):
-        return self._controller.get_roster_headers()
-
-    def get_roster_path(self):
-        return self._controller.get_roster_path()
 
     def get_invoice_data(self):
         from ..core.invoice_data import InvoiceData
 
         return InvoiceData(
-            invoices=self.get_invoices(),
-            col_mapping=self.get_col_mapping(),
-            year=self.get_year(),
-            month=self.get_month(),
-            excluded_dates=self.get_excluded_dates(),
-            roster_headers=self.get_roster_headers(),
-            roster_path=self.get_roster_path(),
+            invoices=self.invoices,
+            col_mapping=dict(self._col_mapping),
+            year=self._year,
+            month=self._month,
+            excluded_dates=self._excluded_dates.copy(),
+            roster_headers=self.roster_headers,
+            roster_path=self.roster_path,
         )
