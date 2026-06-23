@@ -9,7 +9,8 @@ import openpyxl
 from ..core.date_utils import get_week_ranges, to_bool, week_date_str
 from ..core.meal_types import MealType
 from ..core.settings import get_settings
-from ..excel.db_reader import _is_date_col, get_db_reader
+from ..excel._parsing import _is_date_col
+from ..excel.db_reader import get_db_reader
 from ..excel.excel_utils import adjust_formula, build_merged_anchor_map, copy_cell
 from ..templates.template_scanner import scan_placeholders, validate_placeholders
 

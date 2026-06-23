@@ -1,7 +1,7 @@
 """Tests for src.services.invoice_controller.InvoiceService — db.xlsx 기반."""
 
 from datetime import date
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -12,6 +12,7 @@ from src.services.invoice_controller import (
     InvoiceWarning,
     _count_delivery_from_row,
 )
+from tests.conftest import InMemoryDataSource
 
 
 class TestCountDeliveryFromRow:
@@ -42,7 +43,7 @@ class TestCountDeliveryFromRow:
 
 
 class TestInvoiceServiceGenerate:
-    """read_delivery_matrix mock으로 InvoiceService.generate() 테스트.
+    """InMemoryDataSource로 InvoiceService.generate() 테스트.
 
     배송전체는 Power Query가 이미 모든 휴무일/제외일을 반영한 최종 결과.
     추가 차감 없이 그대로 사용.
@@ -50,15 +51,11 @@ class TestInvoiceServiceGenerate:
 
     @pytest.fixture
     def mock_reader(self):
-        with patch("src.services.invoice_controller.get_db_reader") as m:
-            reader = MagicMock()
-            reader.read_delivery_matrix.return_value = []
-            reader.read_delivery_order.return_value = []
-            reader.build_order_map.return_value = {}
-            reader.read_holidays.return_value = []
-            reader.read_vacation_schedule.return_value = []
-            m.return_value = reader
-            yield m
+        reader = InMemoryDataSource()
+        with patch(
+            "src.services.invoice_controller.get_db_reader", return_value=reader
+        ):
+            yield reader
 
     @pytest.fixture
     def mock_make_invoice(self):
@@ -100,8 +97,7 @@ class TestInvoiceServiceGenerate:
         assert "명단 데이터" in (result.error or "")
 
     def test_조식_플래그_O_집계(self, svc, mock_reader, mock_make_invoice, mock_exists):
-        reader = mock_reader.return_value
-        reader.read_delivery_matrix.return_value = [
+        mock_reader._delivery_matrix = [
             {
                 "ID": "P001",
                 "식종": "조식",
@@ -111,7 +107,7 @@ class TestInvoiceServiceGenerate:
                 "6/4": "O",
             },
         ]
-        reader.build_order_map.return_value = {
+        mock_reader._order_map = {
             "010-1234|서울": {"배송순서": "1", "배송담당": "김배송"},
         }
 
@@ -152,11 +148,10 @@ class TestInvoiceServiceGenerate:
         self, svc, mock_reader, mock_make_invoice, mock_exists
     ):
         """배송전체 값이 최종 결과. excluded_dates/holidays 추가 차감 없음."""
-        reader = mock_reader.return_value
-        reader.read_delivery_matrix.return_value = [
+        mock_reader._delivery_matrix = [
             {"ID": "P001", "식종": "조식", "6/1": "O", "6/2": "O", "6/3": "O"},
         ]
-        reader.build_order_map.return_value = {}
+        mock_reader._order_map = {}
 
         result = svc.generate(
             InvoiceGenerationConfig(
@@ -193,11 +188,10 @@ class TestInvoiceServiceGenerate:
     def test_플래그_0이면_건수_0(
         self, svc, mock_reader, mock_make_invoice, mock_exists
     ):
-        reader = mock_reader.return_value
-        reader.read_delivery_matrix.return_value = [
+        mock_reader._delivery_matrix = [
             {"ID": "P001", "식종": "조식", "6/1": "O", "6/2": "O"},
         ]
-        reader.build_order_map.return_value = {}
+        mock_reader._order_map = {}
 
         result = svc.generate(
             InvoiceGenerationConfig(
@@ -233,12 +227,11 @@ class TestInvoiceServiceGenerate:
         self, svc, mock_reader, mock_make_invoice, mock_exists
     ):
         """석식_BOX → 석식으로 합산, 중식 아님."""
-        reader = mock_reader.return_value
-        reader.read_delivery_matrix.return_value = [
+        mock_reader._delivery_matrix = [
             {"ID": "P001", "식종": "석식", "6/1": "1", "6/2": "1"},
             {"ID": "P001", "식종": "석식_BOX", "6/3": "1", "6/4": "1", "6/5": "1"},
         ]
-        reader.build_order_map.return_value = {}
+        mock_reader._order_map = {}
 
         result = svc.generate(
             InvoiceGenerationConfig(

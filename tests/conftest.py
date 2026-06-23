@@ -7,6 +7,48 @@ from typing import Any
 import pytest
 
 from src.core.settings import DEFAULTS, SettingsManager
+from src.excel.data_source import DataSource
+
+
+class InMemoryDataSource(DataSource):
+    """Test double that returns pre-configured data instead of reading Excel."""
+
+    def __init__(self, **kwargs):
+        self._db_path = kwargs.get("db_path", ":memory:")
+        self._roster = kwargs.get("roster", [])
+        self._delivery_matrix = kwargs.get("delivery_matrix", [])
+        self._delivery_map = kwargs.get("delivery_map", {})
+        self._order_map = kwargs.get("order_map", {})
+        self._delivery_contacts = kwargs.get("delivery_contacts", [])
+        self._holiday_set = kwargs.get("holiday_set", set())
+        self._year = kwargs.get("year", 2026)
+        self._month = kwargs.get("month", 6)
+
+    @property
+    def db_path(self) -> str:
+        return self._db_path
+
+    def read_roster(self) -> list[dict]:
+        return list(self._roster)
+
+    def read_delivery_matrix(self) -> list[dict]:
+        return list(self._delivery_matrix)
+
+    def build_delivery_map(self) -> dict[str, dict]:
+        return dict(self._delivery_map)
+
+    def build_order_map(self) -> dict[str, dict]:
+        return dict(self._order_map)
+
+    def read_delivery_contacts(self) -> list[dict]:
+        return list(self._delivery_contacts)
+
+    def get_holiday_set(self) -> set[date]:
+        return set(self._holiday_set)
+
+    def detect_month(self) -> tuple[int, int]:
+        return self._year, self._month
+
 
 # ── Known holidays for testing ──
 

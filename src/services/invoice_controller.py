@@ -7,7 +7,8 @@ from datetime import date
 from typing import Any
 
 from ..core.models import EnrichedPerson, RosterPerson, person_to_dict
-from ..excel.db_reader import _is_date_col, get_db_reader
+from ..excel._parsing import _is_date_col
+from ..excel.db_reader import get_db_reader
 from ..generators.invoice_generator import make_invoice
 
 log = logging.getLogger(__name__)
@@ -243,7 +244,7 @@ class InvoiceService:
             for row in reader.read_delivery_matrix():
                 meal = str(row.get("식종", "")).strip()
                 if "중식" in meal or "방중" in meal:
-                    from ..excel.db_reader import _is_date_col
+                    from ..excel._parsing import _is_date_col
 
                     if any(
                         str(v).strip() in ("1", "O")
