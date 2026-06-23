@@ -105,9 +105,6 @@ class TestInvoicePipeline:
             output_path=output_path,
             year=2026,
             month=6,
-            breakfast_price=9500,
-            dinner_price=9500,
-            lunch_price=9500,
             col_mapping={},
             excluded_dates=set(),
             roster_headers=[
@@ -178,9 +175,6 @@ class TestInvoicePipeline:
             output_path=str(tmp_path / "empty.xlsx"),
             year=2026,
             month=6,
-            breakfast_price=9500,
-            dinner_price=9500,
-            lunch_price=9500,
         )
         result = service.generate(config)
         assert not result.success

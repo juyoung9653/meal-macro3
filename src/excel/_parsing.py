@@ -65,8 +65,10 @@ def _is_date_col(name: str) -> bool:
 
 
 def _parse_date_col(name: str) -> tuple[int, int] | None:
-    """'6/15' → (6, 15)."""
+    """'6/15' → (6, 15). '6/15 월' 등 요일 접미사도 처리."""
     if not _is_date_col(name):
         return None
     parts = name.split("/")
-    return int(parts[0]), int(parts[1])
+    m = int(parts[0])
+    d = int(parts[1].split()[0])  # '1 월' → 1
+    return m, d

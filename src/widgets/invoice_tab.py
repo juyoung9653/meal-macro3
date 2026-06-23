@@ -14,7 +14,6 @@ from PyQt6.QtWidgets import (
     QLabel,
     QMessageBox,
     QPushButton,
-    QSpinBox,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -99,26 +98,6 @@ class InvoiceTab(QWidget):
         config_row.addWidget(QLabel("월"))
         config_row.addSpacing(20)
 
-        config_row.addWidget(QLabel("조식단가:"))
-        self.breakfast_price = QSpinBox()
-        self.breakfast_price.setRange(0, 99999)
-        self.breakfast_price.setValue(9500)
-        self.breakfast_price.setSuffix("원")
-        config_row.addWidget(self.breakfast_price)
-
-        config_row.addWidget(QLabel("석식단가:"))
-        self.dinner_price = QSpinBox()
-        self.dinner_price.setRange(0, 99999)
-        self.dinner_price.setValue(9500)
-        self.dinner_price.setSuffix("원")
-        config_row.addWidget(self.dinner_price)
-
-        config_row.addWidget(QLabel("중식단가:"))
-        self.lunch_price = QSpinBox()
-        self.lunch_price.setRange(0, 99999)
-        self.lunch_price.setValue(9500)
-        self.lunch_price.setSuffix("원")
-        config_row.addWidget(self.lunch_price)
         config_row.addStretch()
         layout.addWidget(config_group)
 
@@ -157,11 +136,6 @@ class InvoiceTab(QWidget):
         btn_layout.addWidget(self.open_file_btn)
         btn_layout.addWidget(self.clear_btn)
         layout.addLayout(btn_layout)
-
-        # 값 변경 시 자동 저장
-        self.breakfast_price.valueChanged.connect(self._save_settings)
-        self.dinner_price.valueChanged.connect(self._save_settings)
-        self.lunch_price.valueChanged.connect(self._save_settings)
 
         # ── 결과 테이블 ──
         table_group = QGroupBox("④ 생성 결과")
@@ -269,15 +243,11 @@ class InvoiceTab(QWidget):
     # ── 설정 저장/복원 ──
 
     def _restore_ui_state(self):
-        out = self._settings.value("invoice/output_dir", "")
+        out = self._settings.value("output_dir", "")
         if out:
             self.output_dir = out
             self.path_label.setText(out)
             self.path_label.setStyleSheet("color: #000;")
-
-        self.breakfast_price.blockSignals(True)
-        self.dinner_price.blockSignals(True)
-        self.lunch_price.blockSignals(True)
 
         # 컬럼 매핑
         mapping = self._settings.value("invoice/col_mapping", None)
@@ -285,21 +255,6 @@ class InvoiceTab(QWidget):
             self._col_mapping = {
                 k: mapping.get(k, v) for k, v in self._col_mapping.items()
             }
-
-        # 단가
-        bp = self._settings.value("invoice/breakfast_price", None)
-        if bp is not None:
-            self.breakfast_price.setValue(int(bp))
-        dp = self._settings.value("invoice/dinner_price", None)
-        if dp is not None:
-            self.dinner_price.setValue(int(dp))
-        lp = self._settings.value("invoice/lunch_price", None)
-        if lp is not None:
-            self.lunch_price.setValue(int(lp))
-
-        self.breakfast_price.blockSignals(False)
-        self.dinner_price.blockSignals(False)
-        self.lunch_price.blockSignals(False)
 
         # db.xlsx 경로 복원
         db_path = self._settings.value("db/last_path", "")
@@ -314,32 +269,6 @@ class InvoiceTab(QWidget):
                 fname = os.path.basename(self._s.get("db", "path"))
                 self.file_label.setText(f"📁 {fname}")
                 self.file_label.setStyleSheet("color: #000;")
-
-        # 캐시된 InvoiceData 복원
-        cached = self._load_cached_invoice_data()
-        if cached and cached.invoices:
-            self.invoices = cached.invoices
-            self._col_mapping = dict(cached.col_mapping)
-            self._year = cached.year
-            self._month = cached.month
-            self._excluded_dates = set(cached.excluded_dates)
-            self.roster_headers = cached.roster_headers
-            self.roster_path = cached.roster_path
-            self._roster_loaded = True
-            self.generate_btn.setEnabled(True)
-            self._update_result(cached.invoices)
-            # 연월 라벨 복원
-            if cached.year:
-                self.year_label.setText(str(cached.year))
-                self.year_label.setStyleSheet(
-                    "font-weight: bold; font-size: 14px; color: #0a0;"
-                )
-            if cached.month:
-                self.month_label.setText(str(cached.month))
-                self.month_label.setStyleSheet(
-                    "font-weight: bold; font-size: 14px; color: #0a0;"
-                )
-            self._load_default_excluded_dates()
 
     def _try_auto_load_roster(self):
         """저장된 db.xlsx 자동 로드."""
@@ -375,25 +304,12 @@ class InvoiceTab(QWidget):
         self._try_auto_load_roster()
 
     def _save_settings(self):
-        self._settings.setValue("invoice/breakfast_price", self.breakfast_price.value())
-        self._settings.setValue("invoice/dinner_price", self.dinner_price.value())
-        self._settings.setValue("invoice/lunch_price", self.lunch_price.value())
         self._settings.setValue("invoice/col_mapping", dict(self._col_mapping))
         if self.output_dir:
-            self._settings.setValue("invoice/output_dir", self.output_dir)
+            self._settings.setValue("output_dir", self.output_dir)
         if self._db_reader.db_path:
             self._settings.setValue("db/last_path", self._db_reader.db_path)
         self._settings.sync()
-
-    def _cache_invoice_data(self):
-        if self.output_dir:
-            self.get_invoice_data().save_cache(self.output_dir)
-
-    def _load_cached_invoice_data(self):
-        out_dir = self._settings.value("invoice/output_dir", "")
-        if not out_dir:
-            return None
-        return InvoiceData.load_cache(out_dir)
 
     def _select_output_dir(self):
         d = QFileDialog.getExistingDirectory(self, "출력 폴더 선택")
@@ -401,7 +317,7 @@ class InvoiceTab(QWidget):
             self.output_dir = d
             self.path_label.setText(d)
             self.path_label.setStyleSheet("color: #000;")
-            self._settings.setValue("invoice/output_dir", d)
+            self._settings.setValue("output_dir", d)
             self._settings.sync()
 
     def _load_default_excluded_dates(self):
@@ -467,9 +383,6 @@ class InvoiceTab(QWidget):
             output_path=out,
             year=self._year,
             month=self._month,
-            breakfast_price=self.breakfast_price.value(),
-            dinner_price=self.dinner_price.value(),
-            lunch_price=self.lunch_price.value(),
             template_path=self._template_path,
             col_mapping=self._col_mapping,
             excluded_dates=self._excluded_dates,
@@ -492,8 +405,6 @@ class InvoiceTab(QWidget):
         self._last_output_path = out
         self.open_file_btn.setEnabled(True)
         self._update_result(result.enriched)
-
-        self._cache_invoice_data()
 
         QMessageBox.information(
             self, "완료", f"청구서 {result.count}건 생성 완료!\n{out}"
@@ -546,6 +457,14 @@ class InvoiceTab(QWidget):
                 self._col_mapping[tcol] = roster_normalized[tnorm]
 
     # ── 외부 접근 ──
+
+    def set_output_dir(self, path: str):
+        """외부에서 출력 경로 설정 (탭 간 공유용)."""
+        if path and path != self.output_dir:
+            self.output_dir = path
+            self.path_label.setText(path)
+            self.path_label.setStyleSheet("color: #000;")
+            self._save_settings()
 
     def get_invoice_data(self):
         return InvoiceData(

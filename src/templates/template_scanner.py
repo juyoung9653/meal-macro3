@@ -1,10 +1,8 @@
 """템플릿 플레이스홀더 스캐너 — {key} 패턴 찾아 위치 캐싱.
 
-캐시는 템플릿 파일 mtime 기준 무효화.
-cache_path 지정 시 파일로 영속화 (프로그램 재시작 간 유지).
+인메모리 캐시 (mtime 기준 무효화). 같은 세션 내에서만 유지.
 """
 
-import json
 import logging
 import os
 import re
@@ -14,7 +12,7 @@ import openpyxl
 
 log = logging.getLogger(__name__)
 
-# ── 인메모리 캐시 (파일 캐시의 2차 캐시 역할) ──
+# ── 인메모리 캐시 ──
 _mem_cache: dict[str, tuple[float, dict[str, dict[str, list[tuple[int, int]]]]]] = {}
 #           template_path -> (mtime, {sheet_name: {placeholder: [(row, col), ...]}})
 
@@ -24,33 +22,6 @@ def _get_mtime(path: str) -> float:
         return os.path.getmtime(path)
     except OSError:
         return 0.0
-
-
-def _load_file_cache(cache_path: str) -> dict:
-    """파일 캐시에서 로드. 없거나 깨졌으면 {}."""
-    if not os.path.exists(cache_path):
-        return {}
-    try:
-        with open(cache_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if not isinstance(data, dict):
-            return {}
-        return data
-    except (json.JSONDecodeError, OSError) as e:
-        log.warning("Failed to load cache file %s: %s", cache_path, e)
-        return {}
-
-
-def _save_file_cache(cache_path: str, data: dict):
-    """파일 캐시 저장."""
-    try:
-        dname = os.path.dirname(cache_path)
-        if dname:
-            os.makedirs(dname, exist_ok=True)
-        with open(cache_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-    except OSError as e:
-        log.warning("Failed to save cache file %s: %s", cache_path, e)
 
 
 def _scan_sheets(
@@ -87,7 +58,6 @@ def _scan_sheets(
 def scan_placeholders(
     template_path: str,
     sheet_names: list[str] | None = None,
-    cache_path: str | None = None,
 ) -> dict[str, dict[str, list[tuple[int, int]]]]:
     """템플릿 파일의 지정 시트들에서 {key} 패턴 위치 스캔.
 
@@ -95,13 +65,11 @@ def scan_placeholders(
 
     캐시 전략:
       1. 인메모리 캐시 확인 (mtime 비교)
-      2. 파일 캐시 확인 (mtime 비교, cache_path 지정 시)
-      3. 템플릿 직접 스캔 → 인메모리 + 파일 캐시 갱신
+      2. 템플릿 직접 스캔 → 인메모리 캐시 갱신
 
     Args:
         template_path: 엑셀 템플릿 경로
         sheet_names: 스캔할 시트명 목록. None이면 모든 시트.
-        cache_path: 파일 캐시 경로. None이면 인메모리 전용.
 
     Returns:
         {sheet_name: {placeholder: [(row, col), ...]}}  — row/col은 1-based.
@@ -116,22 +84,7 @@ def scan_placeholders(
             return cached_data
         log.info("Template mtime changed (mem), re-scanning: %s", template_path)
 
-    # ── 2. 파일 캐시 ──
-    if cache_path:
-        file_cache = _load_file_cache(cache_path)
-        entry = file_cache.get(template_path)
-        if entry and isinstance(entry, dict):
-            cached_mtime = entry.get("_mtime", 0)
-            if cached_mtime == mtime:
-                data = entry.get("_data")
-                if data:
-                    _mem_cache[template_path] = (mtime, data)
-                    log.info(
-                        "File-cache hit for %s (%d sheets)", template_path, len(data)
-                    )
-                    return data
-
-    # ── 3. 템플릿 직접 스캔 ──
+    # ── 2. 템플릿 직접 스캔 ──
     log.info("Scanning placeholders in %s", template_path)
     wb = openpyxl.load_workbook(template_path, data_only=True)
     target_sheets = sheet_names or wb.sheetnames
@@ -148,36 +101,20 @@ def scan_placeholders(
 
     # 캐시 저장
     _mem_cache[template_path] = (mtime, result)
-    if cache_path:
-        file_cache = _load_file_cache(cache_path)
-        file_cache[template_path] = {"_mtime": mtime, "_data": result}
-        _save_file_cache(cache_path, file_cache)
 
     return result
 
 
-def clear_cache(template_path: str | None = None, cache_path: str | None = None):
-    """캐시 초기화.
+def clear_cache(template_path: str | None = None):
+    """인메모리 캐시 초기화.
 
     Args:
         template_path: 특정 템플릿만 초기화. None이면 전체.
-        cache_path: 파일 캐시도 초기화할 경로.
     """
     if template_path is None:
         _mem_cache.clear()
     else:
         _mem_cache.pop(template_path, None)
-
-    if cache_path:
-        if template_path is None:
-            try:
-                os.remove(cache_path)
-            except OSError:
-                pass
-        else:
-            file_cache = _load_file_cache(cache_path)
-            file_cache.pop(template_path, None)
-            _save_file_cache(cache_path, file_cache)
 
 
 # ── 플레이스홀더 검증 ──────────────────────────────

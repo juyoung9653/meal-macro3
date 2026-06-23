@@ -21,6 +21,9 @@ class InMemoryDataSource(DataSource):
         self._order_map = kwargs.get("order_map", {})
         self._delivery_contacts = kwargs.get("delivery_contacts", [])
         self._holiday_set = kwargs.get("holiday_set", set())
+        self._meal_prices = kwargs.get(
+            "meal_prices", {"조식": 9500, "석식": 9500, "중식": 9500}
+        )
         self._year = kwargs.get("year", 2026)
         self._month = kwargs.get("month", 6)
 
@@ -45,6 +48,9 @@ class InMemoryDataSource(DataSource):
 
     def get_holiday_set(self) -> set[date]:
         return set(self._holiday_set)
+
+    def read_meal_prices(self) -> dict[str, int]:
+        return dict(self._meal_prices)
 
     def detect_month(self) -> tuple[int, int]:
         return self._year, self._month

@@ -23,9 +23,6 @@ class InvoiceGenerationConfig:
     output_path: str
     year: int
     month: int
-    breakfast_price: int = 9500
-    dinner_price: int = 9500
-    lunch_price: int = 9500
     col_mapping: dict = field(default_factory=dict)
     excluded_dates: set[date] = field(default_factory=set)
     roster_headers: list[str] = field(default_factory=list)
@@ -71,6 +68,12 @@ class InvoiceService:
 
         reader = get_db_reader(config.db_path)
         order_map = reader.build_order_map()
+
+        # 식종정보 테이블에서 단가 읽기
+        prices = reader.read_meal_prices()
+        breakfast_price = prices.get("조식", 9500)
+        dinner_price = prices.get("석식", 9500)
+        lunch_price = prices.get("중식", 9500)
 
         # 명단 시트 기준 고정 컬럼명 (공백/개행 정규화)
         def _find_col(person: dict, *candidates: str) -> str:
@@ -211,9 +214,9 @@ class InvoiceService:
                 template_path=config.template_path,
                 year=config.year,
                 month=config.month,
-                unit_price_breakfast=config.breakfast_price,
-                unit_price_dinner=config.dinner_price,
-                unit_price_lunch=config.lunch_price,
+                unit_price_breakfast=breakfast_price,
+                unit_price_dinner=dinner_price,
+                unit_price_lunch=lunch_price,
                 excluded_dates=config.excluded_dates.copy()
                 if config.excluded_dates
                 else None,

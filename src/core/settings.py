@@ -14,9 +14,6 @@ from typing import Any
 
 # ── 기본 설정값 ──────────────────────────────────────
 DEFAULTS: dict[str, Any] = {
-    "cache": {
-        "placeholder_cache": ".cache.json",
-    },
     "app": {
         "title": "급식비 정산 프로그램",
         "organization": "분당구",

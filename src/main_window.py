@@ -1,10 +1,8 @@
-from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import QMainWindow, QStatusBar, QTabWidget
 
 from src.core.settings import get_settings
 from src.widgets.confirm_tab import ConfirmTab
 from src.widgets.invoice_tab import InvoiceTab
-from src.widgets.settings_dialog import SettingsDialog
 
 
 class MainWindow(QMainWindow):
@@ -14,7 +12,6 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._s = get_settings()
         self._setup_window()
-        self._setup_menu()
         self._setup_tabs()
         self._connect_signals()
         self._setup_statusbar()
@@ -24,13 +21,6 @@ class MainWindow(QMainWindow):
         w, h = self._s.get_app_window_size()
         self.setMinimumSize(w, h)
         self.resize(w, h)
-
-    def _setup_menu(self):
-        menubar = self.menuBar()
-        file_menu = menubar.addMenu("파일")
-        settings_action = QAction("설정", self)
-        settings_action.triggered.connect(self._open_settings)
-        file_menu.addAction(settings_action)
 
     def _setup_tabs(self):
         self.tab_widget = QTabWidget()
@@ -49,6 +39,14 @@ class MainWindow(QMainWindow):
         self.statusbar.showMessage("명단 파일을 선택해 주세요.")
 
     def _on_tab_changed(self, index: int):
+        # 출력 경로 양방향 동기화
+        inv_dir = self.invoice_tab.output_dir
+        cnf_dir = self.confirm_tab.output_dir
+        if inv_dir and inv_dir != cnf_dir:
+            self.confirm_tab.set_output_dir(inv_dir)
+        elif cnf_dir and cnf_dir != inv_dir:
+            self.invoice_tab.set_output_dir(cnf_dir)
+
         if index >= 1:
             self.confirm_tab.set_invoice_data(self.invoice_tab.get_invoice_data())
 
@@ -58,7 +56,3 @@ class MainWindow(QMainWindow):
                 1: "청구서 기반 확인서 생성",
             }.get(index, "")
         )
-
-    def _open_settings(self):
-        dlg = SettingsDialog(self)
-        dlg.exec()

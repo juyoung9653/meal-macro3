@@ -105,28 +105,15 @@ class ConfirmTab(QWidget):
         layout.addWidget(self.info_label)
 
     def _save_settings(self):
-        self._settings.setValue("confirm/output_dir", self.output_dir or "")
+        self._settings.setValue("output_dir", self.output_dir or "")
         self._settings.sync()
 
-    def _load_cached_invoice_data(self) -> "InvoiceData | None":
-        out_dir = self._settings.value(
-            "invoice/output_dir", ""
-        ) or self._settings.value("confirm/output_dir", "")
-        if not out_dir:
-            return None
-        return InvoiceData.load_cache(out_dir)
-
     def _restore_state(self):
-        raw = self._settings.value("confirm/output_dir", "")
+        raw = self._settings.value("output_dir", "")
         if raw:
             self.output_dir = raw
             self.path_label.setText(raw)
             self.path_label.setStyleSheet("color: #000;")
-
-        # 캐시된 InvoiceData 미리 복원 시도
-        cached = self._load_cached_invoice_data()
-        if cached:
-            self.set_invoice_data(cached)
 
     def _select_output_dir(self):
         dir_path = QFileDialog.getExistingDirectory(self, "출력 폴더 선택")
@@ -205,6 +192,14 @@ class ConfirmTab(QWidget):
                 self, "알림", "열 파일이 없습니다. 먼저 확인서를 생성하세요."
             )
 
+    def set_output_dir(self, path: str):
+        """외부에서 출력 경로 설정 (탭 간 공유용)."""
+        if path and path != self.output_dir:
+            self.output_dir = path
+            self.path_label.setText(path)
+            self.path_label.setStyleSheet("color: #000;")
+            self._save_settings()
+
     def _clear(self):
         self.confirms.clear()
         self.confirm_table.setRowCount(0)
@@ -214,11 +209,6 @@ class ConfirmTab(QWidget):
 
     def set_invoice_data(self, data: InvoiceData):
         """InvoiceData 객체로 모든 상태 한 번에 설정"""
-        # 빈 데이터면 캐시에서 복원 시도
-        if not data.invoices:
-            cached = self._load_cached_invoice_data()
-            if cached and cached.invoices:
-                data = cached
         self._data = data
         self.generate_btn.setEnabled(bool(data.invoices))
 

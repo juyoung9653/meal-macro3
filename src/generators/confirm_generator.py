@@ -142,7 +142,6 @@ def make_confirm(
     all_placeholders = scan_placeholders(
         template_path,
         tpl_sheet_names,
-        cache_path=s.get("cache", "placeholder_cache", default="") or None,
     )
 
     tpl_anchor_maps = _pre_build_anchor_maps(wb, tpl_sheet_names)

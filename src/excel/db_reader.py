@@ -2,7 +2,7 @@
 
 db.xlsx를 유일한 데이터 소스로 사용. 시트를 읽기만 하고 계산은 하지 않음.
 배송전체 시트의 날짜 컬럼에서 해당 월을 자동 감지.
-기타 시트 안의 방학일정/배송휴무/식종별_배송일 테이블 파싱 지원.
+기타 시트 안의 방학일정/배송휴무/식종정보 테이블 파싱 지원.
 
 Usage::
     from src.excel.db_reader import DbReader
@@ -267,7 +267,7 @@ class DbReader(DataSource):
         return self._cache["holidays"]
 
     def read_meal_day_map(self) -> dict[str, str]:
-        """식종별_배송일 (기타 시트 내 테이블) -> {식종: 요일문자열}."""
+        """식종정보 (기타 시트 내 테이블) -> {식종: 요일문자열}."""
         if "meal_day_map" not in self._cache:
             data = self._read_from_gita("식종")
             result: dict[str, str] = {}
@@ -281,6 +281,22 @@ class DbReader(DataSource):
                     result[meal] = day
             self._cache["meal_day_map"] = result
         return self._cache["meal_day_map"]
+
+    def read_meal_prices(self) -> dict[str, int]:
+        """식종정보 (기타 시트 내 테이블) -> {식종: 단가}."""
+        if "meal_prices" not in self._cache:
+            data = self._read_from_gita("식종")
+            result: dict[str, int] = {}
+            for row in data:
+                meal = row.get("식종", "")
+                price_str = row.get("단가", "0")
+                if meal:
+                    try:
+                        result[meal] = int(float(price_str))
+                    except (ValueError, TypeError):
+                        result[meal] = 0
+            self._cache["meal_prices"] = result
+        return self._cache["meal_prices"]
 
     # ── 월 자동 감지 ──
 
