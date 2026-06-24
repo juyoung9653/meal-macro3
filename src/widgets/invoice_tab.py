@@ -285,6 +285,8 @@ class InvoiceTab(QWidget):
                     self.info_label.setText(
                         f"명단 {len(roster)}명 자동 로드됨. 청구서 생성 준비 완료"
                     )
+                    # 연월 자동 감지 (파일 탐색기로 선택한 경우와 동일하게)
+                    self._auto_detect_month()
             except Exception:
                 pass
 
