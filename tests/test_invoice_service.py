@@ -42,6 +42,31 @@ class TestCountDeliveryFromRow:
         assert _count_delivery_from_row(row) == 2
 
 
+class TestInvoiceGenerationConfig:
+    """InvoiceGenerationConfig dataclass defaults."""
+
+    def test_default_meal_type(self):
+        cfg = InvoiceGenerationConfig(
+            roster_data=[],
+            template_path="/fake/tpl.xlsx",
+            output_path="/fake/out.xlsx",
+            year=2026,
+            month=6,
+        )
+        assert cfg.meal_type == "급식"
+
+    def test_custom_meal_type(self):
+        cfg = InvoiceGenerationConfig(
+            roster_data=[],
+            template_path="/fake/tpl.xlsx",
+            output_path="/fake/out.xlsx",
+            year=2026,
+            month=6,
+            meal_type="행복도시락",
+        )
+        assert cfg.meal_type == "행복도시락"
+
+
 class TestInvoiceServiceGenerate:
     """InMemoryDataSource로 InvoiceService.generate() 테스트.
 

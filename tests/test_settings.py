@@ -8,7 +8,7 @@ from .conftest import make_settings_manager
 
 
 class TestTypedAccessors:
-    """Tests for the 2 accessors with logic beyond simple get."""
+    """Tests for typed accessors with logic beyond simple get."""
 
     def test_get_app_window_size(self):
         sm = make_settings_manager()
@@ -23,6 +23,34 @@ class TestTypedAccessors:
         w, h = sm.get_app_window_size()
         assert w == 1200
         assert h == 800
+
+    def test_get_meal_type_default(self):
+        sm = make_settings_manager()
+        assert sm.get_meal_type() == "급식"
+
+    def test_get_meal_type_after_set(self):
+        sm = make_settings_manager()
+        sm.set_meal_type("행복도시락")
+        assert sm.get_meal_type() == "행복도시락"
+
+    def test_set_meal_type_syncs_template_paths(self):
+        """set_meal_type() should update invoice and confirm template paths."""
+        sm = make_settings_manager()
+        sm.set_meal_type("행복도시락")
+        assert (
+            sm.get("templates", "invoice_path") == "assets/행복도시락_청구서템플릿.xlsx"
+        )
+        assert (
+            sm.get("templates", "confirm_path") == "assets/행복도시락_확인서템플릿.xlsx"
+        )
+
+    def test_set_meal_type_restore_to_급식(self):
+        sm = make_settings_manager()
+        sm.set_meal_type("행복도시락")
+        sm.set_meal_type("급식")
+        assert sm.get_meal_type() == "급식"
+        assert sm.get("templates", "invoice_path") == "assets/급식_청구서템플릿.xlsx"
+        assert sm.get("templates", "confirm_path") == "assets/급식_확인서템플릿.xlsx"
 
 
 class TestDirectGet:
@@ -115,6 +143,21 @@ class TestSettingsDefaults:
 
     def test_default_app_title(self):
         assert DEFAULTS["app"]["title"] == "급식비 정산 프로그램"
+
+    def test_default_meal_type(self):
+        assert DEFAULTS["app"]["meal_type"] == "급식"
+
+    def test_default_app_keys(self):
+        """DEFAULTS['app'] has all required keys."""
+        app = DEFAULTS["app"]
+        for key in (
+            "title",
+            "organization",
+            "window_width",
+            "window_height",
+            "meal_type",
+        ):
+            assert key in app, f"Missing key in DEFAULTS['app']: {key}"
 
 
 class TestSettingsManagerGet:

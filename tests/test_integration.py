@@ -23,9 +23,9 @@ class TestInvoicePipeline:
 
     @pytest.fixture
     def template_path(self):
-        path = "assets/청구서템플릿.xlsx"
+        path = "assets/급식_청구서템플릿.xlsx"
         if not os.path.exists(path):
-            pytest.skip("Template file not found")
+            pytest.skip("Template file not found, run: pytest --no-header")
         return path
 
     @pytest.fixture
@@ -135,9 +135,9 @@ class TestInvoicePipeline:
         assert os.path.exists(output_path), f"Output not created: {output_path}"
         wb = openpyxl.load_workbook(output_path)
 
-        # 3. Has expected sheets (총괄 + 학기중 for non-vacation month)
+        # 3. Has expected sheets (청구서 for 급식 type)
         assert len(wb.sheetnames) >= 1
-        assert "총괄" in wb.sheetnames or any("총괄" in s for s in wb.sheetnames)
+        assert "청구서" in wb.sheetnames
 
         # 4. First sheet has data rows (more than just header)
         first_sheet = wb[wb.sheetnames[0]]
