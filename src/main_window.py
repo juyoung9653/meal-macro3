@@ -1,3 +1,4 @@
+from PyQt6.QtCore import QSettings
 from PyQt6.QtWidgets import (
     QComboBox,
     QHBoxLayout,
@@ -20,6 +21,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self._s = get_settings()
+        self._restore_meal_type()
         self._setup_window()
         self._setup_central()
         self._setup_tabs()
@@ -69,9 +71,25 @@ class MainWindow(QMainWindow):
         self.setStatusBar(self.statusbar)
         self.statusbar.showMessage("명단 파일을 선택해 주세요.")
 
+    def _restore_meal_type(self):
+        """QSettings에서 이전에 선택한 식사 유형을 복원."""
+        settings = QSettings(
+            self._s.get("app", "organization"),
+            self._s.get("app", "title"),
+        )
+        saved = settings.value("meal_type", "")
+        if saved in ("급식", "행복도시락"):
+            self._s.set_meal_type(saved)
+
     def _on_meal_changed(self, meal_type: str):
-        """식사 유형 변경 → 설정 저장 + 양 탭에 전파."""
+        """식사 유형 변경 → 설정 저장(QSettings + in-memory) + 양 탭에 전파."""
         self._s.set_meal_type(meal_type)
+        settings = QSettings(
+            self._s.get("app", "organization"),
+            self._s.get("app", "title"),
+        )
+        settings.setValue("meal_type", meal_type)
+        settings.sync()
         self.invoice_tab.set_meal_type(meal_type)
         self.confirm_tab.set_meal_type(meal_type)
 

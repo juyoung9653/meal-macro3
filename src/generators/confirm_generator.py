@@ -3,7 +3,7 @@
 import logging
 import os
 from copy import copy
-from datetime import date
+from datetime import date, timedelta
 
 import openpyxl
 from openpyxl.utils import get_column_letter
@@ -45,6 +45,7 @@ def _calc_weekly_breakdown_from_daily(
     month: int,
     person: dict,
     weeks: list,
+    week_date_map: dict[date, int] | None = None,
 ) -> list[dict]:
     """db.xlsx 배송전체의 멀티 행(식종별) 데이터를 주차별로 집계.
 
@@ -144,11 +145,16 @@ def _calc_weekly_breakdown_from_daily(
             except ValueError:
                 continue
 
-            # 해당 날짜가 속한 주차 찾기
-            for wi, (wn, wstart, wend) in enumerate(weeks):
-                if wstart <= d <= wend:
-                    week_counts[wi][target] += 1
-                    break
+            # 해당 날짜가 속한 주차 찾기 (O(1) lookup)
+            wi = week_date_map.get(d) if week_date_map else None
+            if wi is not None:
+                week_counts[wi][target] += 1
+            else:
+                # fallback: 선형 탐색
+                for wi, (wn, wstart, wend) in enumerate(weeks):
+                    if wstart <= d <= wend:
+                        week_counts[wi][target] += 1
+                        break
 
     return week_counts
 
@@ -187,6 +193,15 @@ def make_confirm(
         title_prefix = f"{year}년 {month}월"
 
     weeks = get_week_ranges(year, month)
+
+    # ── 주차별 날짜 맵 precompute (O(1) lookup) ──
+    week_date_map: dict[date, int] = {}
+    for wi, (_wn, wstart, wend) in enumerate(weeks):
+        d = wstart
+        while d <= wend:
+            week_date_map[d] = wi
+            d += timedelta(days=1)
+
     created = []
 
     # 3. 템플릿 워크북 로드
@@ -218,12 +233,14 @@ def make_confirm(
         delivery_matrix = []
         delivery_contacts = []
 
-    # ── person_id → [rows] 멀티 행 맵 (식종별 여러 행 허용) ──
+    # ── person_id → [rows] 멀티 행 맵 (식종별 여러 행 허용, _daily 미리 계산) ──
     delivery_by_id: dict[str, list[dict]] = {}
     for row in delivery_matrix:
         pid = str(row.get("ID", "")).strip()
         if pid:
-            delivery_by_id.setdefault(pid, []).append(row)
+            enriched = dict(row)
+            enriched["_daily"] = {c: v for c, v in row.items() if "/" in c}
+            delivery_by_id.setdefault(pid, []).append(enriched)
 
     # 배송연락처: 첫 번째 유효한 항목 사용
     delivery_person = ""
@@ -345,6 +362,8 @@ def make_confirm(
             ph_map = all_placeholders.get(tpl_key, {})
 
             title_suffix = s.get("confirm", "title_suffix")
+            if meal_type == "급식":
+                title_suffix = title_suffix.replace("분당구", "수정구")
             _set_ph(
                 ws,
                 ph_map,
@@ -407,17 +426,13 @@ def make_confirm(
                 # ── 배송 데이터: 멀티 행(식종별) 주차별 집계 ──
                 person_id = str(person.get("ID", "")) or str(person.get("id", ""))
 
-                # delivery_by_id에서 이 사람의 모든 행(식종별) 가져오기
-                all_rows = delivery_by_id.get(person_id, []) if person_id else []
-                if all_rows:
-                    person["_delivery_rows_raw"] = []
-                    for r in all_rows:
-                        row_copy = dict(r)
-                        row_copy["_daily"] = {c: v for c, v in r.items() if "/" in c}
-                        person["_delivery_rows_raw"].append(row_copy)
+                # delivery_by_id에서 이 사람의 모든 행(식종별) 가져오기 (_daily는 이미 포함)
+                person["_delivery_rows_raw"] = (
+                    delivery_by_id.get(person_id, []) if person_id else []
+                )
 
                 weekly_counts = _calc_weekly_breakdown_from_daily(
-                    year, month, person, weeks
+                    year, month, person, weeks, week_date_map
                 )
 
                 for wi, wdata in enumerate(weeks):
