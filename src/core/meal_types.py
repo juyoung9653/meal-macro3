@@ -7,7 +7,3 @@ class MealType(StrEnum):
     BREAKFAST = "breakfast"
     DINNER = "dinner"
     LUNCH = "lunch"
-
-
-MEAL_KEYS: list[str] = [m.value for m in MealType]
-ALL_MEALS: set[str] = {m.value for m in MealType}

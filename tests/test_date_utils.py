@@ -10,27 +10,10 @@ from src.core.date_utils import (
     THU,
     TUE,
     WED,
-    date_range,
     get_week_ranges,
     to_bool,
     week_date_str,
 )
-
-
-class TestDateRange:
-    def test_single_day(self):
-        d = date(2026, 6, 15)
-        assert list(date_range(d, d)) == [d]
-
-    def test_three_days(self):
-        result = list(date_range(date(2026, 6, 1), date(2026, 6, 3)))
-        assert result == [date(2026, 6, 1), date(2026, 6, 2), date(2026, 6, 3)]
-
-    def test_cross_month(self):
-        result = list(date_range(date(2026, 1, 30), date(2026, 2, 2)))
-        assert len(result) == 4
-        assert result[0] == date(2026, 1, 30)
-        assert result[-1] == date(2026, 2, 2)
 
 
 class TestToBool:

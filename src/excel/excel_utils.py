@@ -50,20 +50,6 @@ def build_merged_anchor_map(ws) -> dict[tuple[int, int], tuple[int, int]]:
     return anchor_map
 
 
-def safe_set_cell_value(ws, row, column, value):
-    """병합셀 고려 안전한 값 쓰기. MergedCell이면 앵커셀 찾아 씀."""
-    from openpyxl.cell.cell import MergedCell
-
-    cell = ws.cell(row=row, column=column)
-    if isinstance(cell, MergedCell):
-        for mr in ws.merged_cells.ranges:
-            if mr.min_row <= row <= mr.max_row and mr.min_col <= column <= mr.max_col:
-                ws.cell(row=mr.min_row, column=mr.min_col).value = value
-                return
-        return
-    cell.value = value
-
-
 def adjust_formula(formula: str, row_offset: int) -> str:
     """엑셀 formula 내 행 번호를 row_offset 만큼 증가"""
     if not formula or not str(formula).startswith("="):

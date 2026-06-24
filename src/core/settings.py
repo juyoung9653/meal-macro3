@@ -78,14 +78,6 @@ class SettingsManager:
     def __init__(self):
         self._data: dict = copy.deepcopy(DEFAULTS)
 
-    def _deep_merge(self, base: dict, override: dict):
-        """중첩 dict 재귀 병합."""
-        for k, v in override.items():
-            if k in base and isinstance(base[k], dict) and isinstance(v, dict):
-                self._deep_merge(base[k], v)
-            else:
-                base[k] = v
-
     def get(self, *keys: str, default: Any = None) -> Any:
         """중첩 키로 설정값 조회.
 
@@ -130,14 +122,6 @@ class SettingsManager:
         self.set(
             "templates", "confirm_path", value=f"assets/{meal_type}_확인서템플릿.xlsx"
         )
-
-    def get_all(self) -> dict:
-        """전체 설정 dict 반환 (복사본)."""
-        return copy.deepcopy(self._data)
-
-    def reset_to_defaults(self):
-        """모든 설정을 기본값으로 초기화."""
-        self._data = copy.deepcopy(DEFAULTS)
 
 
 def get_settings() -> SettingsManager:

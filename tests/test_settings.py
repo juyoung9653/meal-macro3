@@ -208,62 +208,6 @@ class TestSettingsManagerSet:
         assert sm.get("app", "window_width") == 9999
 
 
-class TestSettingsManagerGetAll:
-    def test_get_all_returns_copy(self):
-        sm = make_settings_manager()
-        all_data = sm.get_all()
-        assert all_data == sm._data
-        # Mutating the copy should not affect the original
-        all_data["app"]["title"] = "Hacked"
-        assert sm.get("app", "title") != "Hacked"
-
-    def test_get_all_contains_defaults(self):
-        sm = make_settings_manager()
-        all_data = sm.get_all()
-        assert all_data["app"]["title"] == "급식비 정산 프로그램"
-
-
-class TestSettingsManagerReset:
-    def test_reset_to_defaults(self):
-        sm = make_settings_manager()
-        sm.set("app", "title", value="Custom")
-        assert sm.get("app", "title") == "Custom"
-        sm.reset_to_defaults()
-        assert sm.get("app", "title") == "급식비 정산 프로그램"
-
-    def test_reset_strips_custom_keys(self):
-        sm = make_settings_manager()
-        sm.set("custom_key", value="custom_value")
-        sm.reset_to_defaults()
-        assert sm.get("custom_key") is None
-
-
-class TestDeepMerge:
-    def test_merge_simple_key(self):
-        sm = make_settings_manager()
-        sm._deep_merge(sm._data, {"app": {"title": "Override"}})
-        assert sm.get("app", "title") == "Override"
-
-    def test_merge_preserves_unmentioned(self):
-        sm = make_settings_manager()
-        sm._deep_merge(sm._data, {"app": {"title": "Override"}})
-        assert sm.get("app", "organization") == "분당구"
-
-    def test_merge_adds_new_key(self):
-        sm = make_settings_manager()
-        sm._deep_merge(sm._data, {"new_section": {"key": "val"}})
-        assert sm.get("new_section", "key") == "val"
-
-    def test_merge_overwrites_non_dict(self):
-        sm = make_settings_manager()
-        merged = {"app": "not_a_dict"}
-        # Before merge: app is a dict
-        assert isinstance(sm._data["app"], dict)
-        # After merge: app becomes the override value
-        sm._deep_merge(sm._data, merged)
-        assert sm._data["app"] == "not_a_dict"
-
-
 class TestSettingsSingleton:
     def test_get_settings_returns_same_instance(self):
         """get_settings() returns the same instance on repeated calls."""

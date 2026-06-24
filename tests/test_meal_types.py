@@ -1,6 +1,6 @@
 """Tests for src.core.meal_types — MealType enum, MEAL_KEYS, ALL_MEALS."""
 
-from src.core.meal_types import ALL_MEALS, MEAL_KEYS, MealType
+from src.core.meal_types import MealType
 
 
 class TestMealType:
@@ -28,16 +28,3 @@ class TestMealType:
         assert MealType("breakfast") == MealType.BREAKFAST
         assert MealType("dinner") == MealType.DINNER
         assert MealType("lunch") == MealType.LUNCH
-
-
-class TestMealKeys:
-    def test_order(self):
-        assert MEAL_KEYS == ["breakfast", "dinner", "lunch"]
-
-    def test_all_meals_content(self):
-        assert ALL_MEALS == {"breakfast", "dinner", "lunch"}
-
-    def test_consistency_with_enum(self):
-        """MEAL_KEYS and ALL_MEALS should match MealType enum values."""
-        assert set(MEAL_KEYS) == set(m.value for m in MealType)
-        assert ALL_MEALS == set(m.value for m in MealType)
