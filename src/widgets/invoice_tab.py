@@ -371,6 +371,17 @@ class InvoiceTab(QWidget):
             if tnorm in roster_normalized:
                 self._col_mapping[tcol] = roster_normalized[tnorm]
 
+        # ── 추가 fallback 매핑 (템플릿 컬럼명 ≠ 명단 컬럼명) ──
+        _FALLBACK_MAP = {
+            "취학유형(미취학/초/중/고/기타)": "취학유형",
+            "주민등록번호": "생년월일",
+            "구분": "취학유형",
+        }
+        for tcol, rcol in _FALLBACK_MAP.items():
+            if tcol in self._col_mapping and not self._col_mapping[tcol]:
+                if rcol in roster_normalized:
+                    self._col_mapping[tcol] = roster_normalized[rcol]
+
     # ── 외부 접근 ──
 
     def set_output_dir(self, path: str):

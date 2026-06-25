@@ -11,6 +11,7 @@ import logging
 from datetime import date
 
 import openpyxl
+from openpyxl.styles import Alignment
 
 from ..core.diff_format import to_numeric
 from ..excel.excel_utils import CENTER_ALIGN, adjust_formula, copy_style
@@ -80,6 +81,9 @@ def _build_price_formula(
     return "=" + "+".join(parts)
 
 
+_MEMO_ALIGN = Alignment(horizontal="left", vertical="top", wrap_text=True)
+
+
 def _fill_invoice_sheet(
     wb,
     sheet_name: str,
@@ -92,6 +96,7 @@ def _fill_invoice_sheet(
     unit_price_dinner: int,
     unit_price_lunch: int,
     excluded_dates: set[date] | None = None,
+    meal_type: str = "급식",
 ) -> int:
     """단일 시트에 people 데이터를 채운다. 작성 건수 반환."""
     template_columns = read_template_columns(template_path, sheet_name=sheet_name)
@@ -107,6 +112,10 @@ def _fill_invoice_sheet(
     _text_cols = {
         col_idx_map[c] for c in (del_start_col, del_end_col) if c and c in col_idx_map
     }
+
+    # 메모 컬럼: 급식은 "평일중식중지=>초1-2,고3", 행복도시락은 "비고"
+    _memo_col_name = "평일중식중지=>초1-2,고3" if meal_type == "급식" else "비고"
+    _memo_col_idx = col_idx_map.get(_memo_col_name)
 
     ws = wb[sheet_name]
     row_idx = get_template_data_start_row()
@@ -153,6 +162,10 @@ def _fill_invoice_sheet(
             f"{breakfast_cnt * unit_price_breakfast + dinner_cnt * unit_price_dinner + lunch_cnt * unit_price_lunch:,}원"
         )
 
+        # ── 비고/평일중식중지: 접수장 메모로 덮어쓰기 ──
+        if _memo_col_idx is not None and person.get("_reception_memo"):
+            row_data[_memo_col_name] = person["_reception_memo"]
+
         # ── Phase 1: 데이터 값 쓰기 ──
         for col_name, value in row_data.items():
             c_idx = col_idx_map.get(col_name)
@@ -160,14 +173,25 @@ def _fill_invoice_sheet(
                 continue
             written_cols.add(c_idx)
             cell = ws.cell(row=row_idx, column=c_idx)
-            if c_idx in _text_cols:
+
+            if c_idx == _memo_col_idx:
+                # 비고: 접수장 메모 (plain text)
+                txt = str(value) if value else ""
+                cell.value = txt
+                cell.alignment = _MEMO_ALIGN
+                line_count = txt.count("\n") + 1
+                est_height = max(17, line_count * 17)
+                if est_height > (ws.row_dimensions[row_idx].height or 0):
+                    ws.row_dimensions[row_idx].height = est_height
+            elif c_idx in _text_cols:
                 # 날짜 텍스트 컬럼: 숫자 변환 없이 문자열 그대로
                 cell.value = str(value) if value else ""
                 cell.number_format = "@"
+                cell.alignment = CENTER_ALIGN
             else:
                 v = to_numeric(value)
                 cell.value = None if isinstance(v, (int, float)) and v == 0 else v
-            cell.alignment = CENTER_ALIGN
+                cell.alignment = CENTER_ALIGN
 
         row_idx += 1
 
@@ -352,6 +376,7 @@ def make_invoice(
             unit_price_dinner,
             unit_price_lunch,
             excluded_dates,
+            meal_type=meal_type,
         )
     if rename_prefix:
         _rename_sheets(wb, rename_prefix)
