@@ -21,6 +21,9 @@ venv/
 
 output/
 
+# Excel temp files
+assets/*[0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F]
+
 # Cache
 .cache.json
 
