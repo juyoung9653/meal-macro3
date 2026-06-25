@@ -165,7 +165,7 @@ class ReportTab(QWidget):
         self.build_btn.setMinimumHeight(32)
         self.build_btn.clicked.connect(self._on_build)
 
-        self.export_btn = QPushButton("엑셀 열기")
+        self.export_btn = QPushButton("엑셀로 저장")
         self.export_btn.setEnabled(False)
         self.export_btn.setMinimumHeight(32)
         self.export_btn.clicked.connect(self._on_export)
@@ -234,9 +234,9 @@ class ReportTab(QWidget):
                 pass
 
         except FileNotFoundError:
-            QMessageBox.warning(self, "오류", f"db.xlsx 파일 없음: {self._ds.db_path}")
+            QMessageBox.warning(self, "오류", f"명단 파일 없음: {self._ds.db_path}")
         except Exception as e:
-            QMessageBox.critical(self, "오류", f"db.xlsx 로드 실패:\n{e}")
+            QMessageBox.critical(self, "오류", f"명단 파일 로드 실패:\n{e}")
 
     def set_meal_type(self, meal_type: str):
         """식사 유형 변경 (현재 리포트 탭에서는 단순 저장)."""

@@ -118,9 +118,7 @@ class DeliveryService:
         prev_col = self._find_date_col(delivery, prev_date) if prev_date else None
 
         # ── 식종 필터링된 행 수집 ──
-        meal_rows = [
-            r for r in delivery if str(r.get("식종", "")).strip().startswith(meal)
-        ]
+        meal_rows = [r for r in delivery if str(r.get("식종", "")).strip() == meal]
 
         # ── 전화번호별 오늘/이전 배송 건수 집계 ──
         today_by_phone: Counter[str] = Counter()
