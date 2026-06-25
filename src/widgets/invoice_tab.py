@@ -69,19 +69,8 @@ class InvoiceTab(QWidget):
     def _setup_ui(self):
         layout = QVBoxLayout(self)
 
-        # ── db.xlsx 명단 로드 (선택 즉시 자동 로드) ──
-        import_group = QGroupBox("① db.xlsx 명단 불러오기")
-        import_layout = QHBoxLayout(import_group)
-        self.file_label = QLabel("db.xlsx 로드 대기 중")
-        self.file_label.setStyleSheet("color: #888;")
-        self.select_btn = QPushButton("db.xlsx 선택")
-        self.select_btn.clicked.connect(self._select_db_file)
-        import_layout.addWidget(self.file_label, stretch=1)
-        import_layout.addWidget(self.select_btn)
-        layout.addWidget(import_group)
-
         # ── 청구 기준 ──
-        config_group = QGroupBox("② 청구 기준 (엑셀에서 자동 감지)")
+        config_group = QGroupBox("① 청구 기준 (엑셀에서 자동 감지)")
         config_row = QHBoxLayout(config_group)
 
         config_row.addWidget(QLabel("귀속 연월:"))
@@ -99,7 +88,7 @@ class InvoiceTab(QWidget):
         layout.addWidget(config_group)
 
         # ── 출력 경로 ──
-        path_group = QGroupBox("③ 출력 경로")
+        path_group = QGroupBox("② 출력 경로")
         path_layout = QHBoxLayout(path_group)
         self.path_label = QLabel("선택된 경로 없음")
         self.path_label.setStyleSheet("color: #888;")
@@ -135,7 +124,7 @@ class InvoiceTab(QWidget):
         layout.addLayout(btn_layout)
 
         # ── 결과 테이블 ──
-        table_group = QGroupBox("④ 생성 결과")
+        table_group = QGroupBox("③ 생성 결과")
         table_layout = QVBoxLayout(table_group)
         self.result_table = QTableWidget()
         self.result_table.setColumnCount(4)
@@ -149,26 +138,42 @@ class InvoiceTab(QWidget):
         self.result_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.result_table.setAlternatingRowColors(True)
         table_layout.addWidget(self.result_table)
-        self.info_label = QLabel("db.xlsx에서 데이터를 불러오세요.")
+        self.info_label = QLabel("명단을 불러오세요.")
         self.info_label.setAlignment(Qt.AlignmentFlag.AlignRight)
         table_layout.addWidget(self.info_label)
         layout.addWidget(table_group, stretch=1)
 
-    # ── db.xlsx 파일 선택/로드 ──
+    # ── 명단 변경 처리 ──
 
-    def _select_db_file(self):
-        """db.xlsx 파일 경로 선택 → 자동 로드."""
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            "db.xlsx 파일 선택",
-            self._db_reader.db_path,
-            "Excel (*.xlsx *.xls);;모든 파일 (*.*)",
-        )
-        if path:
-            self._db_reader.db_path = path
-            self._db_path = path
-            self._s.set("db", "path", value=path)
-            self._load_db_data()
+    def on_roster_changed(self):
+        """MainWindow에서 명단 파일 변경 시 호출."""
+        try:
+            roster = self._db_reader.read_roster()
+            if not roster:
+                QMessageBox.warning(
+                    self, "알림", "db.xlsx에서 명단 데이터를 찾을 수 없습니다."
+                )
+                return
+
+            headers = list(roster[0].keys()) if roster else []
+            self.roster_headers = list(headers)
+            self.roster_path = self._db_reader.db_path
+            self._auto_map_columns()
+
+            self._roster_loaded = True
+            self.generate_btn.setEnabled(True)
+            self.info_label.setText(
+                f"명단 {len(roster)}명 로드됨. 청구서 생성 준비 완료"
+            )
+
+            self._auto_detect_month()
+            self._save_settings()
+        except FileNotFoundError:
+            QMessageBox.warning(
+                self, "오류", f"db.xlsx 파일 없음: {self._db_reader.db_path}"
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "오류", f"db.xlsx 로드 실패:\n{e}")
 
     def _auto_detect_month(self):
         """db.xlsx 배송전체 시트에서 연월 자동 감지 → 라벨 + 컨트롤러 설정."""
@@ -187,47 +192,6 @@ class InvoiceTab(QWidget):
             self._load_default_excluded_dates()
         except Exception as e:
             log.warning("[InvoiceTab] 월 자동감지 실패: %s", e)
-
-    def _load_db_data(self):
-        """db.xlsx에서 명단 데이터 로드."""
-        try:
-            roster = self._db_reader.read_roster()
-            if not roster:
-                QMessageBox.warning(
-                    self,
-                    "알림",
-                    "db.xlsx에서 명단 데이터를 찾을 수 없습니다.\n'명단' 시트가 있는지 확인하세요.",
-                )
-                return
-
-            # 헤더 추출
-            headers = list(roster[0].keys()) if roster else []
-            self.roster_headers = list(headers)
-            self.roster_path = self._db_reader.db_path
-            self._auto_map_columns()
-
-            self._roster_loaded = True
-            self.generate_btn.setEnabled(True)
-            self.file_label.setText(
-                f"✅ {os.path.basename(self._db_reader.db_path)} ({len(roster)}명)"
-            )
-            self.file_label.setStyleSheet("color: #0a0; font-weight: bold;")
-            self.info_label.setText(
-                f"명단 {len(roster)}명 로드됨. 청구서 생성 준비 완료"
-            )
-
-            # 엑셀에서 연월 자동 감지
-            self._auto_detect_month()
-
-            self._save_settings()
-        except FileNotFoundError:
-            QMessageBox.warning(
-                self,
-                "오류",
-                f"db.xlsx 파일을 찾을 수 없습니다.\n'{self._db_reader.db_path}' 경로를 확인하세요.",
-            )
-        except Exception as e:
-            QMessageBox.critical(self, "오류", f"db.xlsx 로드 실패:\n{e}")
 
     # ── 설정 저장/복원 ──
 
@@ -251,48 +215,6 @@ class InvoiceTab(QWidget):
             if os.path.exists(db_path):
                 self._db_reader.db_path = db_path
                 self._db_path = db_path
-                fname = os.path.basename(db_path)
-                self.file_label.setText(f"📁 {fname}")
-                self.file_label.setStyleSheet("color: #000;")
-            elif os.path.exists(self._s.get("db", "path")):
-                fname = os.path.basename(self._s.get("db", "path"))
-                self.file_label.setText(f"📁 {fname}")
-                self.file_label.setStyleSheet("color: #000;")
-
-    def _try_auto_load_roster(self):
-        """저장된 db.xlsx 자동 로드."""
-        db_path = self._settings.value("db/last_path", "")
-        if not db_path:
-            db_path = self._s.get("db", "path")
-        if db_path and os.path.exists(db_path):
-            self._db_reader.db_path = db_path
-            self._db_path = db_path
-            fname = os.path.basename(db_path)
-            self.file_label.setText(f"📁 {fname}")
-            self.file_label.setStyleSheet("color: #000;")
-            # 자동 로드
-            try:
-                roster = self._db_reader.read_roster()
-                if roster:
-                    headers = list(roster[0].keys()) if roster else []
-                    self.roster_headers = list(headers)
-                    self.roster_path = db_path
-                    self._auto_map_columns()
-                    self._roster_loaded = True
-                    self.generate_btn.setEnabled(True)
-                    self.file_label.setText(f"✅ {fname} ({len(roster)}명)")
-                    self.file_label.setStyleSheet("color: #0a0; font-weight: bold;")
-                    self.info_label.setText(
-                        f"명단 {len(roster)}명 자동 로드됨. 청구서 생성 준비 완료"
-                    )
-                    # 연월 자동 감지 (파일 탐색기로 선택한 경우와 동일하게)
-                    self._auto_detect_month()
-            except Exception:
-                pass
-
-    def post_init_load(self):
-        """생성 후 I/O 로드. MainWindow show() 후 호출."""
-        self._try_auto_load_roster()
 
     def _save_settings(self):
         self._settings.setValue("invoice/col_mapping", dict(self._col_mapping))
@@ -428,7 +350,7 @@ class InvoiceTab(QWidget):
     def _clear(self):
         self.invoices.clear()
         self.result_table.setRowCount(0)
-        self.info_label.setText("db.xlsx에서 데이터를 불러오세요.")
+        self.info_label.setText("명단을 불러오세요.")
         self._last_output_path = None
         self.open_file_btn.setEnabled(False)
         self._roster_loaded = False

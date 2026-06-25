@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 
 import openpyxl
@@ -25,7 +25,7 @@ log = logging.getLogger(__name__)
 
 
 # ── 헬퍼 (순수 함수, _parsing으로 분리) ──
-from ._parsing import _is_date_col, _parse_date_col, _serial_to_date, _to_date, _to_str
+from ._parsing import _is_date_col, _parse_date_col, _to_date, _to_str
 from .data_source import DataSource
 
 # ── DbReader ────────────────────────────────────────
@@ -368,6 +368,46 @@ class DbReader(DataSource):
 
             self._cache["delivery_contacts"] = contacts
         return self._cache["delivery_contacts"]
+
+    def read_reception(self) -> list[dict]:
+        """접수장 시트. 날짜 컬럼은 date 객체로 변환."""
+        if "reception" not in self._cache:
+            raw = self._read_sheet_raw("접수장")
+            if not raw:
+                self._cache["reception"] = []
+                return self._cache["reception"]
+
+            headers = [_to_str(c) for c in raw[0]]
+            cleaned = []
+            for h in headers:
+                h = h.replace("\n", " ").strip()
+                if not h:
+                    h = f"Col{len(cleaned)}"
+                cleaned.append(h)
+
+            DATE_COLS = {"접수일", "적용일", "종료일"}
+
+            data = []
+            for row in raw[1:]:
+                vals = list(row)
+                entry = {}
+                for i, h in enumerate(cleaned):
+                    val = vals[i] if i < len(vals) else None
+                    if h in DATE_COLS:
+                        if isinstance(val, datetime):
+                            entry[h] = val.date()
+                        elif isinstance(val, date):
+                            entry[h] = val
+                        else:
+                            entry[h] = None
+                    else:
+                        entry[h] = _to_str(val) if val is not None else ""
+                if all(v == "" or v is None for v in entry.values()):
+                    continue
+                data.append(entry)
+
+            self._cache["reception"] = data
+        return self._cache["reception"]
 
     def close(self):
         if self._wb:

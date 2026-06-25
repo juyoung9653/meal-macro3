@@ -20,7 +20,7 @@ def main():
 
     window = MainWindow()
     window.show()
-    window.invoice_tab.post_init_load()
+    window.post_init_load()
 
     sys.exit(app.exec())
 

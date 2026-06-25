@@ -13,6 +13,10 @@ class DataSource(ABC):
     @abstractmethod
     def db_path(self) -> str: ...
 
+    @db_path.setter
+    @abstractmethod
+    def db_path(self, value: str) -> None: ...
+
     @abstractmethod
     def read_roster(self) -> list[dict]: ...
 
@@ -36,3 +40,8 @@ class DataSource(ABC):
 
     @abstractmethod
     def detect_month(self) -> tuple[int, int]: ...
+
+    @abstractmethod
+    def read_reception(self) -> list[dict]:
+        """접수장 시트 → [{접수일, 접수방법, ID, 이름, 식종, 상태, 적용일, 종료일, 요일패턴, 총 적용일}]."""
+        ...

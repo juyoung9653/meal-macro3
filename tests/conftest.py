@@ -2,7 +2,6 @@
 
 import copy
 from datetime import date
-from typing import Any
 
 import pytest
 
@@ -24,6 +23,7 @@ class InMemoryDataSource(DataSource):
         self._meal_prices = kwargs.get(
             "meal_prices", {"조식": 9500, "석식": 9500, "중식": 9500}
         )
+        self._reception = kwargs.get("reception", [])
         self._year = kwargs.get("year", 2026)
         self._month = kwargs.get("month", 6)
 
@@ -51,6 +51,9 @@ class InMemoryDataSource(DataSource):
 
     def read_meal_prices(self) -> dict[str, int]:
         return dict(self._meal_prices)
+
+    def read_reception(self) -> list[dict]:
+        return list(self._reception)
 
     def detect_month(self) -> tuple[int, int]:
         return self._year, self._month

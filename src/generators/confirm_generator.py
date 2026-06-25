@@ -173,7 +173,7 @@ def make_confirm(
     """명단 데이터 → 확인서템플릿 채워서 단일 엑셀 파일 생성."""
     s = get_settings()
 
-    _LOOKUP = ["주소", "성명", "세대주성명", "핸드폰", "관할동"]
+    _LOOKUP = ["도로명주소", "성명", "세대주\n성명", "핸드폰", "관할동"]
     addr_col, name_col, head_col, phone_col, dong_col = (
         col_mapping.get(k, k) for k in _LOOKUP
     )

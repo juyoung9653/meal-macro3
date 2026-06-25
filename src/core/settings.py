@@ -17,6 +17,7 @@ DEFAULTS: dict[str, Any] = {
     "templates": {
         "invoice_path": "assets/급식_청구서템플릿.xlsx",
         "confirm_path": "assets/급식_확인서템플릿.xlsx",
+        "report_path": "assets/report_template.xlsx",
         "sheet_name": "학기_총괄",
         "data_start_row": 4,
         "confirm_sheet_names": ["1명", "2명", "3명", "4명", "5명"],

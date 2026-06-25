@@ -8,6 +8,7 @@ from typing import Any
 
 from ..core.models import EnrichedPerson, RosterPerson, person_to_dict
 from ..excel._parsing import _is_date_col
+from ..excel.data_source import DataSource
 from ..excel.db_reader import get_db_reader
 from ..generators.invoice_generator import make_invoice
 
@@ -61,13 +62,21 @@ def _count_delivery_from_row(row: dict) -> int:
 class InvoiceService:
     """Pure business logic. db.xlsx 배송전체 시트에서 직접 O/X 집계."""
 
+    def __init__(self, data_source: DataSource | None = None):
+        self._data_source = data_source
+
+    def _get_reader(self, db_path: str | None) -> DataSource:
+        if self._data_source is not None:
+            return self._data_source
+        return get_db_reader(db_path)
+
     def generate(self, config: InvoiceGenerationConfig) -> InvoiceResult:
         warnings: list[InvoiceWarning] = []
 
         if not config.roster_data:
             return InvoiceResult(success=False, error="명단 데이터가 없습니다.")
 
-        reader = get_db_reader(config.db_path)
+        reader = self._get_reader(config.db_path)
         order_map = reader.build_order_map()
 
         # 식종정보 테이블에서 단가 읽기
