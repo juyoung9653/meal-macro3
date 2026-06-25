@@ -32,6 +32,13 @@ class TestToBool:
     def test_str_O(self):
         assert to_bool("O") is True
 
+    def test_str_TRUE(self):
+        assert to_bool("TRUE") is True
+        assert to_bool("true") is True
+
+    def test_str_급식(self):
+        assert to_bool("급식") is True
+
     def test_str_1(self):
         assert to_bool("1") is True
 

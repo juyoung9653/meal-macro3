@@ -12,6 +12,7 @@ from datetime import date
 
 import openpyxl
 
+from ..core.diff_format import to_numeric
 from ..excel.excel_utils import CENTER_ALIGN, adjust_formula, copy_style
 from ..templates.config import (
     col_name_to_index,
@@ -20,28 +21,6 @@ from ..templates.config import (
 )
 
 log = logging.getLogger(__name__)
-
-# ── 숫자 변환 헬퍼 ────────────────────────────────
-
-
-def _to_numeric(val):
-    """str → int/float 변환 가능하면 변환, 아니면 원본 반환.
-
-    "3" → 3, "3.14" → 3.14, "010-1234" → "010-1234" (그대로)
-    """
-    if isinstance(val, (int, float)):
-        return val
-    if not isinstance(val, str) or not val.strip():
-        return val
-    s = val.strip()
-    try:
-        return int(s)
-    except ValueError:
-        pass
-    try:
-        return float(s)
-    except ValueError:
-        return val
 
 
 # ── 엑셀 컬럼 인덱스 → 문자 (A, B, ..., Z, AA, AB, ...) ──
@@ -124,7 +103,7 @@ def _fill_invoice_sheet(
     price_col = col_mapping.get("__calc_price", "청구금액")
     del_start_col = col_mapping.get("__delivery_start", "")
     del_end_col = col_mapping.get("__delivery_end", "")
-    # 날짜 텍스트 컬럼 — _to_numeric 변환 방지 + 셀 서식 텍스트
+    # 날짜 텍스트 컬럼 — to_numeric 변환 방지 + 셀 서식 텍스트
     _text_cols = {
         col_idx_map[c] for c in (del_start_col, del_end_col) if c and c in col_idx_map
     }
@@ -186,7 +165,7 @@ def _fill_invoice_sheet(
                 cell.value = str(value) if value else ""
                 cell.number_format = "@"
             else:
-                v = _to_numeric(value)
+                v = to_numeric(value)
                 cell.value = None if isinstance(v, (int, float)) and v == 0 else v
             cell.alignment = CENTER_ALIGN
 
@@ -256,6 +235,68 @@ def _rename_sheets(wb, keep_prefix: str):
             del wb[sn]
 
 
+# ── 시트 분할 계획 ────────────────────────────────
+
+
+def _get_sheet_plan(
+    meal_type: str,
+    is_vacation_month: bool,
+    roster_data: list[dict],
+    template_sheet_names: list[str],
+) -> tuple[list[tuple[str, list[dict]]], str | None]:
+    """(sheet_plan, rename_prefix)
+
+    sheet_plan: [(template_sheet_name, people_for_this_sheet), ...]
+    rename_prefix: "방학_", "학기_", or None (급식 = no rename).
+
+    The last entry in sheet_plan is the "total" sheet whose fill count
+    becomes the overall total_count.
+    """
+    if meal_type == "급식":
+        # 급식: 단일 시트에 모든 인원 (방중/학기중 구분 없음)
+        active = [
+            p
+            for p in roster_data
+            if p.get("_bf_cnt", 0) > 0
+            or p.get("_dn_cnt", 0) > 0
+            or p.get("_lh_cnt", 0) > 0
+        ]
+        return [(template_sheet_names[0], active)], None
+
+    if is_vacation_month:
+        # ── 방학 월 ──
+        #    학기중: 조식 or 석식 실제 배송 건수 > 0 인원만
+        #    방중:   중식 실제 배송 건수 > 0 인원만
+        #    총괄:   학기중 ∪ 방중 (셋 다 0이면 제외)
+        school_people = [
+            p for p in roster_data if p.get("_bf_cnt", 0) > 0 or p.get("_dn_cnt", 0) > 0
+        ]
+        vac_people = [p for p in roster_data if p.get("_lh_cnt", 0) > 0]
+        union_people = [
+            p
+            for p in roster_data
+            if p.get("_bf_cnt", 0) > 0
+            or p.get("_dn_cnt", 0) > 0
+            or p.get("_lh_cnt", 0) > 0
+        ]
+        return [
+            ("방학_학기중", school_people),
+            ("방학_방중", vac_people),
+            ("방학_총괄", union_people),
+        ], "방학_"
+
+    # ── 일반 월 (행복도시락, 방학 아님) ──
+    active = [
+        p
+        for p in roster_data
+        if p.get("_bf_cnt", 0) > 0 or p.get("_dn_cnt", 0) > 0 or p.get("_lh_cnt", 0) > 0
+    ]
+    return [
+        ("학기_학기중", active),
+        ("학기_총괄", active),
+    ], "학기_"
+
+
 # ── 메인 진입점 ────────────────────────────────────
 
 
@@ -294,22 +335,15 @@ def make_invoice(
             p.get("_lh_cnt", 0),
         )
 
-    if meal_type == "급식":
-        # ── 급식: 단일 시트에 모든 인원 출력 (시트 분할 없음) ──
-        # 급식 템플릿은 한 시트(보통 "총괄")만 존재
-        active_people = [
-            p
-            for p in roster_data
-            if p.get("_bf_cnt", 0) > 0
-            or p.get("_dn_cnt", 0) > 0
-            or p.get("_lh_cnt", 0) > 0
-        ]
-        # 템플릿의 첫 번째 시트 사용
-        sheet_name = wb.sheetnames[0]
+    # ── 시트 분할 계획에 따라 각 시트 채우기 ──
+    sheet_plan, rename_prefix = _get_sheet_plan(
+        meal_type, is_vacation_month, roster_data, wb.sheetnames
+    )
+    for sheet_name, people in sheet_plan:
         total_count = _fill_invoice_sheet(
             wb,
             sheet_name,
-            active_people,
+            people,
             col_mapping,
             template_path,
             year,
@@ -319,107 +353,8 @@ def make_invoice(
             unit_price_lunch,
             excluded_dates,
         )
-    else:
-        # ── 행복도시락: 학기중/방중/총괄 분할 ──
-        has_any_vacation = is_vacation_month
-
-        if has_any_vacation:
-            # ── 방학 월 ──
-            #    학기중: 조식 or 석식 실제 배송 건수 > 0 인원만
-            #    방중:   중식 실제 배송 건수 > 0 인원만
-            #    총괄:   학기중 ∪ 방중 (합집합, 자동으로 셋 다 0이면 제외)
-            school_people = [
-                p
-                for p in roster_data
-                if p.get("_bf_cnt", 0) > 0 or p.get("_dn_cnt", 0) > 0
-            ]
-            vac_people = [p for p in roster_data if p.get("_lh_cnt", 0) > 0]
-            union_people = [
-                p
-                for p in roster_data
-                if p.get("_bf_cnt", 0) > 0
-                or p.get("_dn_cnt", 0) > 0
-                or p.get("_lh_cnt", 0) > 0
-            ]
-
-            _fill_invoice_sheet(
-                wb,
-                "방학_학기중",
-                school_people,
-                col_mapping,
-                template_path,
-                year,
-                month,
-                unit_price_breakfast,
-                unit_price_dinner,
-                unit_price_lunch,
-                excluded_dates,
-            )
-            _fill_invoice_sheet(
-                wb,
-                "방학_방중",
-                vac_people,
-                col_mapping,
-                template_path,
-                year,
-                month,
-                unit_price_breakfast,
-                unit_price_dinner,
-                unit_price_lunch,
-                excluded_dates,
-            )
-            total_count = _fill_invoice_sheet(
-                wb,
-                "방학_총괄",
-                union_people,
-                col_mapping,
-                template_path,
-                year,
-                month,
-                unit_price_breakfast,
-                unit_price_dinner,
-                unit_price_lunch,
-                excluded_dates,
-            )
-
-            _rename_sheets(wb, "방학_")
-        else:
-            # ── 일반 월: 아무 식사라도 실제 배송 건수 > 0 인원만 ──
-            active_people = [
-                p
-                for p in roster_data
-                if p.get("_bf_cnt", 0) > 0
-                or p.get("_dn_cnt", 0) > 0
-                or p.get("_lh_cnt", 0) > 0
-            ]
-            _fill_invoice_sheet(
-                wb,
-                "학기_학기중",
-                active_people,
-                col_mapping,
-                template_path,
-                year,
-                month,
-                unit_price_breakfast,
-                unit_price_dinner,
-                unit_price_lunch,
-                excluded_dates,
-            )
-            total_count = _fill_invoice_sheet(
-                wb,
-                "학기_총괄",
-                active_people,
-                col_mapping,
-                template_path,
-                year,
-                month,
-                unit_price_breakfast,
-                unit_price_dinner,
-                unit_price_lunch,
-                excluded_dates,
-            )
-
-            _rename_sheets(wb, "학기_")
+    if rename_prefix:
+        _rename_sheets(wb, rename_prefix)
 
     wb.save(output_path)
     return total_count, roster_data

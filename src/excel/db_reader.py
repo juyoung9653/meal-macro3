@@ -25,7 +25,14 @@ log = logging.getLogger(__name__)
 
 
 # ── 헬퍼 (순수 함수, _parsing으로 분리) ──
-from ._parsing import _is_date_col, _parse_date_col, _to_date, _to_str
+from ._parsing import (
+    _is_date_col,
+    _normalize_headers,
+    _parse_date_col,
+    _rows_to_dicts,
+    _to_date,
+    _to_str,
+)
 from .data_source import DataSource
 
 # ── DbReader ────────────────────────────────────────
@@ -76,30 +83,8 @@ class DbReader(DataSource):
             return []
 
         raw_headers = [_to_str(c) for c in rows[0]]
-        headers = []
-        seen: dict[str, int] = {}
-        for h in raw_headers:
-            h = h.replace("\n", " ").strip()
-            if not h:
-                h = f"Col{len(headers)}"
-            if h in seen:
-                seen[h] += 1
-                h = f"{h}_{seen[h]}"
-            else:
-                seen[h] = 1
-            headers.append(h)
-
-        data = []
-        for row in rows[1:]:
-            vals = list(row)
-            entry = {
-                headers[i]: _to_str(vals[i]) if i < len(vals) else ""
-                for i in range(len(headers))
-            }
-            if all(not v or v == "" for v in entry.values()):
-                continue
-            data.append(entry)
-        return data
+        headers = _normalize_headers(raw_headers)
+        return _rows_to_dicts(headers, rows[1:])
 
     def _read_sheet_raw(self, sheet_name: str) -> list[list]:
         wb = self._get_wb()
@@ -121,29 +106,14 @@ class DbReader(DataSource):
         if hi < 0:
             return []
         rh = [_to_str(c) for c in raw[hi]]
-        hdrs = []
-        seen: dict[str, int] = {}
-        for h in rh:
-            h = h.replace("\n", " ").strip()
-            if not h:
-                h = f"Col{len(hdrs)}"
-            if h in seen:
-                seen[h] += 1
-                h = f"{h}_{seen[h]}"
-            else:
-                seen[h] = 1
-            hdrs.append(h)
-        data = []
+        headers = _normalize_headers(rh)
+        # Find table end: stop at first all-empty row
+        data_rows = []
         for row in raw[hi + 1 :]:
-            vals = [_to_str(c) for c in row]
-            if all(v == "" for v in vals):
+            if all(_to_str(c) == "" for c in row):
                 break
-            entry = {
-                hdrs[i]: vals[i] if i < len(vals) else "" for i in range(len(hdrs))
-            }
-            if any(v for v in entry.values()):
-                data.append(entry)
-        return data
+            data_rows.append(row)
+        return _rows_to_dicts(headers, data_rows)
 
     # ── Public: 시트 읽기 ──
 
@@ -181,30 +151,10 @@ class DbReader(DataSource):
 
             # 헤더 처리
             raw_headers = [_to_str(c) for c in raw[header_row_idx]]
-            headers = []
-            seen: dict[str, int] = {}
-            for h in raw_headers:
-                h = h.replace("\n", " ").strip()
-                if not h:
-                    h = f"Col{len(headers)}"
-                if h in seen:
-                    seen[h] += 1
-                    h = f"{h}_{seen[h]}"
-                else:
-                    seen[h] = 1
-                headers.append(h)
+            headers = _normalize_headers(raw_headers)
 
             # 데이터 행 (헤더 다음 행부터)
-            data = []
-            for row in raw[header_row_idx + 1 :]:
-                vals = list(row)
-                entry = {
-                    headers[i]: _to_str(vals[i]) if i < len(vals) else ""
-                    for i in range(len(headers))
-                }
-                if all(not v or v == "" for v in entry.values()):
-                    continue
-                data.append(entry)
+            data = _rows_to_dicts(headers, raw[header_row_idx + 1 :])
 
             self._cache["delivery_matrix"] = data
         return self._cache["delivery_matrix"]
@@ -378,12 +328,7 @@ class DbReader(DataSource):
                 return self._cache["reception"]
 
             headers = [_to_str(c) for c in raw[0]]
-            cleaned = []
-            for h in headers:
-                h = h.replace("\n", " ").strip()
-                if not h:
-                    h = f"Col{len(cleaned)}"
-                cleaned.append(h)
+            cleaned = _normalize_headers(headers)
 
             DATE_COLS = {"접수일", "적용일", "종료일"}
 

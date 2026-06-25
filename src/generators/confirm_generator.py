@@ -92,13 +92,8 @@ def _calc_weekly_breakdown_from_daily(
         row_meal_type = str(row_data.get("식종", "")).strip()
 
         # 식종 → MealType 매핑
-        if "조식" in row_meal_type:
-            target = MealType.BREAKFAST
-        elif "석식" in row_meal_type:
-            target = MealType.DINNER
-        elif "중식" in row_meal_type or "방중" in row_meal_type:
-            target = MealType.LUNCH
-        else:
+        target = MealType.from_name(row_meal_type)
+        if target is None:
             # 식종 미상 → 플래그 보고 유추
             if bf_flag:
                 target = MealType.BREAKFAST
@@ -123,8 +118,7 @@ def _calc_weekly_breakdown_from_daily(
             continue
 
         for date_key, val in daily.items():
-            day_val = str(val).strip().upper()
-            if day_val not in ("O", "1", "1.0"):
+            if not to_bool(val):
                 continue
 
             if not _is_date_col(date_key):
@@ -225,22 +219,34 @@ def make_confirm(
         raise ValueError(msg)
 
     # ── DbReader에서 배송 데이터 로드 ──
+    # 모든 person이 _delivery_rows_raw를 가지고 있으면 delivery_matrix는 skip (최적화)
+    need_matrix = any(
+        "_delivery_rows_raw" not in p or not p["_delivery_rows_raw"]
+        for p in roster_data
+    )
+
+    delivery_contacts = []
+    delivery_by_id: dict[str, list[dict]] = {}
+
     try:
         reader = get_db_reader()
-        delivery_matrix = reader.read_delivery_matrix()
+        if need_matrix:
+            delivery_matrix = reader.read_delivery_matrix()
+        else:
+            delivery_matrix = []
         delivery_contacts = reader.read_delivery_contacts()
     except Exception:
         delivery_matrix = []
         delivery_contacts = []
 
-    # ── person_id → [rows] 멀티 행 맵 (식종별 여러 행 허용, _daily 미리 계산) ──
-    delivery_by_id: dict[str, list[dict]] = {}
-    for row in delivery_matrix:
-        pid = str(row.get("ID", "")).strip()
-        if pid:
-            enriched = dict(row)
-            enriched["_daily"] = {c: v for c, v in row.items() if "/" in c}
-            delivery_by_id.setdefault(pid, []).append(enriched)
+    if need_matrix:
+        # ── person_id → [rows] 멀티 행 맵 (식종별 여러 행 허용, _daily 미리 계산) ──
+        for row in delivery_matrix:
+            pid = str(row.get("ID", "")).strip()
+            if pid:
+                enriched = dict(row)
+                enriched["_daily"] = {c: v for c, v in row.items() if _is_date_col(c)}
+                delivery_by_id.setdefault(pid, []).append(enriched)
 
     # 배송연락처: 첫 번째 유효한 항목 사용
     delivery_person = ""
@@ -427,9 +433,14 @@ def make_confirm(
                 person_id = str(person.get("ID", "")) or str(person.get("id", ""))
 
                 # delivery_by_id에서 이 사람의 모든 행(식종별) 가져오기 (_daily는 이미 포함)
-                person["_delivery_rows_raw"] = (
-                    delivery_by_id.get(person_id, []) if person_id else []
-                )
+                # 이미 InvoiceData를 통해 _delivery_rows_raw가 있다면 overwrite하지 않음
+                if (
+                    "_delivery_rows_raw" not in person
+                    or not person["_delivery_rows_raw"]
+                ):
+                    person["_delivery_rows_raw"] = (
+                        delivery_by_id.get(person_id, []) if person_id else []
+                    )
 
                 weekly_counts = _calc_weekly_breakdown_from_daily(
                     year, month, person, weeks, week_date_map

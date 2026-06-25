@@ -4,9 +4,11 @@ import logging
 import os
 from dataclasses import dataclass, field
 from datetime import date
-from typing import Any
 
-from ..core.models import EnrichedPerson, RosterPerson, person_to_dict
+from ..core.date_utils import to_bool
+from ..core.invoice_data import EnrichedPersonDict
+from ..core.meal_types import MealType
+from ..core.models import build_enriched_person_dict
 from ..excel._parsing import _is_date_col
 from ..excel.data_source import DataSource
 from ..excel.db_reader import get_db_reader
@@ -43,7 +45,7 @@ class InvoiceWarning:
 class InvoiceResult:
     success: bool
     count: int = 0
-    enriched: list[dict] = field(default_factory=list)
+    enriched: list[EnrichedPersonDict] = field(default_factory=list)
     warnings: list[InvoiceWarning] = field(default_factory=list)
     error: str | None = None
 
@@ -136,15 +138,15 @@ class InvoiceService:
 
         is_vacation_month = self._is_vacation_month(reader, config.year, config.month)
 
-        enriched: list[dict] = []
+        enriched: list[EnrichedPersonDict] = []
         for person in config.roster_data:
             person_id = str(person.get("ID", "")).strip()
             if not person_id:
                 person_id = str(person.get("id", "")).strip()
 
-            flag_bf = self._to_bool(person.get(breakfast_col, 0))
-            flag_dn = self._to_bool(person.get(dinner_col, 0))
-            flag_lh = self._to_bool(person.get(lunch_col, 0))
+            flag_bf = to_bool(person.get(breakfast_col, 0))
+            flag_dn = to_bool(person.get(dinner_col, 0))
+            flag_lh = to_bool(person.get(lunch_col, 0))
             note_val = str(person.get(note_col, "")).strip()
             if note_val in ("비고", ""):
                 note_val = ""
@@ -154,33 +156,29 @@ class InvoiceService:
             bf_cnt = dn_cnt = lh_cnt = 0
             if flag_bf:
                 for meal, cnt in counts.items():
-                    if "조식" in meal:
+                    if MealType.from_name(meal) == MealType.BREAKFAST:
                         bf_cnt += cnt
             if flag_dn:
                 for meal, cnt in counts.items():
-                    if "석식" in meal:
+                    if MealType.from_name(meal) == MealType.DINNER:
                         dn_cnt += cnt
             if flag_lh:
                 for meal, cnt in counts.items():
-                    if "중식" in meal or "방중" in meal:
+                    if MealType.from_name(meal) == MealType.LUNCH:
                         lh_cnt += cnt
 
             # 배송전체는 Power Query가 이미 모든 휴무일/제외일을 반영한 최종 결과.
             # 추가 차감하지 않음. (사용자 수동 제외일만 적용)
 
-            rp = RosterPerson(
+            ep_dict = build_enriched_person_dict(
                 raw=dict(person),
                 name=str(person.get("성명", "")),
                 dept=str(person.get("학교명", "")),
-            )
-            ep = EnrichedPerson(
-                person=rp,
                 flag_breakfast=flag_bf,
                 flag_dinner=flag_dn,
                 flag_lunch=flag_lh,
                 note=note_val,
             )
-            ep_dict = person_to_dict(ep)
             ep_dict["_bf_cnt"] = bf_cnt
             ep_dict["_dn_cnt"] = dn_cnt
             ep_dict["_lh_cnt"] = lh_cnt
@@ -197,7 +195,7 @@ class InvoiceService:
             if "핸드폰" not in ep_dict or not ep_dict["핸드폰"]:
                 ep_dict["핸드폰"] = order.get("핸드폰", phone)
 
-            # 주차별 계산용 일별 raw 데이터 보존 (첫 번째 row 사용)
+            # 주차별 계산용 일별 raw 데이터 보존 (모든 row 저장, 식종별 멀티 행 대응)
             delivery_rows = [
                 r
                 for r in reader.read_delivery_matrix()
@@ -207,6 +205,10 @@ class InvoiceService:
                 ep_dict["_daily"] = {
                     c: v for c, v in delivery_rows[0].items() if _is_date_col(c)
                 }
+                ep_dict["_delivery_rows_raw"] = [
+                    dict(r, _daily={c: v for c, v in r.items() if _is_date_col(c)})
+                    for r in delivery_rows
+                ]
 
             enriched.append(ep_dict)
 
@@ -241,23 +243,12 @@ class InvoiceService:
         )
 
     @staticmethod
-    def _to_bool(val: Any) -> bool:
-        if isinstance(val, bool):
-            return val
-        if isinstance(val, (int, float)):
-            return val > 0
-        if isinstance(val, str):
-            v = val.strip().upper()
-            return v in ("O", "Y", "1", "1.0", "예", "있음", "TRUE", "급식")
-        return bool(val)
-
-    @staticmethod
     def _is_vacation_month(reader, year: int, month: int) -> bool:
         """배송전체에 중식/방중 건수가 1건이라도 있으면 방학월."""
         try:
             for row in reader.read_delivery_matrix():
                 meal = str(row.get("식종", "")).strip()
-                if "중식" in meal or "방중" in meal:
+                if MealType.from_name(meal) == MealType.LUNCH:
                     from ..excel._parsing import _is_date_col
 
                     if any(

@@ -20,7 +20,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from ..core.invoice_data import InvoiceData
+from ..core.invoice_data import EnrichedPersonDict, InvoiceData
 from ..core.settings import get_settings
 from ..excel.db_reader import get_db_reader
 from ..services.invoice_controller import InvoiceGenerationConfig, InvoiceService
@@ -38,12 +38,12 @@ class InvoiceTab(QWidget):
         super().__init__()
         self._s = get_settings()
         self._meal_type = meal_type or self._s.get_meal_type()
-        self._template_path = self._s.get("templates", "invoice_path")
+        self._template_path = self._s.get_invoice_template_path()
         self._template_columns = read_template_columns(
             self._template_path, meal_type=self._meal_type
         )
         self._service = InvoiceService()
-        self.invoices: list[dict] = []
+        self.invoices: list[EnrichedPersonDict] = []
         self.output_dir: str | None = None
         self.roster_headers: list[str] = []
         self.roster_path: str | None = None
@@ -158,6 +158,7 @@ class InvoiceTab(QWidget):
             headers = list(roster[0].keys()) if roster else []
             self.roster_headers = list(headers)
             self.roster_path = self._db_reader.db_path
+            self._db_path = self._db_reader.db_path
             self._auto_map_columns()
 
             self._roster_loaded = True
@@ -324,7 +325,7 @@ class InvoiceTab(QWidget):
             self, "완료", f"청구서 {result.count}건 생성 완료!\n{out}"
         )
 
-    def _update_result(self, data: list[dict]):
+    def _update_result(self, data: list[EnrichedPersonDict]):
         show = data[: self.MAX_RESULT_ROWS]
         self.result_table.setRowCount(len(show))
         cm = dict(self._col_mapping)
@@ -385,7 +386,7 @@ class InvoiceTab(QWidget):
         if meal_type == self._meal_type:
             return
         self._meal_type = meal_type
-        self._template_path = self._s.get("templates", "invoice_path")
+        self._template_path = self._s.get_invoice_template_path()
         self._template_columns = read_template_columns(
             self._template_path, meal_type=self._meal_type
         )

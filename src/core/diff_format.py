@@ -29,3 +29,23 @@ def strip_diff(val: object) -> str:
     s = str(val) if val is not None else ""
     m = _RE_DIFF.match(s)
     return m.group(1) if m else s
+
+
+def to_numeric(val: object) -> int | float | object:
+    """Convert string to int/float if possible. Return original if not.
+
+    "3" → 3, "3.14" → 3.14, "010-1234" → "010-1234" (unchanged)
+    """
+    if isinstance(val, (int, float)):
+        return val
+    if not isinstance(val, str) or not val.strip():
+        return val
+    s = val.strip()
+    try:
+        return int(s)
+    except ValueError:
+        pass
+    try:
+        return float(s)
+    except ValueError:
+        return val

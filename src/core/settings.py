@@ -114,15 +114,20 @@ class SettingsManager:
     def get_meal_type(self) -> str:
         return self.get("app", "meal_type", default="급식")
 
+    def get_invoice_template_path(self, meal_type: str | None = None) -> str:
+        """Compute invoice template path from meal type."""
+        mt = meal_type or self.get_meal_type()
+        return f"assets/{mt}_청구서템플릿.xlsx"
+
+    def get_confirm_template_path(self, meal_type: str | None = None) -> str:
+        """Compute confirm template path from meal type."""
+        mt = meal_type or self.get_meal_type()
+        return f"assets/{mt}_확인서템플릿.xlsx"
+
     def set_meal_type(self, meal_type: str):
         self.set("app", "meal_type", value=meal_type)
-        # Sync template paths
-        self.set(
-            "templates", "invoice_path", value=f"assets/{meal_type}_청구서템플릿.xlsx"
-        )
-        self.set(
-            "templates", "confirm_path", value=f"assets/{meal_type}_확인서템플릿.xlsx"
-        )
+        # Template paths are now resolved lazily via get_invoice_template_path()
+        # and get_confirm_template_path() — no side effects
 
 
 def get_settings() -> SettingsManager:

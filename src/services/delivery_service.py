@@ -4,34 +4,26 @@ from __future__ import annotations
 
 import logging
 from collections import Counter, defaultdict
+from dataclasses import dataclass, field
 from datetime import date, timedelta
 
 from ..core.diff_format import fmt_cell
+from ..core.meal_types import ERRORS, MEAL_LABELS, MEAL_RULES, MealType
 from ..excel._parsing import _is_date_col, _parse_date_col
 from ..excel.data_source import DataSource
 
+
+@dataclass
+class StaffMemo:
+    """Aggregated memo for a delivery staff member."""
+
+    memo_text: str
+    area_groups: dict[str, set[str]] = field(
+        default_factory=dict
+    )  # area_group -> {names}
+
+
 log = logging.getLogger(__name__)
-
-# ── 식종 설정 ──────────────────────────────────────
-MEAL_RULES: dict[str, set[int]] = {
-    "조식": {4},  # 금요일만
-    "중식": {0, 1, 2, 3, 4},  # 월~금
-    "석식": {0, 1, 2, 3},  # 월~목
-}
-
-MEAL_LABELS: dict[str, str] = {
-    "조식": "조식(금요일)",
-    "중식": "중식(월,화,수,목,금)",
-    "석식": "석식(월,화,수,목)",
-}
-
-ERRORS: dict[str, str] = {
-    "배송안함": "날짜 매칭 오류: 해당 날짜는 배송을 하지 않았습니다",
-    "식종불일치": "유효하지 않은 식종입니다. 허용되는 값: [석식, 중식, 조식]",
-    "날짜형식": "날짜 형식이 유효하지 않습니다. (YYYYMMDD 형식 필요)",
-    "배송일아님": "식종 불일치! {} ({})은 {} 배송일이 아닙니다.",
-    "날짜없음": "{}에 해당하는 날짜를 db시트의 헤더에서 찾을 수 없습니다.",
-}
 
 
 def _date_to_str(d: date) -> str:
@@ -189,9 +181,7 @@ class DeliveryService:
 
         # ── 담당자별 집계 ──
         staff_counts: dict[str, list[int]] = defaultdict(list)
-        staff_memos: dict[str, dict[str, dict[str, set[str]]]] = defaultdict(
-            lambda: defaultdict(lambda: defaultdict(set))
-        )
+        staff_memos: dict[str, list[StaffMemo]] = defaultdict(list)
         staff_areas: dict[str, set[str]] = defaultdict(set)
         prev_buckets: dict[str, list[int]] = defaultdict(lambda: [0] * 5)
 
@@ -235,7 +225,18 @@ class DeliveryService:
                         gk = _extract_addr_key(addr) or "위례동"
                     else:
                         gk = dong if dong else "미지정"
-                    staff_memos[staff][display_memo][gk].add(name)
+                    # Find or create StaffMemo with matching memo_text
+                    memo_list = staff_memos[staff]
+                    found = False
+                    for sm in memo_list:
+                        if sm.memo_text == display_memo:
+                            sm.area_groups.setdefault(gk, set()).add(name)
+                            found = True
+                            break
+                    if not found:
+                        memo_list.append(
+                            StaffMemo(memo_text=display_memo, area_groups={gk: {name}})
+                        )
 
         # ── 출력 테이블 생성 ──
         return self._build_output_table(
@@ -375,7 +376,7 @@ class DeliveryService:
         if recent:
             dates.add(recent)
 
-        if meal == "조식":
+        if MealType.from_name(meal) == MealType.BREAKFAST:
             if _is_active(target_dt):
                 dates.add(target_dt)
         else:
@@ -389,7 +390,7 @@ class DeliveryService:
     def _build_output_table(
         self,
         staff_counts: dict[str, list[int]],
-        staff_memos: dict[str, dict[str, dict[str, set[str]]]],
+        staff_memos: dict[str, list[StaffMemo]],
         staff_areas: dict[str, set[str]],
         prev_buckets: dict[str, list[int]],
         meal: str,
@@ -413,17 +414,17 @@ class DeliveryService:
             qtys = staff_counts.get(st, [])
             qty_counter = Counter(qtys)
             counts = [qty_counter.get(i, 0) for i in range(1, 6)]
-            memos = staff_memos.get(st, {})
+            memos = staff_memos.get(st, [])
             if not any(counts) and not memos:
                 continue
 
             memo_parts = []
-            for m_text, area_dict in sorted(memos.items()):
+            for sm in sorted(memos, key=lambda x: x.memo_text):
                 area_parts = [
                     f"{a}({', '.join(sorted(ns))})"
-                    for a, ns in sorted(area_dict.items())
+                    for a, ns in sorted(sm.area_groups.items())
                 ]
-                memo_parts.append(f"{m_text}\n{', '.join(area_parts)}")
+                memo_parts.append(f"{sm.memo_text}\n{', '.join(area_parts)}")
             memo_text = "\n".join(memo_parts)
 
             areas = sorted(staff_areas.get(st, []))

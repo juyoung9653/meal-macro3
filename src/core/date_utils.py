@@ -17,7 +17,8 @@ def to_bool(val) -> bool:
     if isinstance(val, (int, float)):
         return val > 0
     if isinstance(val, str):
-        return val.strip() in ("1", "1.0", "Y", "y", "예", "있음", "O")
+        v = val.strip().upper()
+        return v in ("1", "1.0", "Y", "예", "있음", "O", "TRUE", "급식")
     return bool(val)
 
 

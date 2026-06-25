@@ -4,7 +4,8 @@ from datetime import date
 
 import pytest
 
-from src.services.delivery_service import MEAL_RULES, DeliveryService
+from src.core.meal_types import MEAL_RULES
+from src.services.delivery_service import DeliveryService
 from tests.conftest import InMemoryDataSource
 
 

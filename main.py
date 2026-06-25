@@ -1,5 +1,13 @@
 import logging
 import sys
+import warnings
+
+# openpyxl: Data Validation extension 경고 (무해) 제거
+warnings.filterwarnings(
+    "ignore",
+    message="Data Validation extension is not supported",
+    category=UserWarning,
+)
 
 from PyQt6.QtWidgets import QApplication
 

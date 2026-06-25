@@ -64,6 +64,43 @@ def _is_date_col(name: str) -> bool:
         return False
 
 
+def _normalize_headers(raw_headers: list[str]) -> list[str]:
+    """Deduplicate empty/duplicate headers.
+
+    - Replace \n with space, strip
+    - Empty headers → f"Col{idx}"
+    - Duplicate headers → f"{name}_{count}"
+    """
+    headers: list[str] = []
+    seen: dict[str, int] = {}
+    for h in raw_headers:
+        h = h.replace("\n", " ").strip()
+        if not h:
+            h = f"Col{len(headers)}"
+        if h in seen:
+            seen[h] += 1
+            h = f"{h}_{seen[h]}"
+        else:
+            seen[h] = 1
+        headers.append(h)
+    return headers
+
+
+def _rows_to_dicts(headers: list[str], rows: list[list]) -> list[dict]:
+    """Convert headers + data rows to list[dict]. Skip all-empty rows."""
+    data: list[dict] = []
+    for row in rows:
+        vals = list(row)
+        entry = {
+            headers[i]: _to_str(vals[i]) if i < len(vals) else ""
+            for i in range(len(headers))
+        }
+        if all(not v or v == "" for v in entry.values()):
+            continue
+        data.append(entry)
+    return data
+
+
 def _parse_date_col(name: str) -> tuple[int, int] | None:
     """'6/15' → (6, 15). '6/15 월' 등 요일 접미사도 처리."""
     if not _is_date_col(name):

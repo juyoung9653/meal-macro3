@@ -147,7 +147,7 @@ class ConfirmTab(QWidget):
                 or p.get("_lh_cnt", 0) > 0
             ]
 
-            template_path = self._s.get("templates", "confirm_path")
+            template_path = self._s.get_confirm_template_path()
             self.confirms = make_confirm(
                 roster_data=active_invoices,
                 col_mapping=self._data.col_mapping,

@@ -2,7 +2,7 @@
 
 import pytest
 
-from src.core.diff_format import fmt_cell, has_diff, strip_diff
+from src.core.diff_format import fmt_cell, has_diff, strip_diff, to_numeric
 
 
 class TestFmtCell:
@@ -52,3 +52,34 @@ class TestStripDiff:
 
     def test_strip_diff_int(self):
         assert strip_diff(3) == "3"
+
+
+class TestToNumeric:
+    def test_int_string(self):
+        assert to_numeric("3") == 3
+        assert to_numeric("0") == 0
+        assert to_numeric("-5") == -5
+
+    def test_float_string(self):
+        assert to_numeric("3.14") == 3.14
+        assert to_numeric("0.0") == 0.0
+        assert to_numeric("-2.5") == -2.5
+
+    def test_non_numeric_string(self):
+        assert to_numeric("010-1234") == "010-1234"
+        assert to_numeric("abc") == "abc"
+
+    def test_int_value(self):
+        assert to_numeric(3) == 3
+        assert to_numeric(0) == 0
+
+    def test_float_value(self):
+        assert to_numeric(3.14) == 3.14
+        assert to_numeric(0.0) == 0.0
+
+    def test_none(self):
+        assert to_numeric(None) is None
+
+    def test_empty_string(self):
+        assert to_numeric("") == ""
+        assert to_numeric("   ") == "   "

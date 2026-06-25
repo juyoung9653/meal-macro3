@@ -34,23 +34,19 @@ class TestTypedAccessors:
         assert sm.get_meal_type() == "행복도시락"
 
     def test_set_meal_type_syncs_template_paths(self):
-        """set_meal_type() should update invoice and confirm template paths."""
+        """Template paths now resolve lazily from meal type."""
         sm = make_settings_manager()
         sm.set_meal_type("행복도시락")
-        assert (
-            sm.get("templates", "invoice_path") == "assets/행복도시락_청구서템플릿.xlsx"
-        )
-        assert (
-            sm.get("templates", "confirm_path") == "assets/행복도시락_확인서템플릿.xlsx"
-        )
+        assert sm.get_invoice_template_path() == "assets/행복도시락_청구서템플릿.xlsx"
+        assert sm.get_confirm_template_path() == "assets/행복도시락_확인서템플릿.xlsx"
 
     def test_set_meal_type_restore_to_급식(self):
         sm = make_settings_manager()
         sm.set_meal_type("행복도시락")
         sm.set_meal_type("급식")
         assert sm.get_meal_type() == "급식"
-        assert sm.get("templates", "invoice_path") == "assets/급식_청구서템플릿.xlsx"
-        assert sm.get("templates", "confirm_path") == "assets/급식_확인서템플릿.xlsx"
+        assert sm.get_invoice_template_path() == "assets/급식_청구서템플릿.xlsx"
+        assert sm.get_confirm_template_path() == "assets/급식_확인서템플릿.xlsx"
 
 
 class TestDirectGet:
@@ -66,11 +62,11 @@ class TestDirectGet:
 
     def test_invoice_template_path(self):
         sm = make_settings_manager()
-        assert sm.get("templates", "invoice_path") == "assets/급식_청구서템플릿.xlsx"
+        assert sm.get_invoice_template_path() == "assets/급식_청구서템플릿.xlsx"
 
     def test_confirm_template_path(self):
         sm = make_settings_manager()
-        assert sm.get("templates", "confirm_path") == "assets/급식_확인서템플릿.xlsx"
+        assert sm.get_confirm_template_path() == "assets/급식_확인서템플릿.xlsx"
 
     def test_template_sheet_name(self):
         sm = make_settings_manager()
