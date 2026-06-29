@@ -26,11 +26,11 @@ def apply_base_page_setup(
     ps.FitToPagesTall = False
     ps.PrintTitleRows = "$1:$2"
 
-    m = 3
-    ps.LeftMargin = m
-    ps.RightMargin = m
-    ps.TopMargin = m
-    ps.BottomMargin = m
+    margin_pt = round(0.3 / 2.54 * 72, 1)  # 0.3cm → pt
+    ps.LeftMargin = margin_pt
+    ps.RightMargin = margin_pt
+    ps.TopMargin = margin_pt
+    ps.BottomMargin = margin_pt
     ps.HeaderMargin = 0
     ps.FooterMargin = 0
     ps.CenterHorizontally = True

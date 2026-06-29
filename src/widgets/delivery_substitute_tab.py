@@ -36,7 +36,7 @@ from src.excel.delivery_viewer import show_excel
 log = logging.getLogger(__name__)
 
 ORI_OPTIONS = ["자동", "세로", "가로"]
-SPLIT_OPTIONS = ["사용 안함", "동기준", "행기준"]
+SPLIT_OPTIONS = ["동기준", "그룹기준"]
 
 
 class DeliverySubstituteTab(QWidget):
@@ -370,7 +370,7 @@ class DeliverySubstituteTab(QWidget):
                 ship=ship,
                 date_str=date_label,
                 ori=ORI_OPTIONS.index(self.ori_combo.currentText()),
-                split=SPLIT_OPTIONS.index(self.split_combo.currentText()),
+                split=SPLIT_OPTIONS.index(self.split_combo.currentText()) + 1,
                 max_rows=max_rows,
             )
 

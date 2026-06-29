@@ -1,9 +1,12 @@
+import logging
 import math
 
 import pandas as pd
 
 from src.core.settings import get_settings
 from src.excel.groups import apply_page_breaks_by_groups, get_groups
+
+log = logging.getLogger(__name__)
 
 _S = get_settings()
 COL_ADDR = _S.get_delivery_config("col_addr")
@@ -39,11 +42,11 @@ def apply_page_formatting(
     groups = get_groups(df)
 
     apply_page_breaks_by_groups(ws, df, groups, mode, max_groups_limit)
+    # AutoFit/분배 전에 줄바꿈 정리 (값 바뀌면서 행 높이 초기화되는 거 방지)
+    _clean_address_newlines(ws, used_rows, [*df.columns.tolist(), COL_SUM], COL_ADDR)
     calc_optimal_font_size(
         ws, df, used_rows, used_cols, groups, mode, actual_orientation
     )
-
-    _clean_address_newlines(ws, used_rows, [*df.columns.tolist(), COL_SUM], COL_ADDR)
 
 
 def calc_optimal_font_size(
@@ -61,7 +64,7 @@ def calc_optimal_font_size(
     A4 가용 영역을 넘지 않는 최대 폰트 크기를 한 번에 찾는다.
     """
     limit_h, limit_w = page_limits_pt(ws, actual_orientation)
-    safe_w, safe_h = limit_w - 10, limit_h - 10
+    safe_w, safe_h = limit_w - 5, limit_h - 5
     all_cols = [*df.columns.tolist(), COL_SUM]
 
     # 각 컬럼별 최대 문자 길이 (헤더명 vs 데이터 중 긴 쪽)
@@ -97,19 +100,41 @@ def calc_optimal_font_size(
             best = pt
             break
 
+    # 배송대타는 주소 wrapping 심하므로 폰트 상한 8pt
+    best = min(best, 8.0)
+
+    log.info(
+        "calc_opt_font: safe_h=%.1f safe_w=%.1f n=%d best=%.1f limit_h=%.1f limit_w=%.1f",
+        safe_h,
+        safe_w,
+        n,
+        best,
+        limit_h,
+        limit_w,
+    )
+
     # 폰트 적용 + 1회 AutoFit (최종 보정만)
     _set_fonts(ws, used_rows, all_cols, best - FONT_BASE_SIZE)
     _apply_autofit(ws, used_rows, used_cols)
 
+    # AutoFit 후 실제 행 높이 확인 (디버깅)
+    actual_row_h = ws.Rows(3).RowHeight if used_rows >= 3 else 0
+    log.info(
+        "autofit: row3_h=%.1f footer_row%d_h=%.1f",
+        actual_row_h,
+        used_rows,
+        ws.Rows(used_rows).RowHeight if used_rows > 0 else 0,
+    )
+
     _widen_address_column_if_gap(ws, used_cols, all_cols, safe_w)
 
-    chunks = (
-        page_chunks_from_breaks(ws, groups)
-        if mode != 0
-        else ([groups] if groups else [])
-    )
-    if chunks:
-        _distribute_extra_height_uniform(ws, chunks, used_rows, safe_h)
+    if mode != 0:
+        chunks = page_chunks_from_breaks(ws, groups)
+        if chunks:
+            for ci, pg in enumerate(chunks):
+                rows_in_page = sum(e - s + 1 for s, e in pg)
+                log.info("chunk %d: groups=%d rows=%d", ci, len(pg), rows_in_page)
+            _distribute_extra_height_uniform(ws, chunks, used_rows, safe_h)
 
     return best
 
@@ -155,13 +180,13 @@ def _widen_address_column_if_gap(
         col = ws.Columns(addr_idx)
         current_width = col.Width
         if current_width > 0:
-            ratio = (current_width + gap * 0.9) / current_width
+            ratio = (current_width + gap * 0.5) / current_width
             col.ColumnWidth *= ratio
     except (ValueError, ZeroDivisionError):
         for c in range(1, used_cols + 1):
             col = ws.Columns(c)
             col.ColumnWidth += (
-                (col.Width / w) * gap * 0.9 * (col.ColumnWidth / col.Width)
+                (col.Width / w) * gap * 0.5 * (col.ColumnWidth / col.Width)
             )
 
 
@@ -177,47 +202,72 @@ def _distribute_extra_height_uniform(
 
     h_hdr = ws.Rows(1).RowHeight + ws.Rows(2).RowHeight
     footer_h = ws.Rows(used_rows).RowHeight if used_rows > 0 else 0
-    available_body_h = safe_h - h_hdr - footer_h - 5
 
-    max_groups_in_page = max(len(pg) for pg in chunks) if chunks else 0
-    if max_groups_in_page <= 0:
-        return
+    for ci, pg in enumerate(chunks):
+        groups_in_page = len(pg)
+        if groups_in_page <= 0:
+            continue
 
-    target_group_height = available_body_h / max_groups_in_page
+        # 마지막 청크는 합계행(footer) 공간 확보, 나머지는 헤더만 제외
+        is_last = ci == len(chunks) - 1
+        avail = safe_h - h_hdr - (footer_h if is_last else 0) - 3
+        target_group_h = avail / groups_in_page
 
-    # Collect ranges per height (no Union)
-    range_groups: dict[float, list[tuple[int, int]]] = {}
-    for pg in chunks:
+        # 행 수별로 동일한 높이 계산 (최소값 없이 순수 계산)
+        height_per_rows: dict[int, float] = {}
+        for s0, e0 in pg:
+            num_rows = e0 - s0 + 1
+            if num_rows not in height_per_rows:
+                height_per_rows[num_rows] = round(target_group_h / num_rows, 2)
+
+        if ci == 0:
+            log.info(
+                "page%d: groups=%d target_group_h=%.1f heights_by_rows=%s",
+                ci,
+                groups_in_page,
+                target_group_h,
+                height_per_rows,
+            )
+
+        # 적용
+        range_groups: dict[float, list[tuple[int, int]]] = {}
         for s0, e0 in pg:
             start_row = s0 + offset
             end_row = e0 + offset
             num_rows = e0 - s0 + 1
+            final_h = height_per_rows[num_rows]
 
-            target_range = ws.Range(ws.Rows(start_row), ws.Rows(end_row))
-            current_h = target_range.RowHeight
-            if current_h is None:
-                max_autofit_h = max(
-                    ws.Rows(r).RowHeight for r in range(start_row, end_row + 1)
+            if ci == 0 and start_row <= 12:
+                log.info(
+                    "  group rows=%d start=%d final_h=%.1f",
+                    num_rows,
+                    start_row,
+                    final_h,
                 )
-            else:
-                max_autofit_h = current_h
-
-            calc_row_h = target_group_height / num_rows
-            final_h = round(min(max(calc_row_h, max_autofit_h, 12), 100), 2)
 
             range_groups.setdefault(final_h, []).append((start_row, end_row))
 
-    # Merge contiguous ranges and apply
-    for h, ranges in range_groups.items():
-        ranges.sort()
-        merged = []
-        for s, e in ranges:
-            if merged and merged[-1][1] + 1 == s:
-                merged[-1] = (merged[-1][0], e)
-            else:
-                merged.append((s, e))
-        for s, e in merged:
-            ws.Range(ws.Rows(s), ws.Rows(e)).RowHeight = h
+        for h, ranges in range_groups.items():
+            ranges.sort()
+            merged = []
+            for s, e in ranges:
+                if merged and merged[-1][1] + 1 == s:
+                    merged[-1] = (merged[-1][0], e)
+                else:
+                    merged.append((s, e))
+            for s, e in merged:
+                try:
+                    ws.Range(ws.Rows(s), ws.Rows(e)).RowHeight = h
+                except Exception:
+                    # 병합 셀 충돌 시 개별 행 설정
+                    for r in range(s, e + 1):
+                        try:
+                            ws.Rows(r).RowHeight = h
+                        except Exception:
+                            pass
+
+        if ci == 0:
+            log.info("  heights: %s", sorted(height_per_rows.values()))
 
 
 def _clean_address_newlines(ws, used_rows, all_cols, col_name):

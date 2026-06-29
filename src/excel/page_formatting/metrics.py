@@ -12,7 +12,8 @@ def page_chunks_from_breaks(
     ws, groups: list[tuple[int, int]], offset: int = 3
 ) -> list[list[tuple[int, int]]]:
     """
-    ws.HPageBreaks 기준으로 '페이지별 그룹 리스트'로 분할합니다.
+    ws.HPageBreaks(수동만) 기준으로 '페이지별 그룹 리스트'로 분할합니다.
+    Excel 자동 추가 페이지 나누기(Extent==2)는 제외합니다.
 
     :param ws: Excel COM Worksheet
     :param groups: (start_idx, end_idx) 목록 (DataFrame 인덱스 기준)
@@ -21,7 +22,20 @@ def page_chunks_from_breaks(
     if not groups:
         return []
 
-    breaks = sorted(pb.Location.Row for pb in ws.HPageBreaks)
+    # COM 컬렉션은 인덱스로 접근
+    breaks = []
+    for i in range(1, ws.HPageBreaks.Count + 1):
+        pb = ws.HPageBreaks(i)
+        ext = getattr(pb, "Extent", -1)
+        row = pb.Location.Row
+        if i == 1:
+            import logging as _lg
+
+            _lg.getLogger(__name__).info(
+                "HPageBreak #%d: row=%d Extent=%s", i, row, ext
+            )
+        breaks.append(row)
+    breaks.sort()
 
     chunks: list[list[tuple[int, int]]] = []
     cur: list[tuple[int, int]] = []
