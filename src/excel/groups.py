@@ -92,6 +92,69 @@ def ord_groups(vals: list[str]) -> list[tuple[int, int]]:
     return out
 
 
+def compute_page_chunks(
+    groups: list[tuple[int, int]],
+    mode: int,
+    max_groups_limit: int,
+    df: pd.DataFrame | None = None,
+) -> list[list[tuple[int, int]]]:
+    """그룹 리스트를 mode/limit 기준으로 페이지 청크로 분할 (Pure Python, COM 불필요).
+
+    mode=2: 전체 페이지 수를 최소화하면서 각 페이지에 균등 배분.
+            예) 30그룹 limit=18 → 2페이지 × 15그룹 (18/12보다 15/15가 균등)
+    mode=1: 관할동 기준 분할 + 최대 그룹 수 제한.
+
+    Returns:
+        chunks: [[(s0,e0), ...], [...]]  — 페이지별 그룹 리스트
+    """
+    if mode == 0 or not groups:
+        return [groups[:]] if groups else []
+
+    total = len(groups)
+
+    if mode == 1 and df is not None:
+        # 관할동 기준 분할 (기존 로직 유지)
+        chunks: list[list[tuple[int, int]]] = []
+        cur: list[tuple[int, int]] = []
+        curr_g = 0
+        curr_dong = ""
+        for g in groups:
+            s0, _ = g
+            need_break = False
+            dong = str(df.iloc[s0].get("관할동", ""))
+            dong_changed = curr_dong and dong != curr_dong
+            limit_exceeded = max_groups_limit > 0 and curr_g >= max_groups_limit
+            if dong_changed or limit_exceeded:
+                need_break = True
+            if need_break:
+                if cur:
+                    chunks.append(cur)
+                cur = []
+                curr_g = 0
+            cur.append(g)
+            curr_g += 1
+            curr_dong = dong
+        if cur:
+            chunks.append(cur)
+        return chunks
+
+    # mode=2: 균등 배분
+    num_pages = max(
+        1, (total + max_groups_limit - 1) // max_groups_limit
+    )  # ceil division
+    base = total // num_pages
+    remainder = total % num_pages
+
+    chunks = []
+    idx = 0
+    for p in range(num_pages):
+        size = base + (1 if p < remainder else 0)
+        chunks.append(groups[idx : idx + size])
+        idx += size
+
+    return chunks
+
+
 def _prevent_group_splits(ws, groups: list[tuple[int, int]], offset: int) -> None:
     """그룹 중간에 페이지가 잘리는 경우 해당 그룹 시작점으로 페이지를 넘깁니다.
 

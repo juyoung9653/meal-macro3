@@ -73,6 +73,7 @@ DEFAULTS: dict[str, Any] = {
         "col_sum": "요약",
         "col_addr": "신주소",
         "col_note": "비고2",
+        "col_phone": "핸드폰",
         "pick_cols": [
             "배송순서",
             "관할동",

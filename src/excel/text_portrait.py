@@ -5,6 +5,7 @@ from src.core.settings import get_settings
 _S = get_settings()
 COL_ADDR = _S.get_delivery_config("col_addr")
 COL_NOTE = _S.get_delivery_config("col_note")
+COL_ORD = _S.get_delivery_config("col_ord")
 
 
 def _wrap_tokens(tokens: list[str], limit: int = 10) -> str:
@@ -30,7 +31,12 @@ def _wrap_tokens(tokens: list[str], limit: int = 10) -> str:
 def preprocess_portrait(df: pd.DataFrame) -> pd.DataFrame:
     addr_col = COL_ADDR
     note_col = COL_NOTE
-    if df.empty or (addr_col not in df.columns and note_col not in df.columns):
+    ord_col = COL_ORD
+    if df.empty or (
+        addr_col not in df.columns
+        and note_col not in df.columns
+        and ord_col not in df.columns
+    ):
         return df
 
     d = df.copy()
@@ -52,5 +58,12 @@ def preprocess_portrait(df: pd.DataFrame) -> pd.DataFrame:
         s = d[note_col].fillna("").astype(str)
         s = s.str.replace(r"[\r\n]+", " ", regex=True).str.strip()
         d[note_col] = s.map(lambda x: _wrap_tokens(x.split(" "), 8))
+
+    if ord_col in d.columns:
+        s = d[ord_col].fillna("").astype(str)
+        # 기존 줄바꿈 제거 후 구분자(콤마+공백) → 줄바꿈
+        s = s.str.replace(r"[\r\n]+", "", regex=True)
+        s = s.str.replace(r"\s*,\s*", "\n", regex=True).str.strip()
+        d[ord_col] = s
 
     return d

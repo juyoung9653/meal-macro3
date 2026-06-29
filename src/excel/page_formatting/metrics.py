@@ -34,6 +34,9 @@ def page_chunks_from_breaks(
             _lg.getLogger(__name__).info(
                 "HPageBreak #%d: row=%d Extent=%s", i, row, ext
             )
+        # 자동 페이지 나누기(Extent==2)는 제외
+        if ext == 2:
+            continue
         breaks.append(row)
     breaks.sort()
 
