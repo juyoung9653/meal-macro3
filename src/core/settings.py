@@ -60,6 +60,59 @@ DEFAULTS: dict[str, Any] = {
             "default": "청구금액",
         },
     },
+    # ── 배송 대타 매크로 설정 ────────────────────────────
+    "delivery_substitute": {
+        "sheet_name": "종합_jon(DB)",
+        "header_row": 2,
+        "data_row": 4,
+        "col_meal": "식사 구분",
+        "col_ship": "배송_new",
+        "col_ord": "배송순서",
+        "col_name": "이름",
+        "col_sum": "요약",
+        "col_addr": "신주소",
+        "col_note": "비고2",
+        "pick_cols": [
+            "배송순서",
+            "관할동",
+            "이름",
+            "상세주소",
+            "신주소",
+            "핸드폰",
+            "비고2",
+        ],
+        "max_rows": 18,
+        "a4_page": "세로",
+        "page_h": 842,
+        "page_w": 595,
+        "split_mode": "동기준",
+        "font_base_size": 8,
+    },
+    "delivery": {
+        "db_path": "",
+        "cols": {
+            "order": [
+                "배송순서",
+                "관할동",
+                "이름",
+                "상세주소",
+                "신주소",
+                "핸드폰",
+                "비고2",
+            ],
+            "enabled": {
+                "배송순서": True,
+                "관할동": True,
+                "이름": True,
+                "상세주소": True,
+                "신주소": True,
+                "핸드폰": True,
+                "비고2": True,
+            },
+        },
+        "orientation": "세로",
+        "split_mode": "동기준",
+    },
 }
 
 
@@ -128,6 +181,36 @@ class SettingsManager:
         self.set("app", "meal_type", value=meal_type)
         # Template paths are now resolved lazily via get_invoice_template_path()
         # and get_confirm_template_path() — no side effects
+
+    # ── 배송 대타 설정 접근자 ────────────────────────────
+
+    def get_delivery_config(self, key: str) -> Any:
+        """delivery_substitute 설정에서 단일 값을 조회.
+
+        Example: ``s.get_delivery_config("max_rows")`` → ``18``
+        """
+        return self.get("delivery_substitute", key)
+
+    def get_delivery_settings(self) -> dict:
+        """delivery 설정 전체 dict 반환."""
+        return self.get("delivery", default={})
+
+    def set_delivery_settings(
+        self,
+        db_path: str = "",
+        order: list[str] | None = None,
+        enabled: dict[str, bool] | None = None,
+        orientation: str = "세로",
+        split_mode: str = "동기준",
+    ) -> None:
+        """delivery 설정을 일괄 갱신."""
+        if order is not None:
+            self.set("delivery", "cols", "order", value=order)
+        if enabled is not None:
+            self.set("delivery", "cols", "enabled", value=enabled)
+        self.set("delivery", "db_path", value=db_path)
+        self.set("delivery", "orientation", value=orientation)
+        self.set("delivery", "split_mode", value=split_mode)
 
 
 def get_settings() -> SettingsManager:

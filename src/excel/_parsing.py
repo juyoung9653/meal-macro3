@@ -2,8 +2,36 @@
 
 from __future__ import annotations
 
+import math
+import re
 from datetime import date, datetime, timedelta
 from typing import Any
+
+
+def to_num(v: Any) -> float | None:
+    """값을 float로 변환. 숫자가 아니면 None."""
+    if v is None:
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    t = re.sub(r"[^\d.\-]", "", _to_str(v))
+    try:
+        return float(t) if t else None
+    except ValueError:
+        return None
+
+
+def truthy(v: Any) -> bool:
+    """값이 truthy(1/Y/True)인지 확인."""
+    if v is None:
+        return False
+    if isinstance(v, float) and math.isnan(v):
+        return False
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        return v == 1
+    return _to_str(v).lower() in {"1", "y", "true"}
 
 
 def _serial_to_date(serial: int | float) -> date | None:
@@ -43,7 +71,18 @@ def _to_date(val: Any) -> date | None:
 def _to_str(val: Any) -> str:
     if val is None:
         return ""
-    return str(val).strip()
+    if isinstance(val, float) and (math.isnan(val) or math.isinf(val)):
+        return ""
+    t = str(val).strip()
+    if not t or t.lower() in {"nan", "inf", "infinity", "+nan", "-nan", "+inf", "-inf"}:
+        return ""
+    if re.fullmatch(r"-?\d+(\.0+)?", t):
+        try:
+            f = float(t)
+            return "" if (math.isnan(f) or math.isinf(f)) else str(int(f))
+        except ValueError:
+            return t
+    return t
 
 
 def _is_date_col(name: str) -> bool:

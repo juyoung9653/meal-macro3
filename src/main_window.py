@@ -16,6 +16,7 @@ from PyQt6.QtWidgets import (
 
 from src.core.settings import get_settings
 from src.widgets.confirm_tab import ConfirmTab
+from src.widgets.delivery_substitute_tab import DeliverySubstituteTab
 from src.widgets.invoice_tab import InvoiceTab
 from src.widgets.report_tab import ReportTab
 
@@ -74,9 +75,11 @@ class MainWindow(QMainWindow):
         self.invoice_tab = InvoiceTab(meal_type=meal_type)
         self.confirm_tab = ConfirmTab(meal_type=meal_type)
         self.report_tab = ReportTab(meal_type=meal_type)
+        self.delivery_tab = DeliverySubstituteTab(meal_type=meal_type)
         self.tab_widget.addTab(self.invoice_tab, "① 청구서")
         self.tab_widget.addTab(self.confirm_tab, "② 확인서")
         self.tab_widget.addTab(self.report_tab, "③ 배송리포트")
+        self.tab_widget.addTab(self.delivery_tab, "④ 배송대타")
 
     def _connect_signals(self):
         self.tab_widget.currentChanged.connect(self._on_tab_changed)
@@ -108,6 +111,7 @@ class MainWindow(QMainWindow):
         self.invoice_tab.set_meal_type(meal_type)
         self.confirm_tab.set_meal_type(meal_type)
         self.report_tab.set_meal_type(meal_type)
+        self.delivery_tab.set_meal_type(meal_type)
 
     # ── 명단 파일 선택 ──
 
@@ -142,6 +146,7 @@ class MainWindow(QMainWindow):
         # 모든 탭에 변경 알림
         self.invoice_tab.on_roster_changed()
         self.report_tab.on_roster_changed()
+        self.delivery_tab.on_roster_changed()
 
         roster = reader.read_roster()
         self.roster_label.setText(f"✅ {os.path.basename(path)} ({len(roster)}명)")
