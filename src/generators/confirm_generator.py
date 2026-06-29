@@ -225,7 +225,6 @@ def make_confirm(
         for p in roster_data
     )
 
-    delivery_contacts = []
     delivery_by_id: dict[str, list[dict]] = {}
 
     try:
@@ -234,10 +233,8 @@ def make_confirm(
             delivery_matrix = reader.read_delivery_matrix()
         else:
             delivery_matrix = []
-        delivery_contacts = reader.read_delivery_contacts()
     except Exception:
         delivery_matrix = []
-        delivery_contacts = []
 
     if need_matrix:
         # ── person_id → [rows] 멀티 행 맵 (식종별 여러 행 허용, _daily 미리 계산) ──
@@ -248,16 +245,19 @@ def make_confirm(
                 enriched["_daily"] = {c: v for c, v in row.items() if _is_date_col(c)}
                 delivery_by_id.setdefault(pid, []).append(enriched)
 
-    # 배송연락처: 첫 번째 유효한 항목 사용
+    # 배송연락처: 배송정보 테이블 헤더에서 연락처/배송담당 컬럼 읽기
     delivery_person = ""
     delivery_phone = ""
-    for dc in delivery_contacts:
-        p = dc.get("배송담당", "").strip()
-        ph = dc.get("연락처", "").strip()
-        if p or ph:
-            delivery_person = p
-            delivery_phone = ph
-            break
+    try:
+        for row in reader.read_delivery_order():
+            p = row.get("배송담당", "").strip()
+            ph = row.get("연락처", "").strip()
+            if p or ph:
+                delivery_person = p
+                delivery_phone = ph
+                break
+    except Exception:
+        pass
 
     for dong, persons_in_dong in dong_groups.items():
         hh_groups = {}

@@ -32,12 +32,10 @@ def test_in_memory_delivery_data():
         ],
         delivery_map={"P001": {"ID": "P001", "phone": "010-1234"}},
         order_map={"010-1234|서울": {"배송순서": "1"}},
-        delivery_contacts=[{"배송담당": "김배송", "연락처": "010-9999"}],
     )
     assert len(reader.read_delivery_matrix()) == 1
     assert reader.build_delivery_map()["P001"]["phone"] == "010-1234"
     assert reader.build_order_map()["010-1234|서울"]["배송순서"] == "1"
-    assert reader.read_delivery_contacts()[0]["배송담당"] == "김배송"
 
 
 def test_in_memory_db_path():

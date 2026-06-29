@@ -18,7 +18,6 @@ class InMemoryDataSource(DataSource):
         self._delivery_matrix = kwargs.get("delivery_matrix", [])
         self._delivery_map = kwargs.get("delivery_map", {})
         self._order_map = kwargs.get("order_map", {})
-        self._delivery_contacts = kwargs.get("delivery_contacts", [])
         self._holiday_set = kwargs.get("holiday_set", set())
         self._meal_prices = kwargs.get(
             "meal_prices", {"조식": 9500, "석식": 9500, "중식": 9500}
@@ -42,9 +41,6 @@ class InMemoryDataSource(DataSource):
 
     def build_order_map(self) -> dict[str, dict]:
         return dict(self._order_map)
-
-    def read_delivery_contacts(self) -> list[dict]:
-        return list(self._delivery_contacts)
 
     def get_holiday_set(self) -> set[date]:
         return set(self._holiday_set)

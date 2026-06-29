@@ -30,9 +30,6 @@ class DataSource(ABC):
     def build_order_map(self) -> dict[str, dict]: ...
 
     @abstractmethod
-    def read_delivery_contacts(self) -> list[dict]: ...
-
-    @abstractmethod
     def get_holiday_set(self) -> set[date]: ...
 
     @abstractmethod

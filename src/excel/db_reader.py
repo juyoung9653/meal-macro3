@@ -16,9 +16,11 @@ from __future__ import annotations
 
 import logging
 import os
+import tempfile
 from datetime import date, datetime
 from typing import Any
 
+import msoffcrypto
 import openpyxl
 
 log = logging.getLogger(__name__)
@@ -41,8 +43,9 @@ from .data_source import DataSource
 class DbReader(DataSource):
     """db.xlsx 단일 데이터 소스 리더. data_only=True, read_only=True."""
 
-    def __init__(self, db_path: str | None = None):
+    def __init__(self, db_path: str | None = None, password: str | None = None):
         self._db_path = db_path or "assets/db.xlsx"
+        self._password = password or ""
         self._wb: openpyxl.Workbook | None = None
         self._cache: dict[str, Any] = {}
 
@@ -61,28 +64,104 @@ class DbReader(DataSource):
             self._wb.close()
             self._wb = None
 
+    # ── 시트명 → 헤더 기반 시트 찾기 ──
+
+    def _resolve_sheet(
+        self, name_hint: str, required_headers: set[str] | None = None
+    ) -> str:
+        """시트 찾기: ①헤더매칭 → ②정확한시트명 → ③부분일치(name_hint 포함)."""
+        wb = self._get_wb()
+
+        if required_headers:
+            for sn in wb.sheetnames:
+                ws = wb[sn]
+                try:
+                    first_row = next(ws.iter_rows(values_only=True))
+                except StopIteration:
+                    continue
+                headers = {_to_str(c).strip() for c in first_row if c is not None}
+                if required_headers.issubset(headers):
+                    log.debug(
+                        "[DbReader] 헤더매칭 → '%s' (name_hint=%s)", sn, name_hint
+                    )
+                    return sn
+
+        if name_hint in wb.sheetnames:
+            return name_hint
+
+        for sn in wb.sheetnames:
+            if name_hint in sn:
+                log.debug("[DbReader] 부분일치 → '%s' (name_hint=%s)", sn, name_hint)
+                return sn
+
+        log.warning("[DbReader] 시트 '%s' 못 찾음. 그대로 사용.", name_hint)
+        return name_hint
+
     def _get_wb(self) -> openpyxl.Workbook:
         if self._wb is None:
             if not os.path.exists(self._db_path):
                 raise FileNotFoundError(f"db.xlsx 없음: {self._db_path}")
-            self._wb = openpyxl.load_workbook(
-                self._db_path, data_only=True, read_only=True
-            )
+
+            load_path = self._db_path
+            cleanup = None
+
+            if self._password:
+                try:
+                    with open(self._db_path, "rb") as f:
+                        file = msoffcrypto.File(f)
+                        file.load_key(password=self._password)
+                        tmp = tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False)
+                        file.decrypt(tmp)
+                        tmp.close()
+                        load_path = tmp.name
+                        cleanup = tmp.name
+                except Exception as e:
+                    log.warning(
+                        "[DbReader] 복호화 실패 (비번 오류?): %s. 원본 시도.", e
+                    )
+
+            try:
+                self._wb = openpyxl.load_workbook(load_path, data_only=True)
+            finally:
+                if cleanup:
+                    try:
+                        os.unlink(cleanup)
+                    except OSError:
+                        pass
+
         return self._wb
+
+    def _resolve_table(
+        self, table_name: str, fallback: str | None = None
+    ) -> str | None:
+        """Excel 테이블(ListObject) 이름으로 시트 찾기."""
+        wb = self._get_wb()
+        for ws in wb.worksheets:
+            if table_name in ws.tables:
+                log.debug("[DbReader] 테이블 '%s' → 시트 '%s'", table_name, ws.title)
+                return ws.title
+        return fallback
 
     def _read_sheet(self, sheet_name: str) -> list[dict]:
         """시트 -> dict 리스트 (첫 행 = 헤더)."""
         wb = self._get_wb()
+        log.debug(
+            "[DbReader] _read_sheet('%s') 시작 — 전체 시트: %s",
+            sheet_name,
+            wb.sheetnames,
+        )
         if sheet_name not in wb.sheetnames:
             log.debug("[DbReader] 시트 '%s' 없음 (무시)", sheet_name)
             return []
 
         ws = wb[sheet_name]
         rows = list(ws.iter_rows(values_only=True))
+        log.debug("[DbReader] 시트 '%s' raw 행 수: %d", sheet_name, len(rows))
         if not rows:
             return []
 
         raw_headers = [_to_str(c) for c in rows[0]]
+        log.debug("[DbReader] 시트 '%s' raw 헤더: %s", sheet_name, raw_headers)
         headers = _normalize_headers(raw_headers)
         return _rows_to_dicts(headers, rows[1:])
 
@@ -120,7 +199,10 @@ class DbReader(DataSource):
     def read_roster(self) -> list[dict]:
         """명단 시트."""
         if "roster" not in self._cache:
-            self._cache["roster"] = self._read_sheet("명단")
+            sn = self._resolve_table("명단") or self._resolve_sheet(
+                "명단", {"ID", "성명"}
+            )
+            self._cache["roster"] = self._read_sheet(sn)
         return self._cache["roster"]
 
     def read_delivery_matrix(self) -> list[dict]:
@@ -162,10 +244,12 @@ class DbReader(DataSource):
     def read_delivery_order(self) -> list[dict]:
         """배송정보 시트 (배송순서/배송담당)."""
         if "delivery_order" not in self._cache:
-            # 실제 시트명은 '배송정보' (구 코드에선 '배송순서'로 불림)
-            data = self._read_sheet("배송정보")
+            sn = self._resolve_table("배송순서") or self._resolve_sheet(
+                "배송정보", {"핸드폰", "도로명주소"}
+            )
+            data = self._read_sheet(sn)
             if not data:
-                data = self._read_sheet("배송순서")
+                data = self._read_sheet("배송순서")  # fallback for legacy
             self._cache["delivery_order"] = data
         return self._cache["delivery_order"]
 
@@ -284,45 +368,13 @@ class DbReader(DataSource):
                 result[key] = row
         return result
 
-    def read_delivery_contacts(self) -> list[dict]:
-        """배송정보 시트 내 '배송연락처' 사이드 테이블 읽기.
-
-        배송정보 시트 오른쪽에 위치한 배송담당/연락처 컬럼을 찾아
-        [{배송담당: str, 연락처: str}, ...] 형태로 반환.
-        """
-        if "delivery_contacts" not in self._cache:
-            raw = self._read_sheet_raw("배송정보")
-            if not raw or len(raw) < 2:
-                self._cache["delivery_contacts"] = []
-                return self._cache["delivery_contacts"]
-
-            # 헤더 행에서 '연락처' 컬럼 위치 찾기 → 왼쪽 컬럼이 '배송담당'
-            header_row = raw[0]
-            contact_col = -1
-            for i, c in enumerate(header_row):
-                if _to_str(c) == "연락처":
-                    contact_col = i
-                    break
-
-            if contact_col < 1:
-                self._cache["delivery_contacts"] = []
-                return self._cache["delivery_contacts"]
-
-            person_col = contact_col - 1  # '배송담당' 컬럼
-            contacts: list[dict] = []
-            for row in raw[1:]:
-                person = _to_str(row[person_col]) if person_col < len(row) else ""
-                phone = _to_str(row[contact_col]) if contact_col < len(row) else ""
-                if person or phone:
-                    contacts.append({"배송담당": person, "연락처": phone})
-
-            self._cache["delivery_contacts"] = contacts
-        return self._cache["delivery_contacts"]
-
     def read_reception(self) -> list[dict]:
         """접수장 시트. 날짜 컬럼은 date 객체로 변환."""
         if "reception" not in self._cache:
-            raw = self._read_sheet_raw("접수장")
+            sn = self._resolve_table("접수장") or self._resolve_sheet(
+                "접수장", {"접수일"}
+            )
+            raw = self._read_sheet_raw(sn)
             if not raw:
                 self._cache["reception"] = []
                 return self._cache["reception"]
@@ -377,8 +429,10 @@ def get_db_reader(db_path: str | None = None) -> DataSource:
     if _reader is None:
         from ..core.settings import get_settings
 
-        path = db_path or get_settings().get("db", "path", default="assets/db.xlsx")
-        _reader = DbReader(path)
+        s = get_settings()
+        path = db_path or s.get("db", "path", default="assets/db.xlsx")
+        pw = s.get("db", "password", default="")
+        _reader = DbReader(path, password=pw)
     elif db_path and db_path != _reader.db_path:
         _reader.db_path = db_path
     return _reader

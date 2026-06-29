@@ -353,10 +353,9 @@ class ReportTab(QWidget):
         # 현재 서비스에서 담당자 목록 수집
         staff_by_meal: dict[str, list[str]] = {}
         try:
-            contacts = self._ds.read_delivery_contacts()
             staff_set = set()
-            for c in contacts:
-                s = c.get("배송담당", "").strip()
+            for row in self._ds.read_delivery_order():
+                s = row.get("배송담당", "").strip()
                 if s:
                     staff_set.add(s)
 

@@ -32,6 +32,7 @@ DEFAULTS: dict[str, Any] = {
     },
     "db": {
         "path": "assets/db.xlsx",
+        "password": "",
     },
     "semantic_columns": {
         "__calc_breakfast": {
