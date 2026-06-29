@@ -40,7 +40,15 @@ class InMemoryDataSource(DataSource):
         return dict(self._delivery_map)
 
     def build_order_map(self) -> dict[str, dict]:
-        return dict(self._order_map)
+        # DbReader.build_order_map()과 동일하게 전화번호 '-' 제거
+        result: dict[str, dict] = {}
+        for key, val in self._order_map.items():
+            phone_part = key.split("|")[0] if "|" in key else ""
+            addr_part = key.split("|")[1] if "|" in key else ""
+            cleaned_phone = phone_part.replace("-", "").replace(" ", "")
+            cleaned_key = f"{cleaned_phone}|{addr_part}"
+            result[cleaned_key] = val
+        return result
 
     def get_holiday_set(self) -> set[date]:
         return set(self._holiday_set)

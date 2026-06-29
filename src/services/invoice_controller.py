@@ -285,9 +285,9 @@ class InvoiceService:
                         ds = expanded
                     else:
                         ds = f"{apply_date.month}/{apply_date.day}"
-                        if end_date:
+                        if end_date and end_date != apply_date:
                             ds += f"~{end_date.month}/{end_date.day}"
-                        elif status in ("배송", "중지"):
+                        elif not end_date and status in ("배송", "중지"):
                             ds += "~"
 
                     parts = []
@@ -339,7 +339,9 @@ class InvoiceService:
             ep_dict["_delivery_end"] = ""
 
             # 배송순서/배송담당 매핑 (핸드폰+도로명주소 기준 조인)
-            phone = str(person.get("핸드폰", "")).strip()
+            phone = (
+                str(person.get("핸드폰", "")).strip().replace("-", "").replace(" ", "")
+            )
             addr = str(person.get("도로명주소", "")).strip()
             order_key = f"{phone}|{addr}"
             order = order_map.get(order_key, {})

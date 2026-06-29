@@ -238,8 +238,10 @@ class DeliverySubstituteTab(QWidget):
             person = roster_by_id.get(pid, {})
 
             name = person.get("성명", "")
-            phone = person.get("핸드폰", "")
-            addr = person.get("도로명주소", "")
+            phone = (
+                str(person.get("핸드폰", "")).strip().replace("-", "").replace(" ", "")
+            )
+            addr = str(person.get("도로명주소", "")).strip()
 
             # 배송정보 lookup
             key = f"{phone}|{addr}" if phone and addr else ""

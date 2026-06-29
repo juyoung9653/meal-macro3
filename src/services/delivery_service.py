@@ -55,11 +55,18 @@ class DeliveryService:
             [헤더행, 데이터행..., 합계행]. 오류 시 [[오류메시지]].
         """
         if meal not in MEAL_RULES:
+            log.debug("[build_report] %s → 식종불일치 (meal=%s)", target_day, meal)
             return [[ERRORS["식종불일치"]]]
 
         dow = target_day.weekday()
         if dow not in MEAL_RULES[meal]:
             day_name = "월화수목금토일"[dow]
+            log.debug(
+                "[build_report] %s(%s) → 배송일아님 (%s)",
+                target_day,
+                day_name,
+                meal,
+            )
             return [
                 [
                     ERRORS["배송일아님"].format(
@@ -75,7 +82,17 @@ class DeliveryService:
         holiday_set = self._ds.get_holiday_set()
         reception = self._ds.read_reception()
 
+        log.debug(
+            "[build_report] %s %s: delivery=%d행 roster=%d명 reception=%d건",
+            target_day,
+            meal,
+            len(delivery),
+            len(roster),
+            len(reception),
+        )
+
         if not delivery:
+            log.debug("[build_report] %s → delivery empty", target_day)
             return [[ERRORS["날짜없음"].format(_date_to_str(target_day))]]
 
         # ── 날짜 컬럼명 찾기 ──
@@ -88,7 +105,13 @@ class DeliveryService:
                     date_col = col
                     break
         if date_col is None:
+            log.debug(
+                "[build_report] %s → 날짜컬럼 없음 (headers: %s)",
+                target_day,
+                list(delivery[0].keys()),
+            )
             return [[ERRORS["날짜없음"].format(_date_to_str(target_day))]]
+        log.debug("[build_report] %s → date_col='%s'", target_day, date_col)
 
         # ── 명단 인덱스 (ID → person info) ──
         roster_by_id: dict[str, dict] = {}
@@ -103,6 +126,13 @@ class DeliveryService:
         # ── 배송일 목록 찾기 ──
         delivery_dates = self._get_delivery_dates(
             delivery, target_day, meal, target_label, holiday_set
+        )
+        log.debug(
+            "[build_report] %s %s → delivery_dates=%s (meal_rows=%d)",
+            target_day,
+            meal,
+            delivery_dates,
+            len([r for r in delivery if str(r.get("식종", "")).strip() == meal]),
         )
         if not delivery_dates:
             return [[ERRORS["배송안함"]]]
@@ -236,10 +266,27 @@ class DeliveryService:
                             StaffMemo(memo_text=display_memo, area_groups={gk: {name}})
                         )
 
+        log.debug(
+            "[build_report] %s %s 집계: staff=%d명 today=%d건 person_today=%d명",
+            target_day,
+            meal,
+            len(staff_counts),
+            sum(len(v) for v in staff_counts.values()),
+            len(person_today),
+        )
+
         # ── 출력 테이블 생성 ──
-        return self._build_output_table(
+        table = self._build_output_table(
             staff_counts, staff_memos, staff_areas, prev_buckets, meal
         )
+        log.debug(
+            "[build_report] %s %s → table=%d행 (헤더+%d데이터)",
+            target_day,
+            meal,
+            len(table),
+            max(0, len(table) - 1),
+        )
+        return table
 
     def build_all(
         self, start: date, end: date, meal_filter: str | None = None
@@ -254,6 +301,7 @@ class DeliveryService:
         current = start
         while current <= end:
             if current in holiday_set:
+                log.debug("[build_all] %s → 휴무일 제외", current)
                 current += timedelta(days=1)
                 continue
 
@@ -265,10 +313,25 @@ class DeliveryService:
 
             for meal in meals_to_check:
                 table = self.build_report(current, meal)
+                table_ok = bool(table and len(table[0]) > 1)
+                log.debug(
+                    "[build_all] %s %s → table=%d행 유효=%s",
+                    _date_to_str(current),
+                    meal,
+                    len(table),
+                    table_ok,
+                )
                 results.append((_date_to_str(current), meal, table))
 
             current += timedelta(days=1)
 
+        log.debug(
+            "[build_all] %s~%s 완료: 총 %d개 (유효=%d)",
+            _date_to_str(start),
+            _date_to_str(end),
+            len(results),
+            sum(1 for r in results if r[2] and len(r[2][0]) > 1),
+        )
         return results
 
     # ── 내부 헬퍼 ──
@@ -487,9 +550,9 @@ def _format_reception_memo(row: dict) -> str:
     parts = [status]
     if apply_date:
         date_str = f"{apply_date.month}/{apply_date.day}"
-        if end_date:
+        if end_date and end_date != apply_date:
             date_str += f"~{end_date.month}/{end_date.day}"
-        else:
+        elif not end_date:
             date_str += "~"
         parts.append(date_str)
 
@@ -521,6 +584,11 @@ def _format_latest_memo(latest: dict, all_relevant: list[dict]) -> str:
     )
 
     if is_restoration:
+        end_date = latest.get("종료일")
+        if end_date and end_date != apply_date:
+            return f"복원 {apply_date.month}/{apply_date.day}~{end_date.month}/{end_date.day}"
+        elif end_date == apply_date:
+            return f"복원 {apply_date.month}/{apply_date.day}"
         return f"복원 {apply_date.month}/{apply_date.day}~"
 
     return _format_reception_memo(latest)

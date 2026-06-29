@@ -59,6 +59,11 @@ class DbReader(DataSource):
         self._invalidate_cache()
 
     def _invalidate_cache(self):
+        log.debug(
+            "[DbReader] 캐시 무효화 (db_path=%s, 캐시키=%s)",
+            self._db_path,
+            list(self._cache.keys()),
+        )
         self._cache.clear()
         if self._wb:
             self._wb.close()
@@ -202,7 +207,16 @@ class DbReader(DataSource):
             sn = self._resolve_table("명단") or self._resolve_sheet(
                 "명단", {"ID", "성명"}
             )
+            log.debug(
+                "[DbReader] read_roster → 새로 읽기 (시트=%s, DB=%s)", sn, self._db_path
+            )
             self._cache["roster"] = self._read_sheet(sn)
+        else:
+            log.debug(
+                "[DbReader] read_roster → 캐시 사용 (%d명, DB=%s)",
+                len(self._cache["roster"]),
+                self._db_path,
+            )
         return self._cache["roster"]
 
     def read_delivery_matrix(self) -> list[dict]:
@@ -211,6 +225,15 @@ class DbReader(DataSource):
         배송전체 시트는 상단 2행이 요약(연도/월/전체합계, 일자별합계)이고
         실제 데이터 헤더는 3행부터 시작. 이를 자동 감지하여 읽는다.
         """
+        cache_hit = "delivery_matrix" in self._cache
+        if cache_hit:
+            log.debug(
+                "[DbReader] read_delivery_matrix → 캐시 사용 (DB: %s)", self._db_path
+            )
+        else:
+            log.debug(
+                "[DbReader] read_delivery_matrix → 새로 읽기 (DB: %s)", self._db_path
+            )
         if "delivery_matrix" not in self._cache:
             raw = self._read_sheet_raw("배송전체")
             if not raw:
@@ -358,7 +381,7 @@ class DbReader(DataSource):
         """배송정보 -> {핸드폰+도로명주소: row} (조인키 = 핸드폰+주소)."""
         result: dict[str, dict] = {}
         for row in self.read_delivery_order():
-            phone = row.get("핸드폰", "").strip()
+            phone = row.get("핸드폰", "").strip().replace("-", "").replace(" ", "")
             addr = row.get("도로명주소", "").strip()
             if not phone and not addr:
                 continue

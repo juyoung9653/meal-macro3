@@ -253,11 +253,35 @@ class ReportTab(QWidget):
 
             meal_filter = "중식" if self.lunch_check.isChecked() else None
 
+            log.debug(
+                "[ReportTab] _on_build: %s ~ %s meal_filter=%s",
+                start,
+                end,
+                meal_filter,
+            )
+
             # 리포트 생성
             results = self._service.build_all(start, end, meal_filter=meal_filter)
+            log.debug(
+                "[ReportTab] build_all 결과: %d개 (필터 전)",
+                len(results),
+            )
+            for ds, ml, tbl in results:
+                log.debug(
+                    "  [%s] %s → %d행, 헤더=%s",
+                    ds,
+                    ml,
+                    len(tbl),
+                    tbl[0] if tbl else "(empty)",
+                )
+
             # 오류(데이터 없음) 결과 제외
             results = [r for r in results if r[2] and len(r[2][0]) > 1]
             self._last_results = results
+            log.debug(
+                "[ReportTab] 필터 후: %d개",
+                len(results),
+            )
 
             # UI 갱신
             self._update_results(results)

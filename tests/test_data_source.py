@@ -35,7 +35,7 @@ def test_in_memory_delivery_data():
     )
     assert len(reader.read_delivery_matrix()) == 1
     assert reader.build_delivery_map()["P001"]["phone"] == "010-1234"
-    assert reader.build_order_map()["010-1234|서울"]["배송순서"] == "1"
+    assert reader.build_order_map()["0101234|서울"]["배송순서"] == "1"
 
 
 def test_in_memory_db_path():
