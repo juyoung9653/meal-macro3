@@ -12,7 +12,7 @@ from ..core.date_utils import get_week_ranges, to_bool, week_date_str
 from ..core.meal_types import MealType
 from ..core.settings import get_settings
 from ..excel._parsing import _is_date_col
-from ..excel.db_reader import get_db_reader
+from ..excel.data_source import DataSource
 from ..excel.excel_utils import adjust_formula, build_merged_anchor_map, copy_cell
 from ..templates.template_scanner import scan_placeholders, validate_placeholders
 
@@ -163,6 +163,7 @@ def make_confirm(
     title_prefix: str = "",
     excluded_dates: set[date] | None = None,
     meal_type: str = "급식",
+    data_source: DataSource | None = None,
 ) -> list[dict]:
     """명단 데이터 → 확인서템플릿 채워서 단일 엑셀 파일 생성."""
     s = get_settings()
@@ -218,8 +219,15 @@ def make_confirm(
         msg += "\n\n확인서템플릿.xlsx 파일을 확인 후 다시 실행하세요."
         raise ValueError(msg)
 
-    # ── DbReader에서 배송 데이터 로드 ──
-    # 모든 person이 _delivery_rows_raw를 가지고 있으면 delivery_matrix는 skip (최적화)
+    # ── Reader 확보 (DataSource 우선, get_db_reader fallback) ──
+    if data_source is not None:
+        reader = data_source
+    else:
+        from ..excel.db_reader import get_db_reader as _get_db_reader
+
+        reader = _get_db_reader()
+
+    # ── 배송 데이터 로드 ──
     need_matrix = any(
         "_delivery_rows_raw" not in p or not p["_delivery_rows_raw"]
         for p in roster_data
@@ -227,17 +235,12 @@ def make_confirm(
 
     delivery_by_id: dict[str, list[dict]] = {}
 
-    try:
-        reader = get_db_reader()
-        if need_matrix:
-            delivery_matrix = reader.read_delivery_matrix()
-        else:
-            delivery_matrix = []
-    except Exception:
-        delivery_matrix = []
-
     if need_matrix:
-        # ── person_id → [rows] 멀티 행 맵 (식종별 여러 행 허용, _daily 미리 계산) ──
+        try:
+            delivery_matrix = reader.read_delivery_matrix()
+        except Exception:
+            delivery_matrix = []
+
         for row in delivery_matrix:
             pid = str(row.get("ID", "")).strip()
             if pid:

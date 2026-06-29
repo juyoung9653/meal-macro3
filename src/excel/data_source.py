@@ -1,4 +1,4 @@
-"""DataSource 추상 인터페이스 — 청구서/확인서가 필요로 하는 8개 메서드."""
+"""DataSource 추상 인터페이스 — 청구서/확인서가 필요로 하는 메서드."""
 
 from __future__ import annotations
 
@@ -41,4 +41,9 @@ class DataSource(ABC):
     @abstractmethod
     def read_reception(self) -> list[dict]:
         """접수장 시트 → [{접수일, 접수방법, ID, 이름, 식종, 상태, 적용일, 종료일, 요일패턴, 총 적용일}]."""
+        ...
+
+    @abstractmethod
+    def read_delivery_order(self) -> list[dict]:
+        """배송정보 시트 (배송순서/배송담당)."""
         ...

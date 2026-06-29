@@ -1,3 +1,5 @@
+"""배송 그룹 분석 — 순서번호 기반 그룹화 및 페이지 나누기."""
+
 import logging
 
 import pandas as pd
@@ -19,17 +21,22 @@ def get_groups(df: pd.DataFrame) -> list[tuple[int, int]]:
 
 
 def apply_page_breaks_by_groups(
-    ws,
     df: pd.DataFrame,
     groups: list[tuple[int, int]],
     mode: int,
     max_groups_limit: int,
     offset: int = 3,
-) -> None:
-    """페이지 구분선을 적용하며, 그룹이 페이지 경계에서 잘리지 않도록 조정합니다."""
-    ws.ResetAllPageBreaks()
+) -> list[int]:
+    """페이지 구분선 위치 계산. COM 조작 대신 break row 인덱스 리스트 반환.
+
+    mode=1: 관할동 기준 분할 + 최대 그룹 수 제한
+    mode=2: compute_page_chunks와 동일한 균등 분할 사용
+
+    Returns:
+        페이지 나누기가 필요한 행 인덱스 리스트 (1-based, 오름차순)
+    """
     if not groups:
-        return
+        return []
 
     log.info(
         "page_breaks: mode=%d max_limit=%d total_groups=%d",
@@ -38,9 +45,22 @@ def apply_page_breaks_by_groups(
         len(groups),
     )
 
+    # mode=2: compute_page_chunks와 동일한 균등 분할
+    if mode == 2 and max_groups_limit > 0:
+        chunks = compute_page_chunks(groups, mode, max_groups_limit, None)
+        chunk_breaks = []
+        cumul = 0
+        for ch in chunks[:-1]:
+            cumul += len(ch)
+            s0, _ = groups[cumul]
+            chunk_breaks.append(s0 + offset)
+        chunk_breaks = _prevent_group_splits(chunk_breaks, groups, offset)
+        log.info("  total_breaks=%d (even split)", len(chunk_breaks))
+        return chunk_breaks
+
+    breaks: list[int] = []
     curr_g = 0
     curr_dong = ""
-    break_count = 0
 
     for s0, _ in groups:
         row_idx = s0 + offset
@@ -48,35 +68,23 @@ def apply_page_breaks_by_groups(
 
         if mode == 1:
             dong = str(df.iloc[s0]["관할동"]) if "관할동" in df.columns else ""
-
-            dong_changed = curr_dong and dong != curr_dong
+            dong_changed = bool(curr_dong) and dong != curr_dong
             limit_exceeded = max_groups_limit > 0 and curr_g >= max_groups_limit
 
             if dong_changed or limit_exceeded:
                 need_break = True
-
             curr_dong = dong
-
-        elif mode == 2 and max_groups_limit > 0:
-            if curr_g >= max_groups_limit:
-                need_break = True
 
         if need_break:
             log.info("  break at group %d -> row %d (curr_g=%d)", s0, row_idx, curr_g)
-            ws.HPageBreaks.Add(Before=ws.Rows(row_idx))
+            breaks.append(row_idx)
             curr_g = 0
-            break_count += 1
+        else:
+            curr_g += 1
 
-        curr_g += 1
-
-    log.info("  total_breaks_added=%d", break_count)
-
-    _prevent_group_splits(ws, groups, offset)
-
-    log.info(
-        "  after _prevent: HPageBreaks.Count=%d",
-        ws.HPageBreaks.Count if ws.HPageBreaks else 0,
-    )
+    breaks = _prevent_group_splits(breaks, groups, offset)
+    log.info("  total_breaks=%d", len(breaks))
+    return breaks
 
 
 def ord_groups(vals: list[str]) -> list[tuple[int, int]]:
@@ -98,10 +106,9 @@ def compute_page_chunks(
     max_groups_limit: int,
     df: pd.DataFrame | None = None,
 ) -> list[list[tuple[int, int]]]:
-    """그룹 리스트를 mode/limit 기준으로 페이지 청크로 분할 (Pure Python, COM 불필요).
+    """그룹 리스트를 mode/limit 기준으로 페이지 청크로 분할 (Pure Python).
 
     mode=2: 전체 페이지 수를 최소화하면서 각 페이지에 균등 배분.
-            예) 30그룹 limit=18 → 2페이지 × 15그룹 (18/12보다 15/15가 균등)
     mode=1: 관할동 기준 분할 + 최대 그룹 수 제한.
 
     Returns:
@@ -113,7 +120,6 @@ def compute_page_chunks(
     total = len(groups)
 
     if mode == 1 and df is not None:
-        # 관할동 기준 분할 (기존 로직 유지)
         chunks: list[list[tuple[int, int]]] = []
         cur: list[tuple[int, int]] = []
         curr_g = 0
@@ -122,7 +128,7 @@ def compute_page_chunks(
             s0, _ = g
             need_break = False
             dong = str(df.iloc[s0].get("관할동", ""))
-            dong_changed = curr_dong and dong != curr_dong
+            dong_changed = bool(curr_dong) and dong != curr_dong
             limit_exceeded = max_groups_limit > 0 and curr_g >= max_groups_limit
             if dong_changed or limit_exceeded:
                 need_break = True
@@ -139,9 +145,7 @@ def compute_page_chunks(
         return chunks
 
     # mode=2: 균등 배분
-    num_pages = max(
-        1, (total + max_groups_limit - 1) // max_groups_limit
-    )  # ceil division
+    num_pages = max(1, (total + max_groups_limit - 1) // max_groups_limit)
     base = total // num_pages
     remainder = total % num_pages
 
@@ -155,27 +159,22 @@ def compute_page_chunks(
     return chunks
 
 
-def _prevent_group_splits(ws, groups: list[tuple[int, int]], offset: int) -> None:
-    """그룹 중간에 페이지가 잘리는 경우 해당 그룹 시작점으로 페이지를 넘깁니다.
+def _prevent_group_splits(
+    breaks: list[int], groups: list[tuple[int, int]], offset: int
+) -> list[int]:
+    """그룹 중간에 페이지가 잘리지 않도록 break 위치를 조정.
 
-    Excel이 자동 추가한 페이지 나누기(Extent==2)는 무시하여
-    AutoFit 전후에 생성되는 예상치 못한 구분선이 그룹을 자르지 않도록 방지합니다.
+    break가 그룹 중간에 있으면 그룹 시작점으로 이동.
     """
-    idx = 0
-    while idx < len(ws.HPageBreaks):
-        pb = ws.HPageBreaks(idx + 1)
-        # 자동 페이지 나누기(xlPageBreakPartial=2)는 무시
-        if getattr(pb, "Extent", 1) == 2:
-            idx += 1
-            continue
-        pb_row = pb.Location.Row
-
+    adjusted: list[int] = []
+    for pb_row in breaks:
+        new_pos = pb_row
         for s0, e0 in groups:
             start_row = s0 + offset
             end_row = e0 + offset
-
             if start_row < pb_row <= end_row:
-                ws.HPageBreaks.Add(Before=ws.Rows(start_row))
+                new_pos = start_row
                 break
-
-        idx += 1
+        if new_pos not in adjusted:
+            adjusted.append(new_pos)
+    return sorted(adjusted)

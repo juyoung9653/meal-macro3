@@ -59,6 +59,9 @@ class InMemoryDataSource(DataSource):
     def read_reception(self) -> list[dict]:
         return list(self._reception)
 
+    def read_delivery_order(self) -> list[dict]:
+        return list(getattr(self, "_delivery_order", []))
+
     def detect_month(self) -> tuple[int, int]:
         return self._year, self._month
 

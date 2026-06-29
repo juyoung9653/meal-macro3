@@ -1,7 +1,55 @@
 """메모 문자열 파싱: 날짜 기반 액션(일시중지/배송/IN/OUT 등) 추출."""
 
 import re
-from datetime import date
+from datetime import date, timedelta
+
+# ── 요일패턴 → 실제 날짜열로 변환 ──
+_WEEKDAY_KR = {"월": 0, "화": 1, "수": 2, "목": 3, "금": 4, "토": 5, "일": 6}
+
+
+def _expand_pattern_to_date_str(
+    apply_date: date | None,
+    end_date: date | None,
+    pattern: str,
+) -> str | None:
+    """요일패턴(월수목) → 실제 날짜 문자열 '6/15, 6/17~6/18'.
+
+    apply_date/end_date 둘 다 있어야 확장. 없으면 None.
+    """
+    if not apply_date or not end_date or not pattern:
+        return None
+    days = {_WEEKDAY_KR[ch] for ch in pattern if ch in _WEEKDAY_KR}
+    if not days:
+        return None
+
+    dates_list: list[date] = []
+    cur = apply_date
+    while cur <= end_date:
+        if cur.weekday() in days:
+            dates_list.append(cur)
+        cur += timedelta(days=1)
+
+    if not dates_list:
+        return None
+
+    ranges: list[tuple[date, date]] = []
+    s = e = dates_list[0]
+    for d in dates_list[1:]:
+        if d == e + timedelta(days=1):
+            e = d
+        else:
+            ranges.append((s, e))
+            s = e = d
+    ranges.append((s, e))
+
+    parts = []
+    for s, e in ranges:
+        if s == e:
+            parts.append(f"{s.month}/{s.day}")
+        else:
+            parts.append(f"{s.month}/{s.day}~{e.month}/{e.day}")
+    return ", ".join(parts)
+
 
 # 정규식 (성능 위해 모듈 레벨에서 한 번만 컴파일)
 RE_ACT = re.compile(r"(일시중지|배송|신규|중지|원복)")
@@ -58,6 +106,109 @@ def get_active_memo(txt: str | None, target_dt: date) -> str:
         _process_action_seg(seg, month, day, seen, out)
 
     return "\n".join(out)
+
+
+def build_reception_memo(
+    person_id: str,
+    reception_entries: list[dict],
+    show_meal_prefix: bool = False,
+) -> str:
+    """접수장 데이터 → 통합 비고 문자열 생성.
+
+    중지→배송 연속 쌍을 일시중지로 병합하고,
+    각 항목을 "날짜 상태" 또는 "식종: 날짜 상태" 형식으로 포맷.
+    요일패턴(월수목)이 있으면 실제 날짜로 확장.
+
+    Args:
+        person_id: 대상자 ID
+        reception_entries: 전체 접수장 데이터 (person_id로 필터링)
+        show_meal_prefix: True면 각 줄에 "식종:" 접두사 추가
+
+    Returns:
+        멀티라인 문자열, 항목 없으면 빈 문자열
+    """
+    person_entries = [
+        r for r in reception_entries if str(r.get("ID", "")).strip() == person_id
+    ]
+    if not person_entries:
+        return ""
+
+    merged = _merge_stop_resume(person_entries)
+
+    lines = []
+    for r in merged:
+        status = str(r.get("상태", "")).strip()
+        if not status:
+            continue
+
+        apply_date = r.get("적용일")
+        end_date = r.get("종료일")
+        meal = str(r.get("식종", "")).strip() if show_meal_prefix else ""
+        pattern = str(r.get("요일패턴", "") or "").strip()
+
+        if apply_date:
+            # 요일패턴 있으면 실제 날짜로 확장
+            expanded = _expand_pattern_to_date_str(apply_date, end_date, pattern)
+            if expanded:
+                ds = expanded
+            else:
+                ds = f"{apply_date.month}/{apply_date.day}"
+                if end_date and end_date != apply_date:
+                    ds += f"~{end_date.month}/{end_date.day}"
+                elif not end_date and status in ("배송", "중지"):
+                    ds += "~"
+
+            parts = []
+            if meal:
+                parts.append(f"{meal}:")
+            parts.append(f"{ds} {status}")
+            lines.append(" ".join(parts))
+        else:
+            parts = []
+            if meal:
+                parts.append(f"{meal}:")
+            parts.append(status)
+            lines.append(" ".join(parts))
+
+    return "\n".join(lines)
+
+
+def _merge_stop_resume(entries: list[dict]) -> list[dict]:
+    """중지→배송 연속 쌍을 일시중지로 병합."""
+    if not entries:
+        return []
+
+    by_meal: dict[str, list[dict]] = {}
+    for e in entries:
+        meal = str(e.get("식종", "")).strip()
+        by_meal.setdefault(meal, []).append(e)
+
+    result = []
+    for _meal, meal_entries in by_meal.items():
+        sorted_entries = sorted(
+            meal_entries,
+            key=lambda r: r.get("적용일") or date.min,
+        )
+        i = 0
+        while i < len(sorted_entries):
+            cur = sorted_entries[i]
+            cur_status = str(cur.get("상태", "")).strip()
+
+            if cur_status == "중지" and i + 1 < len(sorted_entries):
+                nxt = sorted_entries[i + 1]
+                nxt_status = str(nxt.get("상태", "")).strip()
+                if nxt_status == "배송":
+                    merged = dict(cur)
+                    merged["상태"] = "일시중지"
+                    merged["종료일"] = nxt.get("적용일")
+                    result.append(merged)
+                    i += 2
+                    continue
+
+            result.append(cur)
+            i += 1
+
+    return result
 
 
 def _normalize_memo(raw: str) -> str:

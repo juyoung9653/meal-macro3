@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import date, timedelta
@@ -250,7 +251,7 @@ class DeliveryService:
                 if display_memo:
                     # 지역 그룹 키
                     if dong == "위례동" and addr:
-                        gk = _extract_addr_key(addr) or "위례동"
+                        gk = self._extract_addr_key(addr) or "위례동"
                     else:
                         gk = dong if dong else "미지정"
                     # Find or create StaffMemo with matching memo_text
@@ -514,6 +515,23 @@ class DeliveryService:
 
         return table
 
+    @staticmethod
+    def _extract_addr_key(addr: str) -> str:
+        """신주소에서 그룹핑 키 추출."""
+        if not addr or addr in ("", "nan", "None", "-1"):
+            return ""
+
+        m = re.search(r"\b(\d{3,4}-\d{3,4})\b", addr)
+        if m:
+            return m.group(1)
+        m = re.search(r"(\d+)\s*동\s*(\d+)\s*호", addr)
+        if m:
+            return f"{m.group(1)}동 {m.group(2)}호"
+        m = re.search(r"(\d+)\s*호", addr)
+        if m:
+            return f"{m.group(1)}호"
+        return ""
+
 
 # ── 접수장 요일 매핑 ────────────────────────────────
 _WEEKDAY_MAP = {"월": 0, "화": 1, "수": 2, "목": 3, "금": 4, "토": 5, "일": 6}
@@ -592,21 +610,3 @@ def _format_latest_memo(latest: dict, all_relevant: list[dict]) -> str:
         return f"복원 {apply_date.month}/{apply_date.day}~"
 
     return _format_reception_memo(latest)
-
-
-def _extract_addr_key(addr: str) -> str:
-    """신주소에서 그룹핑 키 추출."""
-    if not addr or addr in ("", "nan", "None", "-1"):
-        return ""
-    import re
-
-    m = re.search(r"\b(\d{3,4}-\d{3,4})\b", addr)
-    if m:
-        return m.group(1)
-    m = re.search(r"(\d+)\s*동\s*(\d+)\s*호", addr)
-    if m:
-        return f"{m.group(1)}동 {m.group(2)}호"
-    m = re.search(r"(\d+)\s*호", addr)
-    if m:
-        return f"{m.group(1)}호"
-    return ""

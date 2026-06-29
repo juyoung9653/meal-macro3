@@ -256,7 +256,7 @@ class DeliverySubstituteTab(QWidget):
                 "상세주소": person.get("상세주소", ""),
                 "신주소": order_info.get("도로명주소", addr),
                 "핸드폰": order_info.get("핸드폰", phone),
-                "비고2": person.get("비고2", ""),
+                "비고2": order_info.get("비고", ""),
             }
 
             # 날짜 플래그 컬럼 (6/1, 6/2, ...)

@@ -22,6 +22,7 @@ venv/
 output/
 
 # Excel temp files
+assets/temp.xlsx
 assets/*[0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F]
 
 # Cache

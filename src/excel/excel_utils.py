@@ -1,5 +1,6 @@
 """Excel 조작 유틸리티 — 셀 복사, 병합셀 처리, 수식 조정."""
 
+import re
 from copy import copy
 
 from openpyxl.styles import Alignment
@@ -54,9 +55,8 @@ def adjust_formula(formula: str, row_offset: int) -> str:
     """엑셀 formula 내 행 번호를 row_offset 만큼 증가"""
     if not formula or not str(formula).startswith("="):
         return formula
-    import re as _re
 
-    def _shift_row(m):
-        return f"{m.group(1)}{int(m.group(2)) + row_offset}"
+        def _shift_row(m):
+            return f"{m.group(1)}{int(m.group(2)) + row_offset}"
 
-    return _re.sub(r"([A-Z]+)(\d+)", _shift_row, str(formula))
+        return re.sub(r"([A-Z]+)(\d+)", _shift_row, str(formula))

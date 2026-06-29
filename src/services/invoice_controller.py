@@ -8,6 +8,7 @@ from datetime import date, timedelta
 from ..core.date_utils import to_bool
 from ..core.invoice_data import EnrichedPersonDict
 from ..core.meal_types import MealType
+from ..core.memo import build_reception_memo
 from ..core.models import build_enriched_person_dict
 from ..excel._parsing import _is_date_col
 from ..excel.data_source import DataSource
@@ -62,53 +63,6 @@ def _expand_pattern_to_date_str(
         else:
             parts.append(f"{s.month}/{s.day}~{e.month}/{e.day}")
     return ", ".join(parts)
-
-
-# ── 접수장 전처리: 중지→배송 연속 쌍 → 일시중지 병합 ──
-def _merge_stop_resume_to_tempsuspend(
-    entries: list[dict],
-) -> list[dict]:
-    """같은 식종 내 중지→배송 순서쌍을 일시중지로 합침.
-
-    중지(적용일=A) → 배송(적용일=B, B>=A) 이면
-    → 일시중지(적용일=A, 종료일=B) 로 대체.
-    """
-    if not entries:
-        return []
-
-    # 식종별 그룹 → 정렬
-    by_meal: dict[str, list[dict]] = {}
-    for e in entries:
-        meal = str(e.get("식종", "")).strip()
-        by_meal.setdefault(meal, []).append(e)
-
-    result = []
-    for meal, meal_entries in by_meal.items():
-        sorted_entries = sorted(
-            meal_entries,
-            key=lambda r: r.get("적용일") or date.min,
-        )
-        i = 0
-        while i < len(sorted_entries):
-            cur = sorted_entries[i]
-            cur_status = str(cur.get("상태", "")).strip()
-
-            if cur_status == "중지" and i + 1 < len(sorted_entries):
-                nxt = sorted_entries[i + 1]
-                nxt_status = str(nxt.get("상태", "")).strip()
-                if nxt_status == "배송":
-                    # 중지 → 배송 → 일시중지
-                    merged = dict(cur)
-                    merged["상태"] = "일시중지"
-                    merged["종료일"] = nxt.get("적용일")
-                    result.append(merged)
-                    i += 2
-                    continue
-
-            result.append(cur)
-            i += 1
-
-    return result
 
 
 log = logging.getLogger(__name__)
@@ -255,53 +209,17 @@ class InvoiceService:
             person_receptions = [
                 r for r in reception if str(r.get("ID", "")).strip() == person_id
             ]
-            # 중지→배송 쌍 → 일시중지 병합
-            person_receptions = _merge_stop_resume_to_tempsuspend(person_receptions)
-
-            # 식종이 모두 같은지 확인 (같으면 prefix 생략)
             meal_set = {
                 str(r.get("식종", "")).strip()
                 for r in person_receptions
                 if str(r.get("식종", "")).strip()
             }
             show_meal_prefix = len(meal_set) > 1
-
-            memo_lines = []
-            for r in person_receptions:
-                status = str(r.get("상태", "")).strip()
-                if not status:
-                    continue
-                apply_date = r.get("적용일")
-                end_date = r.get("종료일")
-                meal = str(r.get("식종", "")).strip() if show_meal_prefix else ""
-                pattern = str(r.get("요일패턴", "") or "").strip()
-
-                if apply_date:
-                    # 요일패턴 있으면 실제 날짜로 확장
-                    expanded = _expand_pattern_to_date_str(
-                        apply_date, end_date, pattern
-                    )
-                    if expanded:
-                        ds = expanded
-                    else:
-                        ds = f"{apply_date.month}/{apply_date.day}"
-                        if end_date and end_date != apply_date:
-                            ds += f"~{end_date.month}/{end_date.day}"
-                        elif not end_date and status in ("배송", "중지"):
-                            ds += "~"
-
-                    parts = []
-                    if meal:
-                        parts.append(f"{meal}:")
-                    parts.append(f"{ds} {status}")
-                    memo_lines.append(" ".join(parts))
-                else:
-                    parts = []
-                    if meal:
-                        parts.append(f"{meal}:")
-                    parts.append(status)
-                    memo_lines.append(" ".join(parts))
-            reception_memo = "\n".join(memo_lines)
+            reception_memo = build_reception_memo(
+                person_id=person_id,
+                reception_entries=reception,
+                show_meal_prefix=show_meal_prefix,
+            )
 
             # 배송전체에서 집계된 카운트 가져오기 (식종명 유연 매칭)
             counts = meal_counts_by_id.get(person_id, {})

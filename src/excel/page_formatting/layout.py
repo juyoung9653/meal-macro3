@@ -1,7 +1,11 @@
+"""페이지 레이아웃 최적화 — openpyxl 기반 폰트/컬럼폭/행높이 설정."""
+
 import logging
-import math
 
 import pandas as pd
+from openpyxl.styles import Alignment, Font
+from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.pagebreak import Break
 
 from src.core.settings import get_settings
 from src.excel.groups import (
@@ -18,7 +22,6 @@ COL_PHONE = _S.get_delivery_config("col_phone")
 COL_SUM = _S.get_delivery_config("col_sum")
 FONT_BASE_SIZE = _S.get_delivery_config("font_base_size")
 
-from .metrics import measure_page_height_pt, total_width_pt
 from .setup import apply_base_page_setup, page_limits_pt
 
 
@@ -29,9 +32,7 @@ def apply_page_formatting(
     max_groups_limit: int,
     orientation_pref: int = 0,
 ) -> None:
-    """
-    워크시트에 인쇄용 페이지 포맷을 적용합니다.
-    """
+    """워크시트에 인쇄용 페이지 포맷을 적용합니다."""
     used_rows = len(df) + 3
     used_cols = len(df.columns) + 1
 
@@ -39,170 +40,220 @@ def apply_page_formatting(
         ws, used_rows, used_cols, orientation_pref
     )
     groups = get_groups(df)
-
-    _clean_address_newlines(ws, used_rows, [*df.columns.tolist(), COL_SUM], COL_ADDR)
-    limit_h, _ = page_limits_pt(ws, actual_orientation)
-    safe_h = limit_h - 5
-
-    best = calc_optimal_font_size(
-        ws, df, used_rows, used_cols, groups, mode, actual_orientation
-    )
-
-    # 폰트/컬럼폭 확정 후 페이지 나누기 (Rows AutoFit 없이 → break 안정적)
-    apply_page_breaks_by_groups(ws, df, groups, mode, max_groups_limit)
-
-    min_row_h = round(best * 1.5, 1)
-
-    if mode != 0:
-        chunks = compute_page_chunks(groups, mode, max_groups_limit, df)
-        if chunks:
-            for ci, pg in enumerate(chunks):
-                rows_in_page = sum(e - s + 1 for s, e in pg)
-                log.info("chunk %d: groups=%d rows=%d", ci, len(pg), rows_in_page)
-            _distribute_extra_height_uniform(
-                ws, chunks, used_rows, safe_h, min_row_h=min_row_h
-            )
-
-    if mode == 0:
-        for r in range(3, used_rows + 1):
-            if ws.Rows(r).RowHeight < min_row_h:
-                ws.Rows(r).RowHeight = min_row_h
-
-
-def calc_optimal_font_size(
-    ws,
-    df: pd.DataFrame,
-    used_rows: int,
-    used_cols: int,
-    groups: list[tuple[int, int]],
-    mode: int,
-    actual_orientation: int,
-) -> float:
-    """컬럼 내용 길이 기반 폰트 크기 직접 계산 + 컬럼 폭 AutoFit.
-    (행 높이는 건드리지 않음 — apply_page_formatting에서 page break 후 distribution)
-    """
-    limit_h, limit_w = page_limits_pt(ws, actual_orientation)
-    safe_w, safe_h = limit_w - 5, limit_h - 5
     all_cols = [*df.columns.tolist(), COL_SUM]
 
+    _clean_address_newlines(ws, used_rows, all_cols, COL_ADDR)
+    limit_h, limit_w = page_limits_pt(actual_orientation)
+    safe_h, safe_w = limit_h - 5, limit_w - 5
+
+    def _visual_width(s: str) -> int:
+        """문자열의 시각적 폭: 한글/한자/CJK = 2, ASCII = 1."""
+        return sum(2 if ord(c) > 0x2E80 else 1 for c in s)
+
+    # 컬럼별 최대 시각적 문자 수 계산
     col_chars: dict[str, int] = {}
     for col in all_cols:
-        hdr_len = len(str(col))
+        hdr_len = _visual_width(str(col))
         if col in df.columns:
-            data_len = df[col].astype(str).map(len).max()
+            data_len = int(df[col].astype(str).map(_visual_width).max() or 0)
         else:
             data_len = 0
         col_chars[col] = max(hdr_len, data_len)
 
-    def estimate_width(pt: float) -> float:
-        total = 0.0
-        for chars in col_chars.values():
-            total += math.ceil(chars * pt * 0.5 + 4)
-        return total
+    best = calc_optimal_font_size(
+        col_chars, len(df), used_rows, used_cols, actual_orientation
+    )
+
+    # 페이지 나누기 계산 (pure Python → list[int])
+    page_break_rows = apply_page_breaks_by_groups(df, groups, mode, max_groups_limit)
+    for br in page_break_rows:
+        ws.row_breaks.append(Break(id=br))
+
+    # 폰트/컬럼폭/행높이 적용
+    min_row_h = round(best * 1.5, 1)
+    _apply_fonts(ws, used_rows, all_cols, best)
+    _apply_column_widths(ws, all_cols, col_chars, best, safe_w)
+    _apply_row_heights(ws, used_rows, min_row_h, all_cols)
+
+    # 페이지별 여유 높이 균등 배분
+    if mode != 0:
+        chunks = compute_page_chunks(groups, mode, max_groups_limit, df)
+        if chunks:
+            _distribute_extra_height_overflow(
+                ws, chunks, used_rows, safe_h, min_row_h=min_row_h
+            )
+
+
+def calc_optimal_font_size(
+    col_chars: dict[str, int],
+    data_len: int,
+    used_rows: int,
+    used_cols: int,
+    actual_orientation: int,
+) -> float:
+    """세로 높이 기준 최적 폰트 크기 계산.
+
+    FitToWidth=1 설정으로 Excel이 가로 폭을 자동 스케일링하므로,
+    가로 제약은 무시하고 세로(페이지 높이)만 고려하여 최대 폰트 선정.
+    """
+    limit_h, _ = page_limits_pt(actual_orientation)
+    safe_h = limit_h - 5
 
     def estimate_height(pt: float, n_rows: int) -> float:
         row_h = round(pt * 1.5, 1)
-        return (2 + n_rows + 1) * row_h
+        return (2 + n_rows + 1) * row_h  # 2 headers + data + 1 footer = used_rows
 
-    n = len(df)
+    n = data_len
     best = FONT_BASE_SIZE
 
     for pt in [x * 0.5 for x in range(32, 9, -1)]:
-        w = estimate_width(pt)
         h = estimate_height(pt, n)
-        if w <= safe_w and h <= safe_h:
+        if h <= safe_h:
             best = pt
             break
 
     best = max(best, 10.0)
 
     log.info(
-        "calc_opt_font: safe_h=%.1f safe_w=%.1f n=%d best=%.1f limit_h=%.1f limit_w=%.1f",
+        "calc_opt_font: safe_h=%.1f n=%d best=%.1f",
         safe_h,
-        safe_w,
         n,
         best,
-        limit_h,
-        limit_w,
     )
-
-    _set_fonts(ws, used_rows, all_cols, best - FONT_BASE_SIZE)
-    _autofit_columns(ws, used_rows, used_cols)
-    _widen_address_column_if_gap(ws, used_cols, all_cols, safe_w)
-    _format_phone_column(ws, used_rows, all_cols, best)
 
     return best
 
 
-def _set_fonts(ws, used_rows: int, all_cols: list[str], offset: int) -> None:
-    ws.Rows(2).Font.Size = FONT_BASE_SIZE + 2 + offset
-    ws.Rows(2).Font.Bold = True
+# ── 적용 함수 ──────────────────────────────────────────────
 
+
+def _apply_fonts(ws, used_rows: int, all_cols: list[str], best: float) -> None:
+    """워크시트 전체 폰트 적용 (sheet_writer는 값을 쓰기만 함)."""
+    offset = best - FONT_BASE_SIZE
+
+    # 1행: 정보행
+    ws.cell(row=1, column=1).font = Font(bold=True, size=12)
+
+    # 2행: 헤더행
+    ws.cell(row=2, column=1).font = Font(bold=True, size=FONT_BASE_SIZE + 2 + offset)
+    for c in range(2, len(all_cols) + 1):
+        ws.cell(row=2, column=c).font = Font(
+            bold=True, size=FONT_BASE_SIZE + 2 + offset
+        )
+
+    # 3행+: 데이터
     size = max(5, FONT_BASE_SIZE + offset)
-    for i, _ in enumerate(all_cols, 1):
-        ws.Range(ws.Cells(3, i), ws.Cells(used_rows, i)).Font.Size = size
+    for c in range(1, len(all_cols) + 1):
+        for r in range(3, used_rows + 1):
+            ws.cell(row=r, column=c).font = Font(size=size)
 
 
-def _autofit_columns(ws, used_rows: int, used_cols: int) -> None:
-    """컬럼 폭만 AutoFit (Rows AutoFit은 page break 유지 위해 생략)."""
-    if used_rows >= 3:
-        data_area = ws.Range(ws.Cells(3, 1), ws.Cells(used_rows, used_cols))
-        data_area.WrapText = True
-
-    ws.Columns.AutoFit()
-
-    # 정보행(1행): 고정 높이, 줄바꿈 해제
-    ws.Rows(1).WrapText = False
-    ws.Rows(1).RowHeight = 24
-
-    # 헤더행(2행): 고정 높이, 줄바꿈 해제
-    ws.Rows(2).WrapText = False
-    if ws.Rows(2).RowHeight < 22:
-        ws.Rows(2).RowHeight = 22
-
-
-def _format_phone_column(
-    ws, used_rows: int, all_cols: list[str], base_size: float
+def _apply_column_widths(
+    ws,
+    all_cols: list[str],
+    col_chars: dict[str, int],
+    best: float,
+    safe_w: float,
 ) -> None:
-    """핸드폰 컬럼: 줄바꿈 해제 + 최소 11pt."""
+    """컬럼 폭을 인쇄 가능 폭 내로 계산 (overflow 방지).
+
+    openpyxl width 1 = '0' 문자 폭 ≈ 7px (Calibri 11pt 기준).
+    pt 변환: width * 5.25.
+    모든 컬럼 폭 합이 safe_w를 넘지 않도록 비례 축소.
+    """
+    scale = best / 11.0 if best > 0 else 1.0
+
+    # 각 컬럼의 희망 폭 계산
+    desired = {}
+    for i, col in enumerate(all_cols):
+        chars = col_chars.get(col, 8)
+        w = round((chars + 2) * scale + 0.5, 1)
+        desired[col] = max(w, 8.0)
+
+    # 총 폭(pt)이 safe_w 이내가 되도록 비례 축소
+    total_pt = sum(desired.values()) * 5.25
+    if total_pt > safe_w and len(desired) > 0:
+        ratio = safe_w / total_pt
+        for col in desired:
+            desired[col] = max(round(desired[col] * ratio, 1), 6.0)
+
+    # 적용
+    for i, col in enumerate(all_cols, 1):
+        ws.column_dimensions[get_column_letter(i)].width = desired.get(col, 8.0)
+
+    # 주소 컬럼에 여유 공간 추가 (있으면)
+    current_total_pt = sum(desired.values()) * 5.25
+    gap = safe_w - current_total_pt
+    if gap > 10:
+        try:
+            addr_idx = all_cols.index(COL_ADDR) + 1
+            addr_col = get_column_letter(addr_idx)
+            extra = round(gap * 0.5 / 5.25, 1)
+            ws.column_dimensions[addr_col].width = desired[COL_ADDR] + extra
+        except ValueError:
+            pass
+
+
+def _apply_row_heights(
+    ws, used_rows: int, min_row_h: float, all_cols: list[str] | None = None
+) -> None:
+    """행 높이 설정 및 데이터 영역 가운데 정렬.
+
+    핸드폰 컬럼은 줄바꿈 해제.
+    """
+    ws.row_dimensions[1].height = 24
+    ws.row_dimensions[2].height = max(22, min_row_h)
+
+    center_wrap = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    center_nowrap = Alignment(horizontal="center", vertical="center", wrap_text=False)
+
+    # 핸드폰 컬럼 인덱스 (줄바꿈 해제 대상)
+    phone_col_idx = None
+    if all_cols:
+        try:
+            phone_col_idx = all_cols.index(COL_PHONE) + 1
+        except ValueError:
+            pass
+
+    for r in range(3, used_rows + 1):
+        ws.row_dimensions[r].height = min_row_h
+        for c in range(1, ws.max_column + 1):
+            if c == phone_col_idx:
+                ws.cell(row=r, column=c).alignment = center_nowrap
+            else:
+                ws.cell(row=r, column=c).alignment = center_wrap
+
+    ws.row_dimensions[2].alignment = center_nowrap
+
+
+# ── 주소 줄바꿈 처리 ─────────────────────────────────────────
+
+
+def _clean_address_newlines(ws, used_rows, all_cols, col_name):
+    """줄바꿈을 콤마로 변환 (AutoFit 없이 수동 처리)."""
     try:
-        col_idx = all_cols.index(COL_PHONE) + 1
+        col_idx = all_cols.index(col_name) + 1
     except ValueError:
         return
-    phone_range = ws.Range(ws.Cells(3, col_idx), ws.Cells(used_rows, col_idx))
-    phone_range.WrapText = False
-    phone_range.Font.Size = max(11.0, base_size)
-    # 폰트 변경 후 컬럼 폭 재조정 (짤림 방지)
-    ws.Columns(col_idx).AutoFit()
-
-
-def _widen_address_column_if_gap(
-    ws, used_cols: int, all_cols: list[str], safe_w: float
-) -> None:
-    w = total_width_pt(ws, used_cols)
-    if not (0 < w < safe_w):
-        return
-
-    gap = safe_w - w
-    try:
-        addr_idx = all_cols.index(COL_ADDR) + 1
-        col = ws.Columns(addr_idx)
-        current_width = col.Width
-        if current_width > 0:
-            ratio = (current_width + gap * 0.5) / current_width
-            col.ColumnWidth *= ratio
-    except (ValueError, ZeroDivisionError):
-        for c in range(1, used_cols + 1):
-            col = ws.Columns(c)
-            col.ColumnWidth += (
-                (col.Width / w) * gap * 0.5 * (col.ColumnWidth / col.Width)
+    for r in range(3, used_rows + 1):
+        cell = ws.cell(row=r, column=col_idx)
+        text = str(cell.value or "")
+        if any(b in text for b in ("\n", "\r")):
+            cell.value = (
+                text.replace("\r\n", ", ")
+                .replace("\n", ", ")
+                .replace("\r", ", ")
+                .strip()
             )
 
 
-_PAGE_BOTTOM_MARGIN = 8  # 페이지 하단 여백 (pt, ≈3mm)
+# ── 페이지 높이 균등 배분 ────────────────────────────────────
 
 
-def _distribute_extra_height_uniform(
+_PAGE_BOTTOM_MARGIN = 8
+
+
+def _distribute_extra_height_overflow(
     ws,
     chunks: list[list[tuple[int, int]]],
     used_rows: int,
@@ -210,78 +261,64 @@ def _distribute_extra_height_uniform(
     offset: int = 3,
     min_row_h: float = 0,
 ) -> None:
+    """페이지 여유 높이를 그룹별 균등 배분 (순서 유지).
+
+    모든 행을 min_row_h로 설정 후, overflow를 그룹 개수로 균등 분할.
+    각 그룹은 자기 몫을 자기 행들에 균등 배분.
+    그룹 내 행 높이는 동일, 그룹 간 행 높이는 행 수에 반비례.
+    (그룹 순서 유지, 정렬하지 않음)
+    """
     if not chunks:
         return
 
-    h_hdr = ws.Rows(1).RowHeight + ws.Rows(2).RowHeight
-    footer_h = ws.Rows(used_rows).RowHeight if used_rows > 0 else 0
+    h_hdr = (ws.row_dimensions[1].height or 0) + (ws.row_dimensions[2].height or 0)
+    footer_h = ws.row_dimensions[used_rows].height or 0 if used_rows > 0 else 0
 
     for ci, pg in enumerate(chunks):
         groups_in_page = len(pg)
         if groups_in_page <= 0:
             continue
 
-        # 마지막 청크는 합계행(footer) 공간 확보, 나머지는 헤더만 제외
         is_last = ci == len(chunks) - 1
-        avail = safe_h - h_hdr - (footer_h if is_last else 0) - _PAGE_BOTTOM_MARGIN
-
-        # 총 행 수 기준 1행당 높이 계산 (min_row_h를 floor로)
         total_rows = sum(e - s + 1 for s, e in pg)
-        row_h = round(max(avail / total_rows, min_row_h), 2)
+        min_total = h_hdr + total_rows * min_row_h + _PAGE_BOTTOM_MARGIN
+        if is_last:
+            min_total += footer_h
+        overflow = safe_h - min_total
 
         if ci == 0:
             log.info(
-                "page%d: groups=%d total_rows=%d avail=%.1f row_h=%.1f (min=%.1f)",
+                "page%d: groups=%d total_rows=%d min_total=%.1f overflow=%.1f min_row_h=%.1f",
                 ci,
                 groups_in_page,
                 total_rows,
-                avail,
-                row_h,
+                min_total,
+                overflow,
                 min_row_h,
             )
 
-        # 적용: 동일 행 높이로 그룹 병합 적용
-        range_groups: dict[float, list[tuple[int, int]]] = {}
+        if overflow <= 0:
+            for s0, e0 in pg:
+                for r in range(s0 + offset, e0 + offset + 1):
+                    ws.row_dimensions[r].height = min_row_h
+            continue
+
+        # 1) 모든 행을 min_row_h로 설정
         for s0, e0 in pg:
-            start_row = s0 + offset
-            end_row = e0 + offset
-            range_groups.setdefault(row_h, []).append((start_row, end_row))
+            for r in range(s0 + offset, e0 + offset + 1):
+                ws.row_dimensions[r].height = min_row_h
 
-        for h, ranges in range_groups.items():
-            ranges.sort()
-            merged = []
-            for s, e in ranges:
-                if merged and merged[-1][1] + 1 == s:
-                    merged[-1] = (merged[-1][0], e)
-                else:
-                    merged.append((s, e))
-            for s, e in merged:
-                try:
-                    ws.Range(ws.Rows(s), ws.Rows(e)).RowHeight = h
-                except Exception:
-                    for r in range(s, e + 1):
-                        try:
-                            ws.Rows(r).RowHeight = h
-                        except Exception:
-                            pass
-
-        if ci == 0:
-            log.info("  heights: row_h=%.1f (all rows equal)", row_h)
-
-
-def _clean_address_newlines(ws, used_rows, all_cols, col_name):
-    """AutoFit 없이 줄바꿈만 콤마로 변환."""
-    try:
-        col_idx = all_cols.index(col_name) + 1
-    except ValueError:
-        return
-    for r in range(3, used_rows):
-        cell = ws.Cells(r, col_idx)
-        text = str(cell.Value or "")
-        if any(b in text for b in ("\n", "\r")):
-            cell.Value = (
-                text.replace("\r\n", ", ")
-                .replace("\n", ", ")
-                .replace("\r", ", ")
-                .strip()
-            )
+        # 2) 각 그룹에 overflow 균등 배분 (그룹 순서 유지)
+        extra_per_group = overflow / groups_in_page
+        distributed = 0.0
+        for i, (s0, e0) in enumerate(pg):
+            n_rows = e0 - s0 + 1
+            group_extra = extra_per_group
+            # 마지막 그룹: 반올림 손실분 흡수
+            if i == len(pg) - 1:
+                group_extra = overflow - distributed
+            per_row = group_extra / n_rows
+            h = round(min_row_h + per_row, 1)
+            for r in range(s0 + offset, e0 + offset + 1):
+                ws.row_dimensions[r].height = h
+            distributed += group_extra
