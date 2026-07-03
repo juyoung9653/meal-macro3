@@ -391,9 +391,8 @@ def make_confirm(
                 )
             _set_ph(ws, ph_map, "addr", current_row, addr, tpl_anchor_map)
 
-            # ── 급식 확인서: dong(관할동) 별도 플레이스홀더 ──
-            if meal_type == "급식":
-                _set_ph(ws, ph_map, "dong", current_row, dong, tpl_anchor_map)
+            # ── dong(관할동) 별도 플레이스홀더 ──
+            _set_ph(ws, ph_map, "dong", current_row, dong, tpl_anchor_map)
 
             hh_notes: list[str] = []
             for p in members:
