@@ -1,7 +1,5 @@
-"""Diff 표기 `3(+1)` 생성·파싱·판정 통합.
-
-builder._fmt_cell / exporter._has_diff·_strip_diff / main._has_diff_cell
-세 곳에 산재된 동일 로직을 여기로 모음.
+"""
+Diff 표기 `3(+1)` 생성·파싱·판정 통합.
 """
 
 from __future__ import annotations

@@ -56,7 +56,7 @@ class MainWindow(QMainWindow):
         meal_layout.addWidget(self.meal_combo)
         meal_layout.addSpacing(30)
         meal_layout.addWidget(QLabel("명단:"))
-        self.roster_label = QLabel("db.xlsx 로드 대기 중")
+        self.roster_label = QLabel("명단 로드 대기 중")
         self.roster_label.setStyleSheet("color: #888;")
         meal_layout.addWidget(self.roster_label)
         self.roster_btn = QPushButton("파일 선택")
@@ -79,7 +79,7 @@ class MainWindow(QMainWindow):
         self.tab_widget.addTab(self.invoice_tab, "① 청구서")
         self.tab_widget.addTab(self.confirm_tab, "② 확인서")
         self.tab_widget.addTab(self.report_tab, "③ 배송리포트")
-        self.tab_widget.addTab(self.delivery_tab, "④ 배송대타")
+        self.tab_widget.addTab(self.delivery_tab, "④ 배송정보")
 
     def _connect_signals(self):
         self.tab_widget.currentChanged.connect(self._on_tab_changed)
