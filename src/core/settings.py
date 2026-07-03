@@ -5,6 +5,8 @@ from __future__ import annotations
 import copy
 from typing import Any
 
+from src.core.paths import asset_path
+
 # ── 기본 설정값 ──────────────────────────────────────
 DEFAULTS: dict[str, Any] = {
     "app": {
@@ -142,9 +144,13 @@ class SettingsManager:
         from functools import reduce
 
         try:
-            return reduce(lambda d, k: d[k], keys, self._data)
+            value = reduce(lambda d, k: d[k], keys, self._data)
         except (KeyError, TypeError):
             return default
+
+        if isinstance(value, str) and value.startswith("assets/"):
+            return asset_path(value)
+        return value
 
     def set(self, *keys: str, value: Any):
         """중첩 키로 설정값 변경.
@@ -172,12 +178,12 @@ class SettingsManager:
     def get_invoice_template_path(self, meal_type: str | None = None) -> str:
         """Compute invoice template path from meal type."""
         mt = meal_type or self.get_meal_type()
-        return f"assets/{mt}_청구서템플릿.xlsx"
+        return asset_path(f"assets/{mt}_청구서템플릿.xlsx")
 
     def get_confirm_template_path(self, meal_type: str | None = None) -> str:
         """Compute confirm template path from meal type."""
         mt = meal_type or self.get_meal_type()
-        return f"assets/{mt}_확인서템플릿.xlsx"
+        return asset_path(f"assets/{mt}_확인서템플릿.xlsx")
 
     def set_meal_type(self, meal_type: str):
         self.set("app", "meal_type", value=meal_type)
