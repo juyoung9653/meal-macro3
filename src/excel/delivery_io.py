@@ -38,7 +38,8 @@ def make_result(df: pd.DataFrame, ch: Choice) -> pd.DataFrame:
 
     x = df
     if ch.meal and COL_MEAL in x.columns:
-        x = x[x[COL_MEAL].map(txt) == txt(ch.meal)]
+        meal_str = txt(ch.meal)
+        x = x[x[COL_MEAL].map(txt).str.startswith(meal_str)]
     if ch.ship and COL_SHIP in x.columns:
         x = x[x[COL_SHIP].map(txt) == txt(ch.ship)]
 

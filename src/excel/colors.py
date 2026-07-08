@@ -9,15 +9,12 @@ def fill_color(hex_rgb: str) -> PatternFill:
     if len(hx) < 6:
         raise ValueError(f"Invalid hex color: {hex_rgb!r}")
     r, g, b = int(hx[0:2], 16), int(hx[2:4], 16), int(hx[4:6], 16)
+    argb = f"FF{r:02X}{g:02X}{b:02X}"
     return PatternFill(
-        start_color=f"{r:02X}{g:02X}{b:02X}",
-        end_color=f"{r:02X}{g:02X}{b:02X}",
+        start_color=argb,
+        end_color=argb,
         fill_type="solid",
     )
-
-
-def header_fill() -> PatternFill:
-    return fill_color("DCE6F1")
 
 
 def group_fill(n: int) -> PatternFill | None:

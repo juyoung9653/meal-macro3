@@ -22,7 +22,7 @@ def to_num(v: Any) -> float | None:
 
 
 def truthy(v: Any) -> bool:
-    """값이 truthy(1/Y/True)인지 확인."""
+    """값이 truthy(1/Y/True/O)인지 확인."""
     if v is None:
         return False
     if isinstance(v, float) and math.isnan(v):
@@ -31,7 +31,7 @@ def truthy(v: Any) -> bool:
         return v
     if isinstance(v, (int, float)):
         return v == 1
-    return _to_str(v).lower() in {"1", "y", "true"}
+    return _to_str(v).lower() in {"1", "y", "true", "o"}
 
 
 def _serial_to_date(serial: int | float) -> date | None:

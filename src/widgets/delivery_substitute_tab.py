@@ -2,6 +2,7 @@
 
 DbReader(분당구_급식 db.xlsx)를 유일한 데이터 소스로 사용.
 - 배송전체(ID, 식종, 날짜 O/X) + 명단(ID→성명) + 배송정보(배송순서/주소) 조인
+- 템플릿(assets/급식_배송대타_템플릿.xlsx)에 행 삽입 방식으로 출력.
 """
 
 from __future__ import annotations
@@ -11,15 +12,10 @@ import logging
 import pandas as pd
 from PyQt6.QtCore import QDate
 from PyQt6.QtWidgets import (
-    QAbstractItemView,
     QComboBox,
     QDateEdit,
-    QGridLayout,
-    QGroupBox,
     QHBoxLayout,
     QLabel,
-    QLineEdit,
-    QListWidget,
     QMessageBox,
     QPushButton,
     QVBoxLayout,
@@ -27,7 +23,7 @@ from PyQt6.QtWidgets import (
 )
 
 from src.core.settings import get_settings
-from src.excel._parsing import _is_date_col, _parse_date_col
+from src.excel._parsing import _parse_date_col
 from src.excel.data_source import DataSource
 from src.excel.db_reader import get_db_reader
 from src.excel.delivery_io import Choice, make_result, uniq
@@ -35,27 +31,40 @@ from src.excel.delivery_viewer import show_excel
 
 log = logging.getLogger(__name__)
 
-ORI_OPTIONS = ["자동", "세로", "가로"]
-SPLIT_OPTIONS = ["동기준", "그룹기준"]
+TEMPLATE_OPTIONS = ["전체", "상세주소X"]
+
+# 템플릿별 make_result에 전달할 컬럼 목록
+TEMPLATE_COLS: dict[str, list[str]] = {
+    "전체": [
+        "배송순서",
+        "관할동",
+        "이름",
+        "상세주소",
+        "신주소",
+        "핸드폰",
+        "비고2",
+        "식사 구분",
+    ],
+    "상세주소X": [
+        "배송순서",
+        "관할동",
+        "이름",
+        "신주소",
+        "핸드폰",
+        "비고2",
+        "식사 구분",
+    ],
+}
 
 
 class DeliverySubstituteTab(QWidget):
-    """④ 배송대타 탭 — DB 필터 및 A4 최적화 출력."""
+    """④ 배송대타 탭 — DB 필터 및 템플릿 출력."""
 
     def __init__(self, meal_type: str = "", data_source: DataSource | None = None):
         super().__init__()
         self._s = get_settings()
         self._meal_type = meal_type
         self._ds: DataSource | None = data_source
-
-        # 컬럼 설정
-        self._pick_cols: list[str] = self._s.get_delivery_config("pick_cols") or []
-        delivery_st = self._s.get_delivery_settings()
-        cols_data = delivery_st.get("cols", {})
-        self._order: list[str] = cols_data.get("order", self._pick_cols[:])
-        self._enabled: dict[str, bool] = cols_data.get(
-            "enabled", {c: True for c in self._pick_cols}
-        )
 
         # DB 데이터
         self._df: pd.DataFrame | None = None
@@ -91,49 +100,18 @@ class DeliverySubstituteTab(QWidget):
         row2.addStretch()
         layout.addLayout(row2)
 
-        # ── 인쇄 설정 ──
+        # ── 템플릿 선택 ──
+        row3 = QHBoxLayout()
+        row3.addWidget(QLabel("템플릿"))
+        self.template_combo = QComboBox()
+        self.template_combo.addItems(TEMPLATE_OPTIONS)
         ds = self._s.get_delivery_settings()
-        print_group = QGroupBox("인쇄 설정")
-        print_grid = QGridLayout(print_group)
-        print_grid.addWidget(QLabel("방향:"), 0, 0)
-        self.ori_combo = QComboBox()
-        self.ori_combo.addItems(ORI_OPTIONS)
-        self.ori_combo.setCurrentText(ds.get("orientation", "세로"))
-        print_grid.addWidget(self.ori_combo, 0, 1)
-        print_grid.addWidget(QLabel("분할:"), 0, 2)
-        self.split_combo = QComboBox()
-        self.split_combo.addItems(SPLIT_OPTIONS)
-        self.split_combo.setCurrentText(ds.get("split_mode", "동기준"))
-        print_grid.addWidget(self.split_combo, 0, 3)
-        print_grid.addWidget(QLabel("최대그룹:"), 0, 4)
-        self.max_rows_edit = QLineEdit(str(self._s.get_delivery_config("max_rows")))
-        self.max_rows_edit.setFixedWidth(60)
-        print_grid.addWidget(self.max_rows_edit, 0, 5)
-        print_grid.setColumnStretch(6, 1)
-        layout.addWidget(print_group)
-
-        # ── 출력 컬럼 ──
-        col_group = QGroupBox("출력 컬럼")
-        col_layout = QHBoxLayout(col_group)
-        self.col_list = QListWidget()
-        self.col_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        col_layout.addWidget(self.col_list)
-
-        btn_col = QVBoxLayout()
-        self.up_btn = QPushButton("▲ 위")
-        self.up_btn.clicked.connect(lambda: self._move_column(-1))
-        self.down_btn = QPushButton("▼ 아래")
-        self.down_btn.clicked.connect(lambda: self._move_column(1))
-        self.toggle_btn = QPushButton("토글")
-        self.toggle_btn.clicked.connect(self._toggle_column)
-        btn_col.addWidget(self.up_btn)
-        btn_col.addWidget(self.down_btn)
-        btn_col.addWidget(self.toggle_btn)
-        btn_col.addStretch()
-        col_layout.addLayout(btn_col)
-        layout.addWidget(col_group)
-
-        self._render_column_list()
+        saved_tpl = ds.get("template", "전체")
+        if saved_tpl in TEMPLATE_OPTIONS:
+            self.template_combo.setCurrentText(saved_tpl)
+        row3.addWidget(self.template_combo)
+        row3.addStretch()
+        layout.addLayout(row3)
 
         # ── 실행 ──
         self.run_btn = QPushButton("실행")
@@ -173,20 +151,17 @@ class DeliverySubstituteTab(QWidget):
         조인하여 배송 대타에 필요한 flat DataFrame을 생성한다.
         """
         try:
-            # DataSource 확보
             if self._ds is None:
                 self._ds = get_db_reader(self._s.get("db", "path"))
 
-            # DbReader 기반 DF 빌드
             self._df = self._build_delivery_df()
 
             if self._df is None or self._df.empty:
                 self.status_label.setText("배송 데이터 없음")
                 return False
 
-            # 식사 구분(식종) / 배송담당 목록 추출
-            col_meal = self._s.get_delivery_config("col_meal")  # "식사 구분"
-            col_ship = self._s.get_delivery_config("col_ship")  # "배송_new"
+            col_meal = self._s.get_delivery_config("col_meal")
+            col_ship = self._s.get_delivery_config("col_ship")
             self._meals = uniq(self._df, col_meal)
             self._ships = uniq(self._df, col_ship)
 
@@ -209,18 +184,11 @@ class DeliverySubstituteTab(QWidget):
             return False
 
     def _build_delivery_df(self) -> pd.DataFrame | None:
-        """DbReader 배송전체 + 명단 + 배송정보를 조인하여 flat DataFrame 생성.
-
-        Result columns (for make_result compatibility):
-            식사 구분, 배송_new, 배송순서, 이름, 관할동,
-            상세주소, 신주소, 핸드폰, 비고2, 날짜플래그컬럼들(6/1, 6/2, ...)
-        """
-        # 1. 배송전체: ID, 식종, 날짜별 O/X
+        """DbReader 배송전체 + 명단 + 배송정보를 조인하여 flat DataFrame 생성."""
         matrix = self._ds.read_delivery_matrix()
         if not matrix:
             return None
 
-        # 2. 명단: ID → 성명, 핸드폰, 주소
         roster = self._ds.read_roster()
         roster_by_id: dict[str, dict] = {}
         for p in roster:
@@ -228,10 +196,8 @@ class DeliverySubstituteTab(QWidget):
             if pid:
                 roster_by_id[pid] = p
 
-        # 3. 배송정보: 배송순서, 배송담당, 주소 (key: 핸드폰|주소)
         order_map = self._ds.build_order_map()
 
-        # 4. 조인
         rows: list[dict] = []
         for m in matrix:
             pid = str(m.get("ID", "")).strip()
@@ -243,7 +209,6 @@ class DeliverySubstituteTab(QWidget):
             )
             addr = str(person.get("도로명주소", "")).strip()
 
-            # 배송정보 lookup
             key = f"{phone}|{addr}" if phone and addr else ""
             order_info = order_map.get(key, {}) if key else {}
 
@@ -259,7 +224,6 @@ class DeliverySubstituteTab(QWidget):
                 "비고2": order_info.get("비고", ""),
             }
 
-            # 날짜 플래그 컬럼 (6/1, 6/2, ...)
             for k, v in m.items():
                 if k not in ("ID", "식종"):
                     row[k] = v
@@ -267,51 +231,6 @@ class DeliverySubstituteTab(QWidget):
             rows.append(row)
 
         return pd.DataFrame(rows) if rows else None
-
-    # ── 컬럼 리스트 ──
-
-    def _render_column_list(self):
-        self.col_list.clear()
-        for c in self._order:
-            mark = "✓" if self._enabled.get(c, True) else " "
-            self.col_list.addItem(f"[{mark}] {c}")
-
-    def _toggle_column(self):
-        item = self.col_list.currentItem()
-        if item is None:
-            return
-        text = item.text()
-        col_name = text[4:]  # "[✓] 이름" → "이름"
-        self._enabled[col_name] = not self._enabled.get(col_name, True)
-        self._render_column_list()
-        for i in range(self.col_list.count()):
-            if self.col_list.item(i).text().endswith(col_name):
-                self.col_list.setCurrentRow(i)
-                break
-        self._persist()
-
-    def _move_column(self, d: int):
-        row = self.col_list.currentRow()
-        if row < 0:
-            return
-        new_row = row + d
-        if 0 <= new_row < len(self._order):
-            self._order[row], self._order[new_row] = (
-                self._order[new_row],
-                self._order[row],
-            )
-            self._render_column_list()
-            self.col_list.setCurrentRow(new_row)
-            self._persist()
-
-    def _persist(self):
-        self._s.set_delivery_settings(
-            db_path="",
-            order=self._order[:],
-            enabled={c: bool(self._enabled.get(c, True)) for c in self._pick_cols},
-            orientation=self.ori_combo.currentText(),
-            split_mode=self.split_combo.currentText(),
-        )
 
     # ── 실행 ──
 
@@ -325,7 +244,6 @@ class DeliverySubstituteTab(QWidget):
         m, d = qd.month(), qd.day()
         target_md = (m, d)
 
-        # 배송전체 M/D 컬럼명 찾기
         flag_col = ""
         for col in self._df.columns:
             parsed = _parse_date_col(col)
@@ -338,18 +256,12 @@ class DeliverySubstituteTab(QWidget):
             )
             return
 
-        cols = [c for c in self._order if self._enabled.get(c, False)]
-        if not cols:
-            QMessageBox.warning(self, "오류", "출력할 컬럼을 1개 이상 선택해 주세요.")
-            return
+        template_choice = self.template_combo.currentText()
+        cols = TEMPLATE_COLS.get(template_choice, TEMPLATE_COLS["전체"])
 
-        try:
-            max_rows = int(self.max_rows_edit.text())
-        except ValueError:
-            QMessageBox.warning(self, "오류", "최대그룹에는 숫자를 입력해 주세요.")
-            return
-
-        self._persist()
+        self._s.set_delivery_settings(
+            template=template_choice,
+        )
         self.status_label.setText("처리 중...")
         from PyQt6.QtWidgets import QApplication
 
@@ -362,16 +274,20 @@ class DeliverySubstituteTab(QWidget):
             choice = Choice(meal=meal, ship=ship, flag_col=flag_col, cols=cols)
             out = make_result(self._df, choice)
 
+            if out.empty:
+                QMessageBox.information(
+                    self, "알림", "해당 조건에 맞는 데이터가 없습니다."
+                )
+                self.status_label.setText("대기 중")
+                return
+
             date_label = f"{qd.year()}{m:02d}{d:02d}"
             show_excel(
                 df=out,
-                title="배송대타",
                 meal=meal,
                 ship=ship,
                 date_str=date_label,
-                ori=ORI_OPTIONS.index(self.ori_combo.currentText()),
-                split=SPLIT_OPTIONS.index(self.split_combo.currentText()) + 1,
-                max_rows=max_rows,
+                template_choice=template_choice,
             )
 
             self.status_label.setText("완료")
