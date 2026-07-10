@@ -1,8 +1,8 @@
 """db.xlsx 기반 통합 데이터 리더.
 
 db.xlsx를 유일한 데이터 소스로 사용. 시트를 읽기만 하고 계산은 하지 않음.
-배송전체 시트의 날짜 컬럼에서 해당 월을 자동 감지.
-기타 시트 안의 방학일정/배송휴무/식종정보 테이블 파싱 지원.
+	청구 연월은 배송전체 시트의 '연도', '월' Named Range(이름 관리자)에서 읽음.
+	기타 시트 안의 방학일정/배송휴무/식종정보 테이블 파싱 지원.
 
 Usage::
     from src.excel.db_reader import DbReader
@@ -30,7 +30,6 @@ log = logging.getLogger(__name__)
 from ._parsing import (
     _is_date_col,
     _normalize_headers,
-    _parse_date_col,
     _rows_to_dicts,
     _to_date,
     _to_str,
@@ -325,43 +324,43 @@ class DbReader(DataSource):
             self._cache["meal_prices"] = result
         return self._cache["meal_prices"]
 
-    # ── 월 자동 감지 ──
+    # ── 연월 감지 (이름 관리자 Named Range) ──
 
     def detect_month(self) -> tuple[int, int]:
-        """배송전체 컬럼에서 (year, month) 감지."""
-        matrix = self.read_delivery_matrix()
-        if not matrix:
+        """배송전체 시트의 '연도', '월' Named Range에서 (year, month) 읽기.
+
+        Named Range가 없으면 오늘 날짜로 fallback.
+        """
+        try:
+            wb = self._get_wb()
+        except FileNotFoundError:
             today = date.today()
             return today.year, today.month
 
-        month_counts: dict[int, int] = {}
-        for col_name in matrix[0].keys():
-            parsed = _parse_date_col(col_name)
-            if parsed:
-                m, _ = parsed
-                month_counts[m] = month_counts.get(m, 0) + 1
+        year = self._read_defined_name_int(wb, "연도")
+        month = self._read_defined_name_int(wb, "월")
 
-        detected_month = (
-            max(month_counts, key=month_counts.get)
-            if month_counts
-            else date.today().month
-        )
+        if not year:
+            year = date.today().year
+        if not month:
+            month = date.today().month
 
-        year = date.today().year
-        try:
-            vac = self.read_vacation_schedule()
-            for row in vac:
-                for key in row:
-                    d = _to_date(row[key])
-                    if d:
-                        year = d.year
-                        break
-                if year != date.today().year:
-                    break
-        except Exception:
-            pass
+        return year, month
 
-        return year, detected_month
+    @staticmethod
+    def _read_defined_name_int(wb: openpyxl.Workbook, name: str) -> int:
+        """wb.defined_names에서 name → 정수 변환. 없으면 0."""
+        if name not in wb.defined_names:
+            return 0
+        dn = wb.defined_names[name]
+        for ws_title, coord in dn.destinations:
+            if ws_title in wb.sheetnames:
+                cell = wb[ws_title][coord]
+                try:
+                    return int(cell.value)
+                except (TypeError, ValueError):
+                    return 0
+        return 0
 
     # ── 편의 조회 ──
 

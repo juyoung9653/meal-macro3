@@ -37,7 +37,6 @@ from ..widgets.order_editor import StaffOrderDialog
 
 log = logging.getLogger(__name__)
 
-
 class MemoHighlightDelegate(QStyledItemDelegate):
     """비고 셀: 줄바꿈 기준 홀수 줄 빨간색."""
 
@@ -103,8 +102,10 @@ class ReportTab(QWidget):
         self._roster_loaded = False
         self._last_results: list[tuple[str, str, list[list]]] = []
         self._last_export_path: str | None = None
+        self.output_dir: str | None = None
 
         self._setup_ui()
+        self._restore_state()
 
     def _load_staff_sort(self) -> dict[str, list[str]]:
         import json
@@ -158,17 +159,23 @@ class ReportTab(QWidget):
         date_layout.addStretch()
         layout.addWidget(date_group)
 
+        # ── ② 출력 경로 ──
+        path_group = QGroupBox("② 출력 경로")
+        path_layout = QHBoxLayout(path_group)
+        self.path_label = QLabel("선택된 경로 없음")
+        self.path_label.setStyleSheet("color: #888;")
+        self.path_btn = QPushButton("폴더 선택")
+        self.path_btn.clicked.connect(self._select_output_dir)
+        path_layout.addWidget(self.path_label, stretch=1)
+        path_layout.addWidget(self.path_btn)
+        layout.addWidget(path_group)
+
         # ── 버튼 ──
         btn_layout = QHBoxLayout()
         self.build_btn = QPushButton("리포트 생성")
         self.build_btn.setEnabled(False)
         self.build_btn.setMinimumHeight(32)
         self.build_btn.clicked.connect(self._on_build)
-
-        self.export_btn = QPushButton("엑셀로 저장")
-        self.export_btn.setEnabled(False)
-        self.export_btn.setMinimumHeight(32)
-        self.export_btn.clicked.connect(self._on_export)
 
         self.open_btn = QPushButton("파일 열기")
         self.open_btn.setEnabled(False)
@@ -181,13 +188,12 @@ class ReportTab(QWidget):
 
         btn_layout.addStretch()
         btn_layout.addWidget(self.build_btn)
-        btn_layout.addWidget(self.export_btn)
         btn_layout.addWidget(self.open_btn)
         btn_layout.addWidget(self.order_btn)
         layout.addLayout(btn_layout)
 
         # ── 결과 ──
-        result_group = QGroupBox("② 결과")
+        result_group = QGroupBox("③ 결과")
         result_layout = QVBoxLayout(result_group)
         self.result_tabs = QTabWidget()
         self.result_tabs.setTabPosition(QTabWidget.TabPosition.North)
@@ -217,21 +223,33 @@ class ReportTab(QWidget):
             self._cal_start.set_holidays(holiday_set)
             self._cal_end.set_holidays(holiday_set)
 
-            # 연월 자동 감지 → 날짜 범위 설정
+            # 청구 기준 연월로 날짜 범위 제한
             try:
-                y, m = self._ds.detect_month()
-                dm = QDate(y, m, 1)
-                today = QDate.currentDate()
-                if today.year() == y and today.month() == m:
-                    self.date_start.setDate(today)
-                else:
-                    self.date_start.setDate(dm)
                 import calendar as _cal
 
+                y, m = self._ds.detect_month()
                 last_day = _cal.monthrange(y, m)[1]
-                self.date_end.setDate(QDate(y, m, last_day))
+                d_min = QDate(y, m, 1)
+                d_max = QDate(y, m, last_day)
+
+                self.date_start.setMinimumDate(d_min)
+                self.date_start.setMaximumDate(d_max)
+                self.date_end.setMinimumDate(d_min)
+                self.date_end.setMaximumDate(d_max)
+
+                # 기본값: 당일 (범위 내이면 당일, 아니면 말일)
+                today = QDate.currentDate()
+                if today >= d_min and today <= d_max:
+                    self.date_start.setDate(today)
+                    self.date_end.setDate(today)
+                else:
+                    self.date_start.setDate(d_min)
+                    self.date_end.setDate(d_max)
             except Exception:
-                pass
+                # 연월 감지 실패 시 당일로 fallback
+                today = QDate.currentDate()
+                self.date_start.setDate(today)
+                self.date_end.setDate(today)
 
         except FileNotFoundError:
             QMessageBox.warning(self, "오류", f"명단 파일 없음: {self._ds.db_path}")
@@ -245,6 +263,10 @@ class ReportTab(QWidget):
     # ── 리포트 생성 ──
 
     def _on_build(self):
+        if not self.output_dir:
+            QMessageBox.warning(self, "알림", "출력 경로를 먼저 선택하세요.")
+            return
+
         try:
             qd_start = self.date_start.date()
             qd_end = self.date_end.date()
@@ -286,8 +308,23 @@ class ReportTab(QWidget):
             # UI 갱신
             self._update_results(results)
 
-            self.info_label.setText(f"{len(results)}개 리포트 생성 완료")
-            self.export_btn.setEnabled(True)
+            if not results:
+                self.info_label.setText("생성된 리포트 없음")
+                return
+
+            # 바로 저장
+            self._save_settings()
+            qd = self.date_start.date()
+            fname = f"배송리포트_{qd.year():04d}{qd.month():02d}{qd.day():02d}.xlsx"
+            out_path = os.path.join(self.output_dir, fname)
+
+            export_multi(self._last_results, out_path)
+            self._last_export_path = out_path
+            self.open_btn.setEnabled(True)
+            self.info_label.setText(
+                f"{len(results)}개 리포트 생성 및 저장 완료: {os.path.basename(out_path)}"
+            )
+            QMessageBox.information(self, "완료", f"리포트 저장 완료:\n{out_path}")
 
         except Exception as e:
             log.exception("리포트 생성 실패")
@@ -339,37 +376,45 @@ class ReportTab(QWidget):
             title = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:]}({meal})"
             self.result_tabs.addTab(tab, title)
 
-    # ── 내보내기 ──
-
-    def _on_export(self):
-        if not self._last_results:
-            QMessageBox.warning(self, "알림", "먼저 리포트를 생성하세요.")
-            return
-
-        dir_hint = self._settings.value("output_dir", "")
-        out_dir = QFileDialog.getExistingDirectory(self, "저장 폴더 선택", dir_hint)
-        if not out_dir:
-            return
-        self._settings.setValue("output_dir", out_dir)
-
-        # 기본 파일명
-        qd = self.date_start.date()
-        fname = f"배송리포트_{qd.year():04d}{qd.month():02d}{qd.day():02d}.xlsx"
-        out_path = os.path.join(out_dir, fname)
-
-        try:
-            export_multi(self._last_results, out_path)
-            self._last_export_path = out_path
-            self.open_btn.setEnabled(True)
-            self.info_label.setText(f"저장 완료: {os.path.basename(out_path)}")
-            QMessageBox.information(self, "완료", f"리포트 저장 완료:\n{out_path}")
-        except Exception as e:
-            log.exception("리포트 저장 실패")
-            QMessageBox.critical(self, "오류", f"리포트 저장 실패:\n{e}")
+    # ── 파일 열기 ──
 
     def _on_open(self):
         if self._last_export_path and os.path.exists(self._last_export_path):
             QDesktopServices.openUrl(QUrl.fromLocalFile(self._last_export_path))
+        else:
+            QMessageBox.warning(
+                self, "알림", "열 파일이 없습니다. 먼저 리포트를 생성하세요."
+            )
+
+    # ── 출력 경로 ──
+
+    def _select_output_dir(self):
+        d = QFileDialog.getExistingDirectory(self, "출력 폴더 선택")
+        if d:
+            self.output_dir = d
+            self.path_label.setText(d)
+            self.path_label.setStyleSheet("color: #000;")
+            self._save_settings()
+
+    def _save_settings(self):
+        if self.output_dir:
+            self._settings.setValue("output_dir", self.output_dir)
+        self._settings.sync()
+
+    def _restore_state(self):
+        out = self._settings.value("output_dir", "")
+        if out:
+            self.output_dir = out
+            self.path_label.setText(out)
+            self.path_label.setStyleSheet("color: #000;")
+
+    def set_output_dir(self, path: str):
+        """외부에서 출력 경로 설정 (탭 간 공유용)."""
+        if path and path != self.output_dir:
+            self.output_dir = path
+            self.path_label.setText(path)
+            self.path_label.setStyleSheet("color: #000;")
+            self._save_settings()
 
     # ── 배송순서 편집 ──
 
