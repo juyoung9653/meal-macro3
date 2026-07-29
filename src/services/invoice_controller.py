@@ -1,87 +1,46 @@
-"""청구서 컨트롤러 — db.xlsx 기반 단순화. 배송전체 시트에서 직접 O/X 집계."""
+"""AnnualDeliveryBook 기반 청구서 생성 서비스."""
 
-import logging
-import os
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from pathlib import Path
+from typing import Any
 
-from ..core.date_utils import to_bool
-from ..core.invoice_data import EnrichedPersonDict
-from ..core.meal_types import MealType
-from ..core.memo import build_reception_memo
+from ..core.date_utils import get_week_ranges
+from ..core.delivery_matrix import (
+    ALLOWED_MEALS,
+    AnnualDeliveryBook,
+    DeliveryCellValue,
+    DeliveryRow,
+    MonthState,
+)
+from ..core.invoice_data import EnrichedPersonDict, WeeklyMealCount
 from ..core.models import build_enriched_person_dict
-from ..excel._parsing import _is_date_col
-from ..excel.data_source import DataSource
-from ..excel.db_reader import get_db_reader
+from ..core.settings import get_settings
+from ..excel.annual_workbook import AnnualWorkbook
 from ..generators.invoice_generator import make_invoice
 
-# ── 요일패턴 → 실제 날짜열로 변환 ──
-_WEEKDAY_KR = {"월": 0, "화": 1, "수": 2, "목": 3, "금": 4, "토": 5, "일": 6}
 
-
-def _expand_pattern_to_date_str(
-    apply_date: date | None,
-    end_date: date | None,
-    pattern: str,
-) -> str | None:
-    """요일패턴(월수목) → 실제 날짜 문자열 '6/15, 6/17~6/18'.
-
-    apply_date/end_date 둘 다 있어야 확장. 없으면 None.
-    """
-    if not apply_date or not end_date or not pattern:
-        return None
-    days = {_WEEKDAY_KR[ch] for ch in pattern if ch in _WEEKDAY_KR}
-    if not days:
-        return None
-
-    # 범위 내 해당 요일만 추출
-    dates: list[date] = []
-    cur = apply_date
-    while cur <= end_date:
-        if cur.weekday() in days:
-            dates.append(cur)
-        cur += timedelta(days=1)
-
-    if not dates:
-        return None
-
-    # 연속일끼리 묶음
-    ranges: list[tuple[date, date]] = []
-    s = e = dates[0]
-    for d in dates[1:]:
-        if d == e + timedelta(days=1):
-            e = d
-        else:
-            ranges.append((s, e))
-            s = e = d
-    ranges.append((s, e))
-
-    parts = []
-    for s, e in ranges:
-        if s == e:
-            parts.append(f"{s.month}/{s.day}")
-        else:
-            parts.append(f"{s.month}/{s.day}~{e.month}/{e.day}")
-    return ", ".join(parts)
-
-
-log = logging.getLogger(__name__)
+_MEAL_ORDER = {meal: index for index, meal in enumerate(ALLOWED_MEALS)}
 
 
 @dataclass
 class InvoiceGenerationConfig:
-    """Configuration for invoice generation."""
+    """청구서 생성 입력.
 
-    roster_data: list[dict]
+    ``annual_book``을 직접 제공하는 경로가 우선이며, 없으면
+    ``annual_workbook_path`` 또는 중앙 설정의 연간 워크북 경로를
+    :class:`AnnualWorkbook`으로 읽는다.
+    """
+
     template_path: str
     output_path: str
     year: int
     month: int
+    annual_book: AnnualDeliveryBook | None = None
+    annual_workbook_path: str | Path | None = None
+    annual_workbook_password: str | None = None
     col_mapping: dict = field(default_factory=dict)
-    excluded_dates: set[date] = field(default_factory=set)
-    roster_headers: list[str] = field(default_factory=list)
-    template_columns: list[str] = field(default_factory=list)
-    db_path: str | None = None
+    unit_prices: Mapping[str, int] | None = None
     meal_type: str = "급식"
 
 
@@ -101,235 +60,264 @@ class InvoiceResult:
     error: str | None = None
 
 
-def _count_delivery_from_row(row: dict) -> int:
-    """배송전체 row에서 날짜 컬럼의 1/O 개수 합산 (식종 구분 없이)."""
-    count = 0
-    for col_name, val in row.items():
-        if _is_date_col(col_name):
-            v = str(val).strip().upper()
-            if v in ("O", "1", "1.0"):
-                count += 1
-    return count
+@dataclass
+class _PersonDeliverySummary:
+    counts: dict[str, int]
+    weekly: list[WeeklyMealCount]
 
 
 class InvoiceService:
-    """Pure business logic. db.xlsx 배송전체 시트에서 직접 O/X 집계."""
+    """연간 배송 책을 유일한 배송 사실로 사용하는 청구서 서비스."""
 
-    def __init__(self, data_source: DataSource | None = None):
-        self._data_source = data_source
-
-    def _get_reader(self, db_path: str | None) -> DataSource:
-        if self._data_source is not None:
-            return self._data_source
-        return get_db_reader(db_path)
+    def __init__(self, annual_book: AnnualDeliveryBook | None = None):
+        self._annual_book = annual_book
 
     def generate(self, config: InvoiceGenerationConfig) -> InvoiceResult:
-        warnings: list[InvoiceWarning] = []
+        try:
+            book = self._resolve_book(config)
+        except Exception as error:  # noqa: BLE001 - 사용자용 결과로 변환
+            return InvoiceResult(
+                success=False,
+                error=f"연간 배송 데이터 로드 실패:\n{error}",
+            )
 
-        if not config.roster_data:
+        validation_error = self._validate_target_month(book, config.year, config.month)
+        if validation_error:
+            return InvoiceResult(success=False, error=validation_error)
+        if not book.roster:
             return InvoiceResult(success=False, error="명단 데이터가 없습니다.")
 
-        reader = self._get_reader(config.db_path)
-        order_map = reader.build_order_map()
+        try:
+            unit_prices = self._resolve_unit_prices(config.unit_prices)
+        except (TypeError, ValueError) as error:
+            return InvoiceResult(success=False, error=f"급식 단가 설정 오류:\n{error}")
 
-        # 식종정보 테이블에서 단가 읽기
-        prices = reader.read_meal_prices()
-        breakfast_price = prices.get("조식", 9500)
-        dinner_price = prices.get("석식", 9500)
-        lunch_price = prices.get("중식", 9500)
-
-        # 접수장 데이터 로드 (비고용)
-        reception = reader.read_reception()
-
-        # 명단 시트 기준 고정 컬럼명 (공백/개행 정규화)
-        def _find_col(person: dict, *candidates: str) -> str:
-            for c in candidates:
-                if c in person:
-                    return c
-            # 공백 무시 매칭
-            normalized = {k.replace(" ", ""): k for k in person}
-            for c in candidates:
-                nc = c.replace(" ", "")
-                if nc in normalized:
-                    return normalized[nc]
-            return candidates[0] if candidates else ""
-
-        breakfast_col = _find_col(
-            config.roster_data[0] if config.roster_data else {},
-            "조식 여부",
-            "조식여부",
-            "조식",
-        )
-        dinner_col = _find_col(
-            config.roster_data[0] if config.roster_data else {},
-            "석식 여부",
-            "석식여부",
-            "석식",
-        )
-        lunch_col = _find_col(
-            config.roster_data[0] if config.roster_data else {},
-            "중식 여부",
-            "중식여부",
-            "중식",
-        )
-        note_col = _find_col(
-            config.roster_data[0] if config.roster_data else {}, "비고"
-        )
-
-        # 배송전체 식종별 카운트 미리 집계: {ID: {"조식": cnt, "중식": cnt, "석식": cnt}}
-        meal_counts_by_id: dict[str, dict[str, int]] = {}
-        for row_data in reader.read_delivery_matrix():
-            pid = str(row_data.get("ID", "")).strip()
-            if not pid:
-                continue
-            meal = str(row_data.get("식종", "")).strip()
-            cnt = _count_delivery_from_row(row_data)
-            if pid not in meal_counts_by_id:
-                meal_counts_by_id[pid] = {}
-            # 같은 ID+식종이 여러 행이면 최대값 사용
-            prev = meal_counts_by_id[pid].get(meal, 0)
-            meal_counts_by_id[pid][meal] = max(prev, cnt)
-
-        is_vacation_month = self._is_vacation_month(reader, config.year, config.month)
-
-        enriched: list[EnrichedPersonDict] = []
-        for person in config.roster_data:
-            person_id = str(person.get("ID", "")).strip()
-            if not person_id:
-                person_id = str(person.get("id", "")).strip()
-
-            flag_bf = to_bool(person.get(breakfast_col, 0))
-            flag_dn = to_bool(person.get(dinner_col, 0))
-            flag_lh = to_bool(person.get(lunch_col, 0))
-            note_val = str(person.get(note_col, "")).strip()
-            if note_val in ("비고", ""):
-                note_val = ""
-
-            # ── 접수장 기반 비고 메모 ──
-            person_receptions = [
-                r for r in reception if str(r.get("ID", "")).strip() == person_id
-            ]
-            meal_set = {
-                str(r.get("식종", "")).strip()
-                for r in person_receptions
-                if str(r.get("식종", "")).strip()
-            }
-            show_meal_prefix = len(meal_set) > 1
-            reception_memo = build_reception_memo(
-                person_id=person_id,
-                reception_entries=reception,
-                show_meal_prefix=show_meal_prefix,
+        summaries = _calculate_monthly_summaries(book, config.year, config.month)
+        rows_by_person = _rows_by_person(book)
+        enriched = [
+            _enrich_person(
+                entry.as_dict(),
+                rows_by_person.get(entry.person_id, ()),
+                summaries[entry.person_id],
+                unit_prices,
             )
+            for entry in book.roster
+        ]
 
-            # 배송전체에서 집계된 카운트 가져오기 (식종명 유연 매칭)
-            counts = meal_counts_by_id.get(person_id, {})
-            bf_cnt = dn_cnt = lh_cnt = 0
-            if flag_bf:
-                for meal, cnt in counts.items():
-                    if MealType.from_name(meal) == MealType.BREAKFAST:
-                        bf_cnt += cnt
-            if flag_dn:
-                for meal, cnt in counts.items():
-                    if MealType.from_name(meal) == MealType.DINNER:
-                        dn_cnt += cnt
-            if flag_lh:
-                for meal, cnt in counts.items():
-                    if MealType.from_name(meal) == MealType.LUNCH:
-                        lh_cnt += cnt
-
-            # 배송전체는 Power Query가 이미 모든 휴무일/제외일을 반영한 최종 결과.
-            # 추가 차감하지 않음. (사용자 수동 제외일만 적용)
-
-            ep_dict = build_enriched_person_dict(
-                raw=dict(person),
-                name=str(person.get("성명", "")),
-                dept=str(person.get("학교명", "")),
-                flag_breakfast=flag_bf,
-                flag_dinner=flag_dn,
-                flag_lunch=flag_lh,
-                note=note_val,
-            )
-            ep_dict["_reception_memo"] = reception_memo
-            ep_dict["_bf_cnt"] = bf_cnt
-            ep_dict["_dn_cnt"] = dn_cnt
-            ep_dict["_lh_cnt"] = lh_cnt
-            ep_dict["_delivery_start"] = ""
-            ep_dict["_delivery_end"] = ""
-
-            # 배송순서/배송담당 매핑 (핸드폰+도로명주소 기준 조인)
-            phone = (
-                str(person.get("핸드폰", "")).strip().replace("-", "").replace(" ", "")
-            )
-            addr = str(person.get("도로명주소", "")).strip()
-            order_key = f"{phone}|{addr}"
-            order = order_map.get(order_key, {})
-            ep_dict["배송순서"] = order.get("배송순서", "")
-            ep_dict["배송담당"] = order.get("배송담당", "")
-            if "핸드폰" not in ep_dict or not ep_dict["핸드폰"]:
-                ep_dict["핸드폰"] = order.get("핸드폰", phone)
-
-            # 주차별 계산용 일별 raw 데이터 보존 (모든 row 저장, 식종별 멀티 행 대응)
-            delivery_rows = [
-                r
-                for r in reader.read_delivery_matrix()
-                if str(r.get("ID", "")).strip() == person_id
-            ]
-            if delivery_rows:
-                ep_dict["_daily"] = {
-                    c: v for c, v in delivery_rows[0].items() if _is_date_col(c)
-                }
-                ep_dict["_delivery_rows_raw"] = [
-                    dict(r, _daily={c: v for c, v in r.items() if _is_date_col(c)})
-                    for r in delivery_rows
-                ]
-
-            enriched.append(ep_dict)
-
-        if not os.path.exists(config.template_path):
+        if not Path(config.template_path).is_file():
             return InvoiceResult(
                 success=False,
                 error=f"템플릿 파일 없음:\n{config.template_path}",
             )
 
         try:
-            cnt, enriched = make_invoice(
+            count, rendered = make_invoice(
                 enriched,
                 config.col_mapping,
                 config.output_path,
                 template_path=config.template_path,
                 year=config.year,
                 month=config.month,
-                unit_price_breakfast=breakfast_price,
-                unit_price_dinner=dinner_price,
-                unit_price_lunch=lunch_price,
-                excluded_dates=config.excluded_dates.copy()
-                if config.excluded_dates
-                else None,
-                is_vacation_month=is_vacation_month,
+                unit_prices=unit_prices,
+                is_vacation_month=self._is_vacation_month(
+                    book, config.year, config.month
+                ),
                 meal_type=config.meal_type,
             )
-        except Exception as e:
-            return InvoiceResult(success=False, error=f"청구서 생성 실패:\n{e}")
+        except Exception as error:  # noqa: BLE001 - 생성 실패를 결과로 반환
+            return InvoiceResult(success=False, error=f"청구서 생성 실패:\n{error}")
 
-        return InvoiceResult(
-            success=True, count=cnt, enriched=enriched, warnings=warnings
-        )
+        return InvoiceResult(success=True, count=count, enriched=rendered)
+
+    def _resolve_book(self, config: InvoiceGenerationConfig) -> AnnualDeliveryBook:
+        if config.annual_book is not None:
+            return config.annual_book
+        if self._annual_book is not None:
+            return self._annual_book
+
+        settings = get_settings()
+        configured_path = settings.get("annual_workbook", "path", default="")
+        if not configured_path:
+            configured_path = settings.get(
+                "invoice", "annual_workbook_path", default=""
+            )
+        path = config.annual_workbook_path or configured_path
+        if not path:
+            raise ValueError(
+                "연간 배송 Excel 경로가 설정되지 않았습니다. "
+                "AnnualDeliveryBook 또는 annual_workbook_path를 제공하세요."
+            )
+
+        if config.annual_workbook_password is None:
+            password = settings.get("annual_workbook", "password", default="")
+        else:
+            password = config.annual_workbook_password
+        return AnnualWorkbook(path, password=password).load()
 
     @staticmethod
-    def _is_vacation_month(reader, year: int, month: int) -> bool:
-        """배송전체에 중식/방중 건수가 1건이라도 있으면 방학월."""
-        try:
-            for row in reader.read_delivery_matrix():
-                meal = str(row.get("식종", "")).strip()
-                if MealType.from_name(meal) == MealType.LUNCH:
-                    from ..excel._parsing import _is_date_col
+    def _validate_target_month(
+        book: AnnualDeliveryBook, year: int, month: int
+    ) -> str | None:
+        if not 1 <= month <= 12:
+            return "청구 대상 월은 1부터 12 사이여야 합니다."
+        if book.year != year:
+            return (
+                f"청구 대상 연도는 {year}년이지만 연간 배송 데이터는 "
+                f"{book.year}년입니다."
+            )
+        if not book.dates:
+            return "연간 배송 데이터에 날짜 헤더가 없습니다."
 
-                    if any(
-                        str(v).strip() in ("1", "O")
-                        for c, v in row.items()
-                        if _is_date_col(c)
-                    ):
-                        return True
-        except Exception:
-            pass
-        return False
+        state = book.month_state(year, month)
+        if state is MonthState.MISSING:
+            return f"연간 배송 데이터에 {year}년 {month}월 날짜 헤더가 없습니다."
+        if state is MonthState.UNENTERED:
+            return (
+                f"{year}년 {month}월 배송현황이 미입력 상태입니다. "
+                "월 데이터를 입력한 뒤 다시 생성하세요."
+            )
+        return None
+
+    @staticmethod
+    def _resolve_unit_prices(
+        overrides: Mapping[str, int] | None,
+    ) -> dict[str, int]:
+        configured = get_settings().get("invoice", "unit_prices", default={})
+        if not isinstance(configured, Mapping):
+            configured = {}
+        if overrides is not None and not isinstance(overrides, Mapping):
+            raise TypeError("unit_prices는 식종별 매핑이어야 합니다.")
+
+        result: dict[str, int] = {}
+        for meal in ALLOWED_MEALS:
+            raw_value: Any = 9500
+            if meal in configured:
+                raw_value = configured[meal]
+            if overrides is not None and meal in overrides:
+                raw_value = overrides[meal]
+            if isinstance(raw_value, bool):
+                raise TypeError(f"{meal} 단가는 정수여야 합니다.")
+            try:
+                price = int(raw_value)
+            except (TypeError, ValueError) as error:
+                raise ValueError(f"{meal} 단가는 정수여야 합니다: {raw_value!r}") from error
+            if isinstance(raw_value, float) and not raw_value.is_integer():
+                raise ValueError(f"{meal} 단가는 정수여야 합니다: {raw_value!r}")
+            if price < 0:
+                raise ValueError(f"{meal} 단가는 0 이상이어야 합니다.")
+            result[meal] = price
+        return result
+
+    @staticmethod
+    def _is_vacation_month(
+        book: AnnualDeliveryBook, year: int, month: int
+    ) -> bool:
+        """대상 월 중식 행에 실제 배송(1)이 있을 때만 방학 월로 본다."""
+        if year != book.year:
+            return False
+        target_dates = tuple(
+            day for day in book.dates if day.year == year and day.month == month
+        )
+        return any(
+            row.meal == "중식"
+            and any(
+                row.raw_value_on(day) is DeliveryCellValue.DELIVERED
+                for day in target_dates
+            )
+            for row in book.delivery_rows
+        )
+
+
+def _calculate_monthly_summaries(
+    book: AnnualDeliveryBook, year: int, month: int
+) -> dict[str, _PersonDeliverySummary]:
+    """대상 월의 모든 배송 셀을 한 번 순회해 월/주차 집계를 함께 만든다."""
+    weeks = get_week_ranges(year, month)
+    week_by_date = {
+        day: index
+        for index, (_week, start, end) in enumerate(weeks)
+        for day in book.dates
+        if start <= day <= end
+    }
+
+    summaries: dict[str, _PersonDeliverySummary] = {}
+    for entry in book.roster:
+        weekly: list[WeeklyMealCount] = [
+            {
+                "week": week,
+                "start_date": f"{start:%Y%m%d}",
+                "end_date": f"{end:%Y%m%d}",
+                "조식": 0,
+                "중식": 0,
+                "석식": 0,
+            }
+            for week, start, end in weeks
+        ]
+        summaries[entry.person_id] = _PersonDeliverySummary(
+            counts={meal: 0 for meal in ALLOWED_MEALS},
+            weekly=weekly,
+        )
+
+    target_dates = tuple(
+        day for day in book.dates if day.year == year and day.month == month
+    )
+    for row in book.delivery_rows:
+        summary = summaries[row.person_id]
+        for day in target_dates:
+            if row.raw_value_on(day) is not DeliveryCellValue.DELIVERED:
+                continue
+            summary.counts[row.meal] += 1
+            week_index = week_by_date.get(day)
+            if week_index is not None:
+                summary.weekly[week_index][row.meal] += 1
+
+    return summaries
+
+
+def _rows_by_person(book: AnnualDeliveryBook) -> dict[str, tuple[DeliveryRow, ...]]:
+    grouped: dict[str, list[DeliveryRow]] = {}
+    for row in book.delivery_rows:
+        grouped.setdefault(row.person_id, []).append(row)
+    return {
+        person_id: tuple(
+            sorted(
+                rows,
+                key=lambda row: (
+                    _MEAL_ORDER[row.meal],
+                    row.sequence_sort_key,
+                    row.staff.casefold(),
+                ),
+            )
+        )
+        for person_id, rows in grouped.items()
+    }
+
+
+def _enrich_person(
+    raw: dict,
+    delivery_rows: tuple[DeliveryRow, ...],
+    summary: _PersonDeliverySummary,
+    unit_prices: Mapping[str, int],
+) -> EnrichedPersonDict:
+    note_value = raw.get("비고", "")
+    note = "" if note_value is None else str(note_value).strip()
+    staff = _join_unique(row.staff for row in delivery_rows)
+    sequence = _join_unique(row.sequence_display for row in delivery_rows)
+    return build_enriched_person_dict(
+        raw=raw,
+        note=note,
+        meal_counts=summary.counts,
+        weekly_meal_counts=summary.weekly,
+        delivery_staff=staff,
+        delivery_sequence=sequence,
+        unit_prices=unit_prices,
+    )
+
+
+def _join_unique(values: Iterable[object]) -> str:
+    unique: list[str] = []
+    for value in values:
+        text = str(value).strip()
+        if text and text not in unique:
+            unique.append(text)
+    return " / ".join(unique)

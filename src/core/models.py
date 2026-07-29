@@ -1,55 +1,43 @@
-"""Enriched person dict builder — replaces old RosterPerson/EnrichedPerson ghost types.
+"""청구서와 확인서 사이에서 사용하는 enriched 인원 레코드 builder."""
 
-Usage::
-    from src.core.models import build_enriched_person_dict
-    d = build_enriched_person_dict(raw={"성명": "홍길동"}, flag_breakfast=True)
-"""
+from collections.abc import Mapping, Sequence
+from typing import Any, cast
+
+from .delivery_matrix import ALLOWED_MEALS
+from .invoice_data import EnrichedPersonDict, WeeklyMealCount
 
 
 def build_enriched_person_dict(
-    raw: dict,
-    name: str = "",
-    dept: str = "",
-    note: str = "",
-    flag_breakfast: bool = False,
-    flag_dinner: bool = False,
-    flag_lunch: bool = False,
-    _total: int = 0,
-    _amount: str = "",
-) -> dict:
-    """Build enriched person dict in one step (replaces RosterPerson + EnrichedPerson + person_to_dict).
+    raw: Mapping[str, Any],
+    *,
+    note: str,
+    meal_counts: Mapping[str, int],
+    weekly_meal_counts: Sequence[WeeklyMealCount],
+    delivery_staff: str,
+    delivery_sequence: str,
+    unit_prices: Mapping[str, int],
+) -> EnrichedPersonDict:
+    """명단 원본과 계산 완료 값을 현재 enriched 계약으로 조립한다."""
+    breakfast_count = meal_counts.get("조식", 0)
+    lunch_count = meal_counts.get("중식", 0)
+    dinner_count = meal_counts.get("석식", 0)
+    total = breakfast_count + lunch_count + dinner_count
+    amount = sum(meal_counts.get(meal, 0) * unit_prices[meal] for meal in ALLOWED_MEALS)
+    weekly_copy = [cast(WeeklyMealCount, dict(item)) for item in weekly_meal_counts]
 
-    Parameters
-    ----------
-    raw : dict
-        Original row dict (e.g. from roster data).
-    name : str
-        Person name (convenience, not added to output — already in raw).
-    dept : str
-        Department/school name (convenience, not added to output — already in raw).
-    note : str
-        Free-text note.
-    flag_breakfast, flag_dinner, flag_lunch : bool
-        Meal-day flags.
-    _total : int
-        Computed total count.
-    _amount : str
-        Computed amount string.
-
-    Returns
-    -------
-    dict
-        Flat dict combining raw fields with enriched ``_``-prefixed fields.
-    """
-    d = dict(raw)
-    d.update(
+    enriched = dict(raw)
+    enriched.update(
         {
-            "_breakfast": 1 if flag_breakfast else 0,
-            "_dinner": 1 if flag_dinner else 0,
-            "_lunch": 1 if flag_lunch else 0,
             "_note": note,
-            "_total": _total,
-            "_amount": _amount,
+            "_bf_cnt": breakfast_count,
+            "_lh_cnt": lunch_count,
+            "_dn_cnt": dinner_count,
+            "_total": total,
+            "_amount": f"{amount:,}원",
+            "weekly_meal_counts": weekly_copy,
+            "배송담당": delivery_staff,
+            "배송순서": delivery_sequence,
+            "연번": delivery_sequence,
         }
     )
-    return d
+    return cast(EnrichedPersonDict, enriched)

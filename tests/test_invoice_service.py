@@ -1,275 +1,463 @@
-"""Tests for src.services.invoice_controller.InvoiceService — db.xlsx 기반."""
+"""AnnualDeliveryBook 기반 청구서 서비스 테스트."""
+
+from __future__ import annotations
 
 from datetime import date
-from unittest.mock import patch
+from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
-from src.services.invoice_controller import (
-    InvoiceGenerationConfig,
-    InvoiceResult,
-    InvoiceService,
-    InvoiceWarning,
-    _count_delivery_from_row,
+from src.core.delivery_matrix import (
+    AnnualDeliveryBook,
+    DeliveryCellValue,
+    DeliveryRow,
+    RosterEntry,
 )
-from tests.conftest import InMemoryDataSource
+from src.services import invoice_controller
+from src.services.invoice_controller import InvoiceGenerationConfig, InvoiceService
 
 
-class TestCountDeliveryFromRow:
-    """배송전체 row에서 1/O 개수 집계 (식종 구분 없음)."""
-
-    def test_O_3개(self):
-        row = {"식종": "조식", "6/1": "O", "6/2": "O", "6/3": "O", "6/4": "X"}
-        assert _count_delivery_from_row(row) == 3
-
-    def test_1_2개(self):
-        row = {"식종": "석식", "6/1": "1", "6/2": "0", "6/3": "1"}
-        assert _count_delivery_from_row(row) == 2
-
-    def test_O와_1_혼합(self):
-        row = {"6/1": "O", "6/2": "1", "6/3": "0", "6/4": "X"}
-        assert _count_delivery_from_row(row) == 2
-
-    def test_빈_row(self):
-        assert _count_delivery_from_row({}) == 0
-
-    def test_날짜_컬럼_아닌_것_무시(self):
-        row = {"관할동": "분당", "6/1": "O", "이름": "1"}
-        assert _count_delivery_from_row(row) == 1
-
-    def test_요일_붙은_날짜_컬럼(self):
-        row = {"6/1 월": "1", "6/2 화": "1", "6/3 수": "0"}
-        assert _count_delivery_from_row(row) == 2
+def _delivery_row(
+    person_id: str,
+    meal: str,
+    staff: str,
+    sequence: object,
+    dates: tuple[date, ...],
+    *,
+    delivered: tuple[date, ...] = (),
+    paused: tuple[date, ...] = (),
+) -> DeliveryRow:
+    values = {day: DeliveryCellValue.BLANK for day in dates}
+    values.update({day: DeliveryCellValue.DELIVERED for day in delivered})
+    values.update({day: DeliveryCellValue.PAUSED for day in paused})
+    return DeliveryRow(person_id, meal, staff, sequence, values)
 
 
-class TestInvoiceGenerationConfig:
-    """InvoiceGenerationConfig dataclass defaults."""
-
-    def test_default_meal_type(self):
-        cfg = InvoiceGenerationConfig(
-            roster_data=[],
-            template_path="/fake/tpl.xlsx",
-            output_path="/fake/out.xlsx",
-            year=2026,
-            month=6,
-        )
-        assert cfg.meal_type == "급식"
-
-    def test_custom_meal_type(self):
-        cfg = InvoiceGenerationConfig(
-            roster_data=[],
-            template_path="/fake/tpl.xlsx",
-            output_path="/fake/out.xlsx",
-            year=2026,
-            month=6,
-            meal_type="행복도시락",
-        )
-        assert cfg.meal_type == "행복도시락"
-
-
-class TestInvoiceServiceGenerate:
-    """InMemoryDataSource로 InvoiceService.generate() 테스트.
-
-    배송전체는 Power Query가 이미 모든 휴무일/제외일을 반영한 최종 결과.
-    추가 차감 없이 그대로 사용.
-    """
-
-    @pytest.fixture
-    def mock_reader(self):
-        reader = InMemoryDataSource()
-        with patch(
-            "src.services.invoice_controller.get_db_reader", return_value=reader
-        ):
-            yield reader
-
-    @pytest.fixture
-    def mock_make_invoice(self):
-        with patch("src.services.invoice_controller.make_invoice") as m:
-
-            def _side_effect(enriched, *args, **kwargs):
-                return len(enriched), enriched
-
-            m.side_effect = _side_effect
-            yield m
-
-    @pytest.fixture
-    def mock_exists(self):
-        with patch("src.services.invoice_controller.os.path.exists", return_value=True):
-            yield
-
-    @pytest.fixture
-    def svc(self):
-        return InvoiceService()
-
-    def test_빈_명단(self, svc, mock_reader):
-        result = svc.generate(
-            InvoiceGenerationConfig(
-                roster_data=[],
-                output_path="/tmp/test.xlsx",
-                year=2026,
-                month=6,
-                template_path="/fake/tpl.xlsx",
-                col_mapping={},
-                excluded_dates=set(),
-                roster_headers=[],
-                template_columns=[],
-            )
-        )
-        assert not result.success
-        assert "명단 데이터" in (result.error or "")
-
-    def test_조식_플래그_O_집계(self, svc, mock_reader, mock_make_invoice, mock_exists):
-        mock_reader._delivery_matrix = [
+def _service_book() -> AnnualDeliveryBook:
+    # 물리적 헤더 순서를 흉내 내어 역순/타 월 날짜를 섞는다.
+    dates = (
+        date(2026, 7, 1),
+        date(2026, 6, 30),
+        date(2026, 6, 28),
+        date(2026, 6, 21),
+        date(2026, 6, 14),
+        date(2026, 6, 7),
+        date(2026, 6, 2),  # 모든 행 blank인 비배송일
+        date(2026, 6, 1),
+        date(2026, 5, 31),
+    )
+    roster = (
+        RosterEntry(
+            "P001",
             {
-                "ID": "P001",
-                "식종": "조식",
-                "6/1": "O",
-                "6/2": "O",
-                "6/3": "X",
-                "6/4": "O",
+                "성명": "홍길동",
+                "학교명": "분당초",
+                "관할동": "정자동",
+                "도로명주소": "성남시 1",
+                "세대주\n성명": "홍보호",
+                "핸드폰": "010-1111-1111",
+                "비고": "견과류 알레르기",
+                # 기존 명단 플래그가 0이어도 배송 행의 1을 억제하면 안 된다.
+                "조식 여부": 0,
+                "중식 여부": 0,
+                "석식 여부": 0,
             },
-        ]
-        mock_reader._order_map = {
-            "010-1234|서울": {"배송순서": "1", "배송담당": "김배송"},
-        }
+        ),
+        RosterEntry(
+            "P002",
+            {
+                "성명": "배송행없음",
+                "학교명": "분당초",
+                "관할동": "정자동",
+                "도로명주소": "성남시 2",
+                "세대주\n성명": "김보호",
+                "핸드폰": "010-2222-2222",
+                "비고": "",
+                # 식사 여부 컬럼 자체가 없어도 된다.
+            },
+        ),
+    )
+    rows = (
+        _delivery_row(
+            "P001",
+            "석식",
+            "기사B",
+            2,
+            dates,
+            delivered=(date(2026, 6, 30),),
+            paused=(date(2026, 6, 28),),
+        ),
+        _delivery_row(
+            "P001",
+            "조식",
+            "기사A",
+            "003",
+            dates,
+            delivered=(
+                date(2026, 5, 31),  # 타 월: 제외
+                date(2026, 6, 1),
+                date(2026, 6, 7),
+                date(2026, 7, 1),  # 타 월: 제외
+            ),
+        ),
+        _delivery_row(
+            "P001",
+            "중식",
+            "기사A",
+            "003",
+            dates,
+            delivered=(date(2026, 6, 14),),
+            paused=(date(2026, 6, 21),),
+        ),
+    )
+    return AnnualDeliveryBook(2026, roster, rows, dates)
 
-        result = svc.generate(
-            InvoiceGenerationConfig(
-                roster_data=[
-                    {
-                        "ID": "P001",
-                        "성명": "홍길동",
-                        "학교명": "분당초",
-                        "조식 여부": "1",
-                        "석식 여부": "0",
-                        "중식 여부": "0",
-                        "핸드폰": "010-1234",
-                        "도로명주소": "서울",
-                    }
-                ],
-                output_path="/tmp/test.xlsx",
-                year=2026,
-                month=6,
-                template_path="/fake/tpl.xlsx",
-                col_mapping={},
-                excluded_dates=set(),
-                roster_headers=["ID", "성명", "조식 여부"],
-                template_columns=["성명"],
-            )
+
+@pytest.fixture
+def template_path(tmp_path: Path) -> str:
+    path = tmp_path / "template.xlsx"
+    path.touch()
+    return str(path)
+
+
+@pytest.fixture
+def invoice_spy(monkeypatch: pytest.MonkeyPatch) -> Mock:
+    spy = Mock(side_effect=lambda people, *_args, **_kwargs: (len(people), people))
+    monkeypatch.setattr(invoice_controller, "make_invoice", spy)
+    return spy
+
+
+def _config(
+    template_path: str,
+    book: AnnualDeliveryBook | None = None,
+    **overrides: object,
+) -> InvoiceGenerationConfig:
+    values: dict[str, object] = {
+        "template_path": template_path,
+        "output_path": "out.xlsx",
+        "year": 2026,
+        "month": 6,
+        "annual_book": book,
+    }
+    values.update(overrides)
+    return InvoiceGenerationConfig(**values)  # type: ignore[arg-type]
+
+
+def test_counts_only_target_month_delivered_and_ignores_roster_flags(
+    template_path: str, invoice_spy: Mock
+):
+    result = InvoiceService().generate(_config(template_path, _service_book()))
+
+    assert result.success, result.error
+    person = result.enriched[0]
+    assert (person["_bf_cnt"], person["_lh_cnt"], person["_dn_cnt"]) == (2, 1, 1)
+    assert person["_total"] == 4
+    assert result.enriched[1]["_total"] == 0
+
+    # 원본 비고는 그대로 남고 모든 레거시 전달 필드는 더 이상 만들지 않는다.
+    assert person.get("비고") == "견과류 알레르기"
+    assert person["_note"] == "견과류 알레르기"
+    assert {
+        "_breakfast",
+        "_dinner",
+        "_lunch",
+        "_delivery_start",
+        "_delivery_end",
+        "_daily",
+        "_delivery_rows_raw",
+        "_reception_memo",
+        "excluded_dates",
+    }.isdisjoint(person)
+
+
+def test_projects_staff_and_sequence_from_person_delivery_rows_deterministically(
+    template_path: str, invoice_spy: Mock
+):
+    result = InvoiceService().generate(_config(template_path, _service_book()))
+
+    assert result.success, result.error
+    person = result.enriched[0]
+    # 식종의 정규 순서(조식→중식→석식), 중복 제거 규칙.
+    assert person["배송담당"] == "기사A / 기사B"
+    assert person["배송순서"] == "003 / 2"
+    assert person["연번"] == "003 / 2"
+    assert result.enriched[1]["배송담당"] == ""
+    assert result.enriched[1]["배송순서"] == ""
+
+
+def test_attaches_exact_weekly_meal_counts_once_from_typed_dates(
+    template_path: str, invoice_spy: Mock
+):
+    result = InvoiceService().generate(_config(template_path, _service_book()))
+
+    assert result.success, result.error
+    assert result.enriched[0]["weekly_meal_counts"] == [
+        {
+            "week": 1,
+            "start_date": "20260601",
+            "end_date": "20260606",
+            "조식": 1,
+            "중식": 0,
+            "석식": 0,
+        },
+        {
+            "week": 2,
+            "start_date": "20260607",
+            "end_date": "20260613",
+            "조식": 1,
+            "중식": 0,
+            "석식": 0,
+        },
+        {
+            "week": 3,
+            "start_date": "20260614",
+            "end_date": "20260620",
+            "조식": 0,
+            "중식": 1,
+            "석식": 0,
+        },
+        {
+            "week": 4,
+            "start_date": "20260621",
+            "end_date": "20260627",
+            "조식": 0,
+            "중식": 0,
+            "석식": 0,
+        },
+        {
+            "week": 5,
+            "start_date": "20260628",
+            "end_date": "20260630",
+            "조식": 0,
+            "중식": 0,
+            "석식": 1,
+        },
+    ]
+
+
+def test_zero_only_entered_month_proceeds_with_zero_invoice(
+    template_path: str, invoice_spy: Mock
+):
+    days = (date(2026, 6, 1), date(2026, 6, 2))
+    book = AnnualDeliveryBook(
+        2026,
+        (RosterEntry("P001", {"성명": "홍길동"}),),
+        (
+            _delivery_row(
+                "P001", "중식", "기사A", 1, days, paused=(date(2026, 6, 1),)
+            ),
+        ),
+        days,
+    )
+
+    result = InvoiceService().generate(_config(template_path, book))
+
+    assert result.success, result.error
+    assert result.enriched[0]["_lh_cnt"] == 0
+    assert result.enriched[0]["_total"] == 0
+
+
+@pytest.mark.parametrize(
+    ("book", "year", "month", "message"),
+    [
+        (
+            AnnualDeliveryBook(
+                2025,
+                (RosterEntry("P001"),),
+                (
+                    _delivery_row(
+                        "P001",
+                        "중식",
+                        "기사A",
+                        1,
+                        (date(2025, 6, 1),),
+                        delivered=(date(2025, 6, 1),),
+                    ),
+                ),
+                (date(2025, 6, 1),),
+            ),
+            2026,
+            6,
+            "연도",
+        ),
+        (
+            AnnualDeliveryBook(2026, (RosterEntry("P001"),), (), ()),
+            2026,
+            6,
+            "날짜 헤더",
+        ),
+        (
+            AnnualDeliveryBook(
+                2026,
+                (RosterEntry("P001"),),
+                (
+                    _delivery_row(
+                        "P001",
+                        "중식",
+                        "기사A",
+                        1,
+                        (date(2026, 5, 1),),
+                        delivered=(date(2026, 5, 1),),
+                    ),
+                ),
+                (date(2026, 5, 1),),
+            ),
+            2026,
+            6,
+            "6월 날짜 헤더",
+        ),
+        (
+            AnnualDeliveryBook(
+                2026,
+                (RosterEntry("P001"),),
+                (
+                    _delivery_row(
+                        "P001", "중식", "기사A", 1, (date(2026, 6, 1),)
+                    ),
+                ),
+                (date(2026, 6, 1),),
+            ),
+            2026,
+            6,
+            "미입력",
+        ),
+    ],
+)
+def test_rejects_wrong_year_missing_headers_and_unentered_month(
+    template_path: str,
+    invoice_spy: Mock,
+    book: AnnualDeliveryBook,
+    year: int,
+    month: int,
+    message: str,
+):
+    result = InvoiceService().generate(
+        _config(template_path, book, year=year, month=month)
+    )
+
+    assert not result.success
+    assert message in (result.error or "")
+    invoice_spy.assert_not_called()
+
+
+@pytest.mark.parametrize("month", [0, 13])
+def test_rejects_invalid_month_numbers_before_generation(
+    template_path: str, invoice_spy: Mock, month: int
+):
+    result = InvoiceService().generate(
+        _config(template_path, _service_book(), month=month)
+    )
+
+    assert not result.success
+    assert "1부터 12" in (result.error or "")
+    invoice_spy.assert_not_called()
+
+
+def test_vacation_detection_uses_only_target_month_delivered_lunch():
+    days = (date(2026, 7, 1), date(2026, 8, 1))
+    book = AnnualDeliveryBook(
+        2026,
+        (RosterEntry("P001"),),
+        (
+            _delivery_row(
+                "P001",
+                "중식",
+                "기사A",
+                1,
+                days,
+                delivered=(date(2026, 7, 1),),
+            ),
+            _delivery_row(
+                "P001",
+                "조식",
+                "기사A",
+                1,
+                days,
+                paused=(date(2026, 8, 1),),
+            ),
+        ),
+        days,
+    )
+
+    assert InvoiceService._is_vacation_month(book, 2026, 7)
+    assert not InvoiceService._is_vacation_month(book, 2026, 8)
+
+
+def test_uses_default_prices_and_allows_partial_explicit_override(
+    template_path: str, invoice_spy: Mock
+):
+    config = _config(
+        template_path,
+        _service_book(),
+        unit_prices={"조식": 10_000, "기타": 1},
+    )
+
+    result = InvoiceService().generate(config)
+
+    assert result.success, result.error
+    assert invoice_spy.call_args.kwargs["unit_prices"] == {
+        "조식": 10_000,
+        "중식": 9_500,
+        "석식": 9_500,
+    }
+
+
+def test_uses_central_settings_unit_price_override(
+    template_path: str, invoice_spy: Mock
+):
+    invoice_controller.get_settings().set(
+        "invoice",
+        "unit_prices",
+        value={"조식": 1_111, "중식": 2_222, "석식": 3_333, "기타": 1},
+    )
+
+    result = InvoiceService().generate(_config(template_path, _service_book()))
+
+    assert result.success, result.error
+    assert invoice_spy.call_args.kwargs["unit_prices"] == {
+        "조식": 1_111,
+        "중식": 2_222,
+        "석식": 3_333,
+    }
+    assert result.enriched[0]["_amount"] == "7,777원"
+
+
+def test_loads_book_through_annual_workbook_when_only_path_is_configured(
+    template_path: str, invoice_spy: Mock, monkeypatch: pytest.MonkeyPatch
+):
+    book = _service_book()
+    adapter = Mock()
+    adapter.load.return_value = book
+    adapter_type = Mock(return_value=adapter)
+    monkeypatch.setattr(invoice_controller, "AnnualWorkbook", adapter_type)
+
+    result = InvoiceService().generate(
+        _config(
+            template_path,
+            None,
+            annual_workbook_path="annual.xlsx",
+            annual_workbook_password="secret",
         )
-        assert result.success
-        assert len(result.enriched) == 1
-        assert result.enriched[0]["_bf_cnt"] == 3
-        assert result.enriched[0]["_dn_cnt"] == 0
-        assert result.enriched[0]["배송담당"] == "김배송"
+    )
 
-    def test_배송전체_카운트_그대로_사용(
-        self, svc, mock_reader, mock_make_invoice, mock_exists
-    ):
-        """배송전체 값이 최종 결과. excluded_dates/holidays 추가 차감 없음."""
-        mock_reader._delivery_matrix = [
-            {"ID": "P001", "식종": "조식", "6/1": "O", "6/2": "O", "6/3": "O"},
-        ]
-        mock_reader._order_map = {}
+    assert result.success, result.error
+    adapter_type.assert_called_once_with("annual.xlsx", password="secret")
+    adapter.load.assert_called_once_with()
 
-        result = svc.generate(
-            InvoiceGenerationConfig(
-                roster_data=[
-                    {
-                        "ID": "P001",
-                        "성명": "홍길동",
-                        "학교명": "분당초",
-                        "조식 여부": "1",
-                        "석식 여부": "0",
-                        "중식 여부": "0",
-                        "핸드폰": "",
-                        "도로명주소": "",
-                    }
-                ],
-                output_path="/tmp/test.xlsx",
-                year=2026,
-                month=6,
-                template_path="/fake/tpl.xlsx",
-                col_mapping={},
-                excluded_dates={
-                    date(2026, 6, 1)
-                },  # 제외일 있어도 무시 (배송전체 이미 반영)
-                roster_headers=["ID", "성명", "조식 여부"],
-                template_columns=["성명"],
-            )
-        )
-        assert result.success
-        assert result.enriched[0]["_bf_cnt"] == 3  # 배송전체 그대로 3
 
-    def test_플래그_0이면_건수_0(
-        self, svc, mock_reader, mock_make_invoice, mock_exists
-    ):
-        mock_reader._delivery_matrix = [
-            {"ID": "P001", "식종": "조식", "6/1": "O", "6/2": "O"},
-        ]
-        mock_reader._order_map = {}
+def test_missing_book_and_path_is_a_clear_failure(
+    template_path: str, invoice_spy: Mock, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(
+        invoice_controller.get_settings(),
+        "_data",
+        {"invoice": {"unit_prices": {"조식": 9500, "중식": 9500, "석식": 9500}}},
+    )
 
-        result = svc.generate(
-            InvoiceGenerationConfig(
-                roster_data=[
-                    {
-                        "ID": "P001",
-                        "성명": "홍길동",
-                        "학교명": "분당초",
-                        "조식 여부": "0",
-                        "석식 여부": "0",
-                        "중식 여부": "0",
-                        "핸드폰": "",
-                        "도로명주소": "",
-                    }
-                ],
-                output_path="/tmp/test.xlsx",
-                year=2026,
-                month=6,
-                template_path="/fake/tpl.xlsx",
-                col_mapping={},
-                excluded_dates=set(),
-                roster_headers=["ID", "성명", "조식 여부"],
-                template_columns=["성명"],
-            )
-        )
-        assert result.success
-        assert result.enriched[0]["_bf_cnt"] == 0
+    result = InvoiceService().generate(_config(template_path, None))
 
-    def test_석식_BOX는_석식으로_집계(
-        self, svc, mock_reader, mock_make_invoice, mock_exists
-    ):
-        """석식_BOX → 석식으로 합산, 중식 아님."""
-        mock_reader._delivery_matrix = [
-            {"ID": "P001", "식종": "석식", "6/1": "1", "6/2": "1"},
-            {"ID": "P001", "식종": "석식_BOX", "6/3": "1", "6/4": "1", "6/5": "1"},
-        ]
-        mock_reader._order_map = {}
-
-        result = svc.generate(
-            InvoiceGenerationConfig(
-                roster_data=[
-                    {
-                        "ID": "P001",
-                        "성명": "홍길동",
-                        "학교명": "분당초",
-                        "조식 여부": "0",
-                        "석식 여부": "1",
-                        "중식 여부": "0",
-                        "핸드폰": "",
-                        "도로명주소": "",
-                    }
-                ],
-                output_path="/fake/test.xlsx",
-                year=2026,
-                month=6,
-                template_path="/fake/tpl.xlsx",
-                col_mapping={},
-                excluded_dates=set(),
-                roster_headers=["ID", "성명", "석식 여부"],
-                template_columns=["성명"],
-            )
-        )
-        assert result.success
-        assert result.enriched[0]["_dn_cnt"] == 5  # 석식2 + 석식_BOX3
-        assert result.enriched[0]["_lh_cnt"] == 0  # 중식 아님
+    assert not result.success
+    assert "연간 배송" in (result.error or "")
+    assert "경로" in (result.error or "")
+    invoice_spy.assert_not_called()

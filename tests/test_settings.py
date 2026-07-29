@@ -104,6 +104,15 @@ class TestDirectGet:
         sm = make_settings_manager()
         assert "{year:04d}" in sm.get("invoice", "output_filename_format")
 
+    def test_invoice_unit_price_defaults_are_canonical(self):
+        sm = make_settings_manager()
+        assert sm.get("invoice", "unit_prices") == {
+            "조식": 9500,
+            "중식": 9500,
+            "석식": 9500,
+        }
+        assert "기타" not in sm.get("invoice", "unit_prices")
+
     def test_semantic_columns(self):
         sm = make_settings_manager()
         cols = sm.get("semantic_columns")

@@ -29,6 +29,15 @@ DEFAULTS: dict[str, Any] = {
     },
     "invoice": {
         "output_filename_format": "청구서_{year:04d}{month:02d}.xlsx",
+        "unit_prices": {
+            "조식": 9500,
+            "중식": 9500,
+            "석식": 9500,
+        },
+    },
+    "annual_workbook": {
+        "path": "",
+        "password": "",
     },
     "db": {
         "path": "assets/db.xlsx",

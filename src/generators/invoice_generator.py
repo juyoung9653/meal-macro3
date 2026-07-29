@@ -1,4 +1,4 @@
-"""청구서 생성기 — 템플릿 채우기 (배송일 계산은 delivery_calculator 위임).
+"""계산이 끝난 청구 데이터를 기존 Excel 템플릿에 렌더링한다.
 
 방학 월: roster_data → 방학_방중(방중=1) / 방학_학기중(방중=0) / 방학_총괄(전체)
 일반 월: roster_data → 학기_총괄(전체) / 학기_학기중(전체)
@@ -8,12 +8,13 @@
 """
 
 import logging
-from datetime import date
+from collections.abc import Mapping
 
 import openpyxl
 from openpyxl.styles import Alignment
 
 from ..core.diff_format import to_numeric
+from ..core.invoice_data import EnrichedPersonDict
 from ..excel.excel_utils import CENTER_ALIGN, adjust_formula, copy_style
 from ..templates.config import (
     col_name_to_index,
@@ -38,15 +39,21 @@ def _col_idx_to_letter(idx: int) -> str:
 
 
 def _map_person_to_row(
-    person: dict, mapping: dict, seq: int, template_columns: list[str]
+    person: EnrichedPersonDict,
+    mapping: dict,
+    template_columns: list[str],
 ) -> dict:
-    """person dict + mapping → {template_col_name: value}"""
-    row_data: dict[str, str | int] = {}
+    """person dict + mapping → {template_col_name: value}."""
+    row_data: dict[str, object] = {}
     for col in template_columns:
-        roster_key = mapping.get(col, "")
         if col == "연번":
-            row_data[col] = seq
-        elif roster_key:
+            sequence = person.get("연번")
+            if sequence is None or sequence == "":
+                sequence = person.get("배송순서", "")
+            row_data[col] = sequence
+            continue
+        roster_key = mapping.get(col, "")
+        if roster_key:
             row_data[col] = person.get(roster_key, "")
     return row_data
 
@@ -87,15 +94,12 @@ _MEMO_ALIGN = Alignment(horizontal="left", vertical="top", wrap_text=True)
 def _fill_invoice_sheet(
     wb,
     sheet_name: str,
-    people: list[dict],
+    people: list[EnrichedPersonDict],
     col_mapping: dict,
     template_path: str,
-    year: int,
-    month: int,
     unit_price_breakfast: int,
     unit_price_dinner: int,
     unit_price_lunch: int,
-    excluded_dates: set[date] | None = None,
     meal_type: str = "급식",
 ) -> int:
     """단일 시트에 people 데이터를 채운다. 작성 건수 반환."""
@@ -106,14 +110,9 @@ def _fill_invoice_sheet(
     dn_col = col_mapping.get("__calc_dinner", "석식")
     lh_col = col_mapping.get("__calc_lunch", "중식")
     price_col = col_mapping.get("__calc_price", "청구금액")
-    del_start_col = col_mapping.get("__delivery_start", "")
-    del_end_col = col_mapping.get("__delivery_end", "")
-    # 날짜 텍스트 컬럼 — to_numeric 변환 방지 + 셀 서식 텍스트
-    _text_cols = {
-        col_idx_map[c] for c in (del_start_col, del_end_col) if c and c in col_idx_map
-    }
+    sequence_col_idx = col_idx_map.get("연번")
 
-    # 메모 컬럼: 급식은 "평일중식중지=>초1-2,고3", 행복도시락은 "비고"
+    # 메모 컬럼은 명단에서 정상 매핑된 값을 쓰되 좌측/줄바꿈 서식을 적용한다.
     _memo_col_name = "평일중식중지=>초1-2,고3" if meal_type == "급식" else "비고"
     _memo_col_idx = col_idx_map.get(_memo_col_name)
 
@@ -122,12 +121,12 @@ def _fill_invoice_sheet(
     data_start_row = row_idx
     written_cols: set[int] = set()
 
-    for i, person in enumerate(people):
+    for person in people:
         breakfast_cnt = person.get("_bf_cnt", 0)
         dinner_cnt = person.get("_dn_cnt", 0)
         lunch_cnt = person.get("_lh_cnt", 0)
 
-        row_data = _map_person_to_row(person, col_mapping, i + 1, template_columns)
+        row_data = _map_person_to_row(person, col_mapping, template_columns)
 
         # 식사 건수: 시트에 해당 컬럼이 있을 때만 기록
         if bf_col in col_idx_map:
@@ -137,11 +136,7 @@ def _fill_invoice_sheet(
         if lh_col in col_idx_map:
             row_data[lh_col] = lunch_cnt
 
-        # 배송시작일/종료일: 시트에 컬럼이 있을 때만 기록
-        if del_start_col and del_start_col in col_idx_map:
-            row_data[del_start_col] = person.get("_delivery_start", "")
-        if del_end_col and del_end_col in col_idx_map:
-            row_data[del_end_col] = person.get("_delivery_end", "")
+
 
         # 청구금액 수식: 시트에 존재하는 컬럼만 포함
         if price_col in col_idx_map:
@@ -162,10 +157,6 @@ def _fill_invoice_sheet(
             f"{breakfast_cnt * unit_price_breakfast + dinner_cnt * unit_price_dinner + lunch_cnt * unit_price_lunch:,}원"
         )
 
-        # ── 비고/평일중식중지: 접수장 메모로 덮어쓰기 ──
-        if _memo_col_idx is not None and person.get("_reception_memo"):
-            row_data[_memo_col_name] = person["_reception_memo"]
-
         # ── Phase 1: 데이터 값 쓰기 ──
         for col_name, value in row_data.items():
             c_idx = col_idx_map.get(col_name)
@@ -175,7 +166,7 @@ def _fill_invoice_sheet(
             cell = ws.cell(row=row_idx, column=c_idx)
 
             if c_idx == _memo_col_idx:
-                # 비고: 접수장 메모 (plain text)
+                # 비고: 명단 원본의 plain text
                 txt = str(value) if value else ""
                 cell.value = txt
                 cell.alignment = _MEMO_ALIGN
@@ -183,9 +174,9 @@ def _fill_invoice_sheet(
                 est_height = max(17, line_count * 17)
                 if est_height > (ws.row_dimensions[row_idx].height or 0):
                     ws.row_dimensions[row_idx].height = est_height
-            elif c_idx in _text_cols:
-                # 날짜 텍스트 컬럼: 숫자 변환 없이 문자열 그대로
-                cell.value = str(value) if value else ""
+            elif c_idx == sequence_col_idx:
+                # 직접 배송 연번은 선행 0을 포함한 원본 표시값을 보존한다.
+                cell.value = "" if value is None else str(value)
                 cell.number_format = "@"
                 cell.alignment = CENTER_ALIGN
             else:
@@ -215,11 +206,7 @@ def _fill_invoice_sheet(
                 copy_style(src_cell, dst_cell)
             ws.row_dimensions[r].height = _tmpl_height
 
-    # Phase 2.5: 텍스트 컬럼 number_format 복구 (copy_style이 덮어씀)
-    if _text_cols and data_end_row >= data_start_row:
-        for r in range(data_start_row, data_end_row + 1):
-            for c_idx in _text_cols:
-                ws.cell(row=r, column=c_idx).number_format = "@"
+
 
     return data_end_row - data_start_row + 1
 
@@ -265,9 +252,9 @@ def _rename_sheets(wb, keep_prefix: str):
 def _get_sheet_plan(
     meal_type: str,
     is_vacation_month: bool,
-    roster_data: list[dict],
+    roster_data: list[EnrichedPersonDict],
     template_sheet_names: list[str],
-) -> tuple[list[tuple[str, list[dict]]], str | None]:
+) -> tuple[list[tuple[str, list[EnrichedPersonDict]]], str | None]:
     """(sheet_plan, rename_prefix)
 
     sheet_plan: [(template_sheet_name, people_for_this_sheet), ...]
@@ -325,16 +312,13 @@ def _get_sheet_plan(
 
 
 def make_invoice(
-    roster_data: list[dict],
+    roster_data: list[EnrichedPersonDict],
     col_mapping: dict,
     output_path: str,
     template_path: str,
     year: int,
     month: int,
-    unit_price_breakfast: int,
-    unit_price_dinner: int,
-    unit_price_lunch: int,
-    excluded_dates: set[date] | None = None,
+    unit_prices: Mapping[str, int],
     is_vacation_month: bool = False,
     meal_type: str = "급식",
 ):
@@ -348,8 +332,11 @@ def make_invoice(
     """
 
     wb = openpyxl.load_workbook(template_path)
+    unit_price_breakfast = unit_prices["조식"]
+    unit_price_dinner = unit_prices["석식"]
+    unit_price_lunch = unit_prices["중식"]
 
-    # ── 실제 배송 건수 사전 계산 (플래그만 보지 않고 비고/제외일 반영) ──
+    # ── 서비스에서 계산된 실제 배송 건수 확인 ──
     for p in roster_data:
         log.debug(
             "[Split] %s: bf=%d dn=%d lh=%d",
@@ -363,6 +350,7 @@ def make_invoice(
     sheet_plan, rename_prefix = _get_sheet_plan(
         meal_type, is_vacation_month, roster_data, wb.sheetnames
     )
+    total_count = 0
     for sheet_name, people in sheet_plan:
         total_count = _fill_invoice_sheet(
             wb,
@@ -370,12 +358,9 @@ def make_invoice(
             people,
             col_mapping,
             template_path,
-            year,
-            month,
             unit_price_breakfast,
             unit_price_dinner,
             unit_price_lunch,
-            excluded_dates,
             meal_type=meal_type,
         )
     if rename_prefix:

@@ -1,22 +1,25 @@
-"""확인서 생성기 — 템플릿 채우기 (db.xlsx 기반 배송 데이터 활용)."""
+"""청구 서비스가 준비한 데이터를 기존 확인서 템플릿에 렌더링한다."""
 
 import logging
 import os
+from collections.abc import Mapping, Sequence
 from copy import copy
-from datetime import date, timedelta
 
 import openpyxl
 from openpyxl.utils import get_column_letter
 
-from ..core.date_utils import get_week_ranges, to_bool, week_date_str
-from ..core.meal_types import MealType
 from ..core.settings import get_settings
-from ..excel._parsing import _is_date_col
-from ..excel.data_source import DataSource
 from ..excel.excel_utils import adjust_formula, build_merged_anchor_map, copy_cell
 from ..templates.template_scanner import scan_placeholders, validate_placeholders
 
 log = logging.getLogger(__name__)
+
+
+def _blank_text(value: object) -> str:
+    if value is None:
+        return ""
+    text = str(value)
+    return "" if not text.strip() else text
 
 
 def _set_ph(ws, ph_map, key, current_row, value, tpl_anchor_map=None):
@@ -40,130 +43,63 @@ def _pre_build_anchor_maps(wb, tpl_sheet_names: list[str]) -> dict[str, dict]:
     return maps
 
 
-def _calc_weekly_breakdown_from_daily(
-    year: int,
-    month: int,
-    person: dict,
-    weeks: list,
-    week_date_map: dict[date, int] | None = None,
-) -> list[dict]:
-    """db.xlsx 배송전체의 멀티 행(식종별) 데이터를 주차별로 집계.
-
-    person dict에 포함된 멀티 행 raw 데이터(_delivery_rows_raw 필드)를 기준으로
-    각 주차별 조식/석식/중식 건수를 계산.
-    식종 정보는 각 배송 행의 '식종' 컬럼에서 가져온다.
-    """
-    bf_flag = to_bool(person.get("_breakfast", 0))
-    dn_flag = to_bool(person.get("_dinner", 0))
-    lh_flag = to_bool(person.get("_lunch", 0))
-
-    # 활성화된 식종 플래그가 없으면 전부 0
-    if not (bf_flag or dn_flag or lh_flag):
-        return [
-            {MealType.BREAKFAST: 0, MealType.DINNER: 0, MealType.LUNCH: 0}
-            for _ in weeks
-        ]
-
-    # 주차별 카운트 초기화
-    week_counts = []
-    for wn, wstart, wend in weeks:
-        week_counts.append(
-            {MealType.BREAKFAST: 0, MealType.DINNER: 0, MealType.LUNCH: 0}
+def _prepared_weekly_counts(person: Mapping[str, object]) -> dict[int, dict]:
+    """서비스가 준비한 주차 집계를 검증해 주차 번호로 인덱싱한다."""
+    raw_counts = person.get("weekly_meal_counts")
+    if not isinstance(raw_counts, list):
+        shown = person.get("ID") or person.get("성명") or "알 수 없는 대상자"
+        raise TypeError(
+            f"{shown}: 청구서의 weekly_meal_counts 데이터가 없습니다. "
+            "청구서를 먼저 다시 생성하세요."
         )
 
-    # ── 멀티 행 raw 데이터 처리 (식종별로 여러 행이 있을 수 있음) ──
-    delivery_rows = person.get("_delivery_rows_raw", [])
-    if not delivery_rows:
-        # fallback: 기존 _daily 필드가 있으면 단일 행처럼 처리
-        daily = person.get("_daily", {})
-        if not daily:
-            log.warning(
-                "[_calc_weekly] NO _delivery_rows_raw AND NO _daily → all zeros"
-            )
-            return week_counts
-        delivery_rows = [{"_daily": daily, "식종": person.get("식종", "")}]
-        log.warning(
-            "[_calc_weekly] fallback: using _daily=%d items, 식종=%r",
-            len(daily),
-            person.get("식종", ""),
-        )
+    indexed: dict[int, dict] = {}
+    for item in raw_counts:
+        if not isinstance(item, dict):
+            raise TypeError("weekly_meal_counts 항목은 매핑이어야 합니다.")
+        week = item.get("week")
+        if not isinstance(week, int) or isinstance(week, bool) or not 1 <= week <= 5:
+            raise ValueError(f"유효하지 않은 확인서 주차입니다: {week!r}")
+        if week in indexed:
+            raise ValueError(f"확인서 주차가 중복되었습니다: {week}주")
+        for meal in ("조식", "중식", "석식"):
+            value = item.get(meal, 0)
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise ValueError(f"{week}주 {meal} 건수는 0 이상의 정수여야 합니다.")
+        _format_week_range(item)
+        indexed[week] = item
+    return indexed
 
-    for row_data in delivery_rows:
-        row_meal_type = str(row_data.get("식종", "")).strip()
 
-        # 식종 → MealType 매핑
-        target = MealType.from_name(row_meal_type)
-        if target is None:
-            # 식종 미상 → 플래그 보고 유추
-            if bf_flag:
-                target = MealType.BREAKFAST
-            elif dn_flag:
-                target = MealType.DINNER
-            elif lh_flag:
-                target = MealType.LUNCH
-            else:
-                continue
+def _format_week_range(item: dict) -> str:
+    start = str(item.get("start_date", ""))
+    end = str(item.get("end_date", ""))
+    if not (len(start) == len(end) == 8 and start.isdigit() and end.isdigit()):
+        raise ValueError("주차 시작일/종료일은 YYYYMMDD 형식이어야 합니다.")
+    return f"{start[4:6]}.{start[6:8]}~{end[4:6]}.{end[6:8]}"
 
-        # 해당 식종이 비활성이면 건너뜀
-        if target == MealType.BREAKFAST and not bf_flag:
-            continue
-        if target == MealType.DINNER and not dn_flag:
-            continue
-        if target == MealType.LUNCH and not lh_flag:
-            continue
 
-        # daily 데이터 (날짜 컬럼 → "O"/"X")
-        daily = row_data.get("_daily", {})
-        if not daily:
-            continue
-
-        for date_key, val in daily.items():
-            if not to_bool(val):
-                continue
-
-            if not _is_date_col(date_key):
-                continue
-            parsed = date_key.split("/")
-            try:
-                m_from_key = int(parsed[0])
-                d_from_key = int(parsed[1].split()[0])
-            except (ValueError, IndexError):
-                log.warning("[_calc_weekly] Failed to parse date_key=%r", date_key)
-                continue
-
-            if m_from_key != month:
-                continue
-
-            try:
-                d = date(year, month, d_from_key)
-            except ValueError:
-                continue
-
-            # 해당 날짜가 속한 주차 찾기 (O(1) lookup)
-            wi = week_date_map.get(d) if week_date_map else None
-            if wi is not None:
-                week_counts[wi][target] += 1
-            else:
-                # fallback: 선형 탐색
-                for wi, (wn, wstart, wend) in enumerate(weeks):
-                    if wstart <= d <= wend:
-                        week_counts[wi][target] += 1
-                        break
-
-    return week_counts
+def _household_delivery_staff(
+    members: Sequence[Mapping[str, object]],
+) -> str:
+    unique: list[str] = []
+    for member in members:
+        for value in _blank_text(member.get("배송담당", "")).split(" / "):
+            staff = value.strip()
+            if staff and staff not in unique:
+                unique.append(staff)
+    return " / ".join(unique)
 
 
 def make_confirm(
-    roster_data: list[dict],
-    col_mapping: dict,
+    roster_data: Sequence[Mapping[str, object]],
+    col_mapping: Mapping[str, str],
     output_dir: str,
     template_path: str,
     year: int,
     month: int,
     title_prefix: str = "",
-    excluded_dates: set[date] | None = None,
     meal_type: str = "급식",
-    data_source: DataSource | None = None,
 ) -> list[dict]:
     """명단 데이터 → 확인서템플릿 채워서 단일 엑셀 파일 생성."""
     s = get_settings()
@@ -173,29 +109,22 @@ def make_confirm(
         col_mapping.get(k, k) for k in _LOOKUP
     )
 
-    # 1. 주소 줄바꿈 → 공백
-    for p in roster_data:
-        raw = str(p.get(addr_col, ""))
-        p[addr_col] = raw.replace("\n", " ").replace("\r", " ").strip()
+    # 1. 입력을 복사하면서 주소와 blank 값을 정규화한다.
+    normalized_roster: list[dict[str, object]] = []
+    for source in roster_data:
+        person = dict(source)
+        raw = _blank_text(person.get(addr_col, ""))
+        person[addr_col] = raw.replace("\n", " ").replace("\r", " ").strip()
+        normalized_roster.append(person)
 
     # 2. 관할동별 그룹핑
     dong_groups = {}
-    for p in roster_data:
-        dong = str(p.get(dong_col, "")).strip()
+    for p in normalized_roster:
+        dong = _blank_text(p.get(dong_col, "")).strip()
         dong_groups.setdefault(dong, []).append(p)
 
     if not title_prefix:
         title_prefix = f"{year}년 {month}월"
-
-    weeks = get_week_ranges(year, month)
-
-    # ── 주차별 날짜 맵 precompute (O(1) lookup) ──
-    week_date_map: dict[date, int] = {}
-    for wi, (_wn, wstart, wend) in enumerate(weeks):
-        d = wstart
-        while d <= wend:
-            week_date_map[d] = wi
-            d += timedelta(days=1)
 
     created = []
 
@@ -219,53 +148,10 @@ def make_confirm(
         msg += "\n\n확인서템플릿.xlsx 파일을 확인 후 다시 실행하세요."
         raise ValueError(msg)
 
-    # ── Reader 확보 (DataSource 우선, get_db_reader fallback) ──
-    if data_source is not None:
-        reader = data_source
-    else:
-        from ..excel.db_reader import get_db_reader as _get_db_reader
-
-        reader = _get_db_reader()
-
-    # ── 배송 데이터 로드 ──
-    need_matrix = any(
-        "_delivery_rows_raw" not in p or not p["_delivery_rows_raw"]
-        for p in roster_data
-    )
-
-    delivery_by_id: dict[str, list[dict]] = {}
-
-    if need_matrix:
-        try:
-            delivery_matrix = reader.read_delivery_matrix()
-        except Exception:
-            delivery_matrix = []
-
-        for row in delivery_matrix:
-            pid = str(row.get("ID", "")).strip()
-            if pid:
-                enriched = dict(row)
-                enriched["_daily"] = {c: v for c, v in row.items() if _is_date_col(c)}
-                delivery_by_id.setdefault(pid, []).append(enriched)
-
-    # 배송연락처: 배송정보 테이블 헤더에서 연락처/배송담당 컬럼 읽기
-    delivery_person = ""
-    delivery_phone = ""
-    try:
-        for row in reader.read_delivery_order():
-            p = row.get("배송담당", "").strip()
-            ph = row.get("연락처", "").strip()
-            if p or ph:
-                delivery_person = p
-                delivery_phone = ph
-                break
-    except Exception:
-        pass
-
     for dong, persons_in_dong in dong_groups.items():
         hh_groups = {}
         for p in persons_in_dong:
-            addr = p.get(addr_col, "")
+            addr = _blank_text(p.get(addr_col, ""))
             hh_groups.setdefault(addr, []).append(p)
 
         hh_1 = hh_2 = hh_3 = hh_4 = hh_5 = 0
@@ -319,7 +205,7 @@ def make_confirm(
 
             if not col_widths_copied:
                 # ── 데이터 있는 열(data_cols)까지만 컬럼 너비 복사 ──
-                for _key, src_cd in src.column_dimensions.items():
+                for src_cd in src.column_dimensions.values():
                     if not src_cd.width:
                         continue
                     c_min = src_cd.min or 1
@@ -334,8 +220,8 @@ def make_confirm(
                         ws.sheet_format.defaultColWidth = (
                             src.sheet_format.defaultColWidth
                         )
-                except Exception:
-                    pass
+                except (AttributeError, TypeError, ValueError) as error:
+                    log.debug("템플릿 기본 열 너비 복사 생략: %s", error)
                 col_widths_copied = True
 
             # 셀 복사
@@ -369,6 +255,7 @@ def make_confirm(
                         cell.value = adjust_formula(str(cell.value), current_row - 1)
 
             ph_map = all_placeholders.get(tpl_key, {})
+            delivery_person = _household_delivery_staff(members)
 
             title_suffix = s.get("confirm", "title_suffix")
             if meal_type == "급식":
@@ -381,14 +268,11 @@ def make_confirm(
                 f"{title_prefix} {title_suffix}",
                 tpl_anchor_map,
             )
-            if delivery_person:
-                _set_ph(
-                    ws, ph_map, "delivery", current_row, delivery_person, tpl_anchor_map
-                )
-            if meal_type != "급식" and delivery_phone:
-                _set_ph(
-                    ws, ph_map, "d_phone", current_row, delivery_phone, tpl_anchor_map
-                )
+            _set_ph(
+                ws, ph_map, "delivery", current_row, delivery_person, tpl_anchor_map
+            )
+            # 새 연간 스키마에는 배송 연락처가 없으므로 플레이스홀더를 비운다.
+            _set_ph(ws, ph_map, "d_phone", current_row, "", tpl_anchor_map)
             _set_ph(ws, ph_map, "addr", current_row, addr, tpl_anchor_map)
 
             # ── 급식 확인서: dong(관할동) 별도 플레이스홀더 ──
@@ -397,7 +281,7 @@ def make_confirm(
 
             hh_notes: list[str] = []
             for p in members:
-                nt = str(p.get("_note", "")).strip()
+                nt = _blank_text(p.get("_note", "")).strip()
                 if nt and nt not in hh_notes:
                     hh_notes.append(nt)
             combined_note = "\n".join(hh_notes)
@@ -411,9 +295,9 @@ def make_confirm(
                 if meal_type != "급식":
                     sheet_seq += 1
 
-                name = str(person.get(name_col, ""))
-                head = str(person.get(head_col, ""))
-                phone = str(person.get(phone_col, ""))
+                name = _blank_text(person.get(name_col, ""))
+                head = _blank_text(person.get(head_col, ""))
+                phone = _blank_text(person.get(phone_col, ""))
 
                 if meal_type == "급식" and ci == 0:
                     _set_ph(ws, ph_map, "num1", current_row, sheet_seq, tpl_anchor_map)
@@ -432,65 +316,32 @@ def make_confirm(
                     ws, ph_map, f"phone{ci + 1}", current_row, phone, tpl_anchor_map
                 )
 
-                # ── 배송 데이터: 멀티 행(식종별) 주차별 집계 ──
-                person_id = str(person.get("ID", "")) or str(person.get("id", ""))
-
-                # delivery_by_id에서 이 사람의 모든 행(식종별) 가져오기 (_daily는 이미 포함)
-                # 이미 InvoiceData를 통해 _delivery_rows_raw가 있다면 overwrite하지 않음
-                if (
-                    "_delivery_rows_raw" not in person
-                    or not person["_delivery_rows_raw"]
-                ):
-                    person["_delivery_rows_raw"] = (
-                        delivery_by_id.get(person_id, []) if person_id else []
-                    )
-
-                weekly_counts = _calc_weekly_breakdown_from_daily(
-                    year, month, person, weeks, week_date_map
-                )
-
-                for wi, wdata in enumerate(weeks):
-                    wd = (
-                        weekly_counts[wi]
-                        if wi < len(weekly_counts)
-                        else {
-                            MealType.BREAKFAST: 0,
-                            MealType.DINNER: 0,
-                            MealType.LUNCH: 0,
-                        }
-                    )
+                # 청구 서비스가 계산한 주차별 건수만 렌더링한다.
+                weekly_counts = _prepared_weekly_counts(person)
+                for week in range(1, 6):
+                    prepared = weekly_counts.get(week)
                     _set_ph(
                         ws,
                         ph_map,
-                        f"week{wi + 1}",
+                        f"week{week}",
                         current_row,
-                        week_date_str(wdata[1], wdata[2]),
+                        _format_week_range(prepared) if prepared else "",
                         tpl_anchor_map,
                     )
-                    _set_ph(
-                        ws,
-                        ph_map,
-                        f"sum_b_{ci + 1}_{wi + 1}",
-                        current_row,
-                        wd[MealType.BREAKFAST] if wd[MealType.BREAKFAST] else "",
-                        tpl_anchor_map,
-                    )
-                    _set_ph(
-                        ws,
-                        ph_map,
-                        f"sum_d_{ci + 1}_{wi + 1}",
-                        current_row,
-                        wd[MealType.DINNER] if wd[MealType.DINNER] else "",
-                        tpl_anchor_map,
-                    )
-                    _set_ph(
-                        ws,
-                        ph_map,
-                        f"sum_l_{ci + 1}_{wi + 1}",
-                        current_row,
-                        wd[MealType.LUNCH] if wd[MealType.LUNCH] else "",
-                        tpl_anchor_map,
-                    )
+                    for meal, placeholder in (
+                        ("조식", "sum_b"),
+                        ("석식", "sum_d"),
+                        ("중식", "sum_l"),
+                    ):
+                        count = prepared[meal] if prepared else 0
+                        _set_ph(
+                            ws,
+                            ph_map,
+                            f"{placeholder}_{ci + 1}_{week}",
+                            current_row,
+                            count if count else "",
+                            tpl_anchor_map,
+                        )
 
             current_row += tpl_rows
 

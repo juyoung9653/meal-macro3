@@ -34,7 +34,7 @@ def truthy(v: Any) -> bool:
     return _to_str(v).lower() in {"1", "y", "true"}
 
 
-def _serial_to_date(serial: int | float) -> date | None:
+def _serial_to_date(serial: int | float) -> date | None:  # noqa: PYI041
     if not isinstance(serial, (int, float)) or serial < 1:
         return None
     try:
@@ -66,6 +66,39 @@ def _to_date(val: Any) -> date | None:
                 except (ValueError, OverflowError):
                     pass
     return None
+
+
+def parse_annual_date_header(value: Any) -> date | None:
+    """연간 배송현황의 날짜 헤더를 실제 날짜로 변환한다.
+
+    새 계약인 8자리 ``YYYYMMDD`` 문자열/숫자와 Excel이 반환하는
+    :class:`date`/:class:`datetime`만 지원한다. 레거시 ``M/D`` 형식이나
+    Excel serial number는 의도적으로 해석하지 않는다.
+    """
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, bool):
+        return None
+
+    text: str
+    if isinstance(value, str):
+        text = value.strip()
+    elif isinstance(value, (int, float)):
+        if isinstance(value, float) and (not math.isfinite(value) or not value.is_integer()):
+            return None
+        text = str(int(value))
+    else:
+        return None
+
+    if not re.fullmatch(r"\d{8}", text):
+        return None
+    try:
+        return date(int(text[:4]), int(text[4:6]), int(text[6:8]))
+    except ValueError:
+        return None
+
 
 
 def _to_str(val: Any) -> str:
