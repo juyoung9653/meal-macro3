@@ -6,6 +6,20 @@ from typing import Any, cast
 from .delivery_matrix import ALLOWED_MEALS
 from .invoice_data import EnrichedPersonDict, WeeklyMealCount
 
+FULL_ADDRESS_FIELD = "전체주소"
+
+
+def combine_address(road_address: object, detail_address: object) -> str:
+    """도로명주소와 상세주소를 공백 하나로 연결한 표시 주소를 만든다."""
+    parts: list[str] = []
+    for value in (road_address, detail_address):
+        if value is None:
+            continue
+        text = " ".join(str(value).split())
+        if text:
+            parts.append(text)
+    return " ".join(parts)
+
 
 def build_enriched_person_dict(
     raw: Mapping[str, Any],
@@ -26,6 +40,11 @@ def build_enriched_person_dict(
     weekly_copy = [cast(WeeklyMealCount, dict(item)) for item in weekly_meal_counts]
 
     enriched = dict(raw)
+    if "도로명주소" in raw or "상세주소" in raw:
+        enriched[FULL_ADDRESS_FIELD] = combine_address(
+            raw.get("도로명주소"),
+            raw.get("상세주소"),
+        )
     enriched.update(
         {
             "_note": note,

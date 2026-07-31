@@ -1,19 +1,13 @@
-"""④ 배송대타 탭 — 배송 대타 매크로 기능을 PyQt6로 포팅.
-
-DbReader(분당구_급식 db.xlsx)를 유일한 데이터 소스로 사용.
-- 배송전체(ID, 식종, 날짜 O/X) + 명단(ID→성명) + 배송정보(배송순서/주소) 조인
-"""
+"""④ 배송대타 탭 — 연간 배송 데이터의 실제 배송행을 출력한다."""
 
 from __future__ import annotations
 
 import logging
+from datetime import date, datetime, timezone
 
-import pandas as pd
-from PyQt6.QtCore import QDate
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
-    QDateEdit,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -26,11 +20,15 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from src.core.delivery_matrix import AnnualDeliveryBook
 from src.core.settings import get_settings
-from src.excel._parsing import _is_date_col, _parse_date_col
-from src.excel.data_source import DataSource
-from src.excel.db_reader import get_db_reader
-from src.excel.delivery_io import Choice, make_result, uniq
+from src.excel.delivery_io import (
+    Choice,
+    available_delivery_dates,
+    available_meals,
+    available_staff,
+    make_result,
+)
 from src.excel.delivery_viewer import show_excel
 
 log = logging.getLogger(__name__)
@@ -40,29 +38,37 @@ SPLIT_OPTIONS = ["동기준", "그룹기준"]
 
 
 class DeliverySubstituteTab(QWidget):
-    """④ 배송대타 탭 — DB 필터 및 A4 최적화 출력."""
+    """④ 배송대타 탭 — 연간 배송 데이터 필터 및 A4 최적화 출력."""
 
-    def __init__(self, meal_type: str = "", data_source: DataSource | None = None):
+    def __init__(
+        self,
+        meal_type: str = "",
+        annual_book: AnnualDeliveryBook | None = None,
+    ):
         super().__init__()
         self._s = get_settings()
         self._meal_type = meal_type
-        self._ds: DataSource | None = data_source
+        self._book: AnnualDeliveryBook | None = None
 
         # 컬럼 설정
         self._pick_cols: list[str] = self._s.get_delivery_config("pick_cols") or []
         delivery_st = self._s.get_delivery_settings()
         cols_data = delivery_st.get("cols", {})
-        self._order: list[str] = cols_data.get("order", self._pick_cols[:])
-        self._enabled: dict[str, bool] = cols_data.get(
-            "enabled", {c: True for c in self._pick_cols}
+        stored_order = cols_data.get("order", self._pick_cols[:])
+        self._order: list[str] = [
+            column for column in stored_order if column in self._pick_cols
+        ]
+        self._order.extend(
+            column for column in self._pick_cols if column not in self._order
         )
-
-        # DB 데이터
-        self._df: pd.DataFrame | None = None
-        self._meals: list[str] = []
-        self._ships: list[str] = []
+        stored_enabled = cols_data.get("enabled", {})
+        self._enabled: dict[str, bool] = {
+            column: bool(stored_enabled.get(column, True))
+            for column in self._pick_cols
+        }
 
         self._setup_ui()
+        self.set_annual_book(annual_book)
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -72,22 +78,22 @@ class DeliverySubstituteTab(QWidget):
         row1 = QHBoxLayout()
         row1.addWidget(QLabel("식사 구분"))
         self.meal_combo = QComboBox()
+        self.meal_combo.currentIndexChanged.connect(self._on_meal_changed)
         row1.addWidget(self.meal_combo)
         row1.addSpacing(20)
         row1.addWidget(QLabel("배송담당"))
         self.ship_combo = QComboBox()
+        self.ship_combo.currentIndexChanged.connect(self._on_staff_changed)
         row1.addWidget(self.ship_combo)
         row1.addStretch()
         layout.addLayout(row1)
 
-        # ── 날짜 (캘린더 선택) ──
+        # ── 실제 배송 입력 날짜 ──
         row2 = QHBoxLayout()
         row2.addWidget(QLabel("날짜"))
-        self.date_edit = QDateEdit()
-        self.date_edit.setCalendarPopup(True)
-        self.date_edit.setDate(QDate.currentDate())
-        self.date_edit.setDisplayFormat("yyyy-MM-dd")
-        row2.addWidget(self.date_edit)
+        self.date_combo = QComboBox()
+        self.date_combo.currentIndexChanged.connect(self._on_date_changed)
+        row2.addWidget(self.date_combo)
         row2.addStretch()
         layout.addLayout(row2)
 
@@ -138,11 +144,12 @@ class DeliverySubstituteTab(QWidget):
         # ── 실행 ──
         self.run_btn = QPushButton("실행")
         self.run_btn.setMinimumHeight(36)
+        self.run_btn.setEnabled(False)
         self.run_btn.clicked.connect(self._on_run)
         layout.addWidget(self.run_btn)
 
         # ── 상태 ──
-        self.status_label = QLabel("대기 중 (명단 파일을 선택해 주세요)")
+        self.status_label = QLabel("배송 데이터 미로드")
         layout.addWidget(self.status_label)
 
         layout.addStretch()
@@ -150,123 +157,169 @@ class DeliverySubstituteTab(QWidget):
     # ── Public: MainWindow 연동 ──
 
     def set_meal_type(self, meal_type: str):
+        """앱 업체명을 보관한다. 배송 식종 선택에는 사용하지 않는다."""
         self._meal_type = meal_type
 
-    def on_roster_changed(self):
-        """MainWindow에서 명단 파일 변경 시 호출. DbReader에서 데이터 로드."""
-        self.status_label.setText("명단 로드 중...")
+    def set_annual_book(self, book: AnnualDeliveryBook | None):
+        """연간 배송 책을 설정하고 실제 입력 날짜의 선택지를 초기화한다."""
+        self._book = book
+        self.run_btn.setEnabled(False)
+        self._clear_combo(self.date_combo)
+        self._clear_combo(self.meal_combo)
+        self._clear_combo(self.ship_combo)
+        self.date_combo.setEnabled(False)
+        self.meal_combo.setEnabled(False)
+        self.ship_combo.setEnabled(False)
+
+        if book is None:
+            self.status_label.setText("배송 데이터 미로드")
+            return
+
+        days = available_delivery_dates(book)
+        if not days:
+            self.status_label.setText("선택 가능한 배송 날짜가 없습니다.")
+            return
+
+        was_blocked = self.date_combo.blockSignals(True)
         try:
-            if self._load_db_data():
-                self.status_label.setText("명단 로드 완료")
-            else:
-                self.status_label.setText("명단 로드 실패")
-        except Exception as e:
-            self.status_label.setText(f"명단 로드 오류: {e}")
-            log.exception("on_roster_changed")
+            for day in days:
+                self.date_combo.addItem(day.strftime("%Y%m%d"), day)
+            today = datetime.now(timezone.utc).astimezone().date()
+            selected_index = days.index(today) if today in days else len(days) - 1
+            self.date_combo.setCurrentIndex(selected_index)
+        finally:
+            self.date_combo.blockSignals(was_blocked)
 
-    # ── 데이터 로드 ──
+        self.date_combo.setEnabled(True)
+        self._refresh_meals()
 
-    def _load_db_data(self) -> bool:
-        """DataSource(DbReader)에서 배송 데이터 로드.
+    def _on_date_changed(self, _index: int = -1):
+        self._refresh_meals()
 
-        배송전체(식종+날짜) + 명단(성명) + 배송정보(배송순서/주소)를
-        조인하여 배송 대타에 필요한 flat DataFrame을 생성한다.
-        """
-        try:
-            # DataSource 확보
-            if self._ds is None:
-                self._ds = get_db_reader(self._s.get("db", "path"))
+    def _on_meal_changed(self, _index: int = -1):
+        self._refresh_staff()
 
-            # DbReader 기반 DF 빌드
-            self._df = self._build_delivery_df()
+    def _on_staff_changed(self, _index: int = -1):
+        self._update_run_state()
 
-            if self._df is None or self._df.empty:
-                self.status_label.setText("배송 데이터 없음")
-                return False
+    def _refresh_meals(self):
+        previous_meal = self.meal_combo.currentText()
+        previous_staff = self.ship_combo.currentText()
+        day = self._selected_day()
+        meals = (
+            available_meals(self._book, day)
+            if self._book is not None and day is not None
+            else []
+        )
+        self._replace_text_items(self.meal_combo, meals, previous_meal)
+        self.meal_combo.setEnabled(bool(meals))
+        self._refresh_staff(previous_staff)
 
-            # 식사 구분(식종) / 배송담당 목록 추출
-            col_meal = self._s.get_delivery_config("col_meal")  # "식사 구분"
-            col_ship = self._s.get_delivery_config("col_ship")  # "배송_new"
-            self._meals = uniq(self._df, col_meal)
-            self._ships = uniq(self._df, col_ship)
+    def _refresh_staff(self, preferred_staff: str | None = None):
+        if preferred_staff is None:
+            preferred_staff = self.ship_combo.currentText()
 
-            self.meal_combo.clear()
-            self.meal_combo.addItems(self._meals)
-            self.ship_combo.clear()
-            self.ship_combo.addItems(self._ships)
+        day = self._selected_day()
+        meal = self.meal_combo.currentText()
+        staff = (
+            available_staff(self._book, day, meal)
+            if self._book is not None and day is not None and meal
+            else []
+        )
+        self._replace_text_items(self.ship_combo, staff, preferred_staff)
+        self.ship_combo.setEnabled(bool(staff))
+        self._update_run_state()
 
-            if self._meals:
-                self.meal_combo.setCurrentText(self._meals[0])
-            if self._ships:
-                self.ship_combo.setCurrentText(self._ships[0])
+    def _selected_day(self) -> date | None:
+        value = self.date_combo.currentData()
+        return value if isinstance(value, date) else None
 
-            self.status_label.setText(f"로드 완료 ({len(self._df)}행)")
-            return True
+    def _selection_problem(self) -> str | None:
+        book = self._book
+        if book is None:
+            return "배송 데이터 미로드"
 
-        except Exception as e:
-            self.status_label.setText(f"로드 실패: {e}")
-            log.exception("_load_db_data")
-            return False
+        day = self._selected_day()
+        if day is None:
+            if self.date_combo.count() == 0:
+                return "선택 가능한 배송 날짜가 없습니다."
+            return "선택한 날짜 정보가 올바른 date 값이 아닙니다."
+        if day not in available_delivery_dates(book):
+            return f"{day:%Y%m%d}은(는) 선택 가능한 배송 날짜가 아닙니다."
 
-    def _build_delivery_df(self) -> pd.DataFrame | None:
-        """DbReader 배송전체 + 명단 + 배송정보를 조인하여 flat DataFrame 생성.
+        meals = available_meals(book, day)
+        if not meals:
+            return f"{day:%Y%m%d}: 배송 대상 없음"
 
-        Result columns (for make_result compatibility):
-            식사 구분, 배송_new, 배송순서, 이름, 관할동,
-            상세주소, 신주소, 핸드폰, 비고2, 날짜플래그컬럼들(6/1, 6/2, ...)
-        """
-        # 1. 배송전체: ID, 식종, 날짜별 O/X
-        matrix = self._ds.read_delivery_matrix()
-        if not matrix:
-            return None
+        meal = self.meal_combo.currentText()
+        if meal not in meals:
+            return "식종을 선택해 주세요."
 
-        # 2. 명단: ID → 성명, 핸드폰, 주소
-        roster = self._ds.read_roster()
-        roster_by_id: dict[str, dict] = {}
-        for p in roster:
-            pid = str(p.get("ID", "")).strip()
-            if pid:
-                roster_by_id[pid] = p
-
-        # 3. 배송정보: 배송순서, 배송담당, 주소 (key: 핸드폰|주소)
-        order_map = self._ds.build_order_map()
-
-        # 4. 조인
-        rows: list[dict] = []
-        for m in matrix:
-            pid = str(m.get("ID", "")).strip()
-            person = roster_by_id.get(pid, {})
-
-            name = person.get("성명", "")
-            phone = (
-                str(person.get("핸드폰", "")).strip().replace("-", "").replace(" ", "")
+        blank_staff_rows = self._blank_staff_rows(book, day, meal)
+        if blank_staff_rows:
+            rows = "; ".join(blank_staff_rows)
+            return (
+                f"{day:%Y%m%d} {meal} 배송 대상 중 배송담당이 빈칸인 "
+                f"대상자: {rows}. 해당 식종은 실행할 수 없습니다."
             )
-            addr = str(person.get("도로명주소", "")).strip()
 
-            # 배송정보 lookup
-            key = f"{phone}|{addr}" if phone and addr else ""
-            order_info = order_map.get(key, {}) if key else {}
+        ship = self.ship_combo.currentText()
+        if ship not in available_staff(book, day, meal):
+            return "유효한 배송담당을 선택해 주세요."
+        return None
 
-            row: dict = {
-                "식사 구분": m.get("식종", ""),
-                "배송_new": order_info.get("배송담당", ""),
-                "배송순서": order_info.get("배송순서", ""),
-                "이름": name,
-                "관할동": person.get("관할동", ""),
-                "상세주소": person.get("상세주소", ""),
-                "신주소": order_info.get("도로명주소", addr),
-                "핸드폰": order_info.get("핸드폰", phone),
-                "비고2": order_info.get("비고", ""),
-            }
+    def _update_run_state(self):
+        problem = self._selection_problem()
+        self.run_btn.setEnabled(problem is None)
+        if problem is not None:
+            self.status_label.setText(problem)
+            return
 
-            # 날짜 플래그 컬럼 (6/1, 6/2, ...)
-            for k, v in m.items():
-                if k not in ("ID", "식종"):
-                    row[k] = v
+        day = self._selected_day()
+        if day is None:
+            return
+        self.status_label.setText(
+            f"선택 완료: {day:%Y%m%d} / {self.meal_combo.currentText()} / "
+            f"{self.ship_combo.currentText()}"
+        )
 
-            rows.append(row)
+    @staticmethod
+    def _blank_staff_rows(
+        book: AnnualDeliveryBook, day: date, meal: str
+    ) -> list[str]:
+        rows: list[str] = []
+        seen_people: set[int] = set()
+        for row in book.delivered_rows_on(day, meal=meal):
+            if isinstance(row.staff, str) and row.staff.strip():
+                continue
+            if row.person.source_row in seen_people:
+                continue
+            seen_people.add(row.person.source_row)
+            name = row.person.display_name or "(빈 값)"
+            rows.append(f"성명={name}, Excel 원본 행={row.source_row}")
+        return rows
 
-        return pd.DataFrame(rows) if rows else None
+    @staticmethod
+    def _clear_combo(combo: QComboBox):
+        was_blocked = combo.blockSignals(True)
+        try:
+            combo.clear()
+        finally:
+            combo.blockSignals(was_blocked)
+
+    @staticmethod
+    def _replace_text_items(
+        combo: QComboBox, values: list[str], preferred: str
+    ):
+        was_blocked = combo.blockSignals(True)
+        try:
+            combo.clear()
+            combo.addItems(values)
+            if values:
+                preferred_index = combo.findText(preferred)
+                combo.setCurrentIndex(max(preferred_index, 0))
+        finally:
+            combo.blockSignals(was_blocked)
 
     # ── 컬럼 리스트 ──
 
@@ -285,7 +338,8 @@ class DeliverySubstituteTab(QWidget):
         self._enabled[col_name] = not self._enabled.get(col_name, True)
         self._render_column_list()
         for i in range(self.col_list.count()):
-            if self.col_list.item(i).text().endswith(col_name):
+            candidate = self.col_list.item(i)
+            if candidate is not None and candidate.text().endswith(col_name):
                 self.col_list.setCurrentRow(i)
                 break
         self._persist()
@@ -306,7 +360,6 @@ class DeliverySubstituteTab(QWidget):
 
     def _persist(self):
         self._s.set_delivery_settings(
-            db_path="",
             order=self._order[:],
             enabled={c: bool(self._enabled.get(c, True)) for c in self._pick_cols},
             orientation=self.ori_combo.currentText(),
@@ -316,26 +369,16 @@ class DeliverySubstituteTab(QWidget):
     # ── 실행 ──
 
     def _on_run(self):
-        if self._df is None:
-            if not self._load_db_data():
-                QMessageBox.warning(self, "오류", "DB 데이터를 불러오지 못했습니다.")
-                return
+        problem = self._selection_problem()
+        if problem is not None:
+            self.run_btn.setEnabled(False)
+            self.status_label.setText(problem)
+            QMessageBox.warning(self, "실행 불가", problem)
+            return
 
-        qd = self.date_edit.date()
-        m, d = qd.month(), qd.day()
-        target_md = (m, d)
-
-        # 배송전체 M/D 컬럼명 찾기
-        flag_col = ""
-        for col in self._df.columns:
-            parsed = _parse_date_col(col)
-            if parsed == target_md:
-                flag_col = col
-                break
-        if not flag_col:
-            QMessageBox.warning(
-                self, "오류", f"'{m}/{d}' 날짜 컬럼을 배송전체에서 찾을 수 없습니다."
-            )
+        book = self._book
+        day = self._selected_day()
+        if book is None or day is None:
             return
 
         cols = [c for c in self._order if self._enabled.get(c, False)]
@@ -348,6 +391,11 @@ class DeliverySubstituteTab(QWidget):
         except ValueError:
             QMessageBox.warning(self, "오류", "최대그룹에는 숫자를 입력해 주세요.")
             return
+        if max_rows <= 0:
+            QMessageBox.warning(
+                self, "오류", "최대그룹에는 1 이상의 정수를 입력해 주세요."
+            )
+            return
 
         self._persist()
         self.status_label.setText("처리 중...")
@@ -355,20 +403,23 @@ class DeliverySubstituteTab(QWidget):
 
         QApplication.processEvents()
 
+        meal = self.meal_combo.currentText()
+        ship = self.ship_combo.currentText()
         try:
-            meal = self.meal_combo.currentText()
-            ship = self.ship_combo.currentText()
+            choice = Choice(meal=meal, ship=ship, day=day, cols=cols)
+            out = make_result(book, choice)
+            if out.empty:
+                message = "선택한 조건에 해당하는 배송 대상이 없습니다."
+                self.status_label.setText("배송 대상 없음")
+                QMessageBox.information(self, "안내", message)
+                return
 
-            choice = Choice(meal=meal, ship=ship, flag_col=flag_col, cols=cols)
-            out = make_result(self._df, choice)
-
-            date_label = f"{qd.year()}{m:02d}{d:02d}"
             show_excel(
                 df=out,
                 title="배송대타",
                 meal=meal,
                 ship=ship,
-                date_str=date_label,
+                date_str=day.strftime("%Y%m%d"),
                 ori=ORI_OPTIONS.index(self.ori_combo.currentText()),
                 split=SPLIT_OPTIONS.index(self.split_combo.currentText()) + 1,
                 max_rows=max_rows,
@@ -378,5 +429,5 @@ class DeliverySubstituteTab(QWidget):
             QMessageBox.information(self, "완료", "엑셀 출력이 완료되었습니다.")
         except Exception as e:
             self.status_label.setText(f"오류: {e}")
-            QMessageBox.critical(self, "오류", f"실행 중 오류 발생:\n{e}")
+            QMessageBox.critical(self, "오류", str(e))
             log.exception("_on_run")

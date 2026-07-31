@@ -87,8 +87,9 @@ class ConfirmTab(QWidget):
             ["시트명", "총 가구 수", "1명", "2명", "3명", "4명", "5명"]
         )
         hdr2 = self.confirm_table.horizontalHeader()
-        hdr2.setStretchLastSection(True)
-        hdr2.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        if hdr2 is not None:
+            hdr2.setStretchLastSection(True)
+            hdr2.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.confirm_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.confirm_table.setAlternatingRowColors(True)
 
@@ -124,30 +125,35 @@ class ConfirmTab(QWidget):
             self.path_label.setStyleSheet("color: #000;")
             self._save_settings()
 
+    def _active_invoices(self):
+        """실제 배송 건수가 하나 이상인 청구서만 반환한다."""
+        count_keys = ("_bf_cnt", "_dn_cnt", "_lh_cnt")
+        return [
+            invoice
+            for invoice in self._data.invoices
+            if any((invoice.get(key, 0) or 0) > 0 for key in count_keys)
+        ]
+
     def _generate_confirms(self):
         """확인서 생성"""
+        active_invoices = self._active_invoices()
+        if not active_invoices:
+            QMessageBox.warning(
+                self,
+                "알림",
+                "실제 배송 건수가 있는 청구서 데이터가 없습니다. "
+                "청구서 탭에서 먼저 생성하세요.",
+            )
+            return
         if not self.output_dir:
             QMessageBox.warning(self, "알림", "출력 경로를 먼저 선택하세요.")
-            return
-        if not self._data.invoices:
-            QMessageBox.warning(
-                self, "알림", "청구서 데이터가 없습니다. 청구서 탭에서 먼저 생성하세요."
-            )
             return
 
         try:
             self._save_settings()
+            self._invalidate_result()
 
-            # 청구서에 실제 포함된 인원만 확인서 대상 (건수 0인 인원 제외)
-            active_invoices = [
-                p
-                for p in self._data.invoices
-                if p.get("_bf_cnt", 0) > 0
-                or p.get("_dn_cnt", 0) > 0
-                or p.get("_lh_cnt", 0) > 0
-            ]
-
-            template_path = self._s.get_confirm_template_path()
+            template_path = self._s.get_confirm_template_path(self._meal_type)
             self.confirms = make_confirm(
                 roster_data=active_invoices,
                 col_mapping=self._data.col_mapping,
@@ -155,9 +161,6 @@ class ConfirmTab(QWidget):
                 template_path=template_path,
                 year=self._data.year,
                 month=self._data.month,
-                excluded_dates=self._data.excluded_dates.copy()
-                if self._data.excluded_dates
-                else None,
                 meal_type=self._meal_type,
             )
             if self.confirms:
@@ -170,7 +173,7 @@ class ConfirmTab(QWidget):
             )
         except ValueError as e:
             QMessageBox.warning(self, "템플릿 오류", str(e))
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - 사용자용 오류 대화상자로 변환
             QMessageBox.critical(self, "생성 오류", f"확인서 생성 실패:\n{e}")
 
     def _update_table(self):
@@ -208,20 +211,38 @@ class ConfirmTab(QWidget):
         if meal_type == self._meal_type:
             return
         self._meal_type = meal_type
+        self._invalidate_result()
+        self._update_input_state()
 
-    def _clear(self):
+    def _invalidate_result(self):
         self.confirms.clear()
         self.confirm_table.setRowCount(0)
         self.info_label.setText("생성된 확인서: 0건")
         self._last_output_path = None
         self.open_file_btn.setEnabled(False)
 
-    def set_invoice_data(self, data: InvoiceData):
-        """InvoiceData 객체로 모든 상태 한 번에 설정"""
-        self._data = data
-        self.generate_btn.setEnabled(bool(data.invoices))
-
-        if data.invoices:
+    def _update_input_state(self):
+        active_count = len(self._active_invoices())
+        self.generate_btn.setEnabled(active_count > 0)
+        if active_count:
             self.info_label.setText(
-                f"청구서 {len(data.invoices)}건 로드됨. 생성 버튼을 누르면 확인서를 만듭니다."
+                f"활성 청구서 {active_count}건 로드됨. "
+                "생성 버튼을 누르면 확인서를 만듭니다."
             )
+        elif self._data.invoices:
+            self.info_label.setText("실제 배송 건수가 있는 청구서가 없습니다.")
+        else:
+            self.info_label.setText("청구서 데이터가 없습니다.")
+
+    def _clear(self):
+        self._invalidate_result()
+        self._update_input_state()
+
+    def set_invoice_data(self, data: InvoiceData):
+        """새 청구 결과일 때만 확인서 출력 상태를 초기화한다."""
+        if data == self._data:
+            self._update_input_state()
+            return
+        self._data = data
+        self._invalidate_result()
+        self._update_input_state()

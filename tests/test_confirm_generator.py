@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from unittest.mock import patch
 
 import openpyxl
 import pytest
@@ -36,6 +35,26 @@ def _weekly_counts(
     ]
 
 
+def _roster_person(
+    name: str,
+    address: object,
+    *,
+    detail_address: object = "",
+    dong: object = "정자동",
+) -> dict:
+    return {
+        "성명": name,
+        "세대주 성명": f"{name} 보호자",
+        "핸드폰": "010-1111-1111",
+        "관할동": dong,
+        "도로명주소": address,
+        "상세주소": detail_address,
+        "_note": "",
+        "배송담당": "기사A",
+        "weekly_meal_counts": _weekly_counts(lunch=1),
+    }
+
+
 @pytest.fixture
 def confirm_template() -> str:
     path = "assets/급식_확인서템플릿.xlsx"
@@ -49,9 +68,8 @@ def test_renders_existing_template_from_prepared_weekly_data_without_reader_call
 ):
     people = [
         {
-            "ID": "P001",
             "성명": "홍길동",
-            "세대주\n성명": "홍보호",
+            "세대주 성명": "홍보호",
             "핸드폰": "010-1111-1111",
             "관할동": "정자동",
             "도로명주소": "성남시 분당구 같은집",
@@ -60,9 +78,8 @@ def test_renders_existing_template_from_prepared_weekly_data_without_reader_call
             "weekly_meal_counts": _weekly_counts(breakfast=1, lunch=2),
         },
         {
-            "ID": "P002",
             "성명": "김영희",
-            "세대주\n성명": "김보호",
+            "세대주 성명": "김보호",
             "핸드폰": "010-2222-2222",
             "관할동": "정자동",
             "도로명주소": "성남시 분당구 같은집",
@@ -72,19 +89,15 @@ def test_renders_existing_template_from_prepared_weekly_data_without_reader_call
         },
     ]
 
-    with patch(
-        "src.excel.db_reader.get_db_reader",
-        side_effect=AssertionError("확인서 생성기는 reader를 호출하면 안 됩니다."),
-    ):
-        created = make_confirm(
-            roster_data=people,
-            col_mapping={},
-            output_dir=str(tmp_path),
-            template_path=confirm_template,
-            year=2026,
-            month=6,
-            meal_type="급식",
-        )
+    created = make_confirm(
+        roster_data=people,
+        col_mapping={},
+        output_dir=str(tmp_path),
+        template_path=confirm_template,
+        year=2026,
+        month=6,
+        meal_type="급식",
+    )
 
     assert created == [
         {
@@ -111,20 +124,60 @@ def test_renders_existing_template_from_prepared_weekly_data_without_reader_call
         assert ws["G11"].value is None
         assert ws["H11"].value == 3
         assert ws["I11"].value is None
+        placeholders = scan_placeholders(confirm_template, ["2명"])["2명"]
+        carer1 = placeholders["carer1"][0]
+        carer2 = placeholders["carer2"][0]
+        assert ws.cell(*carer1).value == "홍보호"
+        assert ws.cell(*carer2).value == "김보호"
     finally:
         wb.close()
+
+
+def test_same_road_with_different_detail_addresses_are_separate_households(
+    tmp_path: Path,
+    confirm_template: str,
+):
+    people = [
+        _roster_person("101호 대상", "성남대로 1", detail_address="101호"),
+        _roster_person("102호 대상", "성남대로 1", detail_address="102호"),
+    ]
+
+    created = make_confirm(
+        roster_data=people,
+        col_mapping={},
+        output_dir=str(tmp_path),
+        template_path=confirm_template,
+        year=2026,
+        month=6,
+        meal_type="급식",
+    )
+
+    assert created[0]["total_hh"] == 2
+    assert created[0]["count_1"] == 2
+    assert created[0]["count_2"] == 0
+    workbook = openpyxl.load_workbook(tmp_path / created[0]["file"])
+    try:
+        worksheet = workbook[created[0]["sheet_name"]]
+        values = {
+            cell.value
+            for row in worksheet.iter_rows()
+            for cell in row
+            if isinstance(cell.value, str)
+        }
+        assert {"성남대로 1 101호", "성남대로 1 102호"} <= values
+    finally:
+        workbook.close()
 
 
 def test_none_roster_values_render_as_blanks_with_safe_sheet_fallback(
     tmp_path: Path, confirm_template: str
 ):
     person = {
-        "ID": "P001",
         "성명": None,
-        "세대주\n성명": None,
+        "세대주 성명": None,
         "핸드폰": None,
         "관할동": None,
-        "도로명주소": None,
+        "도로명주소": "성남시 분당구 유효주소",
         "_note": None,
         "배송담당": None,
         "weekly_meal_counts": _weekly_counts(lunch=1),
@@ -144,7 +197,8 @@ def test_none_roster_values_render_as_blanks_with_safe_sheet_fallback(
     wb = openpyxl.load_workbook(tmp_path / created[0]["file"], data_only=False)
     try:
         ws = wb["기타"]
-        for coordinate in ("C3", "F3", "K3", "B6", "C6", "D6"):
+        assert ws["F3"].value == "성남시 분당구 유효주소"
+        for coordinate in ("C3", "K3", "B6", "C6", "D6"):
             assert ws[coordinate].value is None
         assert all(
             "None" not in cell.value
@@ -156,15 +210,123 @@ def test_none_roster_values_render_as_blanks_with_safe_sheet_fallback(
         wb.close()
 
 
+def test_rejects_single_blank_mapped_address_with_dong_and_name(tmp_path: Path):
+    person = {
+        "이름": "주소없는대상자",
+        "동": "정자동",
+        "주소": " \r\n ",
+    }
+
+    with pytest.raises(ValueError) as exc_info:
+        make_confirm(
+            roster_data=[person],
+            col_mapping={"도로명주소": "주소", "성명": "이름", "관할동": "동"},
+            output_dir=str(tmp_path),
+            template_path="사용되지않는_확인서템플릿.xlsx",
+            year=2026,
+            month=6,
+            meal_type="급식",
+        )
+
+    message = str(exc_info.value)
+    assert "빈 주소" in message
+    assert "정자동" in message
+    assert "성명=주소없는대상자, 명단 위치=1" in message
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_rejects_multiple_blank_addresses_with_names_and_roster_positions(
+    tmp_path: Path,
+):
+    names = ["첫번째", "두번째"]
+    people = [
+        _roster_person(names[0], None),
+        _roster_person(names[1], " \n "),
+    ]
+
+    with pytest.raises(ValueError) as exc_info:
+        make_confirm(
+            roster_data=people,
+            col_mapping={},
+            output_dir=str(tmp_path),
+            template_path="사용되지않는_확인서템플릿.xlsx",
+            year=2026,
+            month=6,
+            meal_type="급식",
+        )
+
+    message = str(exc_info.value)
+    assert "빈 주소" in message
+    assert "정자동" in message
+    for position, name in enumerate(names, start=1):
+        assert f"성명={name}, 명단 위치={position}" in message
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_rejects_six_person_household_with_names_and_roster_positions(
+    tmp_path: Path,
+):
+    address = "성남시 분당구 여섯명가구"
+    names = [f"대상자{i}" for i in range(1, 7)]
+    people = [_roster_person(name, address) for name in names]
+
+    with pytest.raises(ValueError) as exc_info:
+        make_confirm(
+            roster_data=people,
+            col_mapping={},
+            output_dir=str(tmp_path),
+            template_path="사용되지않는_확인서템플릿.xlsx",
+            year=2026,
+            month=6,
+            meal_type="급식",
+        )
+
+    message = str(exc_info.value)
+    assert address in message
+    assert "6명" in message
+    for position, name in enumerate(names, start=1):
+        assert f"성명={name}, 명단 위치={position}" in message
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_renders_five_person_household_without_omission(
+    tmp_path: Path, confirm_template: str
+):
+    address = "성남시 분당구 다섯명가구"
+    names = [f"대상자{i}" for i in range(1, 6)]
+    people = [_roster_person(name, address) for name in names]
+
+    created = make_confirm(
+        roster_data=people,
+        col_mapping={},
+        output_dir=str(tmp_path),
+        template_path=confirm_template,
+        year=2026,
+        month=6,
+        meal_type="급식",
+    )
+
+    assert created[0]["total_hh"] == 1
+    assert created[0]["count_5"] == 1
+    placeholders = scan_placeholders(confirm_template, ["5명"])["5명"]
+    wb = openpyxl.load_workbook(tmp_path / created[0]["file"], data_only=False)
+    try:
+        ws = wb[created[0]["sheet_name"]]
+        for index, name in enumerate(names, start=1):
+            row, column = placeholders[f"child{index}"][0]
+            assert ws.cell(row=row, column=column).value == name
+    finally:
+        wb.close()
+
+
 def test_happy_lunch_delivery_phone_placeholder_is_explicitly_blank(tmp_path: Path):
     template = "assets/행복도시락_확인서템플릿.xlsx"
     if not os.path.exists(template):
         pytest.skip("행복도시락 확인서 템플릿 없음")
 
     person = {
-        "ID": "P001",
         "성명": "홍길동",
-        "세대주\n성명": "홍보호",
+        "세대주 성명": "홍보호",
         "핸드폰": "010-1111-1111",
         "관할동": "정자동",
         "도로명주소": "성남시 분당구 1",
@@ -173,19 +335,15 @@ def test_happy_lunch_delivery_phone_placeholder_is_explicitly_blank(tmp_path: Pa
         "weekly_meal_counts": _weekly_counts(lunch=1),
     }
 
-    with patch(
-        "src.excel.db_reader.get_db_reader",
-        side_effect=AssertionError("reader 호출 금지"),
-    ):
-        created = make_confirm(
-            roster_data=[person],
-            col_mapping={},
-            output_dir=str(tmp_path),
-            template_path=template,
-            year=2026,
-            month=6,
-            meal_type="행복도시락",
-        )
+    created = make_confirm(
+        roster_data=[person],
+        col_mapping={},
+        output_dir=str(tmp_path),
+        template_path=template,
+        year=2026,
+        month=6,
+        meal_type="행복도시락",
+    )
 
     placeholder = scan_placeholders(template, ["1명"])["1명"]["d_phone"][0]
     wb = openpyxl.load_workbook(tmp_path / created[0]["file"], data_only=False)

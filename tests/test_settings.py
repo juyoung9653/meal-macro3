@@ -1,5 +1,8 @@
 """Tests for src.core.settings — SettingsManager, get/set, defaults, deep_merge."""
 
+import sys
+from pathlib import Path
+
 import pytest
 
 from src.core.settings import DEFAULTS, SettingsManager, get_settings
@@ -44,9 +47,24 @@ class TestTypedAccessors:
         sm = make_settings_manager()
         sm.set_meal_type("행복도시락")
         sm.set_meal_type("급식")
-        assert sm.get_meal_type() == "급식"
         assert sm.get_invoice_template_path() == "assets/급식_청구서템플릿.xlsx"
         assert sm.get_confirm_template_path() == "assets/급식_확인서템플릿.xlsx"
+
+    def test_template_paths_use_pyinstaller_resource_root(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ):
+        sm = make_settings_manager()
+        monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path), raising=False)
+
+        assert sm.get_invoice_template_path() == str(
+            tmp_path / "assets" / "급식_청구서템플릿.xlsx"
+        )
+        assert sm.get_confirm_template_path() == str(
+            tmp_path / "assets" / "급식_확인서템플릿.xlsx"
+        )
+        assert sm.get_report_template_path() == str(
+            tmp_path / "assets" / "report_template.xlsx"
+        )
 
 
 class TestDirectGet:
@@ -119,9 +137,12 @@ class TestDirectGet:
         assert "__calc_breakfast" in cols
         assert "__calc_total" in cols
 
-    def test_db_path(self):
+    def test_annual_workbook_defaults(self):
         sm = make_settings_manager()
-        assert sm.get("db", "path") == "assets/db.xlsx"
+        assert sm.get("annual_workbook", "path") == ""
+        assert sm.get("annual_workbook", "password") == ""
+        assert "db" not in DEFAULTS
+        assert "db_path" not in sm.get("delivery")
 
     def test_direct_get_overridden_value(self):
         sm = make_settings_manager()
@@ -144,7 +165,9 @@ class TestSettingsDefaults:
         assert "templates" in DEFAULTS
         assert "confirm" in DEFAULTS
         assert "invoice" in DEFAULTS
+        assert "annual_workbook" in DEFAULTS
         assert "semantic_columns" in DEFAULTS
+        assert "db" not in DEFAULTS
 
     def test_default_app_title(self):
         assert DEFAULTS["app"]["title"] == "급식비 정산 프로그램"

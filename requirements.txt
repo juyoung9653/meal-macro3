@@ -1,4 +1,5 @@
 PyQt6>=6.5
-openpyxl>=3.1
+openpyxl==3.1.5
 msoffcrypto-tool>=5.0
 pandas>=2.0
+pyinstaller==6.21.0

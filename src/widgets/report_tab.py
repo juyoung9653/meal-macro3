@@ -1,10 +1,11 @@
-"""배송 리포트 탭 — DbReader + DeliveryService + ReportGenerator 통합."""
+"""연간 배송 장부 기반 배송 리포트 탭."""
 
 from __future__ import annotations
 
 import logging
 import os
-from datetime import date
+from datetime import date, datetime, timezone
+from typing import ClassVar
 
 from PyQt6.QtCore import QDate, QSettings, QSize, Qt, QUrl
 from PyQt6.QtGui import QDesktopServices, QTextDocument
@@ -27,12 +28,10 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from ..core.delivery_matrix import ALLOWED_MEALS, AnnualDeliveryBook, MonthState
 from ..core.settings import get_settings
-from ..excel.data_source import DataSource
-from ..excel.db_reader import get_db_reader
 from ..generators.report_generator import export_multi
 from ..services.delivery_service import DeliveryService
-from ..widgets.meal_calendar import MealCalendarWidget
 from ..widgets.order_editor import StaffOrderDialog
 
 log = logging.getLogger(__name__)
@@ -51,6 +50,8 @@ class MemoHighlightDelegate(QStyledItemDelegate):
         return "".join(parts)
 
     def paint(self, painter, option, index) -> None:
+        if painter is None:
+            return
         painter.save()
         if option.state & QStyle.StateFlag.State_Selected:
             painter.fillRect(option.rect, option.palette.highlight())
@@ -77,9 +78,23 @@ class MemoHighlightDelegate(QStyledItemDelegate):
 class ReportTab(QWidget):
     """배송 리포트 ③번째 탭."""
 
-    TABLE_COLS = ["배송담당", "1", "2", "3", "4", "5", "Total", "비고", "참고"]
+    TABLE_COLS: ClassVar[list[str]] = [
+        "배송담당",
+        "1",
+        "2",
+        "3",
+        "4",
+        "5",
+        "Total",
+        "비고",
+        "참고",
+    ]
 
-    def __init__(self, meal_type: str = "", data_source: DataSource | None = None):
+    def __init__(
+        self,
+        meal_type: str = "",
+        annual_book: AnnualDeliveryBook | None = None,
+    ) -> None:
         super().__init__()
         self._s = get_settings()
         self._meal_type = meal_type or self._s.get_meal_type()
@@ -88,23 +103,13 @@ class ReportTab(QWidget):
         app_title = self._s.get("app", "title")
         self._settings = QSettings(org, app_title)
 
-        # DataSource (주입 or 기본)
-        if data_source is not None:
-            self._ds = data_source
-            self._db_reader = None
-        else:
-            self._db_reader = get_db_reader(self._s.get("db", "path"))
-            self._ds = self._db_reader
-
-        # DeliveryService
-        self._service = DeliveryService(self._ds, self._load_staff_sort())
-
-        # State
-        self._roster_loaded = False
-        self._last_results: list[tuple[str, str, list[list]]] = []
+        self._book: AnnualDeliveryBook | None = None
+        self._service: DeliveryService | None = None
+        self._last_results: list[tuple[str, str, list[list[object]]]] = []
         self._last_export_path: str | None = None
 
         self._setup_ui()
+        self.set_annual_book(annual_book)
 
     def _load_staff_sort(self) -> dict[str, list[str]]:
         import json
@@ -116,11 +121,17 @@ class ReportTab(QWidget):
             if val is not None:
                 try:
                     if isinstance(val, str):
-                        result[meal] = json.loads(val)
+                        loaded = json.loads(val)
                     elif isinstance(val, list):
-                        result[meal] = val
-                except Exception:
-                    pass
+                        loaded = val
+                    else:
+                        continue
+                    if isinstance(loaded, list):
+                        result[meal] = [
+                            item for item in loaded if isinstance(item, str)
+                        ]
+                except (json.JSONDecodeError, TypeError) as error:
+                    log.warning("배송순서 설정을 읽지 못했습니다 (%s): %s", meal, error)
         return result
 
     # ── UI ──
@@ -134,8 +145,6 @@ class ReportTab(QWidget):
 
         self.date_start = QDateEdit()
         self.date_start.setCalendarPopup(True)
-        self._cal_start = MealCalendarWidget()
-        self.date_start.setCalendarWidget(self._cal_start)
         self.date_start.setDate(QDate.currentDate())
         self.date_start.setDisplayFormat("yyyy-MM-dd")
         date_layout.addWidget(QLabel("시작:"))
@@ -143,16 +152,17 @@ class ReportTab(QWidget):
 
         self.date_end = QDateEdit()
         self.date_end.setCalendarPopup(True)
-        self._cal_end = MealCalendarWidget()
-        self.date_end.setCalendarWidget(self._cal_end)
         self.date_end.setDate(QDate.currentDate())
         self.date_end.setDisplayFormat("yyyy-MM-dd")
         date_layout.addWidget(QLabel("종료:"))
         date_layout.addWidget(self.date_end)
 
+        self._default_date_min = self.date_start.minimumDate()
+        self._default_date_max = self.date_start.maximumDate()
+
         self.lunch_check = QCheckBox("중식만")
         self.lunch_check.setToolTip(
-            "체크: 중식만 | 해제: 요일별 자동 (월~목 석식, 금 조식)"
+            "체크: 중식만 | 해제: 매트릭스에서 실제 1이 있는 모든 식종"
         )
         date_layout.addWidget(self.lunch_check)
         date_layout.addStretch()
@@ -192,112 +202,170 @@ class ReportTab(QWidget):
         self.result_tabs = QTabWidget()
         self.result_tabs.setTabPosition(QTabWidget.TabPosition.North)
         result_layout.addWidget(self.result_tabs)
-        self.info_label = QLabel("명단을 불러오고 날짜를 선택하세요.")
+        self.info_label = QLabel("연도: - | 명단: 0명 | 범위: 없음")
         self.info_label.setAlignment(Qt.AlignmentFlag.AlignRight)
         result_layout.addWidget(self.info_label)
         layout.addWidget(result_group, stretch=1)
 
-    # ── 명단 변경 처리 ──
+    # ── 연간 배송 장부 ──
 
-    def on_roster_changed(self):
-        """MainWindow에서 명단 파일 변경 시 호출."""
-        try:
-            roster = self._ds.read_roster()
-            if not roster:
-                QMessageBox.warning(
-                    self, "알림", "db.xlsx에서 명단 데이터를 찾을 수 없습니다."
-                )
-                return
+    def set_annual_book(self, book: AnnualDeliveryBook | None) -> None:
+        """연간 배송 장부를 교체하고 장부에 종속된 UI 상태를 초기화한다."""
+        self._book = book
+        self._service = (
+            DeliveryService(book, self._load_staff_sort())
+            if book is not None
+            else None
+        )
+        self._reset_output_state()
 
-            self._roster_loaded = True
-            self.build_btn.setEnabled(True)
+        has_dates = book is not None and bool(book.dates)
+        self.build_btn.setEnabled(has_dates)
+        self.order_btn.setEnabled(book is not None)
+        self.date_start.setEnabled(has_dates)
+        self.date_end.setEnabled(has_dates)
 
-            # 휴무일 로드 → 캘린더에 반영
-            holiday_set = self._ds.get_holiday_set()
-            self._cal_start.set_holidays(holiday_set)
-            self._cal_end.set_holidays(holiday_set)
+        local_today = datetime.now(timezone.utc).astimezone().date()
+        if book is None or not book.dates:
+            self._restore_default_date_limits()
+            today = self._to_qdate(local_today)
+            self.date_start.setDate(today)
+            self.date_end.setDate(today)
+            if book is None:
+                self._set_status("연간 배송 장부를 불러오세요.")
+            else:
+                self._set_status("배송 날짜 헤더가 없습니다.")
+            return
 
-            # 연월 자동 감지 → 날짜 범위 설정
-            try:
-                y, m = self._ds.detect_month()
-                dm = QDate(y, m, 1)
-                today = QDate.currentDate()
-                if today.year() == y and today.month() == m:
-                    self.date_start.setDate(today)
-                else:
-                    self.date_start.setDate(dm)
-                import calendar as _cal
+        first_day = min(book.dates)
+        last_day = max(book.dates)
+        q_first = self._to_qdate(first_day)
+        q_last = self._to_qdate(last_day)
+        self.date_start.setDateRange(q_first, q_last)
+        self.date_end.setDateRange(q_first, q_last)
 
-                last_day = _cal.monthrange(y, m)[1]
-                self.date_end.setDate(QDate(y, m, last_day))
-            except Exception:
-                pass
+        default_range = self._default_date_range(book, local_today)
+        if default_range is None:
+            default_range = first_day, last_day
+        self.date_start.setDate(self._to_qdate(default_range[0]))
+        self.date_end.setDate(self._to_qdate(default_range[1]))
+        self._set_status("리포트를 생성할 날짜를 선택하세요.")
 
-        except FileNotFoundError:
-            QMessageBox.warning(self, "오류", f"명단 파일 없음: {self._ds.db_path}")
-        except Exception as e:
-            QMessageBox.critical(self, "오류", f"명단 파일 로드 실패:\n{e}")
+    @staticmethod
+    def _default_month(book: AnnualDeliveryBook, today: date) -> int | None:
+        """장부와 기준일만으로 기본 월을 결정한다."""
+        months = book.available_months
+        if not months:
+            return None
+        if (
+            book.year == today.year
+            and today.month in months
+            and book.month_state(book.year, today.month) is MonthState.ENTERED
+        ):
+            return today.month
 
-    def set_meal_type(self, meal_type: str):
+        entered_months = [
+            month
+            for month in months
+            if book.month_state(book.year, month) is MonthState.ENTERED
+        ]
+        return max(entered_months) if entered_months else max(months)
+
+    @classmethod
+    def _default_date_range(
+        cls, book: AnnualDeliveryBook, today: date
+    ) -> tuple[date, date] | None:
+        """기본 월에 실제 존재하는 날짜 헤더의 최소·최대 범위를 반환한다."""
+        month = cls._default_month(book, today)
+        if month is None:
+            return None
+        month_dates = [day for day in book.dates if day.month == month]
+        return min(month_dates), max(month_dates)
+
+    @staticmethod
+    def _to_qdate(day: date) -> QDate:
+        return QDate(day.year, day.month, day.day)
+
+    def _restore_default_date_limits(self) -> None:
+        self.date_start.setDateRange(self._default_date_min, self._default_date_max)
+        self.date_end.setDateRange(self._default_date_min, self._default_date_max)
+
+    def _reset_output_state(self) -> None:
+        self.result_tabs.clear()
+        self._last_results = []
+        self._last_export_path = None
+        self.export_btn.setEnabled(False)
+        self.open_btn.setEnabled(False)
+
+    def _book_status_text(self) -> str:
+        book = self._book
+        if book is None:
+            return "연도: - | 명단: 0명 | 범위: 없음"
+        if not book.dates:
+            return f"연도: {book.year}년 | 명단: {len(book.roster)}명 | 범위: 없음"
+        return (
+            f"연도: {book.year}년 | 명단: {len(book.roster)}명 | "
+            f"범위: {min(book.dates):%Y-%m-%d} ~ {max(book.dates):%Y-%m-%d}"
+        )
+
+    def _set_status(self, message: str = "") -> None:
+        status = self._book_status_text()
+        self.info_label.setText(f"{status} | {message}" if message else status)
+
+    def set_meal_type(self, meal_type: str) -> None:
         """식사 유형 변경 (현재 리포트 탭에서는 단순 저장)."""
         self._meal_type = meal_type
 
     # ── 리포트 생성 ──
 
-    def _on_build(self):
+    def _on_build(self) -> None:
+        service = self._service
+        if self._book is None or service is None:
+            self._reset_output_state()
+            self._set_status("연간 배송 장부를 먼저 불러오세요.")
+            QMessageBox.warning(self, "알림", "연간 배송 장부를 먼저 불러오세요.")
+            return
+
+        qd_start = self.date_start.date()
+        qd_end = self.date_end.date()
+        start = date(qd_start.year(), qd_start.month(), qd_start.day())
+        end = date(qd_end.year(), qd_end.month(), qd_end.day())
+        if start > end:
+            self._reset_output_state()
+            self._set_status("날짜 범위를 확인하세요.")
+            QMessageBox.warning(self, "알림", "시작일은 종료일보다 늦을 수 없습니다.")
+            return
+
+        meal_filter = "중식" if self.lunch_check.isChecked() else None
+        log.debug(
+            "[ReportTab] _on_build: %s ~ %s meal_filter=%s",
+            start,
+            end,
+            meal_filter,
+        )
+
+        self._reset_output_state()
         try:
-            qd_start = self.date_start.date()
-            qd_end = self.date_end.date()
-            start = date(qd_start.year(), qd_start.month(), qd_start.day())
-            end = date(qd_end.year(), qd_end.month(), qd_end.day())
-
-            meal_filter = "중식" if self.lunch_check.isChecked() else None
-
-            log.debug(
-                "[ReportTab] _on_build: %s ~ %s meal_filter=%s",
-                start,
-                end,
-                meal_filter,
-            )
-
-            # 리포트 생성
-            results = self._service.build_all(start, end, meal_filter=meal_filter)
-            log.debug(
-                "[ReportTab] build_all 결과: %d개 (필터 전)",
-                len(results),
-            )
-            for ds, ml, tbl in results:
-                log.debug(
-                    "  [%s] %s → %d행, 헤더=%s",
-                    ds,
-                    ml,
-                    len(tbl),
-                    tbl[0] if tbl else "(empty)",
-                )
-
-            # 오류(데이터 없음) 결과 제외
-            results = [r for r in results if r[2] and len(r[2][0]) > 1]
+            results = service.build_all(start, end, meal_filter=meal_filter)
             self._last_results = results
-            log.debug(
-                "[ReportTab] 필터 후: %d개",
-                len(results),
-            )
-
-            # UI 갱신
             self._update_results(results)
-
-            self.info_label.setText(f"{len(results)}개 리포트 생성 완료")
-            self.export_btn.setEnabled(True)
-
+            self.export_btn.setEnabled(bool(results))
+            if results:
+                self._set_status(f"{len(results)}개 리포트 생성 완료")
+            else:
+                self._set_status("생성된 리포트 없음")
         except Exception as e:
             log.exception("리포트 생성 실패")
+            self._reset_output_state()
+            self._set_status("리포트 생성 실패")
             QMessageBox.critical(self, "오류", f"리포트 생성 실패:\n{e}")
 
-    def _update_results(self, results: list[tuple[str, str, list[list]]]):
+    def _update_results(
+        self, results: list[tuple[str, str, list[list[object]]]]
+    ) -> None:
         self.result_tabs.clear()
 
         if not results:
-            self.info_label.setText("생성된 리포트 없음")
             return
 
         for date_str, meal, table in results:
@@ -306,14 +374,16 @@ class ReportTab(QWidget):
 
             tw = QTableWidget()
             if table and len(table) > 0:
-                headers = table[0]
+                headers = [str(value) for value in table[0]]
                 tw.setColumnCount(len(headers))
                 tw.setHorizontalHeaderLabels(headers)
                 tw.setRowCount(len(table) - 1)
 
-                header_font = tw.horizontalHeader().font()
-                header_font.setBold(True)
-                tw.horizontalHeader().setFont(header_font)
+                horizontal_header = tw.horizontalHeader()
+                if horizontal_header is not None:
+                    header_font = horizontal_header.font()
+                    header_font.setBold(True)
+                    horizontal_header.setFont(header_font)
 
                 for ri, row in enumerate(table[1:]):
                     for ci, val in enumerate(row):
@@ -321,10 +391,11 @@ class ReportTab(QWidget):
                         item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                         tw.setItem(ri, ci, item)
 
-                tw.horizontalHeader().setStretchLastSection(True)
-                tw.horizontalHeader().setSectionResizeMode(
-                    QHeaderView.ResizeMode.Stretch
-                )
+                if horizontal_header is not None:
+                    horizontal_header.setStretchLastSection(True)
+                    horizontal_header.setSectionResizeMode(
+                        QHeaderView.ResizeMode.Stretch
+                    )
                 tw.setAlternatingRowColors(True)
                 tw.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
 
@@ -341,7 +412,7 @@ class ReportTab(QWidget):
 
     # ── 내보내기 ──
 
-    def _on_export(self):
+    def _on_export(self) -> None:
         if not self._last_results:
             QMessageBox.warning(self, "알림", "먼저 리포트를 생성하세요.")
             return
@@ -357,39 +428,47 @@ class ReportTab(QWidget):
         fname = f"배송리포트_{qd.year():04d}{qd.month():02d}{qd.day():02d}.xlsx"
         out_path = os.path.join(out_dir, fname)
 
+        self._last_export_path = None
+        self.open_btn.setEnabled(False)
         try:
             export_multi(self._last_results, out_path)
+            if not os.path.isfile(out_path):
+                raise FileNotFoundError(
+                    f"리포트 파일이 생성되지 않았습니다: {out_path}"
+                )
             self._last_export_path = out_path
             self.open_btn.setEnabled(True)
-            self.info_label.setText(f"저장 완료: {os.path.basename(out_path)}")
+            self._set_status(f"저장 완료: {os.path.basename(out_path)}")
             QMessageBox.information(self, "완료", f"리포트 저장 완료:\n{out_path}")
         except Exception as e:
             log.exception("리포트 저장 실패")
+            self._set_status("리포트 저장 실패")
             QMessageBox.critical(self, "오류", f"리포트 저장 실패:\n{e}")
 
-    def _on_open(self):
+    def _on_open(self) -> None:
         if self._last_export_path and os.path.exists(self._last_export_path):
             QDesktopServices.openUrl(QUrl.fromLocalFile(self._last_export_path))
 
     # ── 배송순서 편집 ──
 
-    def _on_edit_order(self):
-        # 현재 서비스에서 담당자 목록 수집
-        staff_by_meal: dict[str, list[str]] = {}
-        try:
-            staff_set = set()
-            for row in self._ds.read_delivery_order():
-                s = row.get("배송담당", "").strip()
-                if s:
-                    staff_set.add(s)
+    def _on_edit_order(self) -> None:
+        book = self._book
+        if book is None:
+            QMessageBox.warning(self, "알림", "연간 배송 장부를 먼저 불러오세요.")
+            return
 
-            # 간단히 모든 식종에 동일 담당자 할당
-            for meal in ["조식", "중식", "석식"]:
-                staff_by_meal[meal] = sorted(staff_set)
-        except Exception:
-            pass
+        staff_sets: dict[str, set[str]] = {meal: set() for meal in ALLOWED_MEALS}
+        for row in book.delivery_rows:
+            staff = row.staff.strip()
+            if staff:
+                staff_sets[row.meal].add(staff)
+        staff_by_meal = {
+            meal: sorted(staff_sets[meal], key=lambda name: (name.casefold(), name))
+            for meal in ALLOWED_MEALS
+        }
 
         dlg = StaffOrderDialog(staff_by_meal, parent=self)
         if dlg.exec() == StaffOrderDialog.DialogCode.Accepted:
-            new_sort = dlg.staff_sort
-            self._service = DeliveryService(self._ds, new_sort)
+            self._service = DeliveryService(book, dlg.staff_sort)
+            self._reset_output_state()
+            self._set_status("배송순서를 저장했습니다. 리포트를 다시 생성하세요.")

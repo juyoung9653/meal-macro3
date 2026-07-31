@@ -1,4 +1,4 @@
-"""연간 배송 Excel 파일을 검증해 도메인 모델로 변환하는 어댑터."""
+"""단일 명단 시트의 연간 배송 Excel을 검증해 도메인으로 변환한다."""
 
 from __future__ import annotations
 
@@ -25,6 +25,7 @@ from openpyxl.utils.exceptions import InvalidFileException
 from openpyxl.workbook.workbook import Workbook
 from openpyxl.worksheet._read_only import ReadOnlyWorksheet
 from openpyxl.worksheet._reader import WorkSheetParser
+from openpyxl.worksheet.formula import ArrayFormula, DataTableFormula
 
 from ..core.delivery_matrix import (
     ALLOWED_MEALS,
@@ -35,10 +36,11 @@ from ..core.delivery_matrix import (
 )
 from ._parsing import parse_annual_date_header
 
-REQUIRED_SHEETS = ("명단", "배송현황")
-FIXED_DELIVERY_HEADERS = ("ID", "식종", "배송담당", "연번")
+SHEET_NAME = "명단"
+CONTROL_HEADERS = ("식종", "배송담당", "연번")
 
 _SparseRow = dict[int, Any]
+_MaterializedRow = tuple[int, tuple[Any, ...]]
 
 
 class WorkbookValidationError(ValueError):
@@ -102,7 +104,7 @@ class AnnualWorkbook:
 
         try:
             workbook = openpyxl.load_workbook(
-                self._path, data_only=True, read_only=True
+                self._path, data_only=False, read_only=True
             )
         except OSError:
             raise
@@ -133,7 +135,7 @@ class AnnualWorkbook:
                     office_file.decrypt(decrypted)
                 decrypted.seek(0)
                 workbook = openpyxl.load_workbook(
-                    decrypted, data_only=True, read_only=True
+                    decrypted, data_only=False, read_only=True
                 )
             except OSError:
                 raise
@@ -160,19 +162,22 @@ class AnnualWorkbook:
             decrypted.close()
 
     def _parse_workbook(self, workbook: Workbook) -> AnnualDeliveryBook:
-        missing = [name for name in REQUIRED_SHEETS if name not in workbook.sheetnames]
-        if missing:
+        if SHEET_NAME not in workbook.sheetnames:
             raise WorkbookValidationError(
-                f"필수 시트가 없습니다: {', '.join(missing)} "
-                "(필수 시트: 명단, 배송현황)"
+                "필수 시트 '명단'이 없습니다. 새 형식은 명단 시트 하나에 "
+                "개인정보와 식종별 배송현황을 함께 입력합니다."
+            )
+        if workbook.sheetnames != [SHEET_NAME]:
+            extras = ", ".join(
+                name for name in workbook.sheetnames if name != SHEET_NAME
+            )
+            raise WorkbookValidationError(
+                "새 형식은 '명단' 시트 하나만 사용합니다. 별도 배송현황 "
+                f"시트를 제거하세요. 추가 시트: {extras or '(없음)'}"
             )
 
-        roster_sheet = cast(ReadOnlyWorksheet, workbook["명단"])
-        delivery_sheet = cast(ReadOnlyWorksheet, workbook["배송현황"])
-        roster, roster_ids = _parse_roster_sheet(roster_sheet)
-        delivery_rows, dates, year = _parse_delivery_sheet(
-            delivery_sheet, roster_ids
-        )
+        worksheet = cast(ReadOnlyWorksheet, workbook[SHEET_NAME])
+        roster, delivery_rows, dates, year = _parse_roster_matrix(worksheet)
         try:
             return AnnualDeliveryBook(
                 year=year,
@@ -180,180 +185,239 @@ class AnnualWorkbook:
                 delivery_rows=delivery_rows,
                 dates=dates,
             )
-        except ValueError as error:
+        except (TypeError, ValueError) as error:
             raise WorkbookValidationError(
                 f"연간 배송 도메인 구성에 실패했습니다: {error}"
             ) from error
 
 
-def _parse_roster_sheet(
+def _parse_roster_matrix(
     worksheet: ReadOnlyWorksheet,
-) -> tuple[tuple[RosterEntry, ...], set[str]]:
+) -> tuple[
+    tuple[RosterEntry, ...],
+    tuple[DeliveryRow, ...],
+    tuple[date, ...],
+    int,
+]:
     roster: list[RosterEntry] = []
-    first_row_by_id: dict[str, int] = {}
+    delivery_rows: list[DeliveryRow] = []
 
     with _open_nonblank_rows(worksheet) as rows:
-        raw_headers = _read_header(rows, "명단")
-        headers = _validate_roster_headers(raw_headers)
-        id_column = headers.index("ID")
+        raw_headers = _read_header(rows, SHEET_NAME)
+        profile_columns, control_columns, date_columns = _validate_headers(raw_headers)
+        dates = tuple(sorted(date_columns))
+        years = sorted({day.year for day in dates})
+        if len(years) != 1:
+            raise WorkbookValidationError(
+                "명단 날짜 헤더는 한 연도여야 합니다. 발견 연도: "
+                + ", ".join(str(year) for year in years)
+            )
 
+        group: list[_MaterializedRow] = []
         for row_number, sparse_row in rows:
-            row = _materialize_row(sparse_row, len(headers), "명단", row_number)
-            person_id = _identifier(_cell(row, id_column))
-            if not person_id:
-                raise WorkbookValidationError(
-                    f"명단 시트 {row_number}행: ID는 빈칸일 수 없습니다."
+            row = _materialize_row(
+                sparse_row,
+                len(raw_headers),
+                SHEET_NAME,
+                row_number,
+            )
+            group.append((row_number, row))
+            if len(group) == len(ALLOWED_MEALS):
+                person, person_rows = _parse_person_group(
+                    group,
+                    profile_columns=profile_columns,
+                    control_columns=control_columns,
+                    date_columns=date_columns,
                 )
-            if person_id in first_row_by_id:
-                raise WorkbookValidationError(
-                    f"명단 시트 {row_number}행: ID '{person_id}'이 중복되었습니다. "
-                    f"(최초 {first_row_by_id[person_id]}행)"
-                )
+                roster.append(person)
+                delivery_rows.extend(person_rows)
+                group.clear()
 
-            extra = {
-                header: _cell(row, column)
-                for column, header in enumerate(headers)
-                if header != "ID"
-            }
-            roster.append(RosterEntry(person_id=person_id, extra=extra))
-            first_row_by_id[person_id] = row_number
+        if group:
+            row_numbers = ", ".join(str(row_number) for row_number, _row in group)
+            raise WorkbookValidationError(
+                "명단 데이터 행은 한 사람당 조식·중식·석식 3행씩 있어야 "
+                f"합니다. 마지막 묶음이 {len(group)}행뿐입니다: {row_numbers}행"
+            )
 
-    return tuple(roster), set(first_row_by_id)
+    return tuple(roster), tuple(delivery_rows), dates, years[0]
 
 
-def _validate_roster_headers(raw_headers: list[Any]) -> list[str]:
-    headers: list[str] = []
+def _parse_person_group(
+    group: Sequence[_MaterializedRow],
+    *,
+    profile_columns: Sequence[tuple[str, int]],
+    control_columns: dict[str, int],
+    date_columns: dict[date, int],
+) -> tuple[RosterEntry, tuple[DeliveryRow, ...]]:
+    row_numbers = tuple(row_number for row_number, _row in group)
+    expected_rows = tuple(range(row_numbers[0], row_numbers[0] + len(ALLOWED_MEALS)))
+    if row_numbers != expected_rows:
+        shown = ", ".join(str(row_number) for row_number in row_numbers)
+        raise WorkbookValidationError(
+            "한 사람의 조식·중식·석식 행은 빈 행 없이 연속되어야 합니다. "
+            f"확인할 행: {shown}행"
+        )
+
+    profiles = tuple(
+        {
+            header: _cell(row, column)
+            for header, column in profile_columns
+        }
+        for _row_number, row in group
+    )
+    first_profile = profiles[0]
+    for index, profile in enumerate(profiles[1:], start=1):
+        for header, first_value in first_profile.items():
+            other_value = profile[header]
+            if _same_profile_value(first_value, other_value):
+                continue
+            raise WorkbookValidationError(
+                f"명단 {row_numbers[0]}~{row_numbers[-1]}행: 한 사람의 3행은 "
+                f"인적사항이 같아야 합니다. '{header}' 값이 "
+                f"{row_numbers[0]}행={first_value!r}, "
+                f"{row_numbers[index]}행={other_value!r}로 다릅니다."
+            )
+
+    meal_column = control_columns["식종"]
+    meals = tuple(_text(_cell(row, meal_column)) for _row_number, row in group)
+    if len(set(meals)) != len(ALLOWED_MEALS) or set(meals) != set(ALLOWED_MEALS):
+        shown = ", ".join(meal or "빈칸" for meal in meals)
+        raise WorkbookValidationError(
+            f"명단 {row_numbers[0]}~{row_numbers[-1]}행: 식종은 조식, 중식, "
+            f"석식을 각각 한 번씩 입력해야 합니다. 현재값: {shown}"
+        )
+
+    person = RosterEntry(source_row=row_numbers[0], extra=first_profile)
+    parsed_rows: list[DeliveryRow] = []
+    for (row_number, row), meal in zip(group, meals):
+        values = {
+            day: _parse_delivery_value(
+                _cell(row, column),
+                row_number=row_number,
+                day=day,
+            )
+            for day, column in date_columns.items()
+        }
+        parsed_rows.append(
+            DeliveryRow(
+                person=person,
+                meal=meal,
+                staff=_text(_cell(row, control_columns["배송담당"])),
+                sequence=_cell(row, control_columns["연번"]),
+                values=values,
+                source_row=row_number,
+            )
+        )
+
+    return person, tuple(parsed_rows)
+
+
+def _validate_headers(
+    raw_headers: list[Any],
+) -> tuple[list[tuple[str, int]], dict[str, int], dict[date, int]]:
+    parsed_headers: list[str | date] = []
     first_column_by_header: dict[str, int] = {}
+    first_column_by_date: dict[date, int] = {}
+
     for column, raw_header in enumerate(raw_headers, start=1):
-        header = _text(raw_header)
-        if not header:
+        if _is_blank(raw_header):
             raise WorkbookValidationError(
                 f"명단 시트 1행 {column}열: 헤더는 빈칸일 수 없습니다."
             )
+
+        parsed_date = parse_annual_date_header(raw_header)
+        if parsed_date is not None:
+            if parsed_date in first_column_by_date:
+                raise WorkbookValidationError(
+                    "명단 시트 1행: 날짜 헤더 "
+                    f"'{parsed_date:%Y%m%d}'가 중복되었습니다. "
+                    f"({first_column_by_date[parsed_date]}열, {column}열)"
+                )
+            parsed_headers.append(parsed_date)
+            first_column_by_date[parsed_date] = column
+            continue
+
+        header = _header_text(raw_header)
         if header in first_column_by_header:
             raise WorkbookValidationError(
                 f"명단 시트 1행: 헤더 '{header}'가 중복되었습니다. "
                 f"({first_column_by_header[header]}열, {column}열)"
             )
-        headers.append(header)
+        if header == "ID":
+            raise WorkbookValidationError(
+                "명단 시트는 ID 열을 사용하지 않습니다. ID 헤더를 삭제하고 "
+                "한 사람을 연속된 조식·중식·석식 3행으로 입력하세요."
+            )
+        parsed_headers.append(header)
         first_column_by_header[header] = column
 
-    if "ID" not in first_column_by_header:
-        raise WorkbookValidationError("명단 시트에 필수 헤더 'ID'가 없습니다.")
-    return headers
+    if "식종" not in first_column_by_header:
+        raise WorkbookValidationError("명단 시트에 필수 헤더 '식종'이 없습니다.")
 
+    meal_column = first_column_by_header["식종"] - 1
+    expected_control_end = meal_column + len(CONTROL_HEADERS)
+    actual_controls = parsed_headers[meal_column:expected_control_end]
+    if actual_controls != list(CONTROL_HEADERS):
+        shown = " | ".join(str(value) for value in actual_controls)
+        raise WorkbookValidationError(
+            "명단 시트의 고정 헤더는 연속해서 '식종 | 배송담당 | 연번' "
+            f"순서여야 합니다. 현재값: {shown or '(없음)'}"
+        )
 
-def _parse_delivery_sheet(
-    worksheet: ReadOnlyWorksheet,
-    roster_ids: set[str],
-) -> tuple[tuple[DeliveryRow, ...], tuple[date, ...], int]:
-    delivery_rows: list[DeliveryRow] = []
-    first_row_by_key: dict[tuple[str, str], int] = {}
+    profile_headers = parsed_headers[:meal_column]
+    if not profile_headers:
+        raise WorkbookValidationError(
+            "명단 시트에는 식종 앞에 성명 등 인적사항 헤더가 하나 이상 "
+            "필요합니다."
+        )
+    if any(isinstance(header, date) for header in profile_headers):
+        raise WorkbookValidationError(
+            "YYYYMMDD 날짜 헤더는 '식종 | 배송담당 | 연번' 오른쪽에만 "
+            "둘 수 있습니다."
+        )
 
-    with _open_nonblank_rows(worksheet) as rows:
-        raw_headers = _read_header(rows, "배송현황")
-        fixed_columns, date_columns = _validate_delivery_headers(raw_headers)
-        dates = tuple(sorted(date_columns))
-        years = sorted({day.year for day in dates})
-        if len(years) != 1:
-            raise WorkbookValidationError(
-                "배송현황 날짜 헤더는 한 연도여야 합니다. 발견 연도: "
-                + ", ".join(str(year) for year in years)
-            )
-
-        for row_number, sparse_row in rows:
-            row = _materialize_row(
-                sparse_row, len(raw_headers), "배송현황", row_number
-            )
-            person_id = _identifier(_cell(row, fixed_columns["ID"]))
-            if not person_id:
-                raise WorkbookValidationError(
-                    f"배송현황 시트 {row_number}행: ID는 빈칸일 수 없습니다."
-                )
-            if person_id not in roster_ids:
-                raise WorkbookValidationError(
-                    f"배송현황 시트 {row_number}행: 명단에 없는 ID '{person_id}'입니다."
-                )
-
-            meal = _text(_cell(row, fixed_columns["식종"]))
-            if meal not in ALLOWED_MEALS:
-                shown = meal if meal else "빈칸"
-                raise WorkbookValidationError(
-                    f"배송현황 시트 {row_number}행: 식종 '{shown}'은 허용되지 "
-                    "않습니다. 허용값: 조식, 중식, 석식"
-                )
-
-            key = (person_id, meal)
-            if key in first_row_by_key:
-                raise WorkbookValidationError(
-                    f"배송현황 시트 {row_number}행: (ID, 식종) 키 {key!r}가 "
-                    f"중복되었습니다. (최초 {first_row_by_key[key]}행)"
-                )
-
-            values = {
-                day: _parse_delivery_value(
-                    _cell(row, column), row_number=row_number, day=day
-                )
-                for day, column in date_columns.items()
-            }
-            delivery_rows.append(
-                DeliveryRow(
-                    person_id=person_id,
-                    meal=meal,
-                    staff=_text(_cell(row, fixed_columns["배송담당"])),
-                    sequence=_cell(row, fixed_columns["연번"]),
-                    values=values,
-                )
-            )
-            first_row_by_key[key] = row_number
-
-    return tuple(delivery_rows), dates, years[0]
-
-
-def _validate_delivery_headers(
-    raw_headers: list[Any],
-) -> tuple[dict[str, int], dict[date, int]]:
-    fixed_columns: dict[str, int] = {}
-    date_columns: dict[date, int] = {}
-    for column, raw_header in enumerate(raw_headers):
-        header = _text(raw_header)
-        if header in FIXED_DELIVERY_HEADERS:
-            if header in fixed_columns:
-                raise WorkbookValidationError(
-                    f"배송현황 시트 1행: 고정 헤더 '{header}'가 중복되었습니다."
-                )
-            fixed_columns[header] = column
+    raw_date_headers = parsed_headers[expected_control_end:]
+    if not raw_date_headers:
+        raise WorkbookValidationError(
+            "명단 시트에 YYYYMMDD 날짜 헤더가 하나 이상 필요합니다."
+        )
+    for offset, header in enumerate(raw_date_headers, start=expected_control_end + 1):
+        if isinstance(header, date):
             continue
-
-        parsed_date = parse_annual_date_header(raw_header)
-        if parsed_date is None:
-            shown = "빈칸" if _is_blank(raw_header) else repr(raw_header)
-            raise WorkbookValidationError(
-                f"배송현황 시트 1행 {column + 1}열: 헤더 {shown}은 지원하지 "
-                "않습니다. 날짜 헤더는 YYYYMMDD 형식이어야 합니다."
-            )
-        if parsed_date in date_columns:
-            raise WorkbookValidationError(
-                "배송현황 시트 1행: 날짜 헤더 "
-                f"'{parsed_date:%Y%m%d}'가 중복되었습니다."
-            )
-        date_columns[parsed_date] = column
-
-    missing = [header for header in FIXED_DELIVERY_HEADERS if header not in fixed_columns]
-    if missing:
         raise WorkbookValidationError(
-            "배송현황 시트에 필수 고정 헤더가 없습니다: " + ", ".join(missing)
+            f"명단 시트 1행 {offset}열: 연번 오른쪽 헤더 {header!r}은 "
+            "지원하지 않습니다. 날짜 헤더는 YYYYMMDD 형식이어야 합니다."
         )
-    if not date_columns:
-        raise WorkbookValidationError(
-            "배송현황 시트에 YYYYMMDD 날짜 헤더가 하나 이상 필요합니다."
-        )
-    return fixed_columns, date_columns
+
+    profile_columns = [
+        (cast(str, header), column)
+        for column, header in enumerate(profile_headers)
+    ]
+    control_columns = {
+        header: meal_column + index
+        for index, header in enumerate(CONTROL_HEADERS)
+    }
+    date_columns = {
+        cast(date, header): column
+        for column, header in enumerate(parsed_headers)
+        if isinstance(header, date)
+    }
+    return profile_columns, control_columns, date_columns
 
 
 def _parse_delivery_value(
-    value: Any, *, row_number: int, day: date
+    value: Any,
+    *,
+    row_number: int,
+    day: date,
 ) -> DeliveryCellValue:
+    if _is_formula(value):
+        raise WorkbookValidationError(
+            f"명단 시트 {row_number}행, '{day:%Y%m%d}' 열: 배송 값에는 "
+            "수식을 사용할 수 없습니다. 실제 숫자 1, 0 또는 빈칸을 "
+            f"입력하세요. 현재값={value!r}"
+        )
     if _is_blank(value):
         return DeliveryCellValue.BLANK
     if (
@@ -364,7 +428,7 @@ def _parse_delivery_value(
     ):
         return DeliveryCellValue(int(value))
     raise WorkbookValidationError(
-        f"배송현황 시트 {row_number}행, '{day:%Y%m%d}' 열: 배송 값은 "
+        f"명단 시트 {row_number}행, '{day:%Y%m%d}' 열: 배송 값은 "
         f"1, 0 또는 빈칸만 허용됩니다. 현재값={value!r}"
     )
 
@@ -373,7 +437,7 @@ def _parse_delivery_value(
 def _open_nonblank_rows(
     worksheet: ReadOnlyWorksheet,
 ) -> Iterator[Iterator[tuple[int, _SparseRow]]]:
-    """XML에 실제로 존재하는 행만 읽어 빈 서식 차원과 행 간격을 건너뛴다."""
+    """XML에 실제로 존재하는 행만 읽어 과도한 서식 차원을 무시한다."""
     internal = cast(Any, worksheet)
     with internal._get_source() as source:
         parser = WorkSheetParser(
@@ -399,7 +463,8 @@ def _open_nonblank_rows(
 
 
 def _read_header(
-    rows: Iterator[tuple[int, _SparseRow]], sheet_name: str
+    rows: Iterator[tuple[int, _SparseRow]],
+    sheet_name: str,
 ) -> list[Any]:
     first_row = next(rows, None)
     if first_row is None or first_row[0] != 1:
@@ -429,6 +494,18 @@ def _materialize_row(
     return tuple(sparse_row.get(column) for column in range(1, header_width + 1))
 
 
+def _same_profile_value(first: Any, second: Any) -> bool:
+    if _is_blank(first) and _is_blank(second):
+        return True
+    return bool(first == second)
+
+
+def _is_formula(value: Any) -> bool:
+    return isinstance(value, (ArrayFormula, DataTableFormula)) or (
+        isinstance(value, str) and value.startswith("=")
+    )
+
+
 def _is_blank(value: Any) -> bool:
     return value is None or (isinstance(value, str) and not value.strip())
 
@@ -437,14 +514,8 @@ def _cell(row: Sequence[Any], column: int) -> Any:
     return row[column] if column < len(row) else None
 
 
-def _identifier(value: Any) -> str:
-    if _is_blank(value):
-        return ""
-    if isinstance(value, str):
-        return value.strip()
-    if isinstance(value, float) and value.is_integer():
-        return str(int(value))
-    return str(value).strip()
+def _header_text(value: Any) -> str:
+    return " ".join(_text(value).split())
 
 
 def _text(value: Any) -> str:

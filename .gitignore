@@ -29,5 +29,4 @@ assets/*[0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F]
 .cache.json
 
 nul
-main.spec
 main.exe

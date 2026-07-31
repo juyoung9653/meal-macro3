@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import copy
+import sys
+from pathlib import Path
 from typing import Any
 
 # ── 기본 설정값 ──────────────────────────────────────
@@ -39,10 +41,6 @@ DEFAULTS: dict[str, Any] = {
         "path": "",
         "password": "",
     },
-    "db": {
-        "path": "assets/db.xlsx",
-        "password": "",
-    },
     "semantic_columns": {
         "__calc_breakfast": {
             "label": "조식 건수 입력",
@@ -72,11 +70,6 @@ DEFAULTS: dict[str, Any] = {
     },
     # ── 배송 대타 매크로 설정 ────────────────────────────
     "delivery_substitute": {
-        "sheet_name": "종합_jon(DB)",
-        "header_row": 2,
-        "data_row": 4,
-        "col_meal": "식사 구분",
-        "col_ship": "배송_new",
         "col_ord": "배송순서",
         "col_name": "이름",
         "col_sum": "요약",
@@ -93,14 +86,11 @@ DEFAULTS: dict[str, Any] = {
             "비고2",
         ],
         "max_rows": 18,
-        "a4_page": "세로",
         "page_h": 842,
         "page_w": 595,
-        "split_mode": "동기준",
         "font_base_size": 8,
     },
     "delivery": {
-        "db_path": "",
         "cols": {
             "order": [
                 "배송순서",
@@ -138,7 +128,7 @@ class SettingsManager:
         schedule = s.get("schedule")  # 전체 dict
     """
 
-    _instance: "SettingsManager | None" = None
+    _instance: SettingsManager | None = None
 
     def __init__(self):
         self._data: dict = copy.deepcopy(DEFAULTS)
@@ -178,15 +168,30 @@ class SettingsManager:
     def get_meal_type(self) -> str:
         return self.get("app", "meal_type", default="급식")
 
+    @staticmethod
+    def _resource_path(relative_path: str) -> str:
+        """PyInstaller 번들에서는 임시 리소스 루트를 기준으로 경로를 만든다."""
+        bundle_root = getattr(sys, "_MEIPASS", None)
+        if bundle_root:
+            return str(Path(bundle_root) / relative_path)
+        return relative_path
+
     def get_invoice_template_path(self, meal_type: str | None = None) -> str:
         """Compute invoice template path from meal type."""
         mt = meal_type or self.get_meal_type()
-        return f"assets/{mt}_청구서템플릿.xlsx"
+        return self._resource_path(f"assets/{mt}_청구서템플릿.xlsx")
 
     def get_confirm_template_path(self, meal_type: str | None = None) -> str:
         """Compute confirm template path from meal type."""
         mt = meal_type or self.get_meal_type()
-        return f"assets/{mt}_확인서템플릿.xlsx"
+        return self._resource_path(f"assets/{mt}_확인서템플릿.xlsx")
+
+    def get_report_template_path(self) -> str:
+        """배송리포트 템플릿의 실행 환경별 실제 경로를 반환한다."""
+        configured = self.get(
+            "templates", "report_path", default="assets/report_template.xlsx"
+        )
+        return self._resource_path(str(configured))
 
     def set_meal_type(self, meal_type: str):
         self.set("app", "meal_type", value=meal_type)
@@ -208,7 +213,6 @@ class SettingsManager:
 
     def set_delivery_settings(
         self,
-        db_path: str = "",
         order: list[str] | None = None,
         enabled: dict[str, bool] | None = None,
         orientation: str = "세로",
@@ -219,14 +223,12 @@ class SettingsManager:
             self.set("delivery", "cols", "order", value=order)
         if enabled is not None:
             self.set("delivery", "cols", "enabled", value=enabled)
-        self.set("delivery", "db_path", value=db_path)
         self.set("delivery", "orientation", value=orientation)
         self.set("delivery", "split_mode", value=split_mode)
 
 
 def get_settings() -> SettingsManager:
     """싱글턴 SettingsManager 반환."""
-    global SettingsManager
     if SettingsManager._instance is None:
         SettingsManager._instance = SettingsManager()
     return SettingsManager._instance

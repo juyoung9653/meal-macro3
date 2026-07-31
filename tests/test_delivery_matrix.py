@@ -26,13 +26,18 @@ def annual_book() -> AnnualDeliveryBook:
         date(2026, 6, 15),
     )
     blank = DeliveryCellValue.BLANK
-    roster = (
-        RosterEntry("P001", {"성명": "홍길동", "전화": "010-1111-1111"}),
-        RosterEntry("P002", {"성명": "김영희", "메모": "원본 보존"}),
+    p001 = RosterEntry(
+        source_row=2,
+        extra={"성명": "홍길동", "전화": "010-1111-1111"},
     )
+    p002 = RosterEntry(
+        source_row=5,
+        extra={"성명": "김영희", "메모": "원본 보존"},
+    )
+    roster = (p001, p002)
     rows = (
         DeliveryRow(
-            person_id="P001",
+            person=p001,
             meal="중식",
             staff="김기사",
             sequence="010",
@@ -43,9 +48,10 @@ def annual_book() -> AnnualDeliveryBook:
                 date(2026, 7, 29): blank,
                 date(2026, 9, 1): blank,
             },
+            source_row=3,
         ),
         DeliveryRow(
-            person_id="P002",
+            person=p002,
             meal="중식",
             staff="김기사",
             sequence=2,
@@ -56,9 +62,10 @@ def annual_book() -> AnnualDeliveryBook:
                 date(2026, 7, 29): blank,
                 date(2026, 9, 1): blank,
             },
+            source_row=6,
         ),
         DeliveryRow(
-            person_id="P001",
+            person=p001,
             meal="석식",
             staff="이기사",
             sequence="A-1",
@@ -69,6 +76,7 @@ def annual_book() -> AnnualDeliveryBook:
                 date(2026, 7, 29): blank,
                 date(2026, 9, 1): blank,
             },
+            source_row=4,
         ),
     )
     return AnnualDeliveryBook(
@@ -79,20 +87,32 @@ def annual_book() -> AnnualDeliveryBook:
     )
 
 
-def test_builds_indexes_and_preserves_roster_extras(annual_book: AnnualDeliveryBook):
-    assert annual_book.roster_by_id["P001"].extra == {
+def test_builds_person_indexes_and_preserves_roster_extras(
+    annual_book: AnnualDeliveryBook,
+):
+    p001, _p002 = annual_book.roster
+    assert p001.extra == {
         "성명": "홍길동",
         "전화": "010-1111-1111",
     }
-    row = annual_book.delivery_rows_by_key[("P001", "중식")]
-    assert annual_book.get_delivery_row("P001", "중식") is row
-    assert annual_book.get_delivery_row("없는ID", "중식") is None
+
+    row = annual_book.get_delivery_row(p001, "중식")
+    assert row is not None
+    assert row.person is p001
+    assert row.source_row == 3
+    assert annual_book.rows_by_person[p001] == (
+        row,
+        annual_book.get_delivery_row(p001, "석식"),
+    )
+
+    unknown = RosterEntry(source_row=8, extra={"성명": "없는 사람"})
+    assert annual_book.get_delivery_row(unknown, "중식") is None
 
 
 def test_roster_extra_is_immutable_with_explicit_mutable_copy(
     annual_book: AnnualDeliveryBook,
 ):
-    entry = annual_book.roster_by_id["P001"]
+    entry = annual_book.roster[0]
 
     with pytest.raises(TypeError):
         cast(dict[str, object], entry.extra)["성명"] = "변조"
@@ -103,20 +123,41 @@ def test_roster_extra_is_immutable_with_explicit_mutable_copy(
     assert entry.as_dict()["성명"] == "홍길동"
 
 
+def test_book_requires_delivery_row_to_reference_canonical_person_object():
+    day = date(2026, 6, 15)
+    canonical = RosterEntry(source_row=2, extra={"성명": "홍길동"})
+    detached = RosterEntry(source_row=2, extra={"성명": "홍길동"})
+    row = DeliveryRow(
+        person=detached,
+        meal="중식",
+        staff="김기사",
+        sequence=1,
+        values={day: DeliveryCellValue.DELIVERED},
+    )
+
+    with pytest.raises(ValueError, match="동일 객체"):
+        AnnualDeliveryBook(2026, (canonical,), (row,), (day,))
+
+
 def test_book_rejects_missing_or_additional_delivery_value_dates():
     first = date(2026, 6, 15)
     second = date(2026, 6, 16)
     additional = date(2026, 6, 17)
-    roster = (RosterEntry("P001"),)
+    person = RosterEntry(source_row=2)
+    roster = (person,)
 
     sparse_row = DeliveryRow(
-        "P001", "중식", "김기사", 1, {first: DeliveryCellValue.DELIVERED}
+        person,
+        "중식",
+        "김기사",
+        1,
+        {first: DeliveryCellValue.DELIVERED},
     )
     with pytest.raises(ValueError, match="누락.*20260616"):
         AnnualDeliveryBook(2026, roster, (sparse_row,), (first, second))
 
     extra_row = DeliveryRow(
-        "P001",
+        person,
         "중식",
         "김기사",
         1,
@@ -152,38 +193,53 @@ def test_month_and_day_states(annual_book: AnnualDeliveryBook):
     assert annual_book.day_state(date(2026, 6, 15)) is DayState.ENTERED
 
 
-def test_raw_tristate_and_effective_state_are_separate(annual_book: AnnualDeliveryBook):
-    dinner = annual_book.get_delivery_row("P001", "석식")
+def test_raw_tristate_and_effective_state_are_separate(
+    annual_book: AnnualDeliveryBook,
+):
+    p001 = annual_book.roster[0]
+    dinner = annual_book.get_delivery_row(p001, "석식")
     assert dinner is not None
 
-    # 입력된 날짜의 개별 blank는 중지이지만 raw blank 자체는 보존한다.
+    # 입력된 날짜의 개별 blank는 중지이며 raw blank 자체도 보존한다.
     assert dinner.raw_value_on(date(2026, 6, 15)) is DeliveryCellValue.BLANK
     assert (
         annual_book.effective_delivery_state(
-            "P001", "석식", date(2026, 6, 15)
+            p001, "석식", date(2026, 6, 15)
+        )
+        is EffectiveDeliveryState.STOPPED
+    )
+
+    # 명시적 0은 일시중지, 1은 배송으로 effective API에서도 구별된다.
+    assert dinner.raw_value_on(date(2026, 7, 28)) is DeliveryCellValue.PAUSED
+    assert (
+        annual_book.effective_delivery_state(
+            p001, "석식", date(2026, 7, 28)
         )
         is EffectiveDeliveryState.PAUSED
     )
-
-    # 명시적 0도 raw에서 구별된다.
-    assert dinner.raw_value_on(date(2026, 7, 28)) is DeliveryCellValue.PAUSED
+    assert (
+        annual_book.effective_delivery_state(
+            p001, "중식", date(2026, 7, 28)
+        )
+        is EffectiveDeliveryState.DELIVERED
+    )
 
     # 월 전체 미입력/전면 비배송일의 blank는 중지로 해석하지 않는다.
     assert (
         annual_book.effective_delivery_state(
-            "P001", "석식", date(2026, 9, 1)
+            p001, "석식", date(2026, 9, 1)
         )
         is EffectiveDeliveryState.MONTH_UNENTERED
     )
     assert (
         annual_book.effective_delivery_state(
-            "P001", "석식", date(2026, 6, 16)
+            p001, "석식", date(2026, 6, 16)
         )
         is EffectiveDeliveryState.NO_DELIVERY
     )
     assert (
         annual_book.effective_delivery_state(
-            "P001", "석식", date(2026, 6, 14)
+            p001, "석식", date(2026, 6, 14)
         )
         is EffectiveDeliveryState.DATE_MISSING
     )
@@ -192,17 +248,20 @@ def test_raw_tristate_and_effective_state_are_separate(annual_book: AnnualDelive
 def test_delivery_queries_count_and_numeric_sequence_sort(
     annual_book: AnnualDeliveryBook,
 ):
+    p001, p002 = annual_book.roster
     delivered = annual_book.delivered_rows_on(
         date(2026, 6, 15), meal="중식", staff="김기사"
     )
-    assert [row.person_id for row in delivered] == ["P002", "P001"]
+    assert tuple(row.person for row in delivered) == (p002, p001)
+    assert delivered[0].person is p002
+    assert delivered[1].person is p001
     assert delivered[0].sequence == 2
     assert delivered[1].sequence == "010"
     assert delivered[1].sequence_display == "010"
 
-    assert annual_book.monthly_delivery_count("P001", "중식", 2026, 6) == 1
-    assert annual_book.monthly_delivery_count("P001", "중식", 2026, 7) == 1
-    assert annual_book.monthly_delivery_count("P001", "중식", 2026, 9) == 0
+    assert annual_book.monthly_delivery_count(p001, "중식", 2026, 6) == 1
+    assert annual_book.monthly_delivery_count(p001, "중식", 2026, 7) == 1
+    assert annual_book.monthly_delivery_count(p001, "중식", 2026, 9) == 0
 
 
 def test_previous_actual_delivery_date_is_meal_specific(

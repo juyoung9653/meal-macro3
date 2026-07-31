@@ -1,4 +1,4 @@
-"""연간 배송 매트릭스의 프레임워크 독립 도메인 모델."""
+"""단일 명단 시트의 연간 배송 매트릭스 도메인 모델."""
 
 from __future__ import annotations
 
@@ -39,35 +39,69 @@ class EffectiveDeliveryState(StrEnum):
     DATE_MISSING = "DATE_MISSING"
     MONTH_UNENTERED = "MONTH_UNENTERED"
     NO_DELIVERY = "NO_DELIVERY"
+    STOPPED = "STOPPED"
     PAUSED = "PAUSED"
     DELIVERED = "DELIVERED"
 
 
 @dataclass(frozen=True)
 class RosterEntry:
-    """명단 한 행. ``extra``에는 ID 외 모든 원본 컬럼을 보존한다."""
+    """명단 시트의 연속된 식종 3행으로 표현되는 한 사람."""
 
-    person_id: str
-    extra: Mapping[str, Any] = field(default_factory=dict)
+    source_row: int
+    extra: Mapping[str, Any] = field(
+        default_factory=dict,
+        compare=False,
+        hash=False,
+    )
 
     def __post_init__(self) -> None:
+        if isinstance(self.source_row, bool) or not isinstance(self.source_row, int):
+            raise TypeError("명단 시작 행은 정수여야 합니다.")
+        if self.source_row < 2:
+            raise ValueError("명단 시작 행은 헤더 다음인 2행 이상이어야 합니다.")
         object.__setattr__(self, "extra", MappingProxyType(dict(self.extra)))
 
     def as_dict(self) -> dict[str, Any]:
-        return {"ID": self.person_id, **self.extra}
+        """출력기가 안전하게 수정할 수 있는 명단 정보 복사본."""
+        return dict(self.extra)
+
+    @property
+    def display_name(self) -> str:
+        for header in ("성명", "이름"):
+            value = self.extra.get(header)
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text:
+                return text
+        return ""
+
+    @property
+    def location_text(self) -> str:
+        return f"명단 {self.source_row}~{self.source_row + 2}행"
+
+    @property
+    def description(self) -> str:
+        if self.display_name:
+            return f"{self.display_name!r} ({self.location_text})"
+        return self.location_text
 
 
 @dataclass(frozen=True)
 class DeliveryRow:
-    """(ID, 식종)으로 식별되는 배송현황 한 행."""
+    """한 사람의 한 식종 배송행."""
 
-    person_id: str
+    person: RosterEntry
     meal: str
     staff: str
     sequence: Any
     values: Mapping[date, DeliveryCellValue]
+    source_row: int | None = field(default=None, compare=False)
 
     def __post_init__(self) -> None:
+        if not isinstance(self.person, RosterEntry):
+            raise TypeError("배송 행의 person은 RosterEntry여야 합니다.")
         copied = dict(self.values)
         invalid = [
             value
@@ -76,11 +110,13 @@ class DeliveryRow:
         ]
         if invalid:
             raise ValueError("배송 값은 DeliveryCellValue여야 합니다.")
+        source_row = self.person.source_row if self.source_row is None else self.source_row
+        if isinstance(source_row, bool) or not isinstance(source_row, int):
+            raise TypeError("배송 원본 행은 정수여야 합니다.")
+        if source_row < 2:
+            raise ValueError("배송 원본 행은 헤더 다음인 2행 이상이어야 합니다.")
+        object.__setattr__(self, "source_row", source_row)
         object.__setattr__(self, "values", MappingProxyType(copied))
-
-    @property
-    def key(self) -> tuple[str, str]:
-        return self.person_id, self.meal
 
     @property
     def sequence_display(self) -> str:
@@ -108,6 +144,10 @@ class DeliveryRow:
                 pass
         return 1, Decimal(0), text.casefold()
 
+    @property
+    def description(self) -> str:
+        return f"{self.person.description}, 식종={self.meal}, 원본 {self.source_row}행"
+
     def raw_value_on(self, day: date) -> DeliveryCellValue | None:
         """날짜 헤더가 없으면 None, 있으면 원시 tri-state를 반환한다."""
         return self.values.get(day)
@@ -115,15 +155,19 @@ class DeliveryRow:
 
 @dataclass(frozen=True)
 class AnnualDeliveryBook:
-    """한 연도의 명단과 배송현황 및 조회 인덱스."""
+    """한 연도의 사람·식종별 배송행과 조회 인덱스."""
 
     year: int
     roster: tuple[RosterEntry, ...]
     delivery_rows: tuple[DeliveryRow, ...]
     dates: tuple[date, ...]
-    roster_by_id: Mapping[str, RosterEntry] = field(init=False, repr=False)
-    delivery_rows_by_key: Mapping[tuple[str, str], DeliveryRow] = field(
-        init=False, repr=False
+    rows_by_person: Mapping[RosterEntry, tuple[DeliveryRow, ...]] = field(
+        init=False,
+        repr=False,
+    )
+    _delivery_rows_by_key: Mapping[tuple[RosterEntry, str], DeliveryRow] = field(
+        init=False,
+        repr=False,
     )
     _date_set: frozenset[date] = field(init=False, repr=False)
 
@@ -137,23 +181,37 @@ class AnnualDeliveryBook:
         if any(day.year != self.year for day in dates):
             raise ValueError("모든 날짜는 워크북 연도와 같아야 합니다.")
 
-        roster_by_id: dict[str, RosterEntry] = {}
+        roster_by_source_row: dict[int, RosterEntry] = {}
         for entry in roster:
-            if not entry.person_id:
-                raise ValueError("명단 ID는 빈칸일 수 없습니다.")
-            if entry.person_id in roster_by_id:
-                raise ValueError(f"명단 ID가 중복되었습니다: {entry.person_id}")
-            roster_by_id[entry.person_id] = entry
+            if entry.source_row in roster_by_source_row:
+                raise ValueError(
+                    f"명단 시작 행이 중복되었습니다: {entry.source_row}행"
+                )
+            roster_by_source_row[entry.source_row] = entry
 
-        rows_by_key: dict[tuple[str, str], DeliveryRow] = {}
+        rows_by_key: dict[tuple[RosterEntry, str], DeliveryRow] = {}
+        mutable_rows_by_person: dict[RosterEntry, list[DeliveryRow]] = {
+            entry: [] for entry in roster
+        }
         date_set = frozenset(dates)
         for row in delivery_rows:
+            canonical_person = roster_by_source_row.get(row.person.source_row)
+            if canonical_person is None:
+                raise ValueError(
+                    "명단에 연결되지 않은 배송 행입니다: " f"{row.description}"
+                )
+            if row.person is not canonical_person:
+                raise ValueError(
+                    "배송 행의 person은 장부 roster의 동일 객체여야 합니다: "
+                    f"{row.description}"
+                )
             if row.meal not in ALLOWED_MEALS:
                 raise ValueError(f"허용되지 않은 식종입니다: {row.meal}")
-            if row.person_id not in roster_by_id:
-                raise ValueError(f"명단에 없는 배송 ID입니다: {row.person_id}")
-            if row.key in rows_by_key:
-                raise ValueError(f"배송 키가 중복되었습니다: {row.key}")
+            key = (row.person, row.meal)
+            if key in rows_by_key:
+                raise ValueError(
+                    f"한 사람의 식종 행이 중복되었습니다: {row.description}"
+                )
             row_dates = set(row.values)
             missing_dates = date_set - row_dates
             additional_dates = row_dates - date_set
@@ -161,18 +219,29 @@ class AnnualDeliveryBook:
                 missing = _format_dates(missing_dates) or "없음"
                 additional = _format_dates(additional_dates) or "없음"
                 raise ValueError(
-                    f"배송 행 {row.key!r}의 날짜 키가 워크북 날짜와 일치하지 "
-                    f"않습니다. 누락: {missing}; 추가: {additional}"
+                    f"배송 행 {row.description!r}의 날짜 키가 워크북 날짜와 "
+                    f"일치하지 않습니다. 누락: {missing}; 추가: {additional}"
                 )
-            rows_by_key[row.key] = row
+            rows_by_key[key] = row
+            mutable_rows_by_person[row.person].append(row)
 
+        rows_by_person = {
+            person: tuple(rows)
+            for person, rows in mutable_rows_by_person.items()
+        }
         object.__setattr__(self, "roster", roster)
         object.__setattr__(self, "delivery_rows", delivery_rows)
         object.__setattr__(self, "dates", dates)
         object.__setattr__(self, "_date_set", date_set)
-        object.__setattr__(self, "roster_by_id", MappingProxyType(roster_by_id))
         object.__setattr__(
-            self, "delivery_rows_by_key", MappingProxyType(rows_by_key)
+            self,
+            "rows_by_person",
+            MappingProxyType(rows_by_person),
+        )
+        object.__setattr__(
+            self,
+            "_delivery_rows_by_key",
+            MappingProxyType(rows_by_key),
         )
 
     @property
@@ -209,33 +278,49 @@ class AnnualDeliveryBook:
             return DayState.ENTERED
         return DayState.NO_DELIVERY
 
-    def get_delivery_row(self, person_id: str, meal: str) -> DeliveryRow | None:
-        return self.delivery_rows_by_key.get((person_id, meal))
+    def get_delivery_row(
+        self,
+        person: RosterEntry,
+        meal: str,
+    ) -> DeliveryRow | None:
+        return self._delivery_rows_by_key.get((person, meal))
 
     def raw_delivery_value(
-        self, person_id: str, meal: str, day: date
+        self,
+        person: RosterEntry,
+        meal: str,
+        day: date,
     ) -> DeliveryCellValue | None:
-        row = self._require_delivery_row(person_id, meal)
+        row = self._require_delivery_row(person, meal)
         return row.raw_value_on(day)
 
     def effective_delivery_state(
-        self, person_id: str, meal: str, day: date
+        self,
+        person: RosterEntry,
+        meal: str,
+        day: date,
     ) -> EffectiveDeliveryState:
-        """blank를 월/일 전역 상태에 맞춰 안전하게 해석한다.
+        """원시 값과 월/일 전역 상태를 함께 고려한 의미를 반환한다.
 
-        입력된 날짜에서만 개별 blank를 중지로 본다. 월 전체가 미입력이거나
-        해당 날짜 열 전체가 blank이면 각각 별도 상태를 반환한다.
+        입력된 날짜의 개별 blank는 중지, 명시적 0은 일시중지로 구분한다.
+        월 전체가 미입력이거나 해당 날짜 열 전체가 blank이면 각각 별도
+        상태를 반환한다.
         """
-        row = self._require_delivery_row(person_id, meal)
-        if self.day_state(day) is DayState.MISSING:
+        row = self._require_delivery_row(person, meal)
+        day_state = self.day_state(day)
+        if day_state is DayState.MISSING:
             return EffectiveDeliveryState.DATE_MISSING
         if self.month_state(day.year, day.month) is MonthState.UNENTERED:
             return EffectiveDeliveryState.MONTH_UNENTERED
-        if self.day_state(day) is DayState.NO_DELIVERY:
+        if day_state is DayState.NO_DELIVERY:
             return EffectiveDeliveryState.NO_DELIVERY
-        if row.raw_value_on(day) is DeliveryCellValue.DELIVERED:
+
+        raw_value = row.raw_value_on(day)
+        if raw_value is DeliveryCellValue.DELIVERED:
             return EffectiveDeliveryState.DELIVERED
-        return EffectiveDeliveryState.PAUSED
+        if raw_value is DeliveryCellValue.PAUSED:
+            return EffectiveDeliveryState.PAUSED
+        return EffectiveDeliveryState.STOPPED
 
     def delivered_rows_on(
         self,
@@ -259,16 +344,20 @@ class AnnualDeliveryBook:
                 rows,
                 key=lambda row: (
                     row.sequence_sort_key,
-                    row.person_id,
+                    row.person.source_row,
                     row.meal,
                 ),
             )
         )
 
     def monthly_delivery_count(
-        self, person_id: str, meal: str, year: int, month: int
+        self,
+        person: RosterEntry,
+        meal: str,
+        year: int,
+        month: int,
     ) -> int:
-        row = self._require_delivery_row(person_id, meal)
+        row = self._require_delivery_row(person, meal)
         if self.month_state(year, month) is MonthState.MISSING:
             return 0
         return sum(
@@ -290,10 +379,14 @@ class AnnualDeliveryBook:
                 return day
         return None
 
-    def _require_delivery_row(self, person_id: str, meal: str) -> DeliveryRow:
-        row = self.get_delivery_row(person_id, meal)
+    def _require_delivery_row(
+        self,
+        person: RosterEntry,
+        meal: str,
+    ) -> DeliveryRow:
+        row = self.get_delivery_row(person, meal)
         if row is None:
-            raise KeyError(f"배송현황에 (ID='{person_id}', 식종='{meal}') 행이 없습니다.")
+            raise KeyError(f"{person.description}에 식종 '{meal}' 행이 없습니다.")
         return row
 
 

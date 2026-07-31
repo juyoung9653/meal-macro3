@@ -1,5 +1,7 @@
 """AnnualDeliveryBook 기반 청구서 생성 서비스."""
 
+from __future__ import annotations
+
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -12,13 +14,13 @@ from ..core.delivery_matrix import (
     DeliveryCellValue,
     DeliveryRow,
     MonthState,
+    RosterEntry,
 )
 from ..core.invoice_data import EnrichedPersonDict, WeeklyMealCount
 from ..core.models import build_enriched_person_dict
 from ..core.settings import get_settings
 from ..excel.annual_workbook import AnnualWorkbook
 from ..generators.invoice_generator import make_invoice
-
 
 _MEAL_ORDER = {meal: index for index, meal in enumerate(ALLOWED_MEALS)}
 
@@ -93,16 +95,23 @@ class InvoiceService:
             return InvoiceResult(success=False, error=f"급식 단가 설정 오류:\n{error}")
 
         summaries = _calculate_monthly_summaries(book, config.year, config.month)
-        rows_by_person = _rows_by_person(book)
+        try:
+            rows_by_person = _rows_by_person(book, config.year, config.month)
+        except ValueError as error:
+            return InvoiceResult(
+                success=False,
+                error=f"배송 메타데이터 오류:\n{error}",
+            )
         enriched = [
             _enrich_person(
                 entry.as_dict(),
-                rows_by_person.get(entry.person_id, ()),
-                summaries[entry.person_id],
+                rows_by_person.get(entry, ()),
+                summaries[entry],
                 unit_prices,
             )
             for entry in book.roster
         ]
+        output_people = [person for person in enriched if person["_total"] > 0]
 
         if not Path(config.template_path).is_file():
             return InvoiceResult(
@@ -112,7 +121,7 @@ class InvoiceService:
 
         try:
             count, rendered = make_invoice(
-                enriched,
+                output_people,
                 config.col_mapping,
                 config.output_path,
                 template_path=config.template_path,
@@ -127,7 +136,16 @@ class InvoiceService:
         except Exception as error:  # noqa: BLE001 - 생성 실패를 결과로 반환
             return InvoiceResult(success=False, error=f"청구서 생성 실패:\n{error}")
 
-        return InvoiceResult(success=True, count=count, enriched=rendered)
+        rendered_output = [person for person in rendered if person["_total"] > 0]
+        if count != len(rendered_output):
+            return InvoiceResult(
+                success=False,
+                error=(
+                    "청구서 생성 결과 건수가 일치하지 않습니다: "
+                    f"작성 {count}건, 출력 대상 {len(rendered_output)}건"
+                ),
+            )
+        return InvoiceResult(success=True, count=count, enriched=rendered_output)
 
     def _resolve_book(self, config: InvoiceGenerationConfig) -> AnnualDeliveryBook:
         if config.annual_book is not None:
@@ -137,10 +155,6 @@ class InvoiceService:
 
         settings = get_settings()
         configured_path = settings.get("annual_workbook", "path", default="")
-        if not configured_path:
-            configured_path = settings.get(
-                "invoice", "annual_workbook_path", default=""
-            )
         path = config.annual_workbook_path or configured_path
         if not path:
             raise ValueError(
@@ -230,7 +244,7 @@ class InvoiceService:
 
 def _calculate_monthly_summaries(
     book: AnnualDeliveryBook, year: int, month: int
-) -> dict[str, _PersonDeliverySummary]:
+) -> dict[RosterEntry, _PersonDeliverySummary]:
     """대상 월의 모든 배송 셀을 한 번 순회해 월/주차 집계를 함께 만든다."""
     weeks = get_week_ranges(year, month)
     week_by_date = {
@@ -240,7 +254,7 @@ def _calculate_monthly_summaries(
         if start <= day <= end
     }
 
-    summaries: dict[str, _PersonDeliverySummary] = {}
+    summaries: dict[RosterEntry, _PersonDeliverySummary] = {}
     for entry in book.roster:
         weekly: list[WeeklyMealCount] = [
             {
@@ -253,7 +267,7 @@ def _calculate_monthly_summaries(
             }
             for week, start, end in weeks
         ]
-        summaries[entry.person_id] = _PersonDeliverySummary(
+        summaries[entry] = _PersonDeliverySummary(
             counts={meal: 0 for meal in ALLOWED_MEALS},
             weekly=weekly,
         )
@@ -262,7 +276,7 @@ def _calculate_monthly_summaries(
         day for day in book.dates if day.year == year and day.month == month
     )
     for row in book.delivery_rows:
-        summary = summaries[row.person_id]
+        summary = summaries[row.person]
         for day in target_dates:
             if row.raw_value_on(day) is not DeliveryCellValue.DELIVERED:
                 continue
@@ -274,12 +288,36 @@ def _calculate_monthly_summaries(
     return summaries
 
 
-def _rows_by_person(book: AnnualDeliveryBook) -> dict[str, tuple[DeliveryRow, ...]]:
-    grouped: dict[str, list[DeliveryRow]] = {}
+def _rows_by_person(
+    book: AnnualDeliveryBook, year: int, month: int
+) -> dict[RosterEntry, tuple[DeliveryRow, ...]]:
+    """대상 월에 실제 배송이 있는 행만 사람별 메타데이터 행으로 묶는다."""
+    target_dates = tuple(
+        day for day in book.dates if day.year == year and day.month == month
+    )
+    grouped: dict[RosterEntry, list[DeliveryRow]] = {}
     for row in book.delivery_rows:
-        grouped.setdefault(row.person_id, []).append(row)
+        if not any(
+            row.raw_value_on(day) is DeliveryCellValue.DELIVERED
+            for day in target_dates
+        ):
+            continue
+
+        fields = (
+            ("배송담당(staff)", row.staff),
+            ("연번(sequence_display)", row.sequence_display),
+        )
+        for field_name, value in fields:
+            text = "" if value is None else str(value).strip()
+            if not text:
+                raise ValueError(
+                    f"{row.description}, 필드={field_name}: "
+                    f"{year}년 {month}월 실제 배송행의 값이 비어 있습니다."
+                )
+
+        grouped.setdefault(row.person, []).append(row)
     return {
-        person_id: tuple(
+        person: tuple(
             sorted(
                 rows,
                 key=lambda row: (
@@ -289,7 +327,7 @@ def _rows_by_person(book: AnnualDeliveryBook) -> dict[str, tuple[DeliveryRow, ..
                 ),
             )
         )
-        for person_id, rows in grouped.items()
+        for person, rows in grouped.items()
     }
 
 

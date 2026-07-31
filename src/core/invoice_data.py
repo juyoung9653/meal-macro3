@@ -30,6 +30,7 @@ class EnrichedPersonDict(TypedDict):
     # 명단 원본 필드는 Excel 헤더에 따라 동적으로 함께 존재한다.
     비고: NotRequired[Any]
     핸드폰: NotRequired[Any]
+    전체주소: NotRequired[str]
 
 
 @dataclass

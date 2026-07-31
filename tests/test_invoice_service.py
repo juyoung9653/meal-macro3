@@ -17,9 +17,11 @@ from src.core.delivery_matrix import (
 from src.services import invoice_controller
 from src.services.invoice_controller import InvoiceGenerationConfig, InvoiceService
 
+_MEAL_SOURCE_ROW_OFFSETS = {"조식": 0, "중식": 1, "석식": 2}
+
 
 def _delivery_row(
-    person_id: str,
+    person: RosterEntry,
     meal: str,
     staff: str,
     sequence: object,
@@ -31,7 +33,14 @@ def _delivery_row(
     values = {day: DeliveryCellValue.BLANK for day in dates}
     values.update({day: DeliveryCellValue.DELIVERED for day in delivered})
     values.update({day: DeliveryCellValue.PAUSED for day in paused})
-    return DeliveryRow(person_id, meal, staff, sequence, values)
+    return DeliveryRow(
+        person=person,
+        meal=meal,
+        staff=staff,
+        sequence=sequence,
+        values=values,
+        source_row=person.source_row + _MEAL_SOURCE_ROW_OFFSETS[meal],
+    )
 
 
 def _service_book() -> AnnualDeliveryBook:
@@ -47,40 +56,39 @@ def _service_book() -> AnnualDeliveryBook:
         date(2026, 6, 1),
         date(2026, 5, 31),
     )
-    roster = (
-        RosterEntry(
-            "P001",
-            {
-                "성명": "홍길동",
-                "학교명": "분당초",
-                "관할동": "정자동",
-                "도로명주소": "성남시 1",
-                "세대주\n성명": "홍보호",
-                "핸드폰": "010-1111-1111",
-                "비고": "견과류 알레르기",
-                # 기존 명단 플래그가 0이어도 배송 행의 1을 억제하면 안 된다.
-                "조식 여부": 0,
-                "중식 여부": 0,
-                "석식 여부": 0,
-            },
-        ),
-        RosterEntry(
-            "P002",
-            {
-                "성명": "배송행없음",
-                "학교명": "분당초",
-                "관할동": "정자동",
-                "도로명주소": "성남시 2",
-                "세대주\n성명": "김보호",
-                "핸드폰": "010-2222-2222",
-                "비고": "",
-                # 식사 여부 컬럼 자체가 없어도 된다.
-            },
-        ),
+    person = RosterEntry(
+        source_row=2,
+        extra={
+            "성명": "홍길동",
+            "학교명": "분당초",
+            "관할동": "정자동",
+            "도로명주소": "성남시 1",
+            "세대주\n성명": "홍보호",
+            "핸드폰": "010-1111-1111",
+            "비고": "견과류 알레르기",
+            # 기존 명단 플래그가 0이어도 배송 행의 1을 억제하면 안 된다.
+            "조식 여부": 0,
+            "중식 여부": 0,
+            "석식 여부": 0,
+        },
     )
+    person_without_delivery_rows = RosterEntry(
+        source_row=5,
+        extra={
+            "성명": "배송행없음",
+            "학교명": "분당초",
+            "관할동": "정자동",
+            "도로명주소": "성남시 2",
+            "세대주\n성명": "김보호",
+            "핸드폰": "010-2222-2222",
+            "비고": "",
+            # 식사 여부 컬럼 자체가 없어도 된다.
+        },
+    )
+    roster = (person, person_without_delivery_rows)
     rows = (
         _delivery_row(
-            "P001",
+            person,
             "석식",
             "기사B",
             2,
@@ -89,7 +97,7 @@ def _service_book() -> AnnualDeliveryBook:
             paused=(date(2026, 6, 28),),
         ),
         _delivery_row(
-            "P001",
+            person,
             "조식",
             "기사A",
             "003",
@@ -102,7 +110,7 @@ def _service_book() -> AnnualDeliveryBook:
             ),
         ),
         _delivery_row(
-            "P001",
+            person,
             "중식",
             "기사A",
             "003",
@@ -112,6 +120,29 @@ def _service_book() -> AnnualDeliveryBook:
         ),
     )
     return AnnualDeliveryBook(2026, roster, rows, dates)
+
+
+def _month_validation_book(
+    year: int,
+    dates: tuple[date, ...],
+    *,
+    delivered: tuple[date, ...] = (),
+    include_delivery_row: bool = True,
+) -> AnnualDeliveryBook:
+    person = RosterEntry(source_row=2, extra={"성명": "홍길동"})
+    delivery_rows: tuple[DeliveryRow, ...] = ()
+    if include_delivery_row:
+        delivery_rows = (
+            _delivery_row(
+                person,
+                "중식",
+                "기사A",
+                1,
+                dates,
+                delivered=delivered,
+            ),
+        )
+    return AnnualDeliveryBook(year, (person,), delivery_rows, dates)
 
 
 @pytest.fixture
@@ -150,10 +181,11 @@ def test_counts_only_target_month_delivered_and_ignores_roster_flags(
     result = InvoiceService().generate(_config(template_path, _service_book()))
 
     assert result.success, result.error
+    assert result.count == len(result.enriched) == 1
     person = result.enriched[0]
     assert (person["_bf_cnt"], person["_lh_cnt"], person["_dn_cnt"]) == (2, 1, 1)
     assert person["_total"] == 4
-    assert result.enriched[1]["_total"] == 0
+    assert invoice_spy.call_args.args[0] == result.enriched
 
     # 원본 비고는 그대로 남고 모든 레거시 전달 필드는 더 이상 만들지 않는다.
     assert person.get("비고") == "견과류 알레르기"
@@ -182,8 +214,87 @@ def test_projects_staff_and_sequence_from_person_delivery_rows_deterministically
     assert person["배송담당"] == "기사A / 기사B"
     assert person["배송순서"] == "003 / 2"
     assert person["연번"] == "003 / 2"
-    assert result.enriched[1]["배송담당"] == ""
-    assert result.enriched[1]["배송순서"] == ""
+
+
+def test_metadata_uses_only_rows_delivered_in_target_month(
+    template_path: str, invoice_spy: Mock
+):
+    days = (date(2026, 6, 1), date(2026, 7, 1))
+    person = RosterEntry(source_row=2, extra={"성명": "홍길동"})
+    book = AnnualDeliveryBook(
+        2026,
+        (person,),
+        (
+            _delivery_row(
+                person,
+                "조식",
+                "6월기사",
+                "006",
+                days,
+                delivered=(date(2026, 6, 1),),
+            ),
+            _delivery_row(
+                person,
+                "석식",
+                "7월기사",
+                "007",
+                days,
+                delivered=(date(2026, 7, 1),),
+            ),
+        ),
+        days,
+    )
+
+    result = InvoiceService().generate(_config(template_path, book))
+
+    assert result.success, result.error
+    assert result.count == len(result.enriched) == 1
+    assert result.enriched[0]["배송담당"] == "6월기사"
+    assert result.enriched[0]["배송순서"] == "006"
+    assert result.enriched[0]["연번"] == "006"
+
+
+@pytest.mark.parametrize(
+    ("staff", "sequence", "field"),
+    [
+        ("  ", "001", "배송담당(staff)"),
+        ("기사A", "  ", "연번(sequence_display)"),
+    ],
+)
+def test_rejects_blank_metadata_on_target_month_delivered_row(
+    template_path: str,
+    invoice_spy: Mock,
+    staff: str,
+    sequence: object,
+    field: str,
+):
+    days = (date(2026, 6, 1),)
+    person = RosterEntry(source_row=2, extra={"성명": "홍길동"})
+    book = AnnualDeliveryBook(
+        2026,
+        (person,),
+        (
+            _delivery_row(
+                person,
+                "조식",
+                staff,
+                sequence,
+                days,
+                delivered=days,
+            ),
+        ),
+        days,
+    )
+
+    result = InvoiceService().generate(_config(template_path, book))
+
+    assert not result.success
+    assert result.error is not None
+    assert "'홍길동' (명단 2~4행)" in result.error
+    assert "원본 2행" in result.error
+    assert "조식" in result.error
+    assert field in result.error
+    invoice_spy.assert_not_called()
 
 
 def test_attaches_exact_weekly_meal_counts_once_from_typed_dates(
@@ -240,12 +351,13 @@ def test_zero_only_entered_month_proceeds_with_zero_invoice(
     template_path: str, invoice_spy: Mock
 ):
     days = (date(2026, 6, 1), date(2026, 6, 2))
+    person = RosterEntry(source_row=2, extra={"성명": "홍길동"})
     book = AnnualDeliveryBook(
         2026,
-        (RosterEntry("P001", {"성명": "홍길동"}),),
+        (person,),
         (
             _delivery_row(
-                "P001", "중식", "기사A", 1, days, paused=(date(2026, 6, 1),)
+                person, "중식", "기사A", 1, days, paused=(date(2026, 6, 1),)
             ),
         ),
         days,
@@ -254,70 +366,42 @@ def test_zero_only_entered_month_proceeds_with_zero_invoice(
     result = InvoiceService().generate(_config(template_path, book))
 
     assert result.success, result.error
-    assert result.enriched[0]["_lh_cnt"] == 0
-    assert result.enriched[0]["_total"] == 0
+    assert result.count == 0
+    assert result.enriched == []
+    assert invoice_spy.call_args.args[0] == []
 
 
 @pytest.mark.parametrize(
     ("book", "year", "month", "message"),
     [
         (
-            AnnualDeliveryBook(
+            _month_validation_book(
                 2025,
-                (RosterEntry("P001"),),
-                (
-                    _delivery_row(
-                        "P001",
-                        "중식",
-                        "기사A",
-                        1,
-                        (date(2025, 6, 1),),
-                        delivered=(date(2025, 6, 1),),
-                    ),
-                ),
                 (date(2025, 6, 1),),
+                delivered=(date(2025, 6, 1),),
             ),
             2026,
             6,
             "연도",
         ),
         (
-            AnnualDeliveryBook(2026, (RosterEntry("P001"),), (), ()),
+            _month_validation_book(2026, (), include_delivery_row=False),
             2026,
             6,
             "날짜 헤더",
         ),
         (
-            AnnualDeliveryBook(
+            _month_validation_book(
                 2026,
-                (RosterEntry("P001"),),
-                (
-                    _delivery_row(
-                        "P001",
-                        "중식",
-                        "기사A",
-                        1,
-                        (date(2026, 5, 1),),
-                        delivered=(date(2026, 5, 1),),
-                    ),
-                ),
                 (date(2026, 5, 1),),
+                delivered=(date(2026, 5, 1),),
             ),
             2026,
             6,
             "6월 날짜 헤더",
         ),
         (
-            AnnualDeliveryBook(
-                2026,
-                (RosterEntry("P001"),),
-                (
-                    _delivery_row(
-                        "P001", "중식", "기사A", 1, (date(2026, 6, 1),)
-                    ),
-                ),
-                (date(2026, 6, 1),),
-            ),
+            _month_validation_book(2026, (date(2026, 6, 1),)),
             2026,
             6,
             "미입력",
@@ -356,12 +440,13 @@ def test_rejects_invalid_month_numbers_before_generation(
 
 def test_vacation_detection_uses_only_target_month_delivered_lunch():
     days = (date(2026, 7, 1), date(2026, 8, 1))
+    person = RosterEntry(source_row=2, extra={"성명": "홍길동"})
     book = AnnualDeliveryBook(
         2026,
-        (RosterEntry("P001"),),
+        (person,),
         (
             _delivery_row(
-                "P001",
+                person,
                 "중식",
                 "기사A",
                 1,
@@ -369,7 +454,7 @@ def test_vacation_detection_uses_only_target_month_delivered_lunch():
                 delivered=(date(2026, 7, 1),),
             ),
             _delivery_row(
-                "P001",
+                person,
                 "조식",
                 "기사A",
                 1,

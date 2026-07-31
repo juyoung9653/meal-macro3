@@ -5,9 +5,15 @@ from __future__ import annotations
 import os
 from datetime import date
 from pathlib import Path
+from typing import cast
+from unittest.mock import Mock, patch
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import openpyxl
 import pytest
+from PyQt6.QtCore import QSettings
+from PyQt6.QtWidgets import QApplication
 
 from src.core.delivery_matrix import (
     AnnualDeliveryBook,
@@ -15,10 +21,17 @@ from src.core.delivery_matrix import (
     DeliveryRow,
     RosterEntry,
 )
+from src.core.invoice_data import EnrichedPersonDict
+from src.core.models import FULL_ADDRESS_FIELD
 from src.excel.annual_workbook import AnnualWorkbook
 from src.generators.confirm_generator import make_confirm
-from src.services.invoice_controller import InvoiceGenerationConfig, InvoiceService
+from src.services.invoice_controller import (
+    InvoiceGenerationConfig,
+    InvoiceResult,
+    InvoiceService,
+)
 from src.templates.config import read_template_columns
+from src.widgets.invoice_tab import InvoiceTab
 
 
 @pytest.fixture(autouse=True)
@@ -26,6 +39,20 @@ def _clear_template_cache():
     read_template_columns.cache_clear()
     yield
     read_template_columns.cache_clear()
+
+
+@pytest.fixture
+def qapp(tmp_path: Path):
+    previous_format = QSettings.defaultFormat()
+    QSettings.setDefaultFormat(QSettings.Format.IniFormat)
+    QSettings.setPath(
+        QSettings.Format.IniFormat,
+        QSettings.Scope.UserScope,
+        str(tmp_path / "settings"),
+    )
+    app = QApplication.instance() or QApplication([])
+    yield app
+    QSettings.setDefaultFormat(previous_format)
 
 
 @pytest.fixture
@@ -44,6 +71,29 @@ def confirm_template_path() -> str:
     return path
 
 
+def _delivery_row(
+    person: RosterEntry,
+    source_row: int,
+    meal: str,
+    staff: str,
+    sequence: object,
+    dates: tuple[date, ...],
+    *,
+    delivered: tuple[date, ...] = (),
+    paused: tuple[date, ...] = (),
+) -> DeliveryRow:
+    values = {day: DeliveryCellValue.BLANK for day in dates}
+    values.update({day: DeliveryCellValue.DELIVERED for day in delivered})
+    values.update({day: DeliveryCellValue.PAUSED for day in paused})
+    return DeliveryRow(
+        person=person,
+        meal=meal,
+        staff=staff,
+        sequence=sequence,
+        values=values,
+        source_row=source_row,
+    )
+
 
 def _book() -> AnnualDeliveryBook:
     # 실제 물리 열처럼 역순이며 다른 월도 포함한다.
@@ -54,49 +104,63 @@ def _book() -> AnnualDeliveryBook:
         date(2026, 6, 2),
         date(2026, 6, 1),
     )
-    blank = DeliveryCellValue.BLANK
-    roster = (
-        RosterEntry(
-            "P001",
-            {
-                "성명": "홍길동",
-                "학교명": "분당초",
-                "비고": "원본 비고",
-                "조식 여부": 0,
-            },
-        ),
-        RosterEntry(
-            "P002",
-            {"성명": "김철수", "학교명": "분당초", "비고": ""},
-        ),
+    hong = RosterEntry(
+        source_row=2,
+        extra={
+            "성명": "홍길동",
+            "학교명": "분당초",
+            "비고": "원본 비고",
+            "조식 여부": 0,
+        },
     )
+    kim = RosterEntry(
+        source_row=5,
+        extra={"성명": "김철수", "학교명": "분당초", "비고": ""},
+    )
+    paused_person = RosterEntry(
+        source_row=8,
+        extra={"성명": "배송중지", "학교명": "분당초", "비고": ""},
+    )
+    roster = (hong, kim, paused_person)
     rows = (
-        DeliveryRow(
-            "P001",
+        _delivery_row(
+            hong,
+            2,
             "조식",
             "김배송",
             "003",
-            {
-                date(2026, 6, 1): DeliveryCellValue.DELIVERED,
-                date(2026, 6, 2): blank,
-                date(2026, 6, 3): DeliveryCellValue.PAUSED,
-                date(2026, 6, 4): DeliveryCellValue.DELIVERED,
-                date(2026, 7, 1): DeliveryCellValue.DELIVERED,
-            },
+            dates,
+            delivered=(date(2026, 6, 1), date(2026, 6, 4), date(2026, 7, 1)),
+            paused=(date(2026, 6, 3),),
         ),
-        DeliveryRow(
-            "P002",
+        _delivery_row(hong, 3, "중식", "김배송", "003", dates),
+        _delivery_row(hong, 4, "석식", "김배송", "003", dates),
+        _delivery_row(kim, 5, "조식", "이배송", 2, dates),
+        _delivery_row(kim, 6, "중식", "이배송", 2, dates),
+        _delivery_row(
+            kim,
+            7,
             "석식",
             "이배송",
             2,
-            {
-                date(2026, 6, 1): DeliveryCellValue.DELIVERED,
-                date(2026, 6, 2): DeliveryCellValue.DELIVERED,
-                date(2026, 6, 3): DeliveryCellValue.DELIVERED,
-                date(2026, 6, 4): blank,
-                date(2026, 7, 1): blank,
-            },
+            dates,
+            delivered=(
+                date(2026, 6, 1),
+                date(2026, 6, 2),
+                date(2026, 6, 3),
+            ),
         ),
+        _delivery_row(paused_person, 8, "조식", "박배송", 9, dates),
+        _delivery_row(
+            paused_person,
+            9,
+            "중식",
+            "박배송",
+            9,
+            dates,
+            paused=(date(2026, 6, 1),),
+        ),
+        _delivery_row(paused_person, 10, "석식", "박배송", 9, dates),
     )
     return AnnualDeliveryBook(2026, roster, rows, dates)
 
@@ -105,26 +169,17 @@ def _write_annual_workbook(path: Path) -> Path:
     wb = openpyxl.Workbook()
     roster = wb.worksheets[0]
     roster.title = "명단"
+    # 실제 물리 열은 7월→6월→5월 역순이다.
     roster.append(
         [
-            "ID",
             "성명",
             "학교명",
             "관할동",
             "도로명주소",
+            "상세주소",
             "세대주\n성명",
             "핸드폰",
             "비고",
-        ]
-    )
-    # ID 외 blank는 AnnualWorkbook이 None으로 보존해야 한다.
-    roster.append(["P001", None, "분당초", None, None, None, None, None])
-
-    delivery = wb.create_sheet("배송현황")
-    # 실제 물리 열은 7월→6월→5월 역순이다.
-    delivery.append(
-        [
-            "ID",
             "식종",
             "배송담당",
             "연번",
@@ -136,7 +191,37 @@ def _write_annual_workbook(path: Path) -> Path:
             "20260531",
         ]
     )
-    delivery.append(["P001", "조식", "기사A", "003", 1, 0, 1, None, 1, 1])
+    # 줄바꿈 헤더 정규화와 동일 인적사항을 세 식종 행 모두 보존해야 한다.
+    profile = [
+        "홍길동",
+        "분당초",
+        "정자동",
+        "성남대로 1",
+        "101호",
+        "홍보호",
+        "010-1111-1111",
+        None,
+    ]
+    roster.append(
+        [*profile, "조식", "기사A", "003", 1, 0, 1, None, 1, 1]
+    )
+    roster.append(
+        [*profile, "중식", "기사A", "003", None, None, None, None, None, None]
+    )
+    roster.append(
+        [
+            *profile,
+            "석식",
+            "7월기사",
+            "007",
+            1,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ]
+    )
     wb.save(path)
     wb.close()
     return path
@@ -146,12 +231,13 @@ def test_generate_invoice_creates_valid_workbook_from_annual_book(
     tmp_path: Path, template_path: str
 ):
     output = tmp_path / "청구서_202606.xlsx"
+    book = _book()
     config = InvoiceGenerationConfig(
         template_path=template_path,
         output_path=str(output),
         year=2026,
         month=6,
-        annual_book=_book(),
+        annual_book=book,
         col_mapping={
             "성명": "성명",
             "학교명": "학교명",
@@ -166,7 +252,11 @@ def test_generate_invoice_creates_valid_workbook_from_annual_book(
     result = InvoiceService().generate(config)
 
     assert result.success, result.error
-    assert result.count == 2
+    assert result.count == len(result.enriched) == 2
+    assert len(book.roster) == 3
+    assert [entry.source_row for entry in book.roster] == [2, 5, 8]
+    assert [person.get("성명") for person in result.enriched] == ["홍길동", "김철수"]
+    assert all("ID" not in person for person in result.enriched)
     assert output.is_file()
     assert result.enriched[0]["_bf_cnt"] == 2
     assert result.enriched[0]["_dn_cnt"] == 0
@@ -188,6 +278,199 @@ def test_generate_invoice_creates_valid_workbook_from_annual_book(
         wb.close()
 
 
+def test_happy_lunch_maps_combined_address_into_invoice(
+    qapp: QApplication,
+    tmp_path: Path,
+):
+    template = "assets/행복도시락_청구서템플릿.xlsx"
+    if not os.path.exists(template):
+        pytest.skip("행복도시락 청구서 템플릿 없음")
+
+    day = date(2026, 6, 1)
+    person = RosterEntry(
+        source_row=2,
+        extra={
+            "성명": "주소대상자",
+            "도로명주소": "성남대로 1",
+            "상세주소": "101호",
+        },
+    )
+    book = AnnualDeliveryBook(
+        2026,
+        (person,),
+        (
+            _delivery_row(person, 2, "조식", "기사A", "001", (day,)),
+            _delivery_row(
+                person,
+                3,
+                "중식",
+                "기사A",
+                "001",
+                (day,),
+                delivered=(day,),
+            ),
+            _delivery_row(person, 4, "석식", "기사A", "001", (day,)),
+        ),
+        (day,),
+    )
+
+    tab = InvoiceTab(meal_type="행복도시락")
+    try:
+        tab.set_annual_book(book)
+        assert tab._col_mapping["주소"] == FULL_ADDRESS_FIELD
+        output = tmp_path / "행복도시락_청구서.xlsx"
+        result = InvoiceService().generate(
+            InvoiceGenerationConfig(
+                template_path=template,
+                output_path=str(output),
+                year=2026,
+                month=6,
+                annual_book=book,
+                col_mapping=tab._col_mapping,
+                meal_type="행복도시락",
+            )
+        )
+    finally:
+        tab.close()
+
+    assert result.success, result.error
+    assert result.enriched[0].get(FULL_ADDRESS_FIELD) == "성남대로 1 101호"
+    workbook = openpyxl.load_workbook(output, data_only=False)
+    try:
+        assert any(
+            cell.value == "성남대로 1 101호"
+            for worksheet in workbook.worksheets
+            for row in worksheet.iter_rows()
+            for cell in row
+        )
+    finally:
+        workbook.close()
+
+
+def test_zero_only_entered_month_returns_no_output_people(
+    tmp_path: Path, template_path: str
+):
+    day = date(2026, 6, 1)
+    dates = (day,)
+    person = RosterEntry(source_row=2, extra={"성명": "배송중지"})
+    book = AnnualDeliveryBook(
+        2026,
+        (person,),
+        (
+            _delivery_row(person, 2, "조식", "", "", dates),
+            _delivery_row(
+                person,
+                3,
+                "중식",
+                "",
+                "",
+                dates,
+                paused=dates,
+            ),
+            _delivery_row(person, 4, "석식", "", "", dates),
+        ),
+        dates,
+    )
+    output = tmp_path / "청구서_0건.xlsx"
+
+    result = InvoiceService().generate(
+        InvoiceGenerationConfig(
+            template_path=template_path,
+            output_path=str(output),
+            year=2026,
+            month=6,
+            annual_book=book,
+        )
+    )
+
+    assert result.success, result.error
+    assert result.count == 0
+    assert result.enriched == []
+    assert output.is_file()
+
+
+def test_invoice_tab_displays_and_forwards_only_output_people(
+    qapp: QApplication,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(
+        "src.widgets.invoice_tab.read_template_columns",
+        lambda *_args, **_kwargs: ["성명", "학교명"],
+    )
+    active = cast(
+        EnrichedPersonDict,
+        {
+            "성명": "활성 대상",
+            "학교명": "분당초",
+            "_note": "",
+            "_total": 2,
+            "_amount": "19,000원",
+            "_bf_cnt": 2,
+            "_dn_cnt": 0,
+            "_lh_cnt": 0,
+            "weekly_meal_counts": [],
+            "배송순서": "001",
+            "배송담당": "기사A",
+            "연번": "001",
+        },
+    )
+    inactive = cast(
+        EnrichedPersonDict,
+        {
+            "성명": "0건 대상",
+            "학교명": "분당초",
+            "_note": "",
+            "_total": 0,
+            "_amount": "0원",
+            "_bf_cnt": 0,
+            "_dn_cnt": 0,
+            "_lh_cnt": 0,
+            "weekly_meal_counts": [],
+            "배송순서": "",
+            "배송담당": "",
+            "연번": "",
+        },
+    )
+    service = Mock()
+    service.generate.return_value = InvoiceResult(
+        success=True,
+        count=1,
+        enriched=[active, inactive],
+    )
+    tab = InvoiceTab()
+    try:
+        tab._service = service
+        tab._book = _book()
+        tab._year = 2026
+        tab._month = 6
+        tab.output_dir = str(tmp_path)
+        tab._col_mapping = {"성명": "성명", "학교명": "학교명"}
+
+        with (
+            patch("src.widgets.invoice_tab.QMessageBox.information") as information,
+            patch("src.widgets.invoice_tab.QMessageBox.critical") as critical,
+        ):
+            tab._generate_invoices()
+
+        critical.assert_not_called()
+        service.generate.assert_called_once()
+        assert tab.invoices == [active]
+        assert tab.result_table.rowCount() == 1
+        name_item = tab.result_table.item(0, 0)
+        assert name_item is not None
+        assert name_item.text() == "활성 대상"
+        assert tab.info_label.text() == "생성된 청구서: 1건 (처음 1건 표시)"
+        assert "청구서 1건 생성 완료!" in information.call_args.args[2]
+
+        invoice_data = tab.get_invoice_data()
+        assert invoice_data.invoices == [active]
+        assert invoice_data.year == 2026
+        assert invoice_data.month == 6
+    finally:
+        tab.close()
+
+
 def test_real_annual_xlsx_to_invoice_and_confirm_end_to_end(
     tmp_path: Path,
     template_path: str,
@@ -199,7 +482,16 @@ def test_real_annual_xlsx_to_invoice_and_confirm_end_to_end(
     confirm_dir.mkdir()
 
     book = AnnualWorkbook(annual_path).load()
-    assert book.roster_by_id["P001"].extra["성명"] is None
+    assert len(book.roster) == 1
+    person = book.roster[0]
+    assert person.source_row == 2
+    assert person.extra["성명"] == "홍길동"
+    assert person.extra["세대주 성명"] == "홍보호"
+    assert "ID" not in person.extra
+    person_rows = book.rows_by_person[person]
+    assert tuple(row.source_row for row in person_rows) == (2, 3, 4)
+    assert tuple(row.meal for row in person_rows) == ("조식", "중식", "석식")
+    assert all(row.person is person for row in person_rows)
     assert book.dates == (
         date(2026, 5, 31),
         date(2026, 6, 1),
@@ -229,8 +521,13 @@ def test_real_annual_xlsx_to_invoice_and_confirm_end_to_end(
     )
 
     assert result.success, result.error
+    assert result.count == len(result.enriched) == 1
+    assert "ID" not in result.enriched[0]
     assert invoice_path.is_file()
     assert result.enriched[0]["_bf_cnt"] == 2
+    assert result.enriched[0].get(FULL_ADDRESS_FIELD) == "성남대로 1 101호"
+    assert result.enriched[0]["배송담당"] == "기사A"
+    assert result.enriched[0]["연번"] == "003"
     assert result.enriched[0]["weekly_meal_counts"][0]["조식"] == 1
     assert result.enriched[0]["weekly_meal_counts"][1]["조식"] == 1
     assert {
@@ -264,11 +561,13 @@ def test_real_annual_xlsx_to_invoice_and_confirm_end_to_end(
     )
     confirm_path = confirm_dir / created[0]["file"]
     assert confirm_path.is_file()
-    assert created[0]["sheet_name"] == "기타"
+    assert created[0]["sheet_name"] == "정자동"
 
     confirm_wb = openpyxl.load_workbook(confirm_path, data_only=False)
     try:
-        confirm_ws = confirm_wb["기타"]
+        confirm_ws = confirm_wb["정자동"]
+        assert confirm_ws["F3"].value == "성남대로 1 101호"
+        assert confirm_ws["C6"].value == "홍보호"
         assert confirm_ws["K3"].value == "기사A"
         assert confirm_ws["G6"].value == 1
         assert confirm_ws["G7"].value == 1

@@ -13,6 +13,11 @@ _S = get_settings()
 COL_ORD = _S.get_delivery_config("col_ord")
 
 
+def _validate_max_groups_limit(max_groups_limit: int) -> None:
+    if max_groups_limit <= 0:
+        raise ValueError("max_groups_limit must be greater than 0")
+
+
 def get_groups(df: pd.DataFrame) -> list[tuple[int, int]]:
     """DataFrame에서 배송 그룹 인덱스 범위를 추출합니다."""
     if df.empty or COL_ORD not in df.columns:
@@ -35,6 +40,7 @@ def apply_page_breaks_by_groups(
     Returns:
         페이지 나누기가 필요한 행 인덱스 리스트 (1-based, 오름차순)
     """
+    _validate_max_groups_limit(max_groups_limit)
     if not groups:
         return []
 
@@ -114,6 +120,7 @@ def compute_page_chunks(
     Returns:
         chunks: [[(s0,e0), ...], [...]]  — 페이지별 그룹 리스트
     """
+    _validate_max_groups_limit(max_groups_limit)
     if mode == 0 or not groups:
         return [groups[:]] if groups else []
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from copy import copy
-from datetime import datetime
+from datetime import date
 from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
@@ -22,9 +22,7 @@ _DEFAULT_ROW_HEIGHT = 15
 
 
 def get_template_path() -> str:
-    return get_settings().get(
-        "templates", "report_path", default="assets/report_template.xlsx"
-    )
+    return get_settings().get_report_template_path()
 
 
 TEMPLATE_SHEET = "aaa"
@@ -34,10 +32,10 @@ def _format_korean_date(date_str: str) -> str:
     if not date_str:
         return ""
     try:
-        dt = datetime.strptime(date_str, "%Y%m%d")
-    except ValueError:
+        parsed = date(int(date_str[:4]), int(date_str[4:6]), int(date_str[6:8]))
+    except (ValueError, IndexError):
         return date_str
-    return f"{dt.month}월 {dt.day}일"
+    return f"{parsed.month}월 {parsed.day}일"
 
 
 def export_multi(
@@ -46,40 +44,42 @@ def export_multi(
 ) -> None:
     """여러 날짜 리포트를 하나의 Excel 파일로 저장 (날짜별 시트)."""
     if not results:
-        return
+        raise ValueError("내보낼 리포트 결과가 없습니다.")
 
-    tpl_path = get_template_path()
-    tpl_file = Path(tpl_path)
-    if not tpl_file.exists():
-        log.warning("템플릿 없음: %s → fallback", tpl_path)
-        for date_str, meal, table in results:
-            stem = Path(filepath).stem
-            suffix = Path(filepath).suffix
-            single_path = Path(filepath).parent / f"{stem}_{date_str}{suffix}"
-            _export_fallback(table, single_path, date_str, meal)
-        return
+    out_file = Path(filepath)
+    tpl_file = Path(get_template_path())
+    if not tpl_file.is_file():
+        raise FileNotFoundError(
+            f"배송 리포트 템플릿을 찾을 수 없습니다: {tpl_file}"
+        )
 
-    log.info("export: %d시트 → %s", len(results), filepath)
+    log.info("export: %d시트 → %s", len(results), out_file)
     tpl = load_workbook(tpl_file)
-    src = tpl[TEMPLATE_SHEET]
-
     out = Workbook()
-    default = out.active
-    if default is not None:
-        out.remove(default)
+    try:
+        src = tpl[TEMPLATE_SHEET]
+        default = out.active
+        if default is not None:
+            out.remove(default)
 
-    for date_str, meal, table in results:
-        ws = out.create_sheet(title=f"{date_str}({meal})")
-        _copy_sheet(src, ws)
-        ws["A1"] = _format_korean_date(date_str)
-        _fill_data(ws, table, meal)
+        for date_str, meal, table in results:
+            ws = out.create_sheet(title=f"{date_str}({meal})")
+            _copy_sheet(src, ws)
+            ws["A1"] = _format_korean_date(date_str)
+            _fill_data(ws, table, meal)
 
-        last_row = ws.max_row
-        ws.print_area = f"A1:I{last_row}"
-        _stretch_rows_to_page(ws, last_row)
-        _apply_page_setup(ws)
+            last_row = ws.max_row
+            ws.print_area = f"A1:I{last_row}"
+            _stretch_rows_to_page(ws, last_row)
+            _apply_page_setup(ws)
 
-    out.save(filepath)
+        out.save(out_file)
+    finally:
+        out.close()
+        tpl.close()
+
+    if not out_file.is_file():
+        raise OSError(f"리포트 파일이 생성되지 않았습니다: {out_file}")
 
 
 def export(
@@ -335,79 +335,3 @@ def _make_memo_rich_text(
         t = line if i == len(lines) - 1 else line + "\n"
         blocks.append(TextBlock(InlineFont(**kw), t))
     return CellRichText(blocks)
-
-
-def _export_fallback(
-    table: list[list],
-    filepath: str | Path,
-    date_str: str,
-    meal: str,
-) -> None:
-    """템플릿 파일 없을 때 openpyxl로 기본 생성."""
-    from openpyxl.styles import Alignment, Font, PatternFill, Side
-    from openpyxl.styles import Border as OpBorder
-    from openpyxl.utils import get_column_letter
-
-    wb = Workbook()
-    ws = wb.active
-    ws.title = f"아동급식({meal})"
-    ws["A1"] = _format_korean_date(date_str)
-
-    COL_WIDTHS = [14.125, 11, 8.625, 8.625, 8.625, 8.625, 10.375, 23, 16.25]
-    for i, w in enumerate(COL_WIDTHS, 1):
-        ws.column_dimensions[get_column_letter(i)].width = w
-
-    FONT_DEF = Font(name="맑은 고딕", size=11)
-    FONT_BOLD = Font(name="맑은 고딕", size=11, bold=True)
-    THIN = Side(style="thin")
-    MEDIUM = Side(style="medium")
-    BORDER_THIN = OpBorder(left=THIN, right=THIN, top=THIN, bottom=THIN)
-    BORDER_TB = OpBorder(left=THIN, right=THIN, top=MEDIUM, bottom=THIN)
-    FILL_HDR = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid")
-
-    headers = (
-        table[0]
-        if table
-        else ["배송담당", "1", "2", "3", "4", "5", "Total", "비고", "참고"]
-    )
-    for i, h in enumerate(headers[:9], 1):
-        c = ws.cell(row=3, column=i, value=h)
-        c.font = FONT_BOLD
-        c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        c.fill = FILL_HDR
-        c.border = BORDER_TB
-
-    for r_idx, row in enumerate(table[1:], 4):
-        has_diff_any = any(has_diff(row[j + 1]) for j in range(min(5, len(row) - 1)))
-
-        for ci in range(9):
-            val = row[ci] if ci < len(row) else ""
-            if 1 <= ci <= 5:
-                stripped = strip_diff(val)
-                val = int(stripped) if stripped != "" else ""
-            if ci == 6:
-                val = int(val) if val != "" else ""
-            if ci == 7:
-                val = _make_memo_rich_text(val) if val else ""
-            c = ws.cell(row=r_idx, column=ci + 1, value=val)
-            c.font = FONT_DEF
-            if has_diff_any:
-                if ci == 0 or (
-                    1 <= ci <= 5 and has_diff(row[ci] if ci < len(row) else "")
-                ):
-                    c.fill = PatternFill(
-                        start_color="C5D9F1", end_color="C5D9F1", fill_type="solid"
-                    )
-            if ci == 7:
-                c.alignment = Alignment(
-                    horizontal="left", vertical="top", wrap_text=True
-                )
-            else:
-                c.alignment = Alignment(horizontal="center", vertical="center")
-            c.border = BORDER_THIN
-
-    last_row = max(3 + len(table[1:]), 10)
-    ws.print_area = f"A1:I{last_row}"
-    _stretch_rows_to_page(ws, last_row)
-    _apply_page_setup(ws)
-    wb.save(filepath)

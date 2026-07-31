@@ -23,8 +23,8 @@ def show_excel(
     ori: int,
     split: int,
     max_rows: int,
-) -> None:
-    """배송대타 데이터를 Excel 파일로 출력하여 엑셀로 엽니다."""
+) -> str:
+    """배송대타 Excel을 임시 파일로 저장해 열고 생성 경로를 반환한다."""
     wb = Workbook()
     ws = wb.active
     if ws is None:
@@ -41,12 +41,20 @@ def show_excel(
         orientation_pref=ori,
     )
 
-    tmp = tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False)
-    tmp_path = tmp.name
-    tmp.close()
+    descriptor, tmp_path = tempfile.mkstemp(suffix=".xlsx")
+    os.close(descriptor)
 
     try:
         wb.save(tmp_path)
         os.startfile(tmp_path)
     except Exception:
         log.exception("Failed to save/open delivery excel file")
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+    finally:
+        wb.close()
+
+    return tmp_path

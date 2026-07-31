@@ -3,7 +3,7 @@
 from dataclasses import fields
 
 from src.core.invoice_data import InvoiceData, WeeklyMealCount
-from src.core.models import build_enriched_person_dict
+from src.core.models import FULL_ADDRESS_FIELD, build_enriched_person_dict
 
 LEGACY_FIELDS = {
     "_breakfast",
@@ -35,7 +35,12 @@ class TestBuildEnrichedPersonDict:
     def test_builds_only_current_enriched_contract(self):
         weekly = _weekly_counts()
         enriched = build_enriched_person_dict(
-            raw={"ID": "P001", "성명": "홍길동", "비고": "원본"},
+            raw={
+                "성명": "홍길동",
+                "도로명주소": "성남대로 1",
+                "상세주소": "101호",
+                "비고": "원본",
+            },
             note="원본",
             meal_counts={"조식": 2, "중식": 1, "석식": 3},
             weekly_meal_counts=weekly,
@@ -45,6 +50,7 @@ class TestBuildEnrichedPersonDict:
         )
 
         assert enriched.get("성명") == "홍길동"
+        assert enriched.get(FULL_ADDRESS_FIELD) == "성남대로 1 101호"
         assert enriched["_note"] == "원본"
         assert (enriched["_bf_cnt"], enriched["_lh_cnt"], enriched["_dn_cnt"]) == (
             2,
@@ -61,7 +67,7 @@ class TestBuildEnrichedPersonDict:
         assert LEGACY_FIELDS.isdisjoint(enriched)
 
     def test_does_not_mutate_raw_or_weekly_inputs(self):
-        raw = {"ID": "P001", "성명": "홍길동"}
+        raw = {"성명": "홍길동"}
         weekly = _weekly_counts()
 
         enriched = build_enriched_person_dict(
@@ -75,7 +81,7 @@ class TestBuildEnrichedPersonDict:
         )
         enriched["weekly_meal_counts"][0]["조식"] = 99
 
-        assert raw == {"ID": "P001", "성명": "홍길동"}
+        assert raw == {"성명": "홍길동"}
         assert weekly[0]["조식"] == 2
 
 
