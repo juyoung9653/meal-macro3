@@ -69,6 +69,16 @@ class TestWeekRanges:
         weeks = get_week_ranges(2026, 5)
         assert len(weeks) == 5  # 6주였던 것이 5주로 병합됨
 
+    def test_30day_saturday_start_merges_first_weeks(self):
+        """30일 월 + 토요일 시작도 처음 2주를 병합해 5주로 제한."""
+        # 2025년 11월: 1일 토요일, 30일 일요일
+        weeks = get_week_ranges(2025, 11)
+
+        assert len(weeks) == 5
+        assert weeks[0] == (1, date(2025, 11, 1), date(2025, 11, 8))
+        assert weeks[-1] == (5, date(2025, 11, 30), date(2025, 11, 30))
+
+
     def test_feb_2026(self):
         """2026년 2월: 28일."""
         weeks = get_week_ranges(2026, 2)
