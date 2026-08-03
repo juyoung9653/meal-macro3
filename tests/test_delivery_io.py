@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 
 from src.core.delivery_matrix import (
+    ALLOWED_MEALS,
     AnnualDeliveryBook,
     DeliveryCellValue,
     DeliveryRow,
@@ -36,6 +37,29 @@ def _values(
         ZERO_ONLY_DAY: zero_value,
         FULL_BLANK_DAY: DeliveryCellValue.BLANK,
     }
+
+
+def _complete_meal_rows(
+    roster: tuple[RosterEntry, ...],
+    rows: tuple[DeliveryRow, ...],
+    dates: tuple[date, ...],
+) -> tuple[DeliveryRow, ...]:
+    completed_rows = list(rows)
+    for person in roster:
+        present_meals = {row.meal for row in rows if row.person is person}
+        completed_rows.extend(
+            DeliveryRow(
+                person,
+                meal,
+                "",
+                "",
+                {day: DeliveryCellValue.BLANK for day in dates},
+                source_row=person.source_row + meal_index,
+            )
+            for meal_index, meal in enumerate(ALLOWED_MEALS)
+            if meal not in present_meals
+        )
+    return tuple(completed_rows)
 
 
 @pytest.fixture
@@ -167,7 +191,12 @@ def annual_book() -> AnnualDeliveryBook:
             source_row=19,
         ),
     )
-    return AnnualDeliveryBook(2031, roster, rows, DATES)
+    return AnnualDeliveryBook(
+        2031,
+        roster,
+        _complete_meal_rows(roster, rows, DATES),
+        DATES,
+    )
 
 
 def test_choice_is_frozen_and_accepts_list_or_tuple_columns():
@@ -365,7 +394,7 @@ def test_rejects_selected_row_with_blank_sequence(sequence: object):
     book = AnnualDeliveryBook(
         2031,
         (person,),
-        (row,),
+        _complete_meal_rows((person,), (row,), (DELIVERY_DAY,)),
         (DELIVERY_DAY,),
     )
 

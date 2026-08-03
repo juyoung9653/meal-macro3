@@ -26,6 +26,7 @@ def annual_book() -> AnnualDeliveryBook:
         date(2026, 6, 15),
     )
     blank = DeliveryCellValue.BLANK
+    blank_values = {day: blank for day in dates}
     p001 = RosterEntry(
         source_row=2,
         extra={"성명": "홍길동", "전화": "010-1111-1111"},
@@ -78,6 +79,9 @@ def annual_book() -> AnnualDeliveryBook:
             },
             source_row=4,
         ),
+        DeliveryRow(p001, "조식", "", "", blank_values, source_row=2),
+        DeliveryRow(p002, "조식", "", "", blank_values, source_row=5),
+        DeliveryRow(p002, "석식", "", "", blank_values, source_row=7),
     )
     return AnnualDeliveryBook(
         year=2026,
@@ -103,7 +107,14 @@ def test_builds_person_indexes_and_preserves_roster_extras(
     assert annual_book.rows_by_person[p001] == (
         row,
         annual_book.get_delivery_row(p001, "석식"),
+        annual_book.get_delivery_row(p001, "조식"),
     )
+
+    equivalent = RosterEntry(source_row=2, extra={"성명": "홍길동"})
+    assert equivalent is not p001
+    assert equivalent != p001
+    assert annual_book.get_delivery_row(equivalent, "중식") is None
+    assert equivalent not in annual_book.rows_by_person
 
     unknown = RosterEntry(source_row=8, extra={"성명": "없는 사람"})
     assert annual_book.get_delivery_row(unknown, "중식") is None
@@ -137,6 +148,22 @@ def test_book_requires_delivery_row_to_reference_canonical_person_object():
 
     with pytest.raises(ValueError, match="동일 객체"):
         AnnualDeliveryBook(2026, (canonical,), (row,), (day,))
+
+
+def test_book_requires_each_allowed_meal_for_each_roster_person():
+    day = date(2026, 6, 15)
+    person = RosterEntry(source_row=2, extra={"성명": "홍길동"})
+
+    with pytest.raises(ValueError, match="배송 행이 누락되었습니다: 조식, 중식, 석식"):
+        AnnualDeliveryBook(2026, (person,), (), (day,))
+
+
+def test_empty_book_is_allowed():
+    book = AnnualDeliveryBook(2026, (), (), (date(2026, 6, 15),))
+
+    assert book.roster == ()
+    assert book.delivery_rows == ()
+    assert book.rows_by_person == {}
 
 
 def test_book_rejects_missing_or_additional_delivery_value_dates():

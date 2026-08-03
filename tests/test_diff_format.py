@@ -1,6 +1,6 @@
 """core/diff_format.py 단위 테스트."""
 
-import pytest
+
 
 from src.core.diff_format import fmt_cell, has_diff, strip_diff, to_numeric
 

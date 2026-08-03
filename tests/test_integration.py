@@ -21,7 +21,12 @@ from src.core.delivery_matrix import (
     DeliveryRow,
     RosterEntry,
 )
-from src.core.invoice_data import EnrichedPersonDict
+from src.core.invoice_data import (
+    EnrichedPersonDict,
+    MealPrices,
+    MonthlyDeliveryBatch,
+    legacy_recipient,
+)
 from src.core.models import FULL_ADDRESS_FIELD
 from src.excel.annual_workbook import AnnualWorkbook
 from src.generators.confirm_generator import make_confirm
@@ -415,29 +420,16 @@ def test_invoice_tab_displays_and_forwards_only_output_people(
             "연번": "001",
         },
     )
-    inactive = cast(
-        EnrichedPersonDict,
-        {
-            "성명": "0건 대상",
-            "학교명": "분당초",
-            "_note": "",
-            "_total": 0,
-            "_amount": "0원",
-            "_bf_cnt": 0,
-            "_dn_cnt": 0,
-            "_lh_cnt": 0,
-            "weekly_meal_counts": [],
-            "배송순서": "",
-            "배송담당": "",
-            "연번": "",
-        },
+
+    batch = MonthlyDeliveryBatch(
+        year=2026,
+        month=6,
+        prices=MealPrices(breakfast=9500, lunch=9500, dinner=9500),
+        is_vacation_month=False,
+        deliveries=(legacy_recipient(active),),
     )
     service = Mock()
-    service.generate.return_value = InvoiceResult(
-        success=True,
-        count=1,
-        enriched=[active, inactive],
-    )
+    service.generate.return_value = InvoiceResult(success=True, count=1, batch=batch)
     tab = InvoiceTab()
     try:
         tab._service = service
@@ -455,7 +447,7 @@ def test_invoice_tab_displays_and_forwards_only_output_people(
 
         critical.assert_not_called()
         service.generate.assert_called_once()
-        assert tab.invoices == [active]
+        assert tab.get_invoice_data().batch is batch
         assert tab.result_table.rowCount() == 1
         name_item = tab.result_table.item(0, 0)
         assert name_item is not None
@@ -464,7 +456,7 @@ def test_invoice_tab_displays_and_forwards_only_output_people(
         assert "청구서 1건 생성 완료!" in information.call_args.args[2]
 
         invoice_data = tab.get_invoice_data()
-        assert invoice_data.invoices == [active]
+        assert invoice_data.batch is batch
         assert invoice_data.year == 2026
         assert invoice_data.month == 6
     finally:
@@ -550,8 +542,9 @@ def test_real_annual_xlsx_to_invoice_and_confirm_end_to_end(
     finally:
         invoice_wb.close()
 
+    assert result.batch is not None
     created = make_confirm(
-        roster_data=result.enriched,
+        roster_data=result.batch,
         col_mapping={},
         output_dir=str(confirm_dir),
         template_path=confirm_template_path,

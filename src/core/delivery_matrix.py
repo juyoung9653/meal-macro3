@@ -44,7 +44,7 @@ class EffectiveDeliveryState(StrEnum):
     DELIVERED = "DELIVERED"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class RosterEntry:
     """명단 시트의 연속된 식종 3행으로 표현되는 한 사람."""
 
@@ -224,6 +224,16 @@ class AnnualDeliveryBook:
                 )
             rows_by_key[key] = row
             mutable_rows_by_person[row.person].append(row)
+
+        required_meals = frozenset(ALLOWED_MEALS)
+        for person, rows in mutable_rows_by_person.items():
+            present_meals = {row.meal for row in rows}
+            missing_meals = required_meals - present_meals
+            if missing_meals:
+                missing = ", ".join(meal for meal in ALLOWED_MEALS if meal in missing_meals)
+                raise ValueError(
+                    f"{person.description}의 배송 행이 누락되었습니다: {missing}"
+                )
 
         rows_by_person = {
             person: tuple(rows)

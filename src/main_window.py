@@ -1,6 +1,5 @@
 import os
 
-from PyQt6.QtCore import QSettings
 from PyQt6.QtWidgets import (
     QComboBox,
     QFileDialog,
@@ -16,7 +15,8 @@ from PyQt6.QtWidgets import (
 )
 
 from src.core.delivery_matrix import AnnualDeliveryBook
-from src.core.settings import get_settings
+from src.core.settings import TEMPLATE_PROFILES, get_settings
+from src.core.user_preferences import UserPreferences
 from src.excel.annual_workbook import AnnualWorkbook
 from src.widgets.confirm_tab import ConfirmTab
 from src.widgets.delivery_substitute_tab import DeliverySubstituteTab
@@ -30,6 +30,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self._s = get_settings()
+        self._preferences = UserPreferences(self._s)
         self._annual_workbook: AnnualWorkbook | None = None
         self._annual_book: AnnualDeliveryBook | None = None
         self._restore_meal_type()
@@ -53,10 +54,8 @@ class MainWindow(QMainWindow):
         meal_layout = QHBoxLayout()
         meal_layout.addWidget(QLabel("업체명:"))
         self.meal_combo = QComboBox()
-        self.meal_combo.addItems(["급식", "행복도시락"])
-        current_meal = self._s.get_meal_type()
-        if current_meal in ("급식", "행복도시락"):
-            self.meal_combo.setCurrentText(current_meal)
+        self.meal_combo.addItems([profile.label for profile in TEMPLATE_PROFILES.values()])
+        self.meal_combo.setCurrentText(self._s.get_meal_type())
         self.meal_combo.currentTextChanged.connect(self._on_meal_changed)
         meal_layout.addWidget(self.meal_combo)
         meal_layout.addSpacing(30)
@@ -95,24 +94,13 @@ class MainWindow(QMainWindow):
         self.statusbar.showMessage("연간 배송 Excel 파일을 선택해 주세요.")
 
     def _restore_meal_type(self):
-        """QSettings에서 이전에 선택한 업체명을 복원."""
-        settings = QSettings(
-            self._s.get("app", "organization"),
-            self._s.get("app", "title"),
-        )
-        saved = settings.value("meal_type", "")
-        if saved in ("급식", "행복도시락"):
-            self._s.set_meal_type(saved)
+        """Persisted vendor selection을 복원한다."""
+        self._s.set_meal_type(self._preferences.get_meal_type())
 
     def _on_meal_changed(self, meal_type: str):
-        """업체명 변경 → 설정 저장(QSettings + in-memory) + 양 탭에 전파."""
+        """업체명 변경 → 저장 + in-memory + 양 탭에 전파."""
+        meal_type = self._preferences.set_meal_type(meal_type)
         self._s.set_meal_type(meal_type)
-        settings = QSettings(
-            self._s.get("app", "organization"),
-            self._s.get("app", "title"),
-        )
-        settings.setValue("meal_type", meal_type)
-        settings.sync()
         self.invoice_tab.set_meal_type(meal_type)
         self.confirm_tab.set_meal_type(meal_type)
         self.report_tab.set_meal_type(meal_type)
@@ -169,12 +157,7 @@ class MainWindow(QMainWindow):
         self._annual_book = book
         self._s.set("annual_workbook", "path", value=path)
 
-        settings = QSettings(
-            self._s.get("app", "organization"),
-            self._s.get("app", "title"),
-        )
-        settings.setValue("annual_workbook/last_path", path)
-        settings.sync()
+        self._preferences.set_annual_workbook_path(path)
 
         self.invoice_tab.set_annual_book(book)
         self.report_tab.set_annual_book(book)
@@ -193,11 +176,7 @@ class MainWindow(QMainWindow):
 
     def post_init_load(self):
         """show() 후 마지막으로 사용한 연간 배송 파일을 자동 로드한다."""
-        settings = QSettings(
-            self._s.get("app", "organization"),
-            self._s.get("app", "title"),
-        )
-        saved_path = settings.value("annual_workbook/last_path", "")
+        saved_path = self._preferences.get_annual_workbook_path()
         if not saved_path:
             saved_path = self._s.get("annual_workbook", "path", default="")
 

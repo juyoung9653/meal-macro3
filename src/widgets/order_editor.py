@@ -1,11 +1,7 @@
-"""식종별 배송담당 순서 편집 다이얼로그.
-
-cache.py → QSettings 기반 저장으로 변경.
-"""
+"""식종별 배송담당 순서 편집 다이얼로그."""
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QSettings
 from PyQt6.QtWidgets import (
     QDialog,
     QHBoxLayout,
@@ -18,8 +14,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-SETTINGS_ORG = "분당구"
-SETTINGS_APP = "급식비 정산 프로그램"
+from ..core.user_preferences import UserPreferences
 
 
 class StaffOrderDialog(QDialog):
@@ -38,7 +33,7 @@ class StaffOrderDialog(QDialog):
         self._staff_by_meal = staff_by_meal
         self._lists: dict[str, QListWidget] = {}
         self._result: dict[str, list[str]] = {}
-        self._settings = QSettings(SETTINGS_ORG, SETTINGS_APP)
+        self._preferences = UserPreferences()
 
         self._build_ui()
         self._load_cache()
@@ -103,22 +98,20 @@ class StaffOrderDialog(QDialog):
         lw.insertItem(new_row, item)
         lw.setCurrentRow(new_row)
 
+    @staticmethod
+    def _item_texts(widget: QListWidget) -> list[str]:
+        return [
+            item.text()
+            for index in range(widget.count())
+            if (item := widget.item(index)) is not None
+        ]
+
     def _load_cache(self) -> None:
-        data: dict[str, list[str]] = {}
-        for meal in ["조식", "중식", "석식"]:
-            key = f"report/staff_order_{meal}"
-            val = self._settings.value(key)
-            if val is not None:
-                try:
-                    import json
-
-                    if isinstance(val, str):
-                        data[meal] = json.loads(val)
-                    elif isinstance(val, list):
-                        data[meal] = val
-                except Exception:
-                    pass
-
+        data = {
+            meal: order
+            for meal in ["조식", "중식", "석식"]
+            if (order := self._preferences.get_staff_order(meal))
+        }
         if not data:
             return
 
@@ -127,30 +120,23 @@ class StaffOrderDialog(QDialog):
             lw = self._lists.get(meal)
             if not lw:
                 continue
-            current = {lw.item(i).text() for i in range(lw.count())}
-            ordered = [n for n in cached if n in current]
-            remaining = [
-                lw.item(i).text()
-                for i in range(lw.count())
-                if lw.item(i).text() not in ordered
-            ]
+            current_names = self._item_texts(lw)
+            current = set(current_names)
+            ordered = [name for name in cached if name in current]
+            remaining = [name for name in current_names if name not in ordered]
             lw.clear()
             for name in ordered + remaining:
                 lw.addItem(name)
 
     def _on_save(self) -> None:
-        import json
-
         result: dict[str, list[str]] = {}
         for meal in ["조식", "중식", "석식"]:
             lw = self._lists.get(meal)
             if lw:
-                items = [lw.item(i).text() for i in range(lw.count())]
+                items = self._item_texts(lw)
                 result[meal] = items
-                key = f"report/staff_order_{meal}"
-                self._settings.setValue(key, json.dumps(items, ensure_ascii=False))
+                self._preferences.set_staff_order(meal, items)
 
-        self._settings.sync()
         self._result = result
         self.accept()
 

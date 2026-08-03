@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from datetime import date
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -13,22 +14,30 @@ from PyQt6.QtCore import QSettings
 from PyQt6.QtWidgets import QApplication
 
 from src.generators import report_generator
+from src.services.delivery_service import (
+    DeliveryReport,
+    DeliveryReportRow,
+    DeliveryReportTotals,
+)
 from src.widgets import report_tab as report_tab_module
 
 _HEADERS = ["배송담당", "1", "2", "3", "4", "5", "Total", "비고", "참고"]
 
 
-def _report_table(staff: str) -> list[list[object]]:
-    headers: list[object] = []
-    headers.extend(_HEADERS)
-    row: list[object] = [staff, "1", "0", "0", "0", "0", "1", "", ""]
-    return [headers, row]
-
-
-def _report_results() -> list[tuple[str, str, list[list[object]]]]:
+def _report_results() -> list[DeliveryReport]:
     return [
-        ("20260728", "조식", _report_table("기사A")),
-        ("20260728", "석식", _report_table("기사B")),
+        DeliveryReport(
+            date(2026, 7, 28),
+            "조식",
+            (DeliveryReportRow("기사A", ("1(+1)", "0", "0", "0", "0"), 1, "", ""),),
+            DeliveryReportTotals((1, 0, 0, 0, 0), 1),
+        ),
+        DeliveryReport(
+            date(2026, 7, 28),
+            "석식",
+            (DeliveryReportRow("기사B", ("1", "0", "0", "0", "0"), 1, "", ""),),
+            DeliveryReportTotals((1, 0, 0, 0, 0), 1),
+        ),
     ]
 
 
@@ -88,6 +97,32 @@ def test_export_multi_creates_the_exact_requested_file(
     workbook = openpyxl.load_workbook(output)
     try:
         assert workbook.sheetnames == ["20260728(조식)", "20260728(석식)"]
+        worksheet = workbook["20260728(조식)"]
+        assert worksheet["A1"].value == "7월 28일"
+        assert worksheet["A2"].value == "*아동급식 조식*"
+        assert [worksheet.cell(4, column).value for column in range(1, 10)] == [
+            "기사A",
+            1,
+            0,
+            0,
+            0,
+            0,
+            1,
+            None,
+            None,
+        ]
+        assert worksheet["A4"].fill.fill_type == "solid"
+        assert worksheet["B4"].fill.fill_type == "solid"
+        assert [worksheet.cell(5, column).value for column in range(2, 10)] == [
+            1,
+            0,
+            0,
+            0,
+            0,
+            1,
+            None,
+            None,
+        ]
     finally:
         workbook.close()
 

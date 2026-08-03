@@ -1,9 +1,15 @@
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import date
 from typing import Any, NotRequired, TypedDict
+
+from .delivery_matrix import RosterEntry
 
 
 class WeeklyMealCount(TypedDict):
-    """확인서에 바로 전달하는 한 주의 식종별 배송 건수."""
+    """Legacy confirmation payload for direct mapping-based generator callers."""
 
     week: int
     start_date: str  # YYYYMMDD
@@ -14,7 +20,7 @@ class WeeklyMealCount(TypedDict):
 
 
 class EnrichedPersonDict(TypedDict):
-    """청구서 생성 후 확인서 탭으로 전달되는 인원 레코드."""
+    """Deprecated legacy renderer payload; application code uses MonthlyDelivery."""
 
     _note: str
     _total: int
@@ -27,17 +33,121 @@ class EnrichedPersonDict(TypedDict):
     배송담당: str
     연번: str
 
-    # 명단 원본 필드는 Excel 헤더에 따라 동적으로 함께 존재한다.
     비고: NotRequired[Any]
     핸드폰: NotRequired[Any]
     전체주소: NotRequired[str]
 
 
+@dataclass(frozen=True)
+class MealPrices:
+    breakfast: int
+    lunch: int
+    dinner: int
+
+
+@dataclass(frozen=True)
+class WeeklyDelivery:
+    week: int
+    start_date: date
+    end_date: date
+    breakfast_count: int
+    lunch_count: int
+    dinner_count: int
+
+
+@dataclass(frozen=True)
+class MonthlyDelivery:
+    """One recipient's immutable, calculated delivery facts for a target month."""
+
+    roster: RosterEntry
+    note: str
+    delivery_staff: str
+    delivery_sequence: str
+    breakfast_count: int
+    lunch_count: int
+    dinner_count: int
+    weekly: tuple[WeeklyDelivery, ...]
+
+    @property
+    def total_count(self) -> int:
+        return self.breakfast_count + self.lunch_count + self.dinner_count
+
+    def amount(self, prices: MealPrices) -> int:
+        return (
+            self.breakfast_count * prices.breakfast
+            + self.lunch_count * prices.lunch
+            + self.dinner_count * prices.dinner
+        )
+
+
+@dataclass(frozen=True)
+class MonthlyDeliveryBatch:
+    """Immutable monthly billing snapshot consumed by invoice and confirmation writers."""
+
+    year: int
+    month: int
+    prices: MealPrices
+    is_vacation_month: bool
+    deliveries: tuple[MonthlyDelivery, ...]
+
+
+def _legacy_date(value: object) -> date:
+    text = str(value)
+    if len(text) != 8 or not text.isdigit():
+        raise ValueError("주차 날짜는 YYYYMMDD 형식이어야 합니다.")
+    return date(int(text[:4]), int(text[4:6]), int(text[6:]))
+
+
+def legacy_recipient(
+    source: Mapping[str, object], *, position: int = 1
+) -> MonthlyDelivery:
+    """Adapt a legacy direct-generator record at the public compatibility boundary."""
+    def count(key: str) -> int:
+        value = source.get(key, 0)
+        return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+    weekly: list[WeeklyDelivery] = []
+    raw_weekly = source.get("weekly_meal_counts", [])
+    if isinstance(raw_weekly, Sequence) and not isinstance(raw_weekly, (str, bytes)):
+        for item in raw_weekly:
+            if not isinstance(item, Mapping):
+                continue
+            try:
+                weekly.append(
+                    WeeklyDelivery(
+                        week=int(item.get("week", 0)),
+                        start_date=_legacy_date(item.get("start_date", "")),
+                        end_date=_legacy_date(item.get("end_date", "")),
+                        breakfast_count=int(item.get("조식", 0)),
+                        lunch_count=int(item.get("중식", 0)),
+                        dinner_count=int(item.get("석식", 0)),
+                    )
+                )
+            except (TypeError, ValueError):
+                continue
+    return MonthlyDelivery(
+        roster=RosterEntry(source_row=position + 1, extra=source),
+        note="" if source.get("_note") is None else str(source.get("_note", "")).strip(),
+        delivery_staff="" if source.get("배송담당") is None else str(source.get("배송담당", "")).strip(),
+        delivery_sequence="" if source.get("배송순서") is None else str(source.get("배송순서", "")).strip(),
+        breakfast_count=count("_bf_cnt"),
+        lunch_count=count("_lh_cnt"),
+        dinner_count=count("_dn_cnt"),
+        weekly=tuple(weekly),
+    )
+
+
 @dataclass
 class InvoiceData:
-    """청구서 탭에서 확인서 탭으로 넘기는 현재 상태 묶음."""
+    """Invoice-tab state handed to the confirmation tab."""
 
-    invoices: list[EnrichedPersonDict] = field(default_factory=list)
+    batch: MonthlyDeliveryBatch | None = None
     col_mapping: dict = field(default_factory=dict)
-    year: int = 0
-    month: int = 0
+
+    @property
+    def year(self) -> int:
+        return self.batch.year if self.batch is not None else 0
+
+    @property
+    def month(self) -> int:
+        return self.batch.month if self.batch is not None else 0

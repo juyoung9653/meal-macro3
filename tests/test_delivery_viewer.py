@@ -7,6 +7,11 @@ import pandas as pd
 import pytest
 
 from src.excel import delivery_viewer
+from src.excel.delivery_sheet_renderer import (
+    DeliveryPrintPolicy,
+    DeliveryRenderRequest,
+    DeliverySheetRenderer,
+)
 
 
 def _fake_mkstemp(path: Path) -> tuple[int, str]:
@@ -91,3 +96,30 @@ def test_show_excel_propagates_open_failure_and_removes_temp_file(
         )
 
     assert not output.exists()
+
+
+def test_delivery_sheet_renderer_owns_rendering_order_and_print_policy():
+    request = DeliveryRenderRequest(
+        title="배송대타",
+        meal="중식",
+        staff="기사A",
+        date="20260728",
+        print_policy=DeliveryPrintPolicy(
+            orientation=1,
+            split_mode=1,
+            max_rows=18,
+        ),
+    )
+
+    workbook = DeliverySheetRenderer().render(_delivery_frame(), request)
+    try:
+        worksheet = workbook.active
+        assert worksheet is not None
+        assert worksheet.title == "배송대타"
+        assert worksheet["A1"].value == "식종: 중식 | 배송담당: 기사A | 날짜: 20260728"
+        assert worksheet["A2"].value == "배송순서"
+        assert worksheet["A3"].value == "001"
+        assert worksheet.page_setup.orientation == "portrait"
+        assert worksheet.print_title_rows == "$1:$2"
+    finally:
+        workbook.close()

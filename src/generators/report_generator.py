@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from copy import copy
 from datetime import date
 from pathlib import Path
@@ -15,6 +16,8 @@ from openpyxl.worksheet.page import PageMargins
 
 from ..core.diff_format import has_diff, strip_diff
 from ..core.settings import get_settings
+from ..excel.publication import publish_workbook
+from ..services.delivery_service import DeliveryReport
 
 log = logging.getLogger(__name__)
 
@@ -39,7 +42,7 @@ def _format_korean_date(date_str: str) -> str:
 
 
 def export_multi(
-    results: list[tuple[str, str, list[list]]],
+    results: Sequence[DeliveryReport],
     filepath: str | Path,
 ) -> None:
     """여러 날짜 리포트를 하나의 Excel 파일로 저장 (날짜별 시트)."""
@@ -62,34 +65,28 @@ def export_multi(
         if default is not None:
             out.remove(default)
 
-        for date_str, meal, table in results:
-            ws = out.create_sheet(title=f"{date_str}({meal})")
+        for report in results:
+            ws = out.create_sheet(title=f"{report.day:%Y%m%d}({report.meal})")
             _copy_sheet(src, ws)
-            ws["A1"] = _format_korean_date(date_str)
-            _fill_data(ws, table, meal)
+            ws["A1"] = _format_korean_date(report.day.strftime("%Y%m%d"))
+            _fill_data(ws, report)
 
             last_row = ws.max_row
             ws.print_area = f"A1:I{last_row}"
             _stretch_rows_to_page(ws, last_row)
             _apply_page_setup(ws)
 
-        out.save(out_file)
+        publish_workbook(out, out_file)
     finally:
-        out.close()
         tpl.close()
 
     if not out_file.is_file():
         raise OSError(f"리포트 파일이 생성되지 않았습니다: {out_file}")
 
 
-def export(
-    table: list[list],
-    filepath: str | Path,
-    date_str: str,
-    meal: str,
-) -> None:
+def export(report: DeliveryReport, filepath: str | Path) -> None:
     """export_multi 래퍼 (단일 시트)."""
-    export_multi([(date_str, meal, table)], filepath)
+    export_multi((report,), filepath)
 
 
 # ═══════════════════════════════════════════════════
@@ -195,17 +192,11 @@ def _apply_page_setup(ws) -> None:
 _FILL_DIFF = PatternFill(start_color="C5D9F1", end_color="C5D9F1", fill_type="solid")
 
 
-def _fill_data(ws, table: list[list], meal: str) -> None:
-    """템플릿 시트에 데이터 채움."""
-    data_rows = table[1:]  # 헤더 제외
+def _fill_data(ws, report: DeliveryReport) -> None:
+    """템플릿 시트에 리포트 데이터를 채움."""
+    data_count = len(report.rows)
 
-    summary_row = None
-    if data_rows and data_rows[-1] and str(data_rows[-1][0]) == "합계":
-        summary_row = data_rows.pop()
-
-    ws["A2"] = f"*아동급식 {meal}*"
-
-    data_count = len(data_rows)
+    ws["A2"] = f"*아동급식 {report.meal}*"
     if data_count > 5:
         ws.insert_rows(9, data_count - 5)
         src_height = ws.row_dimensions[8].height
@@ -224,28 +215,24 @@ def _fill_data(ws, table: list[list], meal: str) -> None:
     group_rows = list(range(4, 4 + data_count))
     summary_row_num = 4 + data_count
 
-    for i, gr in enumerate(group_rows):
-        row = data_rows[i]
-
-        row_has_diff = any(has_diff(row[j + 1]) for j in range(5))
+    for gr, row in zip(group_rows, report.rows):
+        row_has_diff = any(has_diff(value) for value in row.household_size_cells)
 
         c_a = ws.cell(gr, 1)
-        c_a.value = row[0]
+        c_a.value = row.staff_label
         if row_has_diff:
             c_a.fill = _FILL_DIFF
 
-        for j in range(5):
-            raw = row[j + 1] if j + 1 < len(row) else ""
-            c = ws.cell(gr, j + 2)
+        for column, raw in enumerate(row.household_size_cells, start=2):
+            c = ws.cell(gr, column)
             stripped = strip_diff(raw)
             c.value = int(stripped) if stripped != "" else ""
-            if has_diff(row[j + 1] if j + 1 < len(row) else ""):
+            if has_diff(raw):
                 c.fill = _FILL_DIFF
 
-        raw = row[6] if len(row) > 6 else ""
-        ws.cell(gr, 7).value = int(raw) if raw != "" else ""
+        ws.cell(gr, 7).value = row.person_total
 
-        raw = row[7] if len(row) > 7 else ""
+        raw = row.memo
         c_h = ws.cell(gr, 8)
 
         if raw:
@@ -283,15 +270,14 @@ def _fill_data(ws, table: list[list], meal: str) -> None:
         else:
             c_h.value = ""
 
-        ws.cell(gr, 9).value = row[8] if len(row) > 8 else ""
+        ws.cell(gr, 9).value = row.reference_areas
 
-    if summary_row:
-        for j in range(1, 10):
-            val = summary_row[j] if j < len(summary_row) else ""
-            if 1 <= j <= 6:
-                ws.cell(summary_row_num, j + 1).value = int(val) if val != "" else ""
-            else:
-                ws.cell(summary_row_num, j + 1).value = val
+    totals = report.totals
+    for column, count in enumerate(totals.household_counts, start=2):
+        ws.cell(summary_row_num, column).value = count
+    ws.cell(summary_row_num, 7).value = totals.person_total
+    ws.cell(summary_row_num, 8).value = ""
+    ws.cell(summary_row_num, 9).value = ""
 
     thin = Side(style="thin")
     medium = Side(style="medium")

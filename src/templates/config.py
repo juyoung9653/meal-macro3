@@ -3,6 +3,7 @@
 import functools
 
 import openpyxl
+from openpyxl.cell.cell import MergedCell
 
 from ..core.settings import get_settings
 
@@ -74,32 +75,34 @@ def read_template_columns(
     if sheet_name is None:
         sheet_name = get_template_sheet_name(meal_type=meal_type)
     wb = openpyxl.load_workbook(template_path)
-    ws = wb[sheet_name]
+    try:
+        ws = wb[sheet_name]
 
-    columns: list[str] = []
-    for col in range(1, ws.max_column + 1):
-        c1 = ws.cell(row=1, column=col)
-        c2 = ws.cell(row=2, column=col)
+        columns: list[str] = []
+        for col in range(1, ws.max_column + 1):
+            c1 = ws.cell(row=1, column=col)
+            c2 = ws.cell(row=2, column=col)
 
-        name_r2 = (c2.value or "").strip()
+            name_r2 = str(c2.value or "").strip()
 
-        if isinstance(c1, openpyxl.cell.cell.MergedCell):
+            if isinstance(c1, MergedCell):
+                if name_r2:
+                    columns.append(name_r2)
+                continue
+
+            name_r1 = str(c1.value or "").strip()
+
             if name_r2:
                 columns.append(name_r2)
-            continue
+            elif name_r1:
+                name = name_r1.replace("\n", "")
+                for suffix in ["(급식수)", "(원)"]:
+                    name = name.removesuffix(suffix)
+                columns.append(name)
 
-        name_r1 = (c1.value or "").strip()
-
-        if name_r2:
-            columns.append(name_r2)
-        elif name_r1:
-            name = name_r1.replace("\n", "")
-            for suffix in ["(급식수)", "(원)"]:
-                if name.endswith(suffix):
-                    name = name[: -len(suffix)]
-            columns.append(name)
-
-    return columns
+        return columns
+    finally:
+        wb.close()
 
 
 def col_name_to_index(template_columns: list[str]) -> dict[str, int]:

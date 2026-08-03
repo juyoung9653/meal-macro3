@@ -13,7 +13,10 @@ from src.core.delivery_matrix import (
     RosterEntry,
 )
 from src.services.delivery_service import (
+    DeliveryReport,
     DeliveryReportResult,
+    DeliveryReportRow,
+    DeliveryReportTotals,
     DeliveryService,
     ReportStatus,
 )
@@ -21,17 +24,6 @@ from src.services.delivery_service import (
 BLANK = DeliveryCellValue.BLANK
 PAUSED = DeliveryCellValue.PAUSED
 DELIVERED = DeliveryCellValue.DELIVERED
-HEADER: list[object] = [
-    "배송담당",
-    "1",
-    "2",
-    "3",
-    "4",
-    "5",
-    "Total",
-    "비고",
-    "참고",
-]
 
 
 def _person(
@@ -58,18 +50,40 @@ def _row(
     return DeliveryRow(person, meal, staff, sequence, values, source_row)
 
 
+def _complete_meal_rows(
+    roster: tuple[RosterEntry, ...],
+    rows: tuple[DeliveryRow, ...],
+    dates: tuple[date, ...],
+) -> tuple[DeliveryRow, ...]:
+    completed_rows = list(rows)
+    for person in roster:
+        present_meals = {row.meal for row in rows if row.person is person}
+        completed_rows.extend(
+            _row(person, dates, meal=meal, staff="", sequence="")
+            for meal in ALLOWED_MEALS
+            if meal not in present_meals
+        )
+    return tuple(completed_rows)
+
+
 def _book(
     dates: tuple[date, ...],
     rows: tuple[DeliveryRow, ...],
 ) -> AnnualDeliveryBook:
     roster = tuple(dict.fromkeys(row.person for row in rows))
     year = dates[0].year if dates else 2026
-    return AnnualDeliveryBook(year, roster, rows, dates)
+    return AnnualDeliveryBook(year, roster, _complete_meal_rows(roster, rows, dates), dates)
 
 
 def test_report_result_is_frozen_and_marks_ready_from_status():
     day = date(2026, 6, 1)
-    result = DeliveryReportResult(day, "중식", ReportStatus.READY, [HEADER])
+    report = DeliveryReport(
+        day,
+        "중식",
+        (),
+        DeliveryReportTotals((0, 0, 0, 0, 0), 0),
+    )
+    result = DeliveryReportResult(day, "중식", ReportStatus.READY, report)
 
     assert result.is_ready is True
     attribute = "message"
@@ -86,7 +100,7 @@ def test_invalid_meal_is_rejected_before_date_lookup():
     result = service.build_report(date(2026, 6, 1), "야식")
 
     assert result.status is ReportStatus.INVALID_MEAL
-    assert result.table is None
+    assert result.report is None
     assert "야식" in result.message
     assert result.is_ready is False
 
@@ -103,7 +117,7 @@ def test_missing_date_and_all_blank_day_have_distinct_statuses():
     assert missing.status is ReportStatus.DATE_MISSING
     assert "20260602" in missing.message
     assert all_blank.status is ReportStatus.NON_DELIVERY_DAY
-    assert all_blank.table is None
+    assert all_blank.report is None
 
 
 def test_zero_only_day_has_no_deliveries_for_meal():
@@ -147,11 +161,16 @@ def test_weekend_report_uses_only_one_and_ignores_zero_blank_rows():
     result = DeliveryService(book).build_report(saturday, "중식")
 
     assert result.status is ReportStatus.READY
-    assert result.table == [
-        HEADER,
-        ["주말기사\n(1)", "1(+1)", "", "", "", "", 1, "", "정자동"],
-        ["합계", 1, 0, 0, 0, 0, 1, "", ""],
-    ]
+    assert result.report == DeliveryReport(
+        saturday,
+        "중식",
+        (
+            DeliveryReportRow(
+                "주말기사\n(1)", ("1(+1)", "", "", "", ""), 1, "", "정자동"
+            ),
+        ),
+        DeliveryReportTotals((1, 0, 0, 0, 0), 1),
+    )
 
 
 def test_groups_households_by_trimmed_staff_and_sequence():
@@ -169,12 +188,19 @@ def test_groups_households_by_trimmed_staff_and_sequence():
         _book(dates, rows), staff_sort={"중식": ("김기사", "이기사")}
     ).build_report(day, "중식")
 
-    assert result.table == [
-        HEADER,
-        ["김기사\n(2)", "1(+1)", "1(+1)", "", "", "", 3, "", ""],
-        ["이기사\n(1)", "1(+1)", "", "", "", "", 1, "", ""],
-        ["합계", 2, 1, 0, 0, 0, 4, "", ""],
-    ]
+    assert result.report == DeliveryReport(
+        day,
+        "중식",
+        (
+            DeliveryReportRow(
+                "김기사\n(2)", ("1(+1)", "1(+1)", "", "", ""), 3, "", ""
+            ),
+            DeliveryReportRow(
+                "이기사\n(1)", ("1(+1)", "", "", "", ""), 1, "", ""
+            ),
+        ),
+        DeliveryReportTotals((2, 1, 0, 0, 0), 4),
+    )
 
 
 def test_delivery_row_is_staff_source_and_sort_has_registered_then_casefold_order():
@@ -196,13 +222,13 @@ def test_delivery_row_is_staff_source_and_sort_has_registered_then_casefold_orde
 
     result = service.build_report(day, "중식")
 
-    assert result.table is not None
-    assert [row[0] for row in result.table[1:-1]] == [
+    assert result.report is not None
+    assert [row.staff_label for row in result.report.rows] == [
         "등록기사\n(1)",
         "alpha\n(1)",
         "Bravo\n(1)",
     ]
-    assert all("명단기사" not in str(row[0]) for row in result.table)
+    assert all("명단기사" not in row.staff_label for row in result.report.rows)
 
 
 def test_previous_day_is_aggregated_independently_and_previous_only_staff_is_shown():
@@ -222,12 +248,19 @@ def test_previous_day_is_aggregated_independently_and_previous_only_staff_is_sho
 
     result = service.build_report(current, "중식")
 
-    assert result.table == [
-        HEADER,
-        ["현기사\n(1)", "1(+1)", "0(-1)", "", "", "", 1, "", ""],
-        ["이전기사\n(0)", "0(-1)", "", "", "", "", 0, "", ""],
-        ["합계", 1, 0, 0, 0, 0, 1, "", ""],
-    ]
+    assert result.report == DeliveryReport(
+        current,
+        "중식",
+        (
+            DeliveryReportRow(
+                "현기사\n(1)", ("1(+1)", "0(-1)", "", "", ""), 1, "", ""
+            ),
+            DeliveryReportRow(
+                "이전기사\n(0)", ("0(-1)", "", "", "", ""), 0, "", ""
+            ),
+        ),
+        DeliveryReportTotals((1, 0, 0, 0, 0), 1),
+    )
 
 
 def test_reference_areas_join_current_and_previous_people_uniquely_and_deterministically():
@@ -249,9 +282,9 @@ def test_reference_areas_join_current_and_previous_people_uniquely_and_determini
 
     result = DeliveryService(_book(dates, rows)).build_report(current, "중식")
 
-    assert result.table is not None
-    assert result.table[1][8] == "가동, 나동\n다동"
-    assert result.table[1][7] == ""
+    assert result.report is not None
+    assert result.report.rows[0].reference_areas == "가동, 나동\n다동"
+    assert result.report.rows[0].memo == ""
 
 
 @pytest.mark.parametrize(
@@ -278,7 +311,7 @@ def test_blank_delivered_location_key_is_invalid_data(
     result = DeliveryService(_book((day,), (row,))).build_report(day, "중식")
 
     assert result.status is ReportStatus.INVALID_DATA
-    assert result.table is None
+    assert result.report is None
     assert missing_name in result.message
     assert "오류 대상" in result.message
     assert "명단 20~22행" in result.message
@@ -329,7 +362,7 @@ def test_six_or_more_people_at_one_location_is_invalid_data():
     assert "1~5명 템플릿" in result.message
 
 
-def test_build_all_returns_exact_ready_export_tuples_in_allowed_meal_order():
+def test_build_all_returns_ready_reports_in_allowed_meal_order():
     previous = date(2026, 6, 12)
     blank_day = date(2026, 6, 13)
     zero_only_day = date(2026, 6, 14)
@@ -358,25 +391,32 @@ def test_build_all_returns_exact_ready_export_tuples_in_allowed_meal_order():
 
     results = service.build_all(blank_day, ready_day)
 
-    lunch_table = [
-        HEADER,
-        ["중식기사\n(1)", "1", "", "", "", "", 1, "", "가동"],
-        ["합계", 1, 0, 0, 0, 0, 1, "", ""],
-    ]
-    dinner_table = [
-        HEADER,
-        ["석식기사\n(1)", "1(+1)", "", "", "", "", 1, "", "나동"],
-        ["합계", 1, 0, 0, 0, 0, 1, "", ""],
-    ]
-    assert results == [
-        ("20260615", "중식", lunch_table),
-        ("20260615", "석식", dinner_table),
-    ]
-    assert [meal for _, meal, _ in results] == [
+    lunch_report = DeliveryReport(
+        ready_day,
+        "중식",
+        (
+            DeliveryReportRow(
+                "중식기사\n(1)", ("1", "", "", "", ""), 1, "", "가동"
+            ),
+        ),
+        DeliveryReportTotals((1, 0, 0, 0, 0), 1),
+    )
+    dinner_report = DeliveryReport(
+        ready_day,
+        "석식",
+        (
+            DeliveryReportRow(
+                "석식기사\n(1)", ("1(+1)", "", "", "", ""), 1, "", "나동"
+            ),
+        ),
+        DeliveryReportTotals((1, 0, 0, 0, 0), 1),
+    )
+    assert results == [lunch_report, dinner_report]
+    assert [report.meal for report in results] == [
         meal for meal in ALLOWED_MEALS if meal in {"중식", "석식"}
     ]
     assert service.build_all(blank_day, ready_day, meal_filter="석식") == [
-        ("20260615", "석식", dinner_table)
+        dinner_report
     ]
 
 

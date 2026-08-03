@@ -13,8 +13,11 @@ import openpyxl
 log = logging.getLogger(__name__)
 
 # ── 인메모리 캐시 ──
-_mem_cache: dict[str, tuple[float, dict[str, dict[str, list[tuple[int, int]]]]]] = {}
-#           template_path -> (mtime, {sheet_name: {placeholder: [(row, col), ...]}})
+_mem_cache: dict[
+    tuple[str, tuple[str, ...] | None],
+    tuple[float, dict[str, dict[str, list[tuple[int, int]]]]],
+] = {}
+# (template_path, requested sheet names) -> (mtime, placeholder locations)
 
 
 def _get_mtime(path: str) -> float:
@@ -33,8 +36,7 @@ def _scan_sheets(
 
     for sn in sheet_names:
         if sn not in wb.sheetnames:
-            log.warning("Sheet %r not found in template, skipping", sn)
-            continue
+            raise ValueError(f"Template sheet not found: {sn}")
         ws = wb[sn]
         sheet_map: dict[str, list[tuple[int, int]]] = defaultdict(list)
 
@@ -75,10 +77,12 @@ def scan_placeholders(
         {sheet_name: {placeholder: [(row, col), ...]}}  — row/col은 1-based.
     """
     mtime = _get_mtime(template_path)
+    requested_sheets = tuple(sheet_names) if sheet_names is not None else None
+    cache_key = (os.path.abspath(template_path), requested_sheets)
 
     # ── 1. 인메모리 캐시 ──
-    if template_path in _mem_cache:
-        cached_mtime, cached_data = _mem_cache[template_path]
+    if cache_key in _mem_cache:
+        cached_mtime, cached_data = _mem_cache[cache_key]
         if cached_mtime == mtime:
             log.debug("Mem-cache hit for %s", template_path)
             return cached_data
@@ -87,9 +91,11 @@ def scan_placeholders(
     # ── 2. 템플릿 직접 스캔 ──
     log.info("Scanning placeholders in %s", template_path)
     wb = openpyxl.load_workbook(template_path, data_only=True)
-    target_sheets = sheet_names or wb.sheetnames
-    result = _scan_sheets(wb, target_sheets)
-    wb.close()
+    try:
+        target_sheets = list(requested_sheets) if requested_sheets is not None else wb.sheetnames
+        result = _scan_sheets(wb, target_sheets)
+    finally:
+        wb.close()
 
     total_ph = sum(len(m) for m in result.values())
     log.info(
@@ -100,7 +106,7 @@ def scan_placeholders(
     )
 
     # 캐시 저장
-    _mem_cache[template_path] = (mtime, result)
+    _mem_cache[cache_key] = (mtime, result)
 
     return result
 

@@ -1,11 +1,10 @@
 """연간 배송 데이터 기반 청구서 생성 탭."""
 
 import os
-from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import ClassVar
 
-from PyQt6.QtCore import QSettings, Qt, QUrl
+from PyQt6.QtCore import Qt, QUrl
 from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (
     QComboBox,
@@ -23,9 +22,10 @@ from PyQt6.QtWidgets import (
 )
 
 from ..core.delivery_matrix import AnnualDeliveryBook, MonthState
-from ..core.invoice_data import EnrichedPersonDict, InvoiceData
+from ..core.invoice_data import InvoiceData, MonthlyDeliveryBatch
 from ..core.models import FULL_ADDRESS_FIELD
 from ..core.settings import get_settings
+from ..core.user_preferences import UserPreferences
 from ..services.invoice_controller import InvoiceGenerationConfig, InvoiceService
 from ..templates.config import auto_detect_semantic_columns, read_template_columns
 
@@ -50,7 +50,7 @@ class InvoiceTab(QWidget):
         )
         self._service = InvoiceService()
         self._book: AnnualDeliveryBook | None = None
-        self.invoices: list[EnrichedPersonDict] = []
+        self._batch: MonthlyDeliveryBatch | None = None
         self.output_dir: str | None = None
         self.roster_headers: list[str] = []
         self._col_mapping = self._new_col_mapping()
@@ -58,9 +58,7 @@ class InvoiceTab(QWidget):
         self._month = 0
         self._result_year = 0
         self._result_month = 0
-        org = self._s.get("app", "organization")
-        app_title = self._s.get("app", "title")
-        self._settings = QSettings(org, app_title)
+        self._preferences = UserPreferences(self._s)
         self._last_output_path: str | None = None
         self._setup_ui()
         self._restore_ui_state()
@@ -177,29 +175,28 @@ class InvoiceTab(QWidget):
 
     # ── 설정 저장/복원 ──
 
-    def _new_col_mapping(self) -> dict:
+    def _new_col_mapping(self) -> dict[str, str]:
         mapping = {column: "" for column in self._template_columns}
         mapping.update(auto_detect_semantic_columns(self._template_columns))
         return mapping
 
     def _restore_ui_state(self):
-        output_dir = self._settings.value("output_dir", "")
+        output_dir = self._preferences.get_output_dir()
         if output_dir:
             self.output_dir = str(output_dir)
             self.path_label.setText(self.output_dir)
             self.path_label.setStyleSheet("color: #000;")
 
-        mapping = self._settings.value("invoice/col_mapping", None)
-        if isinstance(mapping, Mapping):
+        mapping = self._preferences.get_invoice_column_mapping()
+        if mapping:
             self._col_mapping = {
                 key: mapping.get(key, value)
                 for key, value in self._col_mapping.items()
             }
 
     def _save_settings(self):
-        self._settings.setValue("invoice/col_mapping", dict(self._col_mapping))
-        self._settings.setValue("output_dir", self.output_dir or "")
-        self._settings.sync()
+        self._preferences.set_invoice_column_mapping(self._col_mapping)
+        self._preferences.set_output_dir(self.output_dir or "")
 
     def _select_output_dir(self):
         selected = QFileDialog.getExistingDirectory(self, "출력 폴더 선택")
@@ -247,53 +244,54 @@ class InvoiceTab(QWidget):
                 QMessageBox.critical(self, "오류", result.error)
             return
 
-        output_invoices = [
-            person for person in result.enriched if person.get("_total", 0) > 0
-        ]
-        if result.count != len(output_invoices):
+        batch = result.batch
+        if batch is None:
+            QMessageBox.critical(self, "오류", "청구서 생성 결과 배치가 없습니다.")
+            return
+        if result.count != len(batch.deliveries):
             QMessageBox.critical(
                 self,
                 "오류",
                 "청구서 생성 결과 건수가 일치하지 않습니다: "
-                f"{result.count}건 / {len(output_invoices)}명",
+                f"{result.count}건 / {len(batch.deliveries)}명",
             )
             return
 
-        self.invoices = output_invoices
-        self._result_year = self._year
-        self._result_month = self._month
+        self._batch = batch
+        self._result_year = batch.year
+        self._result_month = batch.month
         self._last_output_path = output_path
         self.open_file_btn.setEnabled(True)
-        self._update_result(self.invoices)
+        self._update_result(batch)
 
         QMessageBox.information(
             self,
             "완료",
-            f"청구서 {len(self.invoices)}건 생성 완료!\n{output_path}",
+            f"청구서 {len(batch.deliveries)}건 생성 완료!\n{output_path}",
         )
 
     @staticmethod
     def _display_text(value: object) -> str:
         return "" if value is None else str(value)
 
-    def _update_result(self, data: list[EnrichedPersonDict]):
-        show = data[: self.MAX_RESULT_ROWS]
+    def _update_result(self, batch: MonthlyDeliveryBatch):
+        show = batch.deliveries[: self.MAX_RESULT_ROWS]
         self.result_table.setRowCount(len(show))
-        name_col = self._col_mapping.get("성명", "성명")
-        department_col = self._col_mapping.get("학교명", "학교명")
+        name_col = self._col_mapping.get("성명") or "성명"
+        department_col = self._col_mapping.get("학교명") or "학교명"
         for row, person in enumerate(show):
             values = (
-                person.get(name_col, ""),
-                person.get(department_col, ""),
-                person.get("_total", ""),
-                person.get("_amount", ""),
+                person.roster.extra.get(name_col, ""),
+                person.roster.extra.get(department_col, ""),
+                person.total_count,
+                f"{person.amount(batch.prices):,}원",
             )
             for column, value in enumerate(values):
                 self.result_table.setItem(
                     row, column, QTableWidgetItem(self._display_text(value))
                 )
         self.info_label.setText(
-            f"생성된 청구서: {len(data)}건 (처음 {len(show)}건 표시)"
+            f"생성된 청구서: {len(batch.deliveries)}건 (처음 {len(show)}건 표시)"
         )
 
     def _open_output_file(self):
@@ -305,7 +303,7 @@ class InvoiceTab(QWidget):
             )
 
     def _invalidate_result(self, info_text: str | None = None):
-        self.invoices = []
+        self._batch = None
         self._result_year = 0
         self._result_month = 0
         self.result_table.setRowCount(0)
@@ -439,9 +437,4 @@ class InvoiceTab(QWidget):
         self._save_settings()
 
     def get_invoice_data(self):
-        return InvoiceData(
-            invoices=list(self.invoices),
-            col_mapping=dict(self._col_mapping),
-            year=self._result_year,
-            month=self._result_month,
-        )
+        return InvoiceData(batch=self._batch, col_mapping=dict(self._col_mapping))

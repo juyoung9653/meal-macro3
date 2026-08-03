@@ -5,11 +5,12 @@ import os
 import tempfile
 
 import pandas as pd
-from openpyxl import Workbook
 
-from src.excel.page_formatting.layout import apply_page_formatting
-from src.excel.sheet_writer import write_sheet
-from src.excel.text_portrait import preprocess_portrait
+from src.excel.delivery_sheet_renderer import (
+    DeliveryPrintPolicy,
+    DeliveryRenderRequest,
+    DeliverySheetRenderer,
+)
 
 log = logging.getLogger(__name__)
 
@@ -25,21 +26,18 @@ def show_excel(
     max_rows: int,
 ) -> str:
     """배송대타 Excel을 임시 파일로 저장해 열고 생성 경로를 반환한다."""
-    wb = Workbook()
-    ws = wb.active
-    if ws is None:
-        ws = wb.create_sheet()
-    ws.title = title[:31]
-
-    processed = preprocess_portrait(df)
-    write_sheet(ws, processed, meal, ship, date_str)
-    apply_page_formatting(
-        ws,
-        processed,
-        mode=split,
-        max_groups_limit=max_rows,
-        orientation_pref=ori,
+    request = DeliveryRenderRequest(
+        title=title,
+        meal=meal,
+        staff=ship,
+        date=date_str,
+        print_policy=DeliveryPrintPolicy(
+            orientation=ori,
+            split_mode=split,
+            max_rows=max_rows,
+        ),
     )
+    wb = DeliverySheetRenderer().render(df, request)
 
     descriptor, tmp_path = tempfile.mkstemp(suffix=".xlsx")
     os.close(descriptor)

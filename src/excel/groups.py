@@ -1,6 +1,15 @@
-"""배송 그룹 분석 — 순서번호 기반 그룹화 및 페이지 나누기."""
+"""배송 그룹 분석 및 인쇄 페이지 계획.
+
+페이지 소속과 후속 페이지의 시작 행은 :class:`PagePlan`이 단일 기준으로 관리한다.
+레거시 tuple/list API는 기존 호출자를 위한 어댑터다.
+"""
+
+from __future__ import annotations
 
 import logging
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
+from enum import IntEnum
 
 import pandas as pd
 
@@ -13,175 +22,218 @@ _S = get_settings()
 COL_ORD = _S.get_delivery_config("col_ord")
 
 
+class SplitMode(IntEnum):
+    """배송 그룹을 인쇄 페이지에 배치하는 방식."""
+
+    NONE = 0
+    BY_JURISDICTION = 1
+    EVENLY = 2
+
+
+@dataclass(frozen=True)
+class DeliveryGroup:
+    """DataFrame의 연속된 배송 그룹 범위 (0-based, inclusive)."""
+
+    start_index: int
+    end_index: int
+
+    def __post_init__(self) -> None:
+        if self.start_index < 0:
+            raise ValueError("start_index must not be negative")
+        if self.end_index < self.start_index:
+            raise ValueError("end_index must be greater than or equal to start_index")
+
+    @property
+    def start(self) -> int:
+        """레거시 범위 표기와 대응하는 시작 인덱스."""
+        return self.start_index
+
+    @property
+    def end(self) -> int:
+        """레거시 범위 표기와 대응하는 끝 인덱스."""
+        return self.end_index
+
+    @property
+    def row_count(self) -> int:
+        return self.end_index - self.start_index + 1
+
+    def sheet_start_row(self, offset: int = 3) -> int:
+        """그룹 첫 데이터 행의 1-based worksheet row를 반환한다."""
+        return self.start_index + offset
+
+
+@dataclass(frozen=True)
+class PagePlan:
+    """인쇄 페이지의 그룹 청크 및 후속 페이지 시작 행 계획.
+
+    ``next_page_start_rows``는 데이터 행 기준의 1-based worksheet row다. OpenXML
+    break coordinate 변환은 이 순수 계획 객체가 아닌 layout 계층에서만 수행한다.
+    """
+
+    split_mode: SplitMode
+    page_chunks: tuple[tuple[DeliveryGroup, ...], ...]
+    next_page_start_rows: tuple[int, ...]
+
+    @classmethod
+    def from_groups(
+        cls,
+        groups: Sequence[DeliveryGroup],
+        mode: object,
+        max_groups_limit: int,
+        df: pd.DataFrame | None = None,
+        offset: int = 3,
+    ) -> PagePlan:
+        """그룹, 분할 방식, 제한으로 페이지 계획을 생성한다."""
+        split_mode = _coerce_split_mode(mode)
+        _validate_max_groups_limit(max_groups_limit)
+        typed_groups = tuple(groups)
+        if not typed_groups:
+            return cls(split_mode, (), ())
+
+        chunks = _compute_page_chunks(typed_groups, split_mode, max_groups_limit, df)
+        next_page_start_rows = tuple(
+            chunk[0].sheet_start_row(offset) for chunk in chunks[1:] if chunk
+        )
+        return cls(split_mode, chunks, next_page_start_rows)
+
+
+def _coerce_split_mode(mode: object) -> SplitMode:
+    try:
+        return SplitMode(mode)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"unknown split mode: {mode!r}") from exc
+
+
 def _validate_max_groups_limit(max_groups_limit: int) -> None:
     if max_groups_limit <= 0:
         raise ValueError("max_groups_limit must be greater than 0")
 
 
-def get_groups(df: pd.DataFrame) -> list[tuple[int, int]]:
-    """DataFrame에서 배송 그룹 인덱스 범위를 추출합니다."""
+def get_delivery_groups(df: pd.DataFrame) -> list[DeliveryGroup]:
+    """DataFrame에서 연속된 배송 그룹을 typed 범위로 추출한다."""
     if df.empty or COL_ORD not in df.columns:
-        return [(i, i) for i in range(len(df))]
-    return ord_groups(df[COL_ORD].map(txt).tolist())
+        return [DeliveryGroup(i, i) for i in range(len(df))]
+    return _groups_from_values(df[COL_ORD].map(txt).tolist())
+
+
+def get_groups(df: pd.DataFrame) -> list[tuple[int, int]]:
+    """레거시 API: 배송 그룹 범위를 tuple 목록으로 반환한다."""
+    return [(group.start_index, group.end_index) for group in get_delivery_groups(df)]
+
+
+def build_page_plan(
+    df: pd.DataFrame,
+    mode: object,
+    max_groups_limit: int,
+    offset: int = 3,
+) -> PagePlan:
+    """DataFrame 전체를 기준으로 권위 있는 typed 페이지 계획을 생성한다."""
+    return PagePlan.from_groups(
+        get_delivery_groups(df), mode, max_groups_limit, df=df, offset=offset
+    )
 
 
 def apply_page_breaks_by_groups(
     df: pd.DataFrame,
     groups: list[tuple[int, int]],
-    mode: int,
+    mode: object,
     max_groups_limit: int,
     offset: int = 3,
 ) -> list[int]:
-    """페이지 구분선 위치 계산. COM 조작 대신 break row 인덱스 리스트 반환.
-
-    mode=1: 관할동 기준 분할 + 최대 그룹 수 제한
-    mode=2: compute_page_chunks와 동일한 균등 분할 사용
-
-    Returns:
-        페이지 나누기가 필요한 행 인덱스 리스트 (1-based, 오름차순)
-    """
-    _validate_max_groups_limit(max_groups_limit)
-    if not groups:
-        return []
-
+    """레거시 API: ``PagePlan``의 후속 페이지 시작 행을 list로 반환한다."""
+    plan = PagePlan.from_groups(
+        _as_delivery_groups(groups), mode, max_groups_limit, df=df, offset=offset
+    )
     log.info(
-        "page_breaks: mode=%d max_limit=%d total_groups=%d",
-        mode,
+        "page_breaks: mode=%s max_limit=%d total_groups=%d total_breaks=%d",
+        plan.split_mode.name,
         max_groups_limit,
         len(groups),
+        len(plan.next_page_start_rows),
     )
-
-    # mode=2: compute_page_chunks와 동일한 균등 분할
-    if mode == 2 and max_groups_limit > 0:
-        chunks = compute_page_chunks(groups, mode, max_groups_limit, None)
-        chunk_breaks = []
-        cumul = 0
-        for ch in chunks[:-1]:
-            cumul += len(ch)
-            s0, _ = groups[cumul]
-            chunk_breaks.append(s0 + offset)
-        chunk_breaks = _prevent_group_splits(chunk_breaks, groups, offset)
-        log.info("  total_breaks=%d (even split)", len(chunk_breaks))
-        return chunk_breaks
-
-    breaks: list[int] = []
-    curr_g = 0
-    curr_dong = ""
-
-    for s0, _ in groups:
-        row_idx = s0 + offset
-        need_break = False
-
-        if mode == 1:
-            dong = str(df.iloc[s0]["관할동"]) if "관할동" in df.columns else ""
-            dong_changed = bool(curr_dong) and dong != curr_dong
-            limit_exceeded = max_groups_limit > 0 and curr_g >= max_groups_limit
-
-            if dong_changed or limit_exceeded:
-                need_break = True
-            curr_dong = dong
-
-        if need_break:
-            log.info("  break at group %d -> row %d (curr_g=%d)", s0, row_idx, curr_g)
-            breaks.append(row_idx)
-            curr_g = 0
-        else:
-            curr_g += 1
-
-    breaks = _prevent_group_splits(breaks, groups, offset)
-    log.info("  total_breaks=%d", len(breaks))
-    return breaks
+    return list(plan.next_page_start_rows)
 
 
 def ord_groups(vals: list[str]) -> list[tuple[int, int]]:
-    """연속된 동일 값 그룹의 (start, end) 인덱스 반환."""
-    out: list[tuple[int, int]] = []
-    i, n = 0, len(vals)
+    """레거시 API: 연속된 동일 값 그룹의 inclusive tuple 범위를 반환한다."""
+    return [(group.start_index, group.end_index) for group in _groups_from_values(vals)]
+
+
+def _groups_from_values(vals: Iterable[str]) -> list[DeliveryGroup]:
+    values = list(vals)
+    groups: list[DeliveryGroup] = []
+    i, n = 0, len(values)
     while i < n:
         j = i
-        while j + 1 < n and vals[j + 1] == vals[i]:
+        while j + 1 < n and values[j + 1] == values[i]:
             j += 1
-        out.append((i, j))
+        groups.append(DeliveryGroup(i, j))
         i = j + 1
-    return out
+    return groups
+
+
+def _as_delivery_groups(
+    groups: Sequence[DeliveryGroup | tuple[int, int]],
+) -> list[DeliveryGroup]:
+    return [
+        group if isinstance(group, DeliveryGroup) else DeliveryGroup(*group)
+        for group in groups
+    ]
 
 
 def compute_page_chunks(
     groups: list[tuple[int, int]],
-    mode: int,
+    mode: object,
     max_groups_limit: int,
     df: pd.DataFrame | None = None,
 ) -> list[list[tuple[int, int]]]:
-    """그룹 리스트를 mode/limit 기준으로 페이지 청크로 분할 (Pure Python).
+    """레거시 API: ``PagePlan`` 청크를 tuple 목록으로 반환한다."""
+    plan = PagePlan.from_groups(
+        _as_delivery_groups(groups), mode, max_groups_limit, df=df
+    )
+    return [
+        [(group.start_index, group.end_index) for group in chunk]
+        for chunk in plan.page_chunks
+    ]
 
-    mode=2: 전체 페이지 수를 최소화하면서 각 페이지에 균등 배분.
-    mode=1: 관할동 기준 분할 + 최대 그룹 수 제한.
 
-    Returns:
-        chunks: [[(s0,e0), ...], [...]]  — 페이지별 그룹 리스트
-    """
-    _validate_max_groups_limit(max_groups_limit)
-    if mode == 0 or not groups:
-        return [groups[:]] if groups else []
+def _compute_page_chunks(
+    groups: tuple[DeliveryGroup, ...],
+    mode: SplitMode,
+    max_groups_limit: int,
+    df: pd.DataFrame | None,
+) -> tuple[tuple[DeliveryGroup, ...], ...]:
+    if mode is SplitMode.NONE:
+        return (groups,)
 
     total = len(groups)
+    if mode is SplitMode.BY_JURISDICTION and df is not None:
+        chunks: list[tuple[DeliveryGroup, ...]] = []
+        current: list[DeliveryGroup] = []
+        current_count = 0
+        current_dong = ""
+        for group in groups:
+            dong = str(df.iloc[group.start_index].get("관할동", ""))
+            dong_changed = bool(current_dong) and dong != current_dong
+            limit_exceeded = current_count >= max_groups_limit
+            if (dong_changed or limit_exceeded) and current:
+                chunks.append(tuple(current))
+                current = []
+                current_count = 0
+            current.append(group)
+            current_count += 1
+            current_dong = dong
+        if current:
+            chunks.append(tuple(current))
+        return tuple(chunks)
 
-    if mode == 1 and df is not None:
-        chunks: list[list[tuple[int, int]]] = []
-        cur: list[tuple[int, int]] = []
-        curr_g = 0
-        curr_dong = ""
-        for g in groups:
-            s0, _ = g
-            need_break = False
-            dong = str(df.iloc[s0].get("관할동", ""))
-            dong_changed = bool(curr_dong) and dong != curr_dong
-            limit_exceeded = max_groups_limit > 0 and curr_g >= max_groups_limit
-            if dong_changed or limit_exceeded:
-                need_break = True
-            if need_break:
-                if cur:
-                    chunks.append(cur)
-                cur = []
-                curr_g = 0
-            cur.append(g)
-            curr_g += 1
-            curr_dong = dong
-        if cur:
-            chunks.append(cur)
-        return chunks
-
-    # mode=2: 균등 배분
+    # EVENLY, and the legacy BY_JURISDICTION-without-dataframe behavior.
     num_pages = max(1, (total + max_groups_limit - 1) // max_groups_limit)
-    base = total // num_pages
-    remainder = total % num_pages
-
+    base, remainder = divmod(total, num_pages)
     chunks = []
-    idx = 0
-    for p in range(num_pages):
-        size = base + (1 if p < remainder else 0)
-        chunks.append(groups[idx : idx + size])
-        idx += size
-
-    return chunks
-
-
-def _prevent_group_splits(
-    breaks: list[int], groups: list[tuple[int, int]], offset: int
-) -> list[int]:
-    """그룹 중간에 페이지가 잘리지 않도록 break 위치를 조정.
-
-    break가 그룹 중간에 있으면 그룹 시작점으로 이동.
-    """
-    adjusted: list[int] = []
-    for pb_row in breaks:
-        new_pos = pb_row
-        for s0, e0 in groups:
-            start_row = s0 + offset
-            end_row = e0 + offset
-            if start_row < pb_row <= end_row:
-                new_pos = start_row
-                break
-        if new_pos not in adjusted:
-            adjusted.append(new_pos)
-    return sorted(adjusted)
+    index = 0
+    for page_index in range(num_pages):
+        size = base + (1 if page_index < remainder else 0)
+        chunks.append(groups[index : index + size])
+        index += size
+    return tuple(chunks)

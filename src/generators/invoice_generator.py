@@ -14,8 +14,16 @@ import openpyxl
 from openpyxl.styles import Alignment
 
 from ..core.diff_format import to_numeric
-from ..core.invoice_data import EnrichedPersonDict
+from ..core.invoice_data import (
+    EnrichedPersonDict,
+    MealPrices,
+    MonthlyDelivery,
+    MonthlyDeliveryBatch,
+    legacy_recipient,
+)
+from ..core.models import FULL_ADDRESS_FIELD, combine_address
 from ..excel.excel_utils import CENTER_ALIGN, adjust_formula, copy_style
+from ..excel.publication import publish_workbook
 from ..templates.config import (
     col_name_to_index,
     get_template_data_start_row,
@@ -39,22 +47,22 @@ def _col_idx_to_letter(idx: int) -> str:
 
 
 def _map_person_to_row(
-    person: EnrichedPersonDict,
+    person: MonthlyDelivery,
     mapping: dict,
     template_columns: list[str],
 ) -> dict:
-    """person dict + mapping → {template_col_name: value}."""
+    """Typed recipient plus template mapping → {template_col_name: value}."""
     row_data: dict[str, object] = {}
+    source = person.roster.extra
     for col in template_columns:
         if col == "연번":
-            sequence = person.get("연번")
-            if sequence is None or sequence == "":
-                sequence = person.get("배송순서", "")
-            row_data[col] = sequence
+            row_data[col] = person.delivery_sequence
             continue
         roster_key = mapping.get(col, "")
-        if roster_key:
-            row_data[col] = person.get(roster_key, "")
+        if roster_key == FULL_ADDRESS_FIELD:
+            row_data[col] = combine_address(source.get("도로명주소"), source.get("상세주소"))
+        elif roster_key:
+            row_data[col] = source.get(roster_key, "")
     return row_data
 
 
@@ -94,7 +102,7 @@ _MEMO_ALIGN = Alignment(horizontal="left", vertical="top", wrap_text=True)
 def _fill_invoice_sheet(
     wb,
     sheet_name: str,
-    people: list[EnrichedPersonDict],
+    people: list[MonthlyDelivery],
     col_mapping: dict,
     template_path: str,
     unit_price_breakfast: int,
@@ -122,9 +130,9 @@ def _fill_invoice_sheet(
     written_cols: set[int] = set()
 
     for person in people:
-        breakfast_cnt = person.get("_bf_cnt", 0)
-        dinner_cnt = person.get("_dn_cnt", 0)
-        lunch_cnt = person.get("_lh_cnt", 0)
+        breakfast_cnt = person.breakfast_count
+        dinner_cnt = person.dinner_count
+        lunch_cnt = person.lunch_count
 
         row_data = _map_person_to_row(person, col_mapping, template_columns)
 
@@ -151,11 +159,7 @@ def _fill_invoice_sheet(
                 unit_price_lunch,
             )
 
-        # 결과 표시용 (첫 번째 시트에서만 누적 — 호출부에서 total 관리)
-        person["_total"] = breakfast_cnt + dinner_cnt + lunch_cnt
-        person["_amount"] = (
-            f"{breakfast_cnt * unit_price_breakfast + dinner_cnt * unit_price_dinner + lunch_cnt * unit_price_lunch:,}원"
-        )
+
 
         # ── Phase 1: 데이터 값 쓰기 ──
         for col_name, value in row_data.items():
@@ -252,9 +256,9 @@ def _rename_sheets(wb, keep_prefix: str):
 def _get_sheet_plan(
     meal_type: str,
     is_vacation_month: bool,
-    roster_data: list[EnrichedPersonDict],
+    roster_data: tuple[MonthlyDelivery, ...],
     template_sheet_names: list[str],
-) -> tuple[list[tuple[str, list[EnrichedPersonDict]]], str | None]:
+) -> tuple[list[tuple[str, list[MonthlyDelivery]]], str | None]:
     """(sheet_plan, rename_prefix)
 
     sheet_plan: [(template_sheet_name, people_for_this_sheet), ...]
@@ -265,13 +269,7 @@ def _get_sheet_plan(
     """
     if meal_type == "급식":
         # 급식: 단일 시트에 모든 인원 (방중/학기중 구분 없음)
-        active = [
-            p
-            for p in roster_data
-            if p.get("_bf_cnt", 0) > 0
-            or p.get("_dn_cnt", 0) > 0
-            or p.get("_lh_cnt", 0) > 0
-        ]
+        active = [p for p in roster_data if p.total_count > 0]
         return [(template_sheet_names[0], active)], None
 
     if is_vacation_month:
@@ -280,16 +278,10 @@ def _get_sheet_plan(
         #    방중:   중식 실제 배송 건수 > 0 인원만
         #    총괄:   학기중 ∪ 방중 (셋 다 0이면 제외)
         school_people = [
-            p for p in roster_data if p.get("_bf_cnt", 0) > 0 or p.get("_dn_cnt", 0) > 0
+            p for p in roster_data if p.breakfast_count > 0 or p.dinner_count > 0
         ]
-        vac_people = [p for p in roster_data if p.get("_lh_cnt", 0) > 0]
-        union_people = [
-            p
-            for p in roster_data
-            if p.get("_bf_cnt", 0) > 0
-            or p.get("_dn_cnt", 0) > 0
-            or p.get("_lh_cnt", 0) > 0
-        ]
+        vac_people = [p for p in roster_data if p.lunch_count > 0]
+        union_people = [p for p in roster_data if p.total_count > 0]
         return [
             ("방학_학기중", school_people),
             ("방학_방중", vac_people),
@@ -297,11 +289,7 @@ def _get_sheet_plan(
         ], "방학_"
 
     # ── 일반 월 (행복도시락, 방학 아님) ──
-    active = [
-        p
-        for p in roster_data
-        if p.get("_bf_cnt", 0) > 0 or p.get("_dn_cnt", 0) > 0 or p.get("_lh_cnt", 0) > 0
-    ]
+    active = [p for p in roster_data if p.total_count > 0]
     return [
         ("학기_학기중", active),
         ("학기_총괄", active),
@@ -312,7 +300,7 @@ def _get_sheet_plan(
 
 
 def make_invoice(
-    roster_data: list[EnrichedPersonDict],
+    roster_data: MonthlyDeliveryBatch | list[EnrichedPersonDict],
     col_mapping: dict,
     output_path: str,
     template_path: str,
@@ -332,39 +320,62 @@ def make_invoice(
     """
 
     wb = openpyxl.load_workbook(template_path)
-    unit_price_breakfast = unit_prices["조식"]
-    unit_price_dinner = unit_prices["석식"]
-    unit_price_lunch = unit_prices["중식"]
+    publication_started = False
+    try:
+        if isinstance(roster_data, MonthlyDeliveryBatch):
+            batch = roster_data
+        else:
+            prices = MealPrices(
+                breakfast=unit_prices["조식"],
+                lunch=unit_prices["중식"],
+                dinner=unit_prices["석식"],
+            )
+            batch = MonthlyDeliveryBatch(
+                year=year,
+                month=month,
+                prices=prices,
+                is_vacation_month=is_vacation_month,
+                deliveries=tuple(
+                    legacy_recipient(person, position=index)
+                    for index, person in enumerate(roster_data, start=1)
+                ),
+            )
+        unit_price_breakfast = batch.prices.breakfast
+        unit_price_dinner = batch.prices.dinner
+        unit_price_lunch = batch.prices.lunch
 
-    # ── 서비스에서 계산된 실제 배송 건수 확인 ──
-    for p in roster_data:
-        log.debug(
-            "[Split] %s: bf=%d dn=%d lh=%d",
-            p.get("성명", "?"),
-            p.get("_bf_cnt", 0),
-            p.get("_dn_cnt", 0),
-            p.get("_lh_cnt", 0),
+        for p in batch.deliveries:
+            log.debug(
+                "[Split] %s: bf=%d dn=%d lh=%d",
+                p.roster.display_name,
+                p.breakfast_count,
+                p.dinner_count,
+                p.lunch_count,
+            )
+
+        # ── 시트 분할 계획에 따라 각 시트 채우기 ──
+        sheet_plan, rename_prefix = _get_sheet_plan(
+            meal_type, batch.is_vacation_month, batch.deliveries, wb.sheetnames
         )
+        total_count = 0
+        for sheet_name, people in sheet_plan:
+            total_count = _fill_invoice_sheet(
+                wb,
+                sheet_name,
+                people,
+                col_mapping,
+                template_path,
+                unit_price_breakfast,
+                unit_price_dinner,
+                unit_price_lunch,
+                meal_type=meal_type,
+            )
+        if rename_prefix:
+            _rename_sheets(wb, rename_prefix)
 
-    # ── 시트 분할 계획에 따라 각 시트 채우기 ──
-    sheet_plan, rename_prefix = _get_sheet_plan(
-        meal_type, is_vacation_month, roster_data, wb.sheetnames
-    )
-    total_count = 0
-    for sheet_name, people in sheet_plan:
-        total_count = _fill_invoice_sheet(
-            wb,
-            sheet_name,
-            people,
-            col_mapping,
-            template_path,
-            unit_price_breakfast,
-            unit_price_dinner,
-            unit_price_lunch,
-            meal_type=meal_type,
-        )
-    if rename_prefix:
-        _rename_sheets(wb, rename_prefix)
-
-    wb.save(output_path)
-    return total_count, roster_data
+        publication_started = True
+        publish_workbook(wb, output_path)
+        return total_count, batch
+    finally:
+        if not publication_started:
+            wb.close()

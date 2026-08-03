@@ -1,4 +1,4 @@
-"""청구/확인서 전달 모델과 enriched builder 테스트."""
+"""청구/확인서 전달 모델과 legacy enriched projection 테스트."""
 
 from dataclasses import fields
 
@@ -86,9 +86,4 @@ class TestBuildEnrichedPersonDict:
 
 
 def test_invoice_data_contains_only_current_cross_tab_state():
-    assert {item.name for item in fields(InvoiceData)} == {
-        "invoices",
-        "col_mapping",
-        "year",
-        "month",
-    }
+    assert {item.name for item in fields(InvoiceData)} == {"batch", "col_mapping"}

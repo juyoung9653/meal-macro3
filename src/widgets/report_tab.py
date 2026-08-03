@@ -7,7 +7,7 @@ import os
 from datetime import date, datetime, timezone
 from typing import ClassVar
 
-from PyQt6.QtCore import QDate, QSettings, QSize, Qt, QUrl
+from PyQt6.QtCore import QDate, QSize, Qt, QUrl
 from PyQt6.QtGui import QDesktopServices, QTextDocument
 from PyQt6.QtWidgets import (
     QCheckBox,
@@ -30,8 +30,9 @@ from PyQt6.QtWidgets import (
 
 from ..core.delivery_matrix import ALLOWED_MEALS, AnnualDeliveryBook, MonthState
 from ..core.settings import get_settings
+from ..core.user_preferences import UserPreferences
 from ..generators.report_generator import export_multi
-from ..services.delivery_service import DeliveryService
+from ..services.delivery_service import REPORT_HEADERS, DeliveryReport, DeliveryService
 from ..widgets.order_editor import StaffOrderDialog
 
 log = logging.getLogger(__name__)
@@ -99,40 +100,22 @@ class ReportTab(QWidget):
         self._s = get_settings()
         self._meal_type = meal_type or self._s.get_meal_type()
 
-        org = self._s.get("app", "organization")
-        app_title = self._s.get("app", "title")
-        self._settings = QSettings(org, app_title)
+        self._preferences = UserPreferences(self._s)
 
         self._book: AnnualDeliveryBook | None = None
         self._service: DeliveryService | None = None
-        self._last_results: list[tuple[str, str, list[list[object]]]] = []
+        self._last_results: list[DeliveryReport] = []
         self._last_export_path: str | None = None
 
         self._setup_ui()
         self.set_annual_book(annual_book)
 
     def _load_staff_sort(self) -> dict[str, list[str]]:
-        import json
-
-        result: dict[str, list[str]] = {}
-        for meal in ["조식", "중식", "석식"]:
-            key = f"report/staff_order_{meal}"
-            val = self._settings.value(key)
-            if val is not None:
-                try:
-                    if isinstance(val, str):
-                        loaded = json.loads(val)
-                    elif isinstance(val, list):
-                        loaded = val
-                    else:
-                        continue
-                    if isinstance(loaded, list):
-                        result[meal] = [
-                            item for item in loaded if isinstance(item, str)
-                        ]
-                except (json.JSONDecodeError, TypeError) as error:
-                    log.warning("배송순서 설정을 읽지 못했습니다 (%s): %s", meal, error)
-        return result
+        return {
+            meal: order
+            for meal in ["조식", "중식", "석식"]
+            if (order := self._preferences.get_staff_order(meal))
+        }
 
     # ── UI ──
 
@@ -360,55 +343,65 @@ class ReportTab(QWidget):
             self._set_status("리포트 생성 실패")
             QMessageBox.critical(self, "오류", f"리포트 생성 실패:\n{e}")
 
-    def _update_results(
-        self, results: list[tuple[str, str, list[list[object]]]]
-    ) -> None:
+    def _update_results(self, results: list[DeliveryReport]) -> None:
         self.result_tabs.clear()
 
-        if not results:
-            return
-
-        for date_str, meal, table in results:
+        for report in results:
             tab = QWidget()
             tab_layout = QVBoxLayout(tab)
 
             tw = QTableWidget()
-            if table and len(table) > 0:
-                headers = [str(value) for value in table[0]]
-                tw.setColumnCount(len(headers))
-                tw.setHorizontalHeaderLabels(headers)
-                tw.setRowCount(len(table) - 1)
+            headers = list(REPORT_HEADERS)
+            tw.setColumnCount(len(headers))
+            tw.setHorizontalHeaderLabels(headers)
+            tw.setRowCount(len(report.rows) + 1)
 
-                horizontal_header = tw.horizontalHeader()
-                if horizontal_header is not None:
-                    header_font = horizontal_header.font()
-                    header_font.setBold(True)
-                    horizontal_header.setFont(header_font)
+            horizontal_header = tw.horizontalHeader()
+            if horizontal_header is not None:
+                header_font = horizontal_header.font()
+                header_font.setBold(True)
+                horizontal_header.setFont(header_font)
 
-                for ri, row in enumerate(table[1:]):
-                    for ci, val in enumerate(row):
-                        item = QTableWidgetItem(str(val) if val is not None else "")
-                        item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-                        tw.setItem(ri, ci, item)
+            for row_index, row in enumerate(report.rows):
+                values = (
+                    row.staff_label,
+                    *row.household_size_cells,
+                    row.person_total,
+                    row.memo,
+                    row.reference_areas,
+                )
+                for column_index, value in enumerate(values):
+                    item = QTableWidgetItem(str(value))
+                    item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                    tw.setItem(row_index, column_index, item)
 
-                if horizontal_header is not None:
-                    horizontal_header.setStretchLastSection(True)
-                    horizontal_header.setSectionResizeMode(
-                        QHeaderView.ResizeMode.Stretch
-                    )
-                tw.setAlternatingRowColors(True)
-                tw.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+            totals = report.totals
+            summary_values = (
+                "합계",
+                *totals.household_counts,
+                totals.person_total,
+                "",
+                "",
+            )
+            for column_index, value in enumerate(summary_values):
+                item = QTableWidgetItem(str(value))
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                tw.setItem(len(report.rows), column_index, item)
 
-                # 비고 컬럼 delegate (index 7)
-                if len(headers) > 7 and headers[7] == "비고":
-                    tw.setItemDelegateForColumn(7, MemoHighlightDelegate(tw))
+            if horizontal_header is not None:
+                horizontal_header.setStretchLastSection(True)
+                horizontal_header.setSectionResizeMode(
+                    QHeaderView.ResizeMode.Stretch
+                )
+            tw.setAlternatingRowColors(True)
+            tw.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
 
-                tw.resizeRowsToContents()
+            # 비고 컬럼 delegate (index 7)
+            tw.setItemDelegateForColumn(7, MemoHighlightDelegate(tw))
+            tw.resizeRowsToContents()
 
             tab_layout.addWidget(tw)
-
-            title = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:]}({meal})"
-            self.result_tabs.addTab(tab, title)
+            self.result_tabs.addTab(tab, f"{report.day:%Y-%m-%d}({report.meal})")
 
     # ── 내보내기 ──
 
@@ -417,11 +410,11 @@ class ReportTab(QWidget):
             QMessageBox.warning(self, "알림", "먼저 리포트를 생성하세요.")
             return
 
-        dir_hint = self._settings.value("output_dir", "")
+        dir_hint = self._preferences.get_output_dir()
         out_dir = QFileDialog.getExistingDirectory(self, "저장 폴더 선택", dir_hint)
         if not out_dir:
             return
-        self._settings.setValue("output_dir", out_dir)
+        self._preferences.set_output_dir(out_dir)
 
         # 기본 파일명
         qd = self.date_start.date()

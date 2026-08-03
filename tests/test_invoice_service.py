@@ -9,6 +9,7 @@ from unittest.mock import Mock
 import pytest
 
 from src.core.delivery_matrix import (
+    ALLOWED_MEALS,
     AnnualDeliveryBook,
     DeliveryCellValue,
     DeliveryRow,
@@ -41,6 +42,22 @@ def _delivery_row(
         values=values,
         source_row=person.source_row + _MEAL_SOURCE_ROW_OFFSETS[meal],
     )
+
+
+def _complete_meal_rows(
+    roster: tuple[RosterEntry, ...],
+    rows: tuple[DeliveryRow, ...],
+    dates: tuple[date, ...],
+) -> tuple[DeliveryRow, ...]:
+    completed_rows = list(rows)
+    for person in roster:
+        present_meals = {row.meal for row in rows if row.person is person}
+        completed_rows.extend(
+            _delivery_row(person, meal, "", "", dates)
+            for meal in ALLOWED_MEALS
+            if meal not in present_meals
+        )
+    return tuple(completed_rows)
 
 
 def _service_book() -> AnnualDeliveryBook:
@@ -119,7 +136,12 @@ def _service_book() -> AnnualDeliveryBook:
             paused=(date(2026, 6, 21),),
         ),
     )
-    return AnnualDeliveryBook(2026, roster, rows, dates)
+    return AnnualDeliveryBook(
+        2026,
+        roster,
+        _complete_meal_rows(roster, rows, dates),
+        dates,
+    )
 
 
 def _month_validation_book(
@@ -142,7 +164,13 @@ def _month_validation_book(
                 delivered=delivered,
             ),
         )
-    return AnnualDeliveryBook(year, (person,), delivery_rows, dates)
+    roster = (person,)
+    return AnnualDeliveryBook(
+        year,
+        roster,
+        _complete_meal_rows(roster, delivery_rows, dates),
+        dates,
+    )
 
 
 @pytest.fixture
@@ -154,7 +182,9 @@ def template_path(tmp_path: Path) -> str:
 
 @pytest.fixture
 def invoice_spy(monkeypatch: pytest.MonkeyPatch) -> Mock:
-    spy = Mock(side_effect=lambda people, *_args, **_kwargs: (len(people), people))
+    spy = Mock(
+        side_effect=lambda batch, *_args, **_kwargs: (len(batch.deliveries), batch)
+    )
     monkeypatch.setattr(invoice_controller, "make_invoice", spy)
     return spy
 
@@ -185,7 +215,7 @@ def test_counts_only_target_month_delivered_and_ignores_roster_flags(
     person = result.enriched[0]
     assert (person["_bf_cnt"], person["_lh_cnt"], person["_dn_cnt"]) == (2, 1, 1)
     assert person["_total"] == 4
-    assert invoice_spy.call_args.args[0] == result.enriched
+    assert invoice_spy.call_args.args[0] is result.batch
 
     # 원본 비고는 그대로 남고 모든 레거시 전달 필드는 더 이상 만들지 않는다.
     assert person.get("비고") == "견과류 알레르기"
@@ -224,23 +254,27 @@ def test_metadata_uses_only_rows_delivered_in_target_month(
     book = AnnualDeliveryBook(
         2026,
         (person,),
-        (
-            _delivery_row(
-                person,
-                "조식",
-                "6월기사",
-                "006",
-                days,
-                delivered=(date(2026, 6, 1),),
+        _complete_meal_rows(
+            (person,),
+            (
+                _delivery_row(
+                    person,
+                    "조식",
+                    "6월기사",
+                    "006",
+                    days,
+                    delivered=(date(2026, 6, 1),),
+                ),
+                _delivery_row(
+                    person,
+                    "석식",
+                    "7월기사",
+                    "007",
+                    days,
+                    delivered=(date(2026, 7, 1),),
+                ),
             ),
-            _delivery_row(
-                person,
-                "석식",
-                "7월기사",
-                "007",
-                days,
-                delivered=(date(2026, 7, 1),),
-            ),
+            days,
         ),
         days,
     )
@@ -273,15 +307,19 @@ def test_rejects_blank_metadata_on_target_month_delivered_row(
     book = AnnualDeliveryBook(
         2026,
         (person,),
-        (
-            _delivery_row(
-                person,
-                "조식",
-                staff,
-                sequence,
-                days,
-                delivered=days,
+        _complete_meal_rows(
+            (person,),
+            (
+                _delivery_row(
+                    person,
+                    "조식",
+                    staff,
+                    sequence,
+                    days,
+                    delivered=days,
+                ),
             ),
+            days,
         ),
         days,
     )
@@ -355,10 +393,14 @@ def test_zero_only_entered_month_proceeds_with_zero_invoice(
     book = AnnualDeliveryBook(
         2026,
         (person,),
-        (
-            _delivery_row(
-                person, "중식", "기사A", 1, days, paused=(date(2026, 6, 1),)
+        _complete_meal_rows(
+            (person,),
+            (
+                _delivery_row(
+                    person, "중식", "기사A", 1, days, paused=(date(2026, 6, 1),)
+                ),
             ),
+            days,
         ),
         days,
     )
@@ -368,7 +410,8 @@ def test_zero_only_entered_month_proceeds_with_zero_invoice(
     assert result.success, result.error
     assert result.count == 0
     assert result.enriched == []
-    assert invoice_spy.call_args.args[0] == []
+    assert invoice_spy.call_args.args[0] is result.batch
+    assert result.batch is not None and result.batch.deliveries == ()
 
 
 @pytest.mark.parametrize(
@@ -444,23 +487,27 @@ def test_vacation_detection_uses_only_target_month_delivered_lunch():
     book = AnnualDeliveryBook(
         2026,
         (person,),
-        (
-            _delivery_row(
-                person,
-                "중식",
-                "기사A",
-                1,
-                days,
-                delivered=(date(2026, 7, 1),),
+        _complete_meal_rows(
+            (person,),
+            (
+                _delivery_row(
+                    person,
+                    "중식",
+                    "기사A",
+                    1,
+                    days,
+                    delivered=(date(2026, 7, 1),),
+                ),
+                _delivery_row(
+                    person,
+                    "조식",
+                    "기사A",
+                    1,
+                    days,
+                    paused=(date(2026, 8, 1),),
+                ),
             ),
-            _delivery_row(
-                person,
-                "조식",
-                "기사A",
-                1,
-                days,
-                paused=(date(2026, 8, 1),),
-            ),
+            days,
         ),
         days,
     )

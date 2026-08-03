@@ -16,8 +16,14 @@ from ..core.delivery_matrix import (
     MonthState,
     RosterEntry,
 )
-from ..core.invoice_data import EnrichedPersonDict, WeeklyMealCount
-from ..core.models import build_enriched_person_dict
+from ..core.invoice_data import (
+    EnrichedPersonDict,
+    MealPrices,
+    MonthlyDelivery,
+    MonthlyDeliveryBatch,
+    WeeklyDelivery,
+)
+from ..core.models import FULL_ADDRESS_FIELD, combine_address
 from ..core.settings import get_settings
 from ..excel.annual_workbook import AnnualWorkbook
 from ..generators.invoice_generator import make_invoice
@@ -57,6 +63,8 @@ class InvoiceWarning:
 class InvoiceResult:
     success: bool
     count: int = 0
+    batch: MonthlyDeliveryBatch | None = None
+    # Deprecated compatibility projection for non-application callers.
     enriched: list[EnrichedPersonDict] = field(default_factory=list)
     warnings: list[InvoiceWarning] = field(default_factory=list)
     error: str | None = None
@@ -65,7 +73,7 @@ class InvoiceResult:
 @dataclass
 class _PersonDeliverySummary:
     counts: dict[str, int]
-    weekly: list[WeeklyMealCount]
+    weekly: list[WeeklyDelivery]
 
 
 class InvoiceService:
@@ -102,16 +110,25 @@ class InvoiceService:
                 success=False,
                 error=f"배송 메타데이터 오류:\n{error}",
             )
-        enriched = [
-            _enrich_person(
-                entry.as_dict(),
+        deliveries = tuple(
+            _build_monthly_delivery(
+                entry,
                 rows_by_person.get(entry, ()),
                 summaries[entry],
-                unit_prices,
             )
             for entry in book.roster
-        ]
-        output_people = [person for person in enriched if person["_total"] > 0]
+        )
+        batch = MonthlyDeliveryBatch(
+            year=config.year,
+            month=config.month,
+            prices=MealPrices(
+                breakfast=unit_prices["조식"],
+                lunch=unit_prices["중식"],
+                dinner=unit_prices["석식"],
+            ),
+            is_vacation_month=self._is_vacation_month(book, config.year, config.month),
+            deliveries=tuple(item for item in deliveries if item.total_count > 0),
+        )
 
         if not Path(config.template_path).is_file():
             return InvoiceResult(
@@ -121,31 +138,35 @@ class InvoiceService:
 
         try:
             count, rendered = make_invoice(
-                output_people,
+                batch,
                 config.col_mapping,
                 config.output_path,
                 template_path=config.template_path,
                 year=config.year,
                 month=config.month,
                 unit_prices=unit_prices,
-                is_vacation_month=self._is_vacation_month(
-                    book, config.year, config.month
-                ),
+                is_vacation_month=batch.is_vacation_month,
                 meal_type=config.meal_type,
             )
         except Exception as error:  # noqa: BLE001 - 생성 실패를 결과로 반환
             return InvoiceResult(success=False, error=f"청구서 생성 실패:\n{error}")
 
-        rendered_output = [person for person in rendered if person["_total"] > 0]
-        if count != len(rendered_output):
+        if not isinstance(rendered, MonthlyDeliveryBatch):
+            return InvoiceResult(success=False, error="청구서 생성 결과 형식이 올바르지 않습니다.")
+        if count != len(rendered.deliveries):
             return InvoiceResult(
                 success=False,
                 error=(
                     "청구서 생성 결과 건수가 일치하지 않습니다: "
-                    f"작성 {count}건, 출력 대상 {len(rendered_output)}건"
+                    f"작성 {count}건, 출력 대상 {len(rendered.deliveries)}건"
                 ),
             )
-        return InvoiceResult(success=True, count=count, enriched=rendered_output)
+        return InvoiceResult(
+            success=True,
+            count=count,
+            batch=batch,
+            enriched=[_legacy_record(item, batch.prices) for item in batch.deliveries],
+        )
 
     def _resolve_book(self, config: InvoiceGenerationConfig) -> AnnualDeliveryBook:
         if config.annual_book is not None:
@@ -256,15 +277,15 @@ def _calculate_monthly_summaries(
 
     summaries: dict[RosterEntry, _PersonDeliverySummary] = {}
     for entry in book.roster:
-        weekly: list[WeeklyMealCount] = [
-            {
-                "week": week,
-                "start_date": f"{start:%Y%m%d}",
-                "end_date": f"{end:%Y%m%d}",
-                "조식": 0,
-                "중식": 0,
-                "석식": 0,
-            }
+        weekly: list[WeeklyDelivery] = [
+            WeeklyDelivery(
+                week=week,
+                start_date=start,
+                end_date=end,
+                breakfast_count=0,
+                lunch_count=0,
+                dinner_count=0,
+            )
             for week, start, end in weeks
         ]
         summaries[entry] = _PersonDeliverySummary(
@@ -283,7 +304,15 @@ def _calculate_monthly_summaries(
             summary.counts[row.meal] += 1
             week_index = week_by_date.get(day)
             if week_index is not None:
-                summary.weekly[week_index][row.meal] += 1
+                item = summary.weekly[week_index]
+                summary.weekly[week_index] = WeeklyDelivery(
+                    week=item.week,
+                    start_date=item.start_date,
+                    end_date=item.end_date,
+                    breakfast_count=item.breakfast_count + (1 if row.meal == "조식" else 0),
+                    lunch_count=item.lunch_count + (1 if row.meal == "중식" else 0),
+                    dinner_count=item.dinner_count + (1 if row.meal == "석식" else 0),
+                )
 
     return summaries
 
@@ -331,25 +360,56 @@ def _rows_by_person(
     }
 
 
-def _enrich_person(
-    raw: dict,
+def _build_monthly_delivery(
+    roster: RosterEntry,
     delivery_rows: tuple[DeliveryRow, ...],
     summary: _PersonDeliverySummary,
-    unit_prices: Mapping[str, int],
-) -> EnrichedPersonDict:
-    note_value = raw.get("비고", "")
-    note = "" if note_value is None else str(note_value).strip()
-    staff = _join_unique(row.staff for row in delivery_rows)
-    sequence = _join_unique(row.sequence_display for row in delivery_rows)
-    return build_enriched_person_dict(
-        raw=raw,
-        note=note,
-        meal_counts=summary.counts,
-        weekly_meal_counts=summary.weekly,
-        delivery_staff=staff,
-        delivery_sequence=sequence,
-        unit_prices=unit_prices,
+) -> MonthlyDelivery:
+    note_value = roster.extra.get("비고", "")
+    return MonthlyDelivery(
+        roster=roster,
+        note="" if note_value is None else str(note_value).strip(),
+        delivery_staff=_join_unique(row.staff for row in delivery_rows),
+        delivery_sequence=_join_unique(row.sequence_display for row in delivery_rows),
+        breakfast_count=summary.counts["조식"],
+        lunch_count=summary.counts["중식"],
+        dinner_count=summary.counts["석식"],
+        weekly=tuple(summary.weekly),
     )
+
+
+def _legacy_record(delivery: MonthlyDelivery, prices: MealPrices) -> EnrichedPersonDict:
+    """Explicit one-way compatibility projection; application paths never consume it."""
+    record = delivery.roster.as_dict()
+    if "도로명주소" in record or "상세주소" in record:
+        record[FULL_ADDRESS_FIELD] = combine_address(
+            record.get("도로명주소"), record.get("상세주소")
+        )
+    record.update(
+        {
+            "_note": delivery.note,
+            "_total": delivery.total_count,
+            "_amount": f"{delivery.amount(prices):,}원",
+            "_bf_cnt": delivery.breakfast_count,
+            "_lh_cnt": delivery.lunch_count,
+            "_dn_cnt": delivery.dinner_count,
+            "weekly_meal_counts": [
+                {
+                    "week": item.week,
+                    "start_date": f"{item.start_date:%Y%m%d}",
+                    "end_date": f"{item.end_date:%Y%m%d}",
+                    "조식": item.breakfast_count,
+                    "중식": item.lunch_count,
+                    "석식": item.dinner_count,
+                }
+                for item in delivery.weekly
+            ],
+            "배송담당": delivery.delivery_staff,
+            "배송순서": delivery.delivery_sequence,
+            "연번": delivery.delivery_sequence,
+        }
+    )
+    return record  # type: ignore[return-value]
 
 
 def _join_unique(values: Iterable[object]) -> str:

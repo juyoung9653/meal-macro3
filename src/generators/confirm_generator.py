@@ -8,9 +8,16 @@ from copy import copy
 import openpyxl
 from openpyxl.utils import get_column_letter
 
+from ..core.invoice_data import (
+    MonthlyDelivery,
+    MonthlyDeliveryBatch,
+    WeeklyDelivery,
+    legacy_recipient,
+)
 from ..core.models import combine_address
 from ..core.settings import get_settings
 from ..excel.excel_utils import adjust_formula, build_merged_anchor_map, copy_cell
+from ..excel.publication import publish_workbook
 from ..templates.template_scanner import scan_placeholders, validate_placeholders
 
 log = logging.getLogger(__name__)
@@ -63,90 +70,60 @@ def _pre_build_anchor_maps(wb, tpl_sheet_names: list[str]) -> dict[str, dict]:
 
 
 def _prepared_weekly_counts(
-    person: Mapping[str, object], name_col: str = "성명"
-) -> dict[int, dict]:
-    """서비스가 준비한 주차 집계를 검증해 주차 번호로 인덱싱한다."""
-    raw_counts = person.get("weekly_meal_counts")
-    if not isinstance(raw_counts, list):
-        raise TypeError(
-            f"{_person_identifier(person, name_col)}: "
-            "청구서의 weekly_meal_counts 데이터가 없습니다. "
-            "청구서를 먼저 다시 생성하세요."
-        )
-
-    indexed: dict[int, dict] = {}
-    for item in raw_counts:
-        if not isinstance(item, dict):
-            raise TypeError("weekly_meal_counts 항목은 매핑이어야 합니다.")
-        week = item.get("week")
-        if not isinstance(week, int) or isinstance(week, bool) or not 1 <= week <= 5:
-            raise ValueError(f"유효하지 않은 확인서 주차입니다: {week!r}")
-        if week in indexed:
-            raise ValueError(f"확인서 주차가 중복되었습니다: {week}주")
-        for meal in ("조식", "중식", "석식"):
-            value = item.get(meal, 0)
-            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-                raise ValueError(f"{week}주 {meal} 건수는 0 이상의 정수여야 합니다.")
-        _format_week_range(item)
-        indexed[week] = item
+    person: MonthlyDelivery, name_col: str = "성명"
+) -> dict[int, WeeklyDelivery]:
+    """Index immutable service-prepared weekly delivery facts by week."""
+    indexed: dict[int, WeeklyDelivery] = {}
+    for item in person.weekly:
+        if not 1 <= item.week <= 5:
+            raise ValueError(f"유효하지 않은 확인서 주차입니다: {item.week!r}")
+        if item.week in indexed:
+            raise ValueError(f"확인서 주차가 중복되었습니다: {item.week}주")
+        if min(item.breakfast_count, item.lunch_count, item.dinner_count) < 0:
+            raise ValueError(f"{item.week}주 식종 건수는 0 이상의 정수여야 합니다.")
+        indexed[item.week] = item
     return indexed
 
 
-def _format_week_range(item: dict) -> str:
-    start = str(item.get("start_date", ""))
-    end = str(item.get("end_date", ""))
-    if not (len(start) == len(end) == 8 and start.isdigit() and end.isdigit()):
-        raise ValueError("주차 시작일/종료일은 YYYYMMDD 형식이어야 합니다.")
-    return f"{start[4:6]}.{start[6:8]}~{end[4:6]}.{end[6:8]}"
+def _format_week_range(item: WeeklyDelivery) -> str:
+    return f"{item.start_date:%m.%d}~{item.end_date:%m.%d}"
 
 
-def _household_delivery_staff(
-    members: Sequence[Mapping[str, object]],
-) -> str:
+def _household_delivery_staff(members: Sequence[MonthlyDelivery]) -> str:
     unique: list[str] = []
     for member in members:
-        for value in _blank_text(member.get("배송담당", "")).split(" / "):
+        for value in _blank_text(member.delivery_staff).split(" / "):
             staff = value.strip()
             if staff and staff not in unique:
                 unique.append(staff)
     return " / ".join(unique)
 
 
-def _person_identifier(person: Mapping[str, object], name_col: str) -> str:
-    name = _blank_text(person.get(name_col, "")).strip() or "(빈 값)"
-    raw_position = person.get(_ROSTER_POSITION_KEY)
-    position = (
-        str(raw_position)
-        if isinstance(raw_position, int) and not isinstance(raw_position, bool)
-        else "(알 수 없음)"
-    )
-    return f"성명={name}, 명단 위치={position}"
+def _person_identifier(person: MonthlyDelivery, name_col: str) -> str:
+    name = _blank_text(person.roster.extra.get(name_col, "")).strip() or "(빈 값)"
+    return f"성명={name}, 명단 위치={person.roster.source_row - 1}"
 
 
 def _validated_household_groups(
-    roster_data: Sequence[Mapping[str, object]],
+    roster_data: Sequence[MonthlyDelivery],
     road_address_col: str,
     detail_address_col: str,
     dong_col: str,
     name_col: str,
-) -> dict[str, dict[tuple[str, str], list[dict[str, object]]]]:
+) -> dict[str, dict[tuple[str, str], list[MonthlyDelivery]]]:
     """전체 주소를 정규화하고 관할동별 가구를 렌더링 전에 검증한다."""
-    groups: dict[str, dict[tuple[str, str], list[dict[str, object]]]] = {}
+    groups: dict[str, dict[tuple[str, str], list[MonthlyDelivery]]] = {}
     blank_addresses: list[str] = []
 
-    for position, source in enumerate(roster_data, start=1):
-        person = dict(source)
-        person[_ROSTER_POSITION_KEY] = position
-        road_address = _normalized_text(person.get(road_address_col, ""))
+    for person in roster_data:
+        source = person.roster.extra
+        road_address = _normalized_text(source.get(road_address_col, ""))
         detail_address = (
             ""
             if detail_address_col == road_address_col
-            else _normalized_text(person.get(detail_address_col, ""))
+            else _normalized_text(source.get(detail_address_col, ""))
         )
-        person[road_address_col] = road_address
-        person[detail_address_col] = detail_address
-
-        dong = _normalized_text(person.get(dong_col, ""))
+        dong = _normalized_text(source.get(dong_col, ""))
         if not road_address:
             blank_addresses.append(
                 f"관할동={dong or '(빈 값)'}, "
@@ -188,7 +165,7 @@ def _validated_household_groups(
 
 
 def make_confirm(
-    roster_data: Sequence[Mapping[str, object]],
+    roster_data: MonthlyDeliveryBatch | Sequence[Mapping[str, object]],
     col_mapping: Mapping[str, str],
     output_dir: str,
     template_path: str,
@@ -212,9 +189,18 @@ def make_confirm(
     phone_col = _mapped_source_column(col_mapping, "핸드폰", "전화번호")
     dong_col = _mapped_source_column(col_mapping, "관할동", "동")
 
+    if isinstance(roster_data, MonthlyDeliveryBatch):
+        recipients = roster_data.deliveries
+        year, month = roster_data.year, roster_data.month
+    else:
+        recipients = tuple(
+            legacy_recipient(person, position=index)
+            for index, person in enumerate(roster_data, start=1)
+        )
+
     # 1. 도로명·상세주소를 정규화하고 관할동+전체주소 가구를 검증한다.
     dong_households = _validated_household_groups(
-        roster_data,
+        recipients,
         road_address_col,
         detail_address_col,
         dong_col,
@@ -375,7 +361,7 @@ def make_confirm(
 
             hh_notes: list[str] = []
             for p in members:
-                nt = _blank_text(p.get("_note", "")).strip()
+                nt = _blank_text(p.note).strip()
                 if nt and nt not in hh_notes:
                     hh_notes.append(nt)
             combined_note = "\n".join(hh_notes)
@@ -389,9 +375,9 @@ def make_confirm(
                 if meal_type != "급식":
                     sheet_seq += 1
 
-                name = _blank_text(person.get(name_col, ""))
-                head = _blank_text(person.get(head_col, ""))
-                phone = _blank_text(person.get(phone_col, ""))
+                name = _blank_text(person.roster.extra.get(name_col, ""))
+                head = _blank_text(person.roster.extra.get(head_col, ""))
+                phone = _blank_text(person.roster.extra.get(phone_col, ""))
 
                 if meal_type == "급식" and ci == 0:
                     _set_ph(ws, ph_map, "num1", current_row, sheet_seq, tpl_anchor_map)
@@ -419,7 +405,7 @@ def make_confirm(
                         ph_map,
                         f"week{week}",
                         current_row,
-                        _format_week_range(prepared) if prepared else "",
+                        _format_week_range(prepared) if prepared is not None else "",
                         tpl_anchor_map,
                     )
                     for meal, placeholder in (
@@ -427,7 +413,11 @@ def make_confirm(
                         ("석식", "sum_d"),
                         ("중식", "sum_l"),
                     ):
-                        count = prepared[meal] if prepared else 0
+                        count = (
+                            prepared.breakfast_count if meal == "조식"
+                            else prepared.lunch_count if meal == "중식"
+                            else prepared.dinner_count
+                        ) if prepared is not None else 0
                         _set_ph(
                             ws,
                             ph_map,
@@ -460,7 +450,7 @@ def make_confirm(
     fname_fmt = s.get("confirm", "output_filename_format")
     fname = fname_fmt.format(year=year, month=month)
     out_path = os.path.join(output_dir, fname)
-    wb.save(out_path)
+    publish_workbook(wb, out_path)
 
     for item in created:
         item["file"] = fname

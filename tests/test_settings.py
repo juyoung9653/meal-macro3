@@ -5,9 +5,26 @@ from pathlib import Path
 
 import pytest
 
-from src.core.settings import DEFAULTS, SettingsManager, get_settings
+from src.core.settings import (
+    DEFAULTS,
+    TEMPLATE_PROFILES,
+    SettingsManager,
+    get_settings,
+    get_template_profile,
+)
 
 from .conftest import make_settings_manager
+
+
+class TestTemplateProfiles:
+    def test_known_profile_has_existing_asset_paths(self):
+        profile = get_template_profile("행복도시락")
+        assert profile is TEMPLATE_PROFILES["행복도시락"]
+        assert profile.invoice_template_path == "assets/행복도시락_청구서템플릿.xlsx"
+        assert profile.confirm_template_path == "assets/행복도시락_확인서템플릿.xlsx"
+
+    def test_unknown_profile_falls_back_to_급식(self):
+        assert get_template_profile("알수없음").key == "급식"
 
 
 class TestTypedAccessors:
@@ -49,6 +66,11 @@ class TestTypedAccessors:
         sm.set_meal_type("급식")
         assert sm.get_invoice_template_path() == "assets/급식_청구서템플릿.xlsx"
         assert sm.get_confirm_template_path() == "assets/급식_확인서템플릿.xlsx"
+
+    def test_unknown_meal_type_falls_back_to_급식(self):
+        sm = make_settings_manager()
+        sm.set_meal_type("알수없음")
+        assert sm.get_meal_type() == "급식"
 
     def test_template_paths_use_pyinstaller_resource_root(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

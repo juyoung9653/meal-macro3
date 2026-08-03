@@ -4,8 +4,42 @@ from __future__ import annotations
 
 import copy
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+
+@dataclass(frozen=True)
+class TemplateProfile:
+    """Vendor-specific workbook assets identified by the persisted meal type."""
+
+    key: str
+    label: str
+    invoice_template_path: str
+    confirm_template_path: str
+
+
+TEMPLATE_PROFILES: dict[str, TemplateProfile] = {
+    "급식": TemplateProfile(
+        key="급식",
+        label="급식",
+        invoice_template_path="assets/급식_청구서템플릿.xlsx",
+        confirm_template_path="assets/급식_확인서템플릿.xlsx",
+    ),
+    "행복도시락": TemplateProfile(
+        key="행복도시락",
+        label="행복도시락",
+        invoice_template_path="assets/행복도시락_청구서템플릿.xlsx",
+        confirm_template_path="assets/행복도시락_확인서템플릿.xlsx",
+    ),
+}
+DEFAULT_TEMPLATE_PROFILE_KEY = "급식"
+
+
+def get_template_profile(meal_type: str | None = None) -> TemplateProfile:
+    """Return the requested profile, falling back to the legacy default."""
+    return TEMPLATE_PROFILES.get(meal_type or "", TEMPLATE_PROFILES[DEFAULT_TEMPLATE_PROFILE_KEY])
+
 
 # ── 기본 설정값 ──────────────────────────────────────
 DEFAULTS: dict[str, Any] = {
@@ -166,7 +200,8 @@ class SettingsManager:
         )
 
     def get_meal_type(self) -> str:
-        return self.get("app", "meal_type", default="급식")
+        meal_type = self.get("app", "meal_type", default=DEFAULT_TEMPLATE_PROFILE_KEY)
+        return get_template_profile(str(meal_type)).key
 
     @staticmethod
     def _resource_path(relative_path: str) -> str:
@@ -176,15 +211,20 @@ class SettingsManager:
             return str(Path(bundle_root) / relative_path)
         return relative_path
 
+    def get_template_profile(self, meal_type: str | None = None) -> TemplateProfile:
+        return get_template_profile(meal_type or self.get_meal_type())
+
     def get_invoice_template_path(self, meal_type: str | None = None) -> str:
-        """Compute invoice template path from meal type."""
-        mt = meal_type or self.get_meal_type()
-        return self._resource_path(f"assets/{mt}_청구서템플릿.xlsx")
+        """Return the selected profile's invoice template path."""
+        return self._resource_path(
+            self.get_template_profile(meal_type).invoice_template_path
+        )
 
     def get_confirm_template_path(self, meal_type: str | None = None) -> str:
-        """Compute confirm template path from meal type."""
-        mt = meal_type or self.get_meal_type()
-        return self._resource_path(f"assets/{mt}_확인서템플릿.xlsx")
+        """Return the selected profile's confirm template path."""
+        return self._resource_path(
+            self.get_template_profile(meal_type).confirm_template_path
+        )
 
     def get_report_template_path(self) -> str:
         """배송리포트 템플릿의 실행 환경별 실제 경로를 반환한다."""
@@ -194,9 +234,8 @@ class SettingsManager:
         return self._resource_path(str(configured))
 
     def set_meal_type(self, meal_type: str):
-        self.set("app", "meal_type", value=meal_type)
-        # Template paths are now resolved lazily via get_invoice_template_path()
-        # and get_confirm_template_path() — no side effects
+        self.set("app", "meal_type", value=get_template_profile(meal_type).key)
+        # Template paths are resolved lazily via the selected profile.
 
     # ── 배송 대타 설정 접근자 ────────────────────────────
 

@@ -8,11 +8,7 @@ from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.pagebreak import Break
 
 from src.core.settings import get_settings
-from src.excel.groups import (
-    apply_page_breaks_by_groups,
-    compute_page_chunks,
-    get_groups,
-)
+from src.excel.groups import PagePlan, SplitMode, build_page_plan
 
 log = logging.getLogger(__name__)
 
@@ -39,7 +35,7 @@ def apply_page_formatting(
     actual_orientation = apply_base_page_setup(
         ws, used_rows, used_cols, orientation_pref
     )
-    groups = get_groups(df)
+    page_plan = build_page_plan(df, mode, max_groups_limit)
     all_cols = [*df.columns.tolist(), COL_SUM]
 
     _clean_address_newlines(ws, used_rows, all_cols, COL_ADDR)
@@ -55,7 +51,11 @@ def apply_page_formatting(
     for col in all_cols:
         hdr_len = _visual_width(str(col))
         if col in df.columns:
-            data_len = int(df[col].astype(str).map(_visual_width).max() or 0)
+            column_index = list(df.columns).index(col)
+            data_len = max(
+                (_visual_width(str(value)) for value in df.iloc[:, column_index]),
+                default=0,
+            )
         else:
             data_len = 0
         col_chars[col] = max(hdr_len, data_len)
@@ -64,10 +64,10 @@ def apply_page_formatting(
         col_chars, len(df), used_rows, used_cols, actual_orientation
     )
 
-    # 페이지 나누기 계산 (pure Python → list[int])
-    page_break_rows = apply_page_breaks_by_groups(df, groups, mode, max_groups_limit)
-    for br in page_break_rows:
-        ws.row_breaks.append(Break(id=br))
+    # PagePlan row는 worksheet 기준 1-based다. OpenXML 변환은 이 계층에서만 한다.
+    for next_page_start_row in page_plan.next_page_start_rows:
+        # OpenXML brk/@id is zero-based and the break is above that row.
+        ws.row_breaks.append(Break(id=next_page_start_row - 1))
 
     # 폰트/컬럼폭/행높이 적용
     min_row_h = round(best * 1.5, 1)
@@ -75,13 +75,11 @@ def apply_page_formatting(
     _apply_column_widths(ws, all_cols, col_chars, best, safe_w)
     _apply_row_heights(ws, used_rows, min_row_h, all_cols)
 
-    # 페이지별 여유 높이 균등 배분
-    if mode != 0:
-        chunks = compute_page_chunks(groups, mode, max_groups_limit, df)
-        if chunks:
-            _distribute_extra_height_overflow(
-                ws, chunks, used_rows, safe_h, min_row_h=min_row_h
-            )
+    # 페이지별 여유 높이 균등 배분도 같은 PagePlan의 청크를 사용한다.
+    if page_plan.split_mode is not SplitMode.NONE and page_plan.page_chunks:
+        _distribute_extra_height_overflow(
+            ws, page_plan, used_rows, safe_h, min_row_h=min_row_h
+        )
 
 
 def calc_optimal_font_size(
@@ -174,8 +172,8 @@ def _apply_column_widths(
     total_pt = sum(desired.values()) * 5.25
     if total_pt > safe_w and len(desired) > 0:
         ratio = safe_w / total_pt
-        for col in desired:
-            desired[col] = max(round(desired[col] * ratio, 1), 6.0)
+        for col, width in desired.items():
+            desired[col] = max(round(width * ratio, 1), 6.0)
 
     # 적용
     for i, col in enumerate(all_cols, 1):
@@ -255,7 +253,7 @@ _PAGE_BOTTOM_MARGIN = 8
 
 def _distribute_extra_height_overflow(
     ws,
-    chunks: list[list[tuple[int, int]]],
+    page_plan: PagePlan,
     used_rows: int,
     safe_h: float,
     offset: int = 3,
@@ -268,19 +266,19 @@ def _distribute_extra_height_overflow(
     그룹 내 행 높이는 동일, 그룹 간 행 높이는 행 수에 반비례.
     (그룹 순서 유지, 정렬하지 않음)
     """
-    if not chunks:
+    if not page_plan.page_chunks:
         return
 
     h_hdr = (ws.row_dimensions[1].height or 0) + (ws.row_dimensions[2].height or 0)
     footer_h = ws.row_dimensions[used_rows].height or 0 if used_rows > 0 else 0
 
-    for ci, pg in enumerate(chunks):
+    for ci, pg in enumerate(page_plan.page_chunks):
         groups_in_page = len(pg)
         if groups_in_page <= 0:
             continue
 
-        is_last = ci == len(chunks) - 1
-        total_rows = sum(e - s + 1 for s, e in pg)
+        is_last = ci == len(page_plan.page_chunks) - 1
+        total_rows = sum(group.row_count for group in pg)
         min_total = h_hdr + total_rows * min_row_h + _PAGE_BOTTOM_MARGIN
         if is_last:
             min_total += footer_h
@@ -298,27 +296,27 @@ def _distribute_extra_height_overflow(
             )
 
         if overflow <= 0:
-            for s0, e0 in pg:
-                for r in range(s0 + offset, e0 + offset + 1):
+            for group in pg:
+                for r in range(group.start_index + offset, group.end_index + offset + 1):
                     ws.row_dimensions[r].height = min_row_h
             continue
 
         # 1) 모든 행을 min_row_h로 설정
-        for s0, e0 in pg:
-            for r in range(s0 + offset, e0 + offset + 1):
+        for group in pg:
+            for r in range(group.start_index + offset, group.end_index + offset + 1):
                 ws.row_dimensions[r].height = min_row_h
 
         # 2) 각 그룹에 overflow 균등 배분 (그룹 순서 유지)
         extra_per_group = overflow / groups_in_page
         distributed = 0.0
-        for i, (s0, e0) in enumerate(pg):
-            n_rows = e0 - s0 + 1
+        for i, group in enumerate(pg):
+            n_rows = group.row_count
             group_extra = extra_per_group
             # 마지막 그룹: 반올림 손실분 흡수
             if i == len(pg) - 1:
                 group_extra = overflow - distributed
             per_row = group_extra / n_rows
             h = round(min_row_h + per_row, 1)
-            for r in range(s0 + offset, e0 + offset + 1):
+            for r in range(group.start_index + offset, group.end_index + offset + 1):
                 ws.row_dimensions[r].height = h
             distributed += group_extra

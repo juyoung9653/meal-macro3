@@ -30,13 +30,42 @@ class ReportStatus(StrEnum):
 
 
 @dataclass(frozen=True)
+class DeliveryReportRow:
+    """한 배송담당자의 리포트 표시 값."""
+
+    staff_label: str
+    household_size_cells: tuple[str, str, str, str, str]
+    person_total: int
+    memo: str
+    reference_areas: str
+
+
+@dataclass(frozen=True)
+class DeliveryReportTotals:
+    """리포트의 가구원 수별·인원 합계."""
+
+    household_counts: tuple[int, int, int, int, int]
+    person_total: int
+
+
+@dataclass(frozen=True)
+class DeliveryReport:
+    """한 날짜·식종의 불변 배송 리포트."""
+
+    day: date
+    meal: str
+    rows: tuple[DeliveryReportRow, ...]
+    totals: DeliveryReportTotals
+
+
+@dataclass(frozen=True)
 class DeliveryReportResult:
     """단일 날짜·식종에 대한 배송 리포트 생성 결과."""
 
     day: date
     meal: str
     status: ReportStatus
-    table: list[list[object]] | None = None
+    report: DeliveryReport | None = None
     message: str = ""
     is_ready: bool = field(init=False)
 
@@ -54,7 +83,7 @@ class _InvalidDeliveryData(ValueError):
     pass
 
 
-_HEADER = ("배송담당", "1", "2", "3", "4", "5", "Total", "비고", "참고")
+REPORT_HEADERS = ("배송담당", "1", "2", "3", "4", "5", "Total", "비고", "참고")
 _EMPTY_BUCKETS = (0, 0, 0, 0, 0)
 
 
@@ -141,7 +170,7 @@ class DeliveryService:
             day=day,
             meal=meal,
             status=ReportStatus.READY,
-            table=self._build_table(meal, current, previous),
+            report=self._build_report(day, meal, current, previous),
         )
 
     def build_all(
@@ -149,8 +178,8 @@ class DeliveryService:
         start: date,
         end: date,
         meal_filter: str | None = None,
-    ) -> list[tuple[str, str, list[list[object]]]]:
-        """범위 내 장부 날짜에서 준비된 리포트만 export 호환 형식으로 반환한다."""
+    ) -> list[DeliveryReport]:
+        """범위 내 장부 날짜에서 준비된 리포트만 반환한다."""
         if end < start:
             raise ValueError("종료일은 시작일보다 빠를 수 없습니다.")
         if meal_filter is not None and meal_filter not in ALLOWED_MEALS:
@@ -162,7 +191,7 @@ class DeliveryService:
         meals: Sequence[str] = (
             (meal_filter,) if meal_filter is not None else ALLOWED_MEALS
         )
-        results: list[tuple[str, str, list[list[object]]]] = []
+        results: list[DeliveryReport] = []
 
         for day in self._book.dates:
             if day < start:
@@ -175,9 +204,9 @@ class DeliveryService:
                     raise ValueError(report.message)
                 if not report.is_ready:
                     continue
-                if report.table is None:
-                    raise RuntimeError("READY 배송 리포트에 출력 테이블이 없습니다.")
-                results.append((day.strftime("%Y%m%d"), meal, report.table))
+                if report.report is None:
+                    raise RuntimeError("READY 배송 리포트에 출력 데이터가 없습니다.")
+                results.append(report.report)
 
         return results
 
@@ -249,12 +278,13 @@ class DeliveryService:
             },
         )
 
-    def _build_table(
+    def _build_report(
         self,
+        day: date,
         meal: str,
         current: _DeliveryAggregate,
         previous: _DeliveryAggregate,
-    ) -> list[list[object]]:
+    ) -> DeliveryReport:
         all_staff = set(current.buckets_by_staff) | set(previous.buckets_by_staff)
         staff_order = {
             staff: index
@@ -269,8 +299,9 @@ class DeliveryService:
             ),
         )
 
-        table: list[list[object]] = [list(_HEADER)]
-        totals = [0, 0, 0, 0, 0, 0]
+        rows: list[DeliveryReportRow] = []
+        totals = [0, 0, 0, 0, 0]
+        person_total = 0
 
         for staff in sorted_staff:
             current_buckets = current.buckets_by_staff.get(staff, _EMPTY_BUCKETS)
@@ -279,27 +310,41 @@ class DeliveryService:
             person_count = sum(
                 size * count for size, count in enumerate(current_buckets, start=1)
             )
-            table.append(
-                [
-                    f"{staff}\n({household_count})",
-                    *[
-                        fmt_cell(current_count, previous_count)
-                        for current_count, previous_count in zip(
-                            current_buckets, previous_buckets
-                        )
-                    ],
-                    person_count,
-                    "",
-                    self._area_text(staff, current, previous),
-                ]
+            rows.append(
+                DeliveryReportRow(
+                    staff_label=f"{staff}\n({household_count})",
+                    household_size_cells=(
+                        fmt_cell(current_buckets[0], previous_buckets[0]),
+                        fmt_cell(current_buckets[1], previous_buckets[1]),
+                        fmt_cell(current_buckets[2], previous_buckets[2]),
+                        fmt_cell(current_buckets[3], previous_buckets[3]),
+                        fmt_cell(current_buckets[4], previous_buckets[4]),
+                    ),
+                    person_total=person_count,
+                    memo="",
+                    reference_areas=self._area_text(staff, current, previous),
+                )
             )
 
             for index, count in enumerate(current_buckets):
                 totals[index] += count
-            totals[5] += person_count
+            person_total += person_count
 
-        table.append(["합계", *totals[:5], totals[5], "", ""])
-        return table
+        return DeliveryReport(
+            day=day,
+            meal=meal,
+            rows=tuple(rows),
+            totals=DeliveryReportTotals(
+                household_counts=(
+                    totals[0],
+                    totals[1],
+                    totals[2],
+                    totals[3],
+                    totals[4],
+                ),
+                person_total=person_total,
+            ),
+        )
 
     def _area_text(
         self,

@@ -1,6 +1,6 @@
 import os
 
-from PyQt6.QtCore import QSettings, Qt, QUrl
+from PyQt6.QtCore import Qt, QUrl
 from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (
     QFileDialog,
@@ -18,6 +18,7 @@ from PyQt6.QtWidgets import (
 
 from ..core.invoice_data import InvoiceData
 from ..core.settings import get_settings
+from ..core.user_preferences import UserPreferences
 from ..generators.confirm_generator import make_confirm
 
 
@@ -33,9 +34,7 @@ class ConfirmTab(QWidget):
         self._per_file_mode = True
         self._s = get_settings()
         self._meal_type = meal_type or self._s.get_meal_type()
-        org = self._s.get("app", "organization")
-        app_title = self._s.get("app", "title")
-        self._settings = QSettings(org, app_title)
+        self._preferences = UserPreferences(self._s)
         self._setup_ui()
         self._restore_state()
 
@@ -107,11 +106,10 @@ class ConfirmTab(QWidget):
         layout.addWidget(self.info_label)
 
     def _save_settings(self):
-        self._settings.setValue("output_dir", self.output_dir or "")
-        self._settings.sync()
+        self._preferences.set_output_dir(self.output_dir or "")
 
     def _restore_state(self):
-        raw = self._settings.value("output_dir", "")
+        raw = self._preferences.get_output_dir()
         if raw:
             self.output_dir = raw
             self.path_label.setText(raw)
@@ -125,19 +123,15 @@ class ConfirmTab(QWidget):
             self.path_label.setStyleSheet("color: #000;")
             self._save_settings()
 
-    def _active_invoices(self):
-        """실제 배송 건수가 하나 이상인 청구서만 반환한다."""
-        count_keys = ("_bf_cnt", "_dn_cnt", "_lh_cnt")
-        return [
-            invoice
-            for invoice in self._data.invoices
-            if any((invoice.get(key, 0) or 0) > 0 for key in count_keys)
-        ]
+    def _active_batch(self):
+        """Return the immutable active-delivery snapshot, if one is available."""
+        batch = self._data.batch
+        return batch if batch is not None and batch.deliveries else None
 
     def _generate_confirms(self):
         """확인서 생성"""
-        active_invoices = self._active_invoices()
-        if not active_invoices:
+        active_batch = self._active_batch()
+        if active_batch is None:
             QMessageBox.warning(
                 self,
                 "알림",
@@ -155,7 +149,7 @@ class ConfirmTab(QWidget):
 
             template_path = self._s.get_confirm_template_path(self._meal_type)
             self.confirms = make_confirm(
-                roster_data=active_invoices,
+                roster_data=active_batch,
                 col_mapping=self._data.col_mapping,
                 output_dir=self.output_dir,
                 template_path=template_path,
@@ -222,14 +216,15 @@ class ConfirmTab(QWidget):
         self.open_file_btn.setEnabled(False)
 
     def _update_input_state(self):
-        active_count = len(self._active_invoices())
+        batch = self._active_batch()
+        active_count = len(batch.deliveries) if batch is not None else 0
         self.generate_btn.setEnabled(active_count > 0)
         if active_count:
             self.info_label.setText(
                 f"활성 청구서 {active_count}건 로드됨. "
                 "생성 버튼을 누르면 확인서를 만듭니다."
             )
-        elif self._data.invoices:
+        elif self._data.batch is not None:
             self.info_label.setText("실제 배송 건수가 있는 청구서가 없습니다.")
         else:
             self.info_label.setText("청구서 데이터가 없습니다.")

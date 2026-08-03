@@ -56,7 +56,7 @@ def adjust_formula(formula: str, row_offset: int) -> str:
     if not formula or not str(formula).startswith("="):
         return formula
 
-        def _shift_row(m):
-            return f"{m.group(1)}{int(m.group(2)) + row_offset}"
+    def _shift_row(match: re.Match[str]) -> str:
+        return f"{match.group(1)}{int(match.group(2)) + row_offset}"
 
-        return re.sub(r"([A-Z]+)(\d+)", _shift_row, str(formula))
+    return re.sub(r"([A-Z]+)(\d+)", _shift_row, str(formula))
