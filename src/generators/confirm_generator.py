@@ -101,7 +101,7 @@ def _household_delivery_staff(members: Sequence[MonthlyDelivery]) -> str:
 
 def _person_identifier(person: MonthlyDelivery, name_col: str) -> str:
     name = _blank_text(person.roster.extra.get(name_col, "")).strip() or "(빈 값)"
-    return f"성명={name}, 명단 위치={person.roster.source_row - 1}"
+    return f"성명={name}, {person.roster.location_text}"
 
 
 def _validated_household_groups(

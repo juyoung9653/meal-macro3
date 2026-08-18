@@ -68,7 +68,7 @@ class InvoiceTab(QWidget):
     def _setup_ui(self):
         layout = QVBoxLayout(self)
 
-        config_group = QGroupBox("① 청구 기준 (연간 파일 / 선택 월)")
+        config_group = QGroupBox("① 청구 기준 (db 파일 / 선택 월)")
         config_row = QHBoxLayout(config_group)
 
         config_row.addWidget(QLabel("귀속 연월:"))
@@ -129,7 +129,7 @@ class InvoiceTab(QWidget):
         self.result_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.result_table.setAlternatingRowColors(True)
         table_layout.addWidget(self.result_table)
-        self.info_label = QLabel("연간 파일을 불러오세요.")
+        self.info_label = QLabel("db 파일을 불러오세요.")
         self.info_label.setAlignment(Qt.AlignmentFlag.AlignRight)
         table_layout.addWidget(self.info_label)
         layout.addWidget(table_group, stretch=1)
@@ -165,11 +165,11 @@ class InvoiceTab(QWidget):
 
     def _selection_info_text(self) -> str:
         if self._book is None:
-            return "연간 파일을 불러오세요."
+            return "db 파일을 불러오세요."
         if not self._month:
-            return f"{self._book.year}년 연간 파일에 선택 가능한 월이 없습니다."
+            return f"{self._book.year}년 db 파일에 선택 가능한 월이 없습니다."
         return (
-            f"연간 파일 명단 {len(self._book.roster)}명 · "
+            f"db 파일 명단 {len(self._book.roster)}명 · "
             f"{self._book.year}년 {self._month}월 선택"
         )
 
@@ -211,7 +211,7 @@ class InvoiceTab(QWidget):
     def _generate_invoices(self):
         if self._book is None or not self._year or not self._month:
             QMessageBox.warning(
-                self, "알림", "연간 파일을 불러오고 청구 대상 월을 선택하세요."
+                self, "알림", "db 파일을 불러오고 청구 대상 월을 선택하세요."
             )
             return
 

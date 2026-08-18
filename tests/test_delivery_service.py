@@ -8,6 +8,7 @@ import pytest
 from src.core.delivery_matrix import (
     ALLOWED_MEALS,
     AnnualDeliveryBook,
+    DayState,
     DeliveryCellValue,
     DeliveryRow,
     RosterEntry,
@@ -120,16 +121,17 @@ def test_missing_date_and_all_blank_day_have_distinct_statuses():
     assert all_blank.report is None
 
 
-def test_zero_only_day_has_no_deliveries_for_meal():
+def test_zero_only_day_is_entered_but_has_no_actual_deliveries():
     day = date(2026, 6, 1)
     person = _person(2)
     row = _row(person, (day,), paused=(day,))
-    service = DeliveryService(_book((day,), (row,)))
+    book = _book((day,), (row,))
 
-    result = service.build_report(day, "중식")
+    result = DeliveryService(book).build_report(day, "중식")
 
+    assert book.day_state(day) is DayState.ENTERED
     assert result.status is ReportStatus.NO_DELIVERIES_FOR_MEAL
-    assert "값 1" in result.message
+    assert result.report is None
 
 
 def test_entered_day_without_requested_meal_has_no_deliveries_for_meal():
@@ -143,7 +145,7 @@ def test_entered_day_without_requested_meal_has_no_deliveries_for_meal():
     assert result.status is ReportStatus.NO_DELIVERIES_FOR_MEAL
 
 
-def test_weekend_report_uses_only_one_and_ignores_zero_blank_rows():
+def test_weekend_report_uses_only_one_and_ignores_blank_rows():
     saturday = date(2026, 6, 13)
     assert saturday.weekday() == 5
     people = (
@@ -153,7 +155,7 @@ def test_weekend_report_uses_only_one_and_ignores_zero_blank_rows():
     )
     rows = (
         _row(people[0], (saturday,), staff="주말기사", delivered=(saturday,)),
-        _row(people[1], (saturday,), staff=" ", sequence=" ", paused=(saturday,)),
+        _row(people[1], (saturday,), staff=" ", sequence=" "),
         _row(people[2], (saturday,), staff=" ", sequence=" "),
     )
     book = _book((saturday,), rows)
@@ -287,23 +289,14 @@ def test_reference_areas_join_current_and_previous_people_uniquely_and_determini
     assert result.report.rows[0].memo == ""
 
 
-@pytest.mark.parametrize(
-    ("staff", "sequence", "missing_name"),
-    [
-        ("   ", 1, "담당자"),
-        ("김기사", "   ", "연번"),
-    ],
-)
-def test_blank_delivered_location_key_is_invalid_data(
-    staff: str, sequence: object, missing_name: str
-):
+def test_blank_delivered_staff_is_invalid_data():
     day = date(2026, 6, 1)
     person = _person(20, {"성명": "오류 대상"})
     row = _row(
         person,
         (day,),
-        staff=staff,
-        sequence=sequence,
+        staff="   ",
+        sequence=1,
         delivered=(day,),
         source_row=21,
     )
@@ -312,36 +305,29 @@ def test_blank_delivered_location_key_is_invalid_data(
 
     assert result.status is ReportStatus.INVALID_DATA
     assert result.report is None
-    assert missing_name in result.message
+    assert "담당자" in result.message
     assert "오류 대상" in result.message
-    assert "명단 20~22행" in result.message
+    assert "명단 20행" in result.message
     assert "원본 21행" in result.message
 
 
-def test_invalid_previous_location_key_reports_person_and_source_rows():
-    previous = date(2026, 5, 29)
-    current = date(2026, 6, 1)
-    dates = (previous, current)
-    current_person = _person(2, {"성명": "현재 대상"})
-    previous_person = _person(11, {"성명": "직전 오류 대상"})
-    rows = (
-        _row(current_person, dates, sequence=1, delivered=(current,), source_row=3),
-        _row(
-            previous_person,
-            dates,
-            sequence=" ",
-            delivered=(previous,),
-            source_row=12,
-        ),
+def test_blank_sequences_count_different_people_as_distinct_locations():
+    day = date(2026, 6, 1)
+    people = (
+        _person(2, {"성명": "첫 대상"}),
+        _person(5, {"성명": "둘째 대상"}),
+    )
+    rows = tuple(
+        _row(person, (day,), sequence=" ", delivered=(day,))
+        for person in people
     )
 
-    result = DeliveryService(_book(dates, rows)).build_report(current, "중식")
+    result = DeliveryService(_book((day,), rows)).build_report(day, "중식")
 
-    assert result.status is ReportStatus.INVALID_DATA
-    assert "직전 오류 대상" in result.message
-    assert "명단 11~13행" in result.message
-    assert "원본 12행" in result.message
-    assert "직전 배송일" in result.message
+    assert result.status is ReportStatus.READY
+    assert result.report is not None
+    assert result.report.totals.household_counts == (2, 0, 0, 0, 0)
+    assert result.report.totals.person_total == 2
 
 
 def test_six_or_more_people_at_one_location_is_invalid_data():
@@ -365,10 +351,10 @@ def test_six_or_more_people_at_one_location_is_invalid_data():
 def test_build_all_returns_ready_reports_in_allowed_meal_order():
     previous = date(2026, 6, 12)
     blank_day = date(2026, 6, 13)
-    zero_only_day = date(2026, 6, 14)
+    additional_blank_day = date(2026, 6, 14)
     ready_day = date(2026, 6, 15)
     after_range = date(2026, 6, 16)
-    dates = (after_range, ready_day, zero_only_day, blank_day, previous)
+    dates = (after_range, ready_day, additional_blank_day, blank_day, previous)
     lunch_person = _person(2, {"성명": "중식 대상", "관할동": "가동"})
     dinner_person = _person(5, {"성명": "석식 대상", "관할동": "나동"})
     lunch = _row(
@@ -377,7 +363,6 @@ def test_build_all_returns_ready_reports_in_allowed_meal_order():
         meal="중식",
         staff="중식기사",
         delivered=(previous, ready_day, after_range),
-        paused=(zero_only_day,),
     )
     dinner = _row(
         dinner_person,
@@ -418,16 +403,23 @@ def test_build_all_returns_ready_reports_in_allowed_meal_order():
     assert service.build_all(blank_day, ready_day, meal_filter="석식") == [
         dinner_report
     ]
+    assert service.build_all(
+        blank_day,
+        ready_day,
+        meal_filter=("석식", "조식"),
+    ) == [dinner_report]
 
 
-def test_build_all_raises_instead_of_silently_skipping_invalid_delivery_data():
+def test_build_all_includes_delivery_rows_without_sequence():
     day = date(2026, 6, 1)
     person = _person(14, {"성명": "연번 오류 대상"})
     row = _row(person, (day,), sequence="", delivered=(day,), source_row=15)
     service = DeliveryService(_book((day,), (row,)))
 
-    with pytest.raises(ValueError, match="연번.*연번 오류 대상.*원본 15행"):
-        service.build_all(day, day)
+    results = service.build_all(day, day)
+
+    assert len(results) == 1
+    assert results[0].totals.household_counts == (1, 0, 0, 0, 0)
 
 
 def test_build_all_validates_range_and_meal_filter():
@@ -439,5 +431,9 @@ def test_build_all_validates_range_and_meal_filter():
         service.build_all(second, first)
     with pytest.raises(ValueError, match="식종 필터"):
         service.build_all(first, second, meal_filter="")
+    with pytest.raises(ValueError, match="하나 이상"):
+        service.build_all(first, second, meal_filter=())
     with pytest.raises(ValueError, match="야식"):
         service.build_all(first, second, meal_filter="야식")
+    with pytest.raises(ValueError, match="야식"):
+        service.build_all(first, second, meal_filter=("중식", "야식"))

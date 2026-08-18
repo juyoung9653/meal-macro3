@@ -28,7 +28,6 @@ def main():
 
     window = MainWindow()
     window.show()
-    window.post_init_load()
 
     sys.exit(app.exec())
 

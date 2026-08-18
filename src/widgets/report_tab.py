@@ -7,12 +7,11 @@ import os
 from datetime import date, datetime, timezone
 from typing import ClassVar
 
-from PyQt6.QtCore import QDate, QSize, Qt, QUrl
-from PyQt6.QtGui import QDesktopServices, QTextDocument
+from PyQt6.QtCore import QDate, QSize, Qt
+from PyQt6.QtGui import QTextDocument
 from PyQt6.QtWidgets import (
     QCheckBox,
     QDateEdit,
-    QFileDialog,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
@@ -31,7 +30,8 @@ from PyQt6.QtWidgets import (
 from ..core.delivery_matrix import ALLOWED_MEALS, AnnualDeliveryBook, MonthState
 from ..core.settings import get_settings
 from ..core.user_preferences import UserPreferences
-from ..generators.report_generator import export_multi
+from ..excel.report_viewer import open_excel
+from ..excel.report_viewer import show_excel as show_report_excel
 from ..services.delivery_service import REPORT_HEADERS, DeliveryReport, DeliveryService
 from ..widgets.order_editor import StaffOrderDialog
 
@@ -105,7 +105,7 @@ class ReportTab(QWidget):
         self._book: AnnualDeliveryBook | None = None
         self._service: DeliveryService | None = None
         self._last_results: list[DeliveryReport] = []
-        self._last_export_path: str | None = None
+        self._last_excel_path: str | None = None
 
         self._setup_ui()
         self.set_annual_book(annual_book)
@@ -143,11 +143,21 @@ class ReportTab(QWidget):
         self._default_date_min = self.date_start.minimumDate()
         self._default_date_max = self.date_start.maximumDate()
 
-        self.lunch_check = QCheckBox("중식만")
+        date_layout.addWidget(QLabel("식종:"))
+        self.lunch_check = QCheckBox("중식")
+        self.lunch_check.setChecked(True)
         self.lunch_check.setToolTip(
-            "체크: 중식만 | 해제: 매트릭스에서 실제 1이 있는 모든 식종"
+            "체크하면 중식 리포트를 포함합니다."
         )
         date_layout.addWidget(self.lunch_check)
+
+        # Qt는 단일 '&'를 단축키 표시로 해석하므로 '&&'로 실제 문자를 표시한다.
+        self.breakfast_dinner_check = QCheckBox("석식&&조식")
+        self.breakfast_dinner_check.setChecked(True)
+        self.breakfast_dinner_check.setToolTip(
+            "체크하면 석식과 조식 리포트를 포함합니다."
+        )
+        date_layout.addWidget(self.breakfast_dinner_check)
         date_layout.addStretch()
         layout.addWidget(date_group)
 
@@ -158,11 +168,6 @@ class ReportTab(QWidget):
         self.build_btn.setMinimumHeight(32)
         self.build_btn.clicked.connect(self._on_build)
 
-        self.export_btn = QPushButton("엑셀로 저장")
-        self.export_btn.setEnabled(False)
-        self.export_btn.setMinimumHeight(32)
-        self.export_btn.clicked.connect(self._on_export)
-
         self.open_btn = QPushButton("파일 열기")
         self.open_btn.setEnabled(False)
         self.open_btn.setMinimumHeight(32)
@@ -172,9 +177,11 @@ class ReportTab(QWidget):
         self.order_btn.setMinimumHeight(32)
         self.order_btn.clicked.connect(self._on_edit_order)
 
+        self.lunch_check.toggled.connect(self._update_build_enabled)
+        self.breakfast_dinner_check.toggled.connect(self._update_build_enabled)
+
         btn_layout.addStretch()
         btn_layout.addWidget(self.build_btn)
-        btn_layout.addWidget(self.export_btn)
         btn_layout.addWidget(self.open_btn)
         btn_layout.addWidget(self.order_btn)
         layout.addLayout(btn_layout)
@@ -203,7 +210,7 @@ class ReportTab(QWidget):
         self._reset_output_state()
 
         has_dates = book is not None and bool(book.dates)
-        self.build_btn.setEnabled(has_dates)
+        self._update_build_enabled()
         self.order_btn.setEnabled(book is not None)
         self.date_start.setEnabled(has_dates)
         self.date_end.setEnabled(has_dates)
@@ -215,7 +222,7 @@ class ReportTab(QWidget):
             self.date_start.setDate(today)
             self.date_end.setDate(today)
             if book is None:
-                self._set_status("연간 배송 장부를 불러오세요.")
+                self._set_status("db 파일을 불러오세요.")
             else:
                 self._set_status("배송 날짜 헤더가 없습니다.")
             return
@@ -276,8 +283,7 @@ class ReportTab(QWidget):
     def _reset_output_state(self) -> None:
         self.result_tabs.clear()
         self._last_results = []
-        self._last_export_path = None
-        self.export_btn.setEnabled(False)
+        self._last_excel_path = None
         self.open_btn.setEnabled(False)
 
     def _book_status_text(self) -> str:
@@ -299,14 +305,26 @@ class ReportTab(QWidget):
         """식사 유형 변경 (현재 리포트 탭에서는 단순 저장)."""
         self._meal_type = meal_type
 
+    def _selected_meals(self) -> tuple[str, ...]:
+        selected: set[str] = set()
+        if self.lunch_check.isChecked():
+            selected.add("중식")
+        if self.breakfast_dinner_check.isChecked():
+            selected.update(("조식", "석식"))
+        return tuple(meal for meal in ALLOWED_MEALS if meal in selected)
+
+    def _update_build_enabled(self, _checked: bool | None = None) -> None:
+        has_dates = self._book is not None and bool(self._book.dates)
+        self.build_btn.setEnabled(has_dates and bool(self._selected_meals()))
+
     # ── 리포트 생성 ──
 
     def _on_build(self) -> None:
         service = self._service
         if self._book is None or service is None:
             self._reset_output_state()
-            self._set_status("연간 배송 장부를 먼저 불러오세요.")
-            QMessageBox.warning(self, "알림", "연간 배송 장부를 먼저 불러오세요.")
+            self._set_status("db 파일을 먼저 불러오세요.")
+            QMessageBox.warning(self, "알림", "db 파일을 먼저 불러오세요.")
             return
 
         qd_start = self.date_start.date()
@@ -319,29 +337,54 @@ class ReportTab(QWidget):
             QMessageBox.warning(self, "알림", "시작일은 종료일보다 늦을 수 없습니다.")
             return
 
-        meal_filter = "중식" if self.lunch_check.isChecked() else None
+        selected_meals = self._selected_meals()
+        if not selected_meals:
+            self._set_status("식종을 하나 이상 선택하세요.")
+            QMessageBox.warning(self, "알림", "식종을 하나 이상 선택하세요.")
+            self._update_build_enabled()
+            return
+
         log.debug(
-            "[ReportTab] _on_build: %s ~ %s meal_filter=%s",
+            "[ReportTab] _on_build: %s ~ %s selected_meals=%s",
             start,
             end,
-            meal_filter,
+            selected_meals,
         )
 
         self._reset_output_state()
         try:
-            results = service.build_all(start, end, meal_filter=meal_filter)
-            self._last_results = results
-            self._update_results(results)
-            self.export_btn.setEnabled(bool(results))
-            if results:
-                self._set_status(f"{len(results)}개 리포트 생성 완료")
-            else:
-                self._set_status("생성된 리포트 없음")
+            results = service.build_all(start, end, meal_filter=selected_meals)
         except Exception as e:
             log.exception("리포트 생성 실패")
             self._reset_output_state()
             self._set_status("리포트 생성 실패")
             QMessageBox.critical(self, "오류", f"리포트 생성 실패:\n{e}")
+            return
+
+        self._last_results = results
+        self._update_results(results)
+        if not results:
+            self._set_status("생성된 리포트 없음")
+            return
+
+        try:
+            self._last_excel_path = show_report_excel(results)
+        except Exception as e:
+            log.exception("리포트 Excel 출력 실패")
+            self._last_excel_path = None
+            self.open_btn.setEnabled(False)
+            self._set_status(
+                f"{len(results)}개 리포트 생성 완료 · Excel 출력 실패"
+            )
+            QMessageBox.critical(
+                self,
+                "오류",
+                f"리포트는 생성했지만 Excel 출력에 실패했습니다:\n{e}",
+            )
+            return
+
+        self.open_btn.setEnabled(True)
+        self._set_status(f"{len(results)}개 리포트 생성 및 Excel 실행 완료")
 
     def _update_results(self, results: list[DeliveryReport]) -> None:
         self.result_tabs.clear()
@@ -403,51 +446,21 @@ class ReportTab(QWidget):
             tab_layout.addWidget(tw)
             self.result_tabs.addTab(tab, f"{report.day:%Y-%m-%d}({report.meal})")
 
-    # ── 내보내기 ──
-
-    def _on_export(self) -> None:
-        if not self._last_results:
-            QMessageBox.warning(self, "알림", "먼저 리포트를 생성하세요.")
-            return
-
-        dir_hint = self._preferences.get_output_dir()
-        out_dir = QFileDialog.getExistingDirectory(self, "저장 폴더 선택", dir_hint)
-        if not out_dir:
-            return
-        self._preferences.set_output_dir(out_dir)
-
-        # 기본 파일명
-        qd = self.date_start.date()
-        fname = f"배송리포트_{qd.year():04d}{qd.month():02d}{qd.day():02d}.xlsx"
-        out_path = os.path.join(out_dir, fname)
-
-        self._last_export_path = None
-        self.open_btn.setEnabled(False)
-        try:
-            export_multi(self._last_results, out_path)
-            if not os.path.isfile(out_path):
-                raise FileNotFoundError(
-                    f"리포트 파일이 생성되지 않았습니다: {out_path}"
-                )
-            self._last_export_path = out_path
-            self.open_btn.setEnabled(True)
-            self._set_status(f"저장 완료: {os.path.basename(out_path)}")
-            QMessageBox.information(self, "완료", f"리포트 저장 완료:\n{out_path}")
-        except Exception as e:
-            log.exception("리포트 저장 실패")
-            self._set_status("리포트 저장 실패")
-            QMessageBox.critical(self, "오류", f"리포트 저장 실패:\n{e}")
-
     def _on_open(self) -> None:
-        if self._last_export_path and os.path.exists(self._last_export_path):
-            QDesktopServices.openUrl(QUrl.fromLocalFile(self._last_export_path))
+        if not self._last_excel_path or not os.path.exists(self._last_excel_path):
+            return
+        try:
+            open_excel(self._last_excel_path)
+        except Exception as e:
+            log.exception("리포트 Excel 다시 열기 실패")
+            QMessageBox.critical(self, "오류", f"Excel을 열지 못했습니다:\n{e}")
 
     # ── 배송순서 편집 ──
 
     def _on_edit_order(self) -> None:
         book = self._book
         if book is None:
-            QMessageBox.warning(self, "알림", "연간 배송 장부를 먼저 불러오세요.")
+            QMessageBox.warning(self, "알림", "db 파일을 먼저 불러오세요.")
             return
 
         staff_sets: dict[str, set[str]] = {meal: set() for meal in ALLOWED_MEALS}

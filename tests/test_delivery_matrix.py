@@ -20,6 +20,7 @@ from src.core.delivery_matrix import (
 def annual_book() -> AnnualDeliveryBook:
     dates = (
         date(2026, 9, 1),
+        date(2026, 8, 3),
         date(2026, 7, 29),
         date(2026, 6, 16),
         date(2026, 7, 28),
@@ -47,6 +48,7 @@ def annual_book() -> AnnualDeliveryBook:
                 date(2026, 6, 16): blank,
                 date(2026, 7, 28): DeliveryCellValue.DELIVERED,
                 date(2026, 7, 29): blank,
+                date(2026, 8, 3): blank,
                 date(2026, 9, 1): blank,
             },
             source_row=3,
@@ -61,6 +63,7 @@ def annual_book() -> AnnualDeliveryBook:
                 date(2026, 6, 16): blank,
                 date(2026, 7, 28): blank,
                 date(2026, 7, 29): blank,
+                date(2026, 8, 3): blank,
                 date(2026, 9, 1): blank,
             },
             source_row=6,
@@ -75,6 +78,7 @@ def annual_book() -> AnnualDeliveryBook:
                 date(2026, 6, 16): blank,
                 date(2026, 7, 28): DeliveryCellValue.PAUSED,
                 date(2026, 7, 29): blank,
+                date(2026, 8, 3): DeliveryCellValue.DELIVERED,
                 date(2026, 9, 1): blank,
             },
             source_row=4,
@@ -150,12 +154,31 @@ def test_book_requires_delivery_row_to_reference_canonical_person_object():
         AnnualDeliveryBook(2026, (canonical,), (row,), (day,))
 
 
-def test_book_requires_each_allowed_meal_for_each_roster_person():
+def test_book_requires_at_least_one_delivery_row_for_each_roster_person():
     day = date(2026, 6, 15)
     person = RosterEntry(source_row=2, extra={"성명": "홍길동"})
 
-    with pytest.raises(ValueError, match="배송 행이 누락되었습니다: 조식, 중식, 석식"):
+    with pytest.raises(ValueError, match="배송 행이 하나도 없습니다"):
         AnnualDeliveryBook(2026, (person,), (), (day,))
+
+
+def test_book_allows_only_the_meal_rows_that_person_uses():
+    day = date(2026, 6, 15)
+    person = RosterEntry(source_row=2, extra={"성명": "홍길동"})
+    lunch = DeliveryRow(
+        person=person,
+        meal="중식",
+        staff="김기사",
+        sequence=None,
+        values={day: DeliveryCellValue.DELIVERED},
+    )
+
+    book = AnnualDeliveryBook(2026, (person,), (lunch,), (day,))
+
+    assert book.rows_by_person[person] == (lunch,)
+    assert book.get_delivery_row(person, "조식") is None
+    assert book.get_delivery_row(person, "중식") is lunch
+    assert book.get_delivery_row(person, "석식") is None
 
 
 def test_empty_book_is_allowed():
@@ -204,39 +227,43 @@ def test_dates_are_sorted_by_actual_date_not_input_order(annual_book: AnnualDeli
         date(2026, 6, 16),
         date(2026, 7, 28),
         date(2026, 7, 29),
+        date(2026, 8, 3),
         date(2026, 9, 1),
     )
-    assert annual_book.available_months == (6, 7, 9)
+    assert annual_book.available_months == (6, 7, 8, 9)
 
 
 def test_month_and_day_states(annual_book: AnnualDeliveryBook):
     assert annual_book.month_state(2025, 6) is MonthState.MISSING
-    assert annual_book.month_state(2026, 8) is MonthState.MISSING
+    assert annual_book.month_state(2026, 10) is MonthState.MISSING
     assert annual_book.month_state(2026, 9) is MonthState.UNENTERED
     assert annual_book.month_state(2026, 6) is MonthState.ENTERED
+    assert annual_book.month_state(2026, 8) is MonthState.ENTERED
 
     assert annual_book.day_state(date(2026, 6, 14)) is DayState.MISSING
     assert annual_book.day_state(date(2026, 6, 16)) is DayState.NO_DELIVERY
     assert annual_book.day_state(date(2026, 6, 15)) is DayState.ENTERED
 
 
-def test_raw_tristate_and_effective_state_are_separate(
+def test_raw_three_state_and_effective_state_are_separate(
     annual_book: AnnualDeliveryBook,
 ):
-    p001 = annual_book.roster[0]
+    p001, p002 = annual_book.roster
     dinner = annual_book.get_delivery_row(p001, "석식")
+    stopped_lunch = annual_book.get_delivery_row(p002, "중식")
     assert dinner is not None
+    assert stopped_lunch is not None
 
-    # 입력된 날짜의 개별 blank는 중지이며 raw blank 자체도 보존한다.
-    assert dinner.raw_value_on(date(2026, 6, 15)) is DeliveryCellValue.BLANK
+    # 이후 배송이 없는 개별 빈칸은 중지이며 raw blank 자체도 보존한다.
+    assert stopped_lunch.raw_value_on(date(2026, 7, 28)) is DeliveryCellValue.BLANK
     assert (
         annual_book.effective_delivery_state(
-            p001, "석식", date(2026, 6, 15)
+            p002, "중식", date(2026, 7, 28)
         )
         is EffectiveDeliveryState.STOPPED
     )
 
-    # 명시적 0은 일시중지, 1은 배송으로 effective API에서도 구별된다.
+    # 명시적 0은 이후 배송 여부와 관계없이 일시중지다.
     assert dinner.raw_value_on(date(2026, 7, 28)) is DeliveryCellValue.PAUSED
     assert (
         annual_book.effective_delivery_state(
@@ -269,6 +296,45 @@ def test_raw_tristate_and_effective_state_are_separate(
             p001, "석식", date(2026, 6, 14)
         )
         is EffectiveDeliveryState.DATE_MISSING
+    )
+
+
+def test_blank_before_later_delivery_is_inferred_as_paused():
+    paused_day = date(2026, 7, 28)
+    resumed_day = date(2026, 7, 29)
+    paused_person = RosterEntry(source_row=2, extra={"성명": "재개 대상"})
+    other_person = RosterEntry(source_row=3, extra={"성명": "당일 배송 대상"})
+    paused_row = DeliveryRow(
+        paused_person,
+        "중식",
+        "김기사",
+        1,
+        {
+            paused_day: DeliveryCellValue.BLANK,
+            resumed_day: DeliveryCellValue.DELIVERED,
+        },
+    )
+    other_row = DeliveryRow(
+        other_person,
+        "중식",
+        "김기사",
+        2,
+        {
+            paused_day: DeliveryCellValue.DELIVERED,
+            resumed_day: DeliveryCellValue.BLANK,
+        },
+    )
+    book = AnnualDeliveryBook(
+        2026,
+        (paused_person, other_person),
+        (paused_row, other_row),
+        (paused_day, resumed_day),
+    )
+
+    assert paused_row.raw_value_on(paused_day) is DeliveryCellValue.BLANK
+    assert (
+        book.effective_delivery_state(paused_person, "중식", paused_day)
+        is EffectiveDeliveryState.PAUSED
     )
 
 

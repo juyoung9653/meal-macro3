@@ -11,8 +11,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import openpyxl
 import pytest
 from PyQt6.QtCore import QSettings
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QPushButton
 
+from src.core.delivery_matrix import ALLOWED_MEALS, AnnualDeliveryBook
 from src.generators import report_generator
 from src.services.delivery_service import (
     DeliveryReport,
@@ -136,80 +137,120 @@ def test_export_multi_rejects_empty_results(tmp_path: Path):
     assert not output.exists()
 
 
-def test_report_tab_does_not_mark_missing_output_as_success(
+def test_report_tab_removes_save_button_and_opens_excel_after_build(
     qapp: QApplication, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
-    tab = report_tab_module.ReportTab()
-    information_calls: list[str] = []
-    critical_calls: list[str] = []
+    day = date(2026, 7, 28)
+    book = AnnualDeliveryBook(2026, (), (), (day,))
+    tab = report_tab_module.ReportTab(annual_book=book)
+    results = _report_results()
+    opened = tmp_path / "automatic.xlsx"
+    calls: list[list[DeliveryReport]] = []
+    meal_filters: list[tuple[str, ...]] = []
+
+    class StubService:
+        def build_all(
+            self, *_args, meal_filter: tuple[str, ...], **_kwargs
+        ) -> list[DeliveryReport]:
+            meal_filters.append(meal_filter)
+            return results
+
+    def show_excel(value: list[DeliveryReport]) -> str:
+        calls.append(value)
+        opened.touch()
+        return str(opened)
+
     try:
-        tab._last_results = _report_results()
-        tab._last_export_path = str(tmp_path / "previous.xlsx")
-        tab.open_btn.setEnabled(True)
-        monkeypatch.setattr(
-            report_tab_module.QFileDialog,
-            "getExistingDirectory",
-            lambda *_args: str(tmp_path),
-        )
-        monkeypatch.setattr(report_tab_module, "export_multi", lambda *_args: None)
-        monkeypatch.setattr(
-            report_tab_module.QMessageBox,
-            "information",
-            lambda _parent, _title, message: information_calls.append(message),
-        )
-        monkeypatch.setattr(
-            report_tab_module.QMessageBox,
-            "critical",
-            lambda _parent, _title, message: critical_calls.append(message),
-        )
+        tab._service = StubService()
+        monkeypatch.setattr(report_tab_module, "show_report_excel", show_excel)
 
-        tab._on_export()
+        button_texts = [button.text() for button in tab.findChildren(QPushButton)]
+        assert "엑셀로 저장" not in button_texts
+        assert tab.lunch_check.text() == "중식"
+        assert tab.breakfast_dinner_check.text() == "석식&&조식"
 
-        assert tab._last_export_path is None
-        assert not tab.open_btn.isEnabled()
-        assert information_calls == []
-        assert len(critical_calls) == 1
-        assert "리포트 파일이 생성되지 않았습니다" in critical_calls[0]
-        assert "리포트 저장 실패" in tab.info_label.text()
+        tab._on_build()
+
+        assert calls == [results]
+        assert meal_filters == [ALLOWED_MEALS]
+        assert tab._last_excel_path == str(opened)
+        assert tab.open_btn.isEnabled()
+        assert tab.result_tabs.count() == len(results)
+        assert "Excel 실행 완료" in tab.info_label.text()
     finally:
         tab.close()
 
 
-def test_report_tab_marks_existing_output_as_success(
-    qapp: QApplication, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+def test_report_tab_requires_a_meal_group_and_maps_each_checkbox(
+    qapp: QApplication
 ):
-    tab = report_tab_module.ReportTab()
-    information_calls: list[str] = []
-    critical_calls: list[str] = []
+    day = date(2026, 7, 28)
+    book = AnnualDeliveryBook(2026, (), (), (day,))
+    tab = report_tab_module.ReportTab(annual_book=book)
+    meal_filters: list[tuple[str, ...]] = []
 
-    def create_requested_file(_results, filepath: str) -> None:
-        Path(filepath).touch()
+    class StubService:
+        def build_all(
+            self, *_args, meal_filter: tuple[str, ...], **_kwargs
+        ) -> list[DeliveryReport]:
+            meal_filters.append(meal_filter)
+            return []
 
     try:
-        tab._last_results = _report_results()
-        monkeypatch.setattr(
-            report_tab_module.QFileDialog,
-            "getExistingDirectory",
-            lambda *_args: str(tmp_path),
-        )
-        monkeypatch.setattr(report_tab_module, "export_multi", create_requested_file)
-        monkeypatch.setattr(
-            report_tab_module.QMessageBox,
-            "information",
-            lambda _parent, _title, message: information_calls.append(message),
-        )
+        tab._service = StubService()
+        assert tab.lunch_check.isChecked()
+        assert tab.breakfast_dinner_check.isChecked()
+        assert tab.build_btn.isEnabled()
+
+        tab.lunch_check.setChecked(False)
+        assert tab.build_btn.isEnabled()
+        tab._on_build()
+        assert meal_filters == [("조식", "석식")]
+
+        tab.breakfast_dinner_check.setChecked(False)
+        assert not tab.build_btn.isEnabled()
+
+        tab.lunch_check.setChecked(True)
+        assert tab.build_btn.isEnabled()
+        tab._on_build()
+        assert meal_filters == [("조식", "석식"), ("중식",)]
+    finally:
+        tab.close()
+
+
+def test_report_tab_keeps_preview_when_automatic_excel_output_fails(
+    qapp: QApplication, monkeypatch: pytest.MonkeyPatch
+):
+    day = date(2026, 7, 28)
+    book = AnnualDeliveryBook(2026, (), (), (day,))
+    tab = report_tab_module.ReportTab(annual_book=book)
+    results = _report_results()
+    critical_calls: list[str] = []
+
+    class StubService:
+        def build_all(self, *_args, **_kwargs) -> list[DeliveryReport]:
+            return results
+
+    def fail_to_show(_results: list[DeliveryReport]) -> str:
+        raise OSError("Excel 실행 실패")
+
+    try:
+        tab._service = StubService()
+        monkeypatch.setattr(report_tab_module, "show_report_excel", fail_to_show)
         monkeypatch.setattr(
             report_tab_module.QMessageBox,
             "critical",
             lambda _parent, _title, message: critical_calls.append(message),
         )
 
-        tab._on_export()
+        tab._on_build()
 
-        assert tab._last_export_path is not None
-        assert Path(tab._last_export_path).is_file()
-        assert tab.open_btn.isEnabled()
-        assert len(information_calls) == 1
-        assert critical_calls == []
+        assert tab._last_results == results
+        assert tab.result_tabs.count() == len(results)
+        assert tab._last_excel_path is None
+        assert not tab.open_btn.isEnabled()
+        assert len(critical_calls) == 1
+        assert "Excel 출력에 실패" in critical_calls[0]
+        assert "Excel 출력 실패" in tab.info_label.text()
     finally:
         tab.close()

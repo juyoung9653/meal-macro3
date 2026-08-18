@@ -231,7 +231,7 @@ def test_rejects_single_blank_mapped_address_with_dong_and_name(tmp_path: Path):
     message = str(exc_info.value)
     assert "빈 주소" in message
     assert "정자동" in message
-    assert "성명=주소없는대상자, 명단 위치=1" in message
+    assert "성명=주소없는대상자, 명단 2행" in message
     assert list(tmp_path.iterdir()) == []
 
 
@@ -258,8 +258,8 @@ def test_rejects_multiple_blank_addresses_with_names_and_roster_positions(
     message = str(exc_info.value)
     assert "빈 주소" in message
     assert "정자동" in message
-    for position, name in enumerate(names, start=1):
-        assert f"성명={name}, 명단 위치={position}" in message
+    for source_row, name in enumerate(names, start=2):
+        assert f"성명={name}, 명단 {source_row}행" in message
     assert list(tmp_path.iterdir()) == []
 
 
@@ -284,8 +284,8 @@ def test_rejects_six_person_household_with_names_and_roster_positions(
     message = str(exc_info.value)
     assert address in message
     assert "6명" in message
-    for position, name in enumerate(names, start=1):
-        assert f"성명={name}, 명단 위치={position}" in message
+    for source_row, name in enumerate(names, start=2):
+        assert f"성명={name}, 명단 {source_row}행" in message
     assert list(tmp_path.iterdir()) == []
 
 

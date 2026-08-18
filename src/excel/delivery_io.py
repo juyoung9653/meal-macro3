@@ -35,8 +35,8 @@ class Choice:
 
 
 def available_delivery_dates(book: AnnualDeliveryBook) -> list[date]:
-    """입력 흔적(0 또는 1)이 있는 날짜를 실제 날짜순으로 반환한다."""
-    return [day for day in book.dates if book.day_state(day) is DayState.ENTERED]
+    """실제 배송(1)이 있는 날짜를 실제 날짜순으로 반환한다."""
+    return [day for day in book.dates if book.delivered_rows_on(day)]
 
 
 def available_meals(book: AnnualDeliveryBook, day: date) -> list[str]:
@@ -64,13 +64,6 @@ def make_result(book: AnnualDeliveryBook, ch: Choice) -> pd.DataFrame:
         meal=ch.meal,
         staff=ch.ship,
     )
-
-    for row in delivery_rows:
-        if _is_blank(_sequence_display(row)):
-            raise ValueError(
-                "배송현황 연번이 빈칸입니다: "
-                f"{_delivery_row_identifier(row)}."
-            )
 
     values = [
         [_project_value(column, row) for column in columns]
@@ -111,11 +104,6 @@ def _project_value(column: str, row: DeliveryRow) -> Any:
     return _roster_value(row.person.extra, column)
 
 
-def _delivery_row_identifier(row: DeliveryRow) -> str:
-    name = row.person.display_name or "(빈 값)"
-    return f"성명={name}, Excel 원본 행={row.source_row}"
-
-
 def _roster_value(extra: Mapping[str, Any], column: str) -> Any:
     source_columns = _ROSTER_ALIASES.get(column, (column,))
     for source_column in source_columns:
@@ -130,7 +118,8 @@ def _roster_value(extra: Mapping[str, Any], column: str) -> Any:
 def _sequence_display(row: DeliveryRow) -> str:
     if _is_missing(row.sequence):
         return ""
-    return row.sequence_display
+    value = row.sequence_display
+    return value if value.strip() else ""
 
 
 def _normalize_value(value: Any) -> Any:

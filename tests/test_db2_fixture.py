@@ -1,4 +1,4 @@
-"""배포용 단일 시트 테스트 워크북 ``assets/db2.xlsx``의 계약 회귀 테스트."""
+"""배포용 ``db`` 테이블 테스트 워크북 ``assets/db2.xlsx`` 회귀 테스트."""
 
 from datetime import date
 from pathlib import Path
@@ -14,9 +14,10 @@ from src.core.delivery_matrix import (
     MonthState,
     RosterEntry,
 )
-from src.excel.annual_workbook import AnnualWorkbook
+from src.excel.annual_workbook import TABLE_NAME, AnnualWorkbook
 
 FIXTURE_PATH = Path("assets/db2.xlsx")
+FIXTURE_SHEET_NAME = "종합_jon(DB)"
 PROFILE_HEADERS = (
     "취학유형",
     "학교명",
@@ -53,7 +54,7 @@ def _person_named(book: AnnualDeliveryBook, name: str) -> RosterEntry:
     return matches[0]
 
 
-def test_db2_exercises_the_single_sheet_annual_delivery_contract():
+def test_db2_exercises_the_db_table_annual_delivery_contract():
     book = AnnualWorkbook(FIXTURE_PATH).load()
 
     assert book.year == 2026
@@ -78,17 +79,17 @@ def test_db2_exercises_the_single_sheet_annual_delivery_contract():
     assert book.month_state(2026, 8) is MonthState.UNENTERED
 
     no_delivery_day = date(2026, 7, 29)
-    zero_only_day = date(2026, 7, 30)
+    second_no_delivery_day = date(2026, 7, 30)
     mixed_day = date(2026, 7, 28)
     assert book.day_state(no_delivery_day) is DayState.NO_DELIVERY
-    assert book.day_state(zero_only_day) is DayState.ENTERED
-    assert book.delivered_rows_on(zero_only_day) == ()
+    assert book.day_state(second_no_delivery_day) is DayState.NO_DELIVERY
+    assert book.delivered_rows_on(second_no_delivery_day) == ()
     assert all(
         row.raw_value_on(no_delivery_day) is DeliveryCellValue.BLANK
         for row in book.delivery_rows
     )
     assert all(
-        row.raw_value_on(zero_only_day) is DeliveryCellValue.PAUSED
+        row.raw_value_on(second_no_delivery_day) is DeliveryCellValue.BLANK
         for row in book.delivery_rows
     )
     assert all(
@@ -110,7 +111,7 @@ def test_db2_exercises_the_single_sheet_annual_delivery_contract():
         is DeliveryCellValue.DELIVERED
     )
     assert (
-        book.effective_delivery_state(stopped_person, "중식", mixed_day)
+        book.effective_delivery_state(stopped_person, "조식", mixed_day)
         is EffectiveDeliveryState.STOPPED
     )
     assert (
@@ -161,7 +162,6 @@ def test_db2_exercises_the_single_sheet_annual_delivery_contract():
         "가상아동6": ("조식", "석식"),
         "가상아동7": ("조식", "석식"),
     }
-    ordinary_days = tuple(day for day in book.dates if day != zero_only_day)
     for name, meals in added_blank_meals.items():
         person = _person_named(book, name)
         for meal in meals:
@@ -169,16 +169,17 @@ def test_db2_exercises_the_single_sheet_annual_delivery_contract():
             assert row is not None
             assert all(
                 row.raw_value_on(day) is DeliveryCellValue.BLANK
-                for day in ordinary_days
+                for day in book.dates
             )
-            assert row.raw_value_on(zero_only_day) is DeliveryCellValue.PAUSED
 
 
 def test_db2_keeps_excel_editing_aids_and_exact_physical_layout():
     workbook = openpyxl.load_workbook(FIXTURE_PATH, data_only=False)
     try:
-        assert workbook.sheetnames == ["명단"]
-        worksheet = workbook["명단"]
+        assert workbook.sheetnames == [FIXTURE_SHEET_NAME]
+        worksheet = workbook[FIXTURE_SHEET_NAME]
+        assert tuple(worksheet.tables) == (TABLE_NAME,)
+        assert worksheet.tables[TABLE_NAME].ref == "A1:Z22"
         expected_headers = (*PROFILE_HEADERS, *CONTROL_HEADERS, *DATE_HEADERS)
         actual_headers = tuple(
             worksheet.cell(row=1, column=column).value
@@ -227,7 +228,7 @@ def test_db2_keeps_excel_editing_aids_and_exact_physical_layout():
         }
         assert validations == {
             ('"조식,중식,석식"', "O2:O22", False),
-            ('"0,1"', "R2:Z22", True),
+            ('"1"', "R2:Z22", True),
         }
 
         conditional_ranges = tuple(worksheet.conditional_formatting)
@@ -242,12 +243,11 @@ def test_db2_keeps_excel_editing_aids_and_exact_physical_layout():
             for rule in conditional_rules
         } == {
             ("cellIs", "equal", ("1",)),
-            ("cellIs", "equal", ("0",)),
         }
         fill_by_value = {
             rule.formula[0]: rule.dxf.fill.fgColor.rgb for rule in conditional_rules
         }
-        assert fill_by_value == {"1": "00C6E0B4", "0": "00FFE699"}
+        assert fill_by_value == {"1": "00C6E0B4"}
 
         date_column_by_header = {
             worksheet.cell(row=1, column=column).value: column
@@ -260,16 +260,15 @@ def test_db2_keeps_excel_editing_aids_and_exact_physical_layout():
         )
         assert all(
             worksheet.cell(row=row, column=date_column_by_header["20260730"]).value
-            == 0
+            is None
             for row in range(2, worksheet.max_row + 1)
         )
         mixed_values = [
             worksheet.cell(row=row, column=date_column_by_header["20260728"]).value
             for row in range(2, worksheet.max_row + 1)
         ]
-        assert all(value in (None, 0, 1) for value in mixed_values)
+        assert all(value in (None, 1) for value in mixed_values)
         assert any(value is None for value in mixed_values)
-        assert 0 in mixed_values
         assert 1 in mixed_values
         assert all(
             worksheet.cell(row=row, column=date_column_by_header[header]).value
@@ -278,7 +277,7 @@ def test_db2_keeps_excel_editing_aids_and_exact_physical_layout():
             for row in range(2, worksheet.max_row + 1)
         )
         assert all(
-            cell.data_type != "f" and cell.value in (None, 0, 1)
+            cell.data_type != "f" and cell.value in (None, 1)
             for row in worksheet.iter_rows(
                 min_row=2,
                 min_col=first_date_column,

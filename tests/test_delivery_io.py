@@ -22,19 +22,17 @@ from src.excel.delivery_io import (
 )
 
 DELIVERY_DAY = date(2031, 6, 15)
-ZERO_ONLY_DAY = date(2031, 6, 16)
+PAUSED_ONLY_DAY = date(2031, 6, 16)
 FULL_BLANK_DAY = date(2031, 6, 17)
-DATES = (FULL_BLANK_DAY, DELIVERY_DAY, ZERO_ONLY_DAY)
+DATES = (FULL_BLANK_DAY, PAUSED_ONLY_DAY, DELIVERY_DAY)
 
 
 def _values(
     delivery_value: DeliveryCellValue,
-    *,
-    zero_value: DeliveryCellValue = DeliveryCellValue.BLANK,
 ) -> dict[date, DeliveryCellValue]:
     return {
         DELIVERY_DAY: delivery_value,
-        ZERO_ONLY_DAY: zero_value,
+        PAUSED_ONLY_DAY: DeliveryCellValue.BLANK,
         FULL_BLANK_DAY: DeliveryCellValue.BLANK,
     }
 
@@ -152,10 +150,7 @@ def annual_book() -> AnnualDeliveryBook:
             "중식",
             "기사A",
             "001",
-            _values(
-                DeliveryCellValue.DELIVERED,
-                zero_value=DeliveryCellValue.PAUSED,
-            ),
+            _values(DeliveryCellValue.DELIVERED),
             source_row=3,
         ),
         DeliveryRow(
@@ -171,7 +166,11 @@ def annual_book() -> AnnualDeliveryBook:
             "중식",
             "중지기사",
             4,
-            _values(DeliveryCellValue.PAUSED),
+            {
+                DELIVERY_DAY: DeliveryCellValue.BLANK,
+                PAUSED_ONLY_DAY: DeliveryCellValue.PAUSED,
+                FULL_BLANK_DAY: DeliveryCellValue.BLANK,
+            },
             source_row=12,
         ),
         DeliveryRow(
@@ -309,30 +308,15 @@ def test_selection_uses_only_one_cells_and_domain_numeric_order(
     ]
 
 
-def test_options_use_day_state_but_meals_and_staff_use_only_one_cells(
+def test_options_include_only_dates_with_actual_deliveries(
     annual_book: AnnualDeliveryBook,
 ):
-    assert available_delivery_dates(annual_book) == [DELIVERY_DAY, ZERO_ONLY_DAY]
+    assert available_delivery_dates(annual_book) == [DELIVERY_DAY]
     assert available_meals(annual_book, DELIVERY_DAY) == ["중식", "석식"]
     assert available_staff(annual_book, DELIVERY_DAY, "중식") == ["기사A"]
 
-    assert available_meals(annual_book, ZERO_ONLY_DAY) == []
-    assert available_staff(annual_book, ZERO_ONLY_DAY, "중식") == []
     assert FULL_BLANK_DAY not in available_delivery_dates(annual_book)
-
-
-def test_zero_only_date_returns_empty_frame_with_exact_columns(
-    annual_book: AnnualDeliveryBook,
-):
-    columns = ["없는컬럼", "이름"]
-
-    result = make_result(
-        annual_book,
-        Choice("중식", "기사A", ZERO_ONLY_DAY, columns),
-    )
-
-    assert result.empty
-    assert result.columns.tolist() == columns
+    assert PAUSED_ONLY_DAY not in available_delivery_dates(annual_book)
 
 
 @pytest.mark.parametrize("ship", ["", "   "])
@@ -381,7 +365,7 @@ def test_rejects_non_date_value(annual_book: AnnualDeliveryBook):
 
 
 @pytest.mark.parametrize("sequence", [None, "   ", float("nan")])
-def test_rejects_selected_row_with_blank_sequence(sequence: object):
+def test_selected_row_with_blank_sequence_outputs_empty_cell(sequence: object):
     person = RosterEntry(source_row=20, extra={"성명": "연번없음"})
     row = DeliveryRow(
         person=person,
@@ -398,11 +382,9 @@ def test_rejects_selected_row_with_blank_sequence(sequence: object):
         (DELIVERY_DAY,),
     )
 
-    with pytest.raises(
-        ValueError,
-        match="성명=연번없음.*Excel 원본 행=21",
-    ):
-        make_result(
-            book,
-            Choice("중식", "기사A", DELIVERY_DAY, ["이름"]),
-        )
+    result = make_result(
+        book,
+        Choice("중식", "기사A", DELIVERY_DAY, ["연번", "이름"]),
+    )
+
+    assert result.to_dict("records") == [{"연번": "", "이름": "연번없음"}]

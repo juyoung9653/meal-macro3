@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -147,6 +148,7 @@ class InvoiceService:
                 unit_prices=unit_prices,
                 is_vacation_month=batch.is_vacation_month,
                 meal_type=config.meal_type,
+                profile_conflicts=book.profile_conflicts,
             )
         except Exception as error:  # noqa: BLE001 - 생성 실패를 결과로 반환
             return InvoiceResult(success=False, error=f"청구서 생성 실패:\n{error}")
@@ -161,11 +163,26 @@ class InvoiceService:
                     f"작성 {count}건, 출력 대상 {len(rendered.deliveries)}건"
                 ),
             )
+        warnings = []
+        if book.profile_conflicts:
+            warnings.append(
+                InvoiceWarning(
+                    code="DB 데이터 검토",
+                    message=(
+                        "같은 사람의 인적사항에서 서로 다른 값 "
+                        f"{len(book.profile_conflicts)}건을 발견했습니다. "
+                        "빈칸은 자동 보완했고, 불일치는 생성된 청구서의 "
+                        "'DB검토' 시트에 기록했습니다."
+                    ),
+                    details={"count": len(book.profile_conflicts)},
+                )
+            )
         return InvoiceResult(
             success=True,
             count=count,
             batch=batch,
             enriched=[_legacy_record(item, batch.prices) for item in batch.deliveries],
+            warnings=warnings,
         )
 
     def _resolve_book(self, config: InvoiceGenerationConfig) -> AnnualDeliveryBook:
@@ -298,10 +315,12 @@ def _calculate_monthly_summaries(
     )
     for row in book.delivery_rows:
         summary = summaries[row.person]
+        breakfast_multiplier = _breakfast_invoice_multiplier(row, target_dates)
         for day in target_dates:
             if row.raw_value_on(day) is not DeliveryCellValue.DELIVERED:
                 continue
-            summary.counts[row.meal] += 1
+            increment = breakfast_multiplier if row.meal == "조식" else 1
+            summary.counts[row.meal] += increment
             week_index = week_by_date.get(day)
             if week_index is not None:
                 item = summary.weekly[week_index]
@@ -309,12 +328,41 @@ def _calculate_monthly_summaries(
                     week=item.week,
                     start_date=item.start_date,
                     end_date=item.end_date,
-                    breakfast_count=item.breakfast_count + (1 if row.meal == "조식" else 0),
-                    lunch_count=item.lunch_count + (1 if row.meal == "중식" else 0),
-                    dinner_count=item.dinner_count + (1 if row.meal == "석식" else 0),
+                    breakfast_count=(
+                        item.breakfast_count
+                        + (increment if row.meal == "조식" else 0)
+                    ),
+                    lunch_count=(
+                        item.lunch_count
+                        + (increment if row.meal == "중식" else 0)
+                    ),
+                    dinner_count=(
+                        item.dinner_count
+                        + (increment if row.meal == "석식" else 0)
+                    ),
                 )
 
     return summaries
+
+
+def _breakfast_invoice_multiplier(
+    row: DeliveryRow,
+    target_dates: tuple[date, ...],
+) -> int:
+    """대상 월의 토·일이 모두 비면 VBA처럼 조식 배송값을 3배한다."""
+    if row.meal != "조식":
+        return 1
+    weekend_values = (
+        row.raw_value_on(day)
+        for day in target_dates
+        if day.weekday() >= 5
+    )
+    if all(
+        value is None or value is DeliveryCellValue.BLANK
+        for value in weekend_values
+    ):
+        return 3
+    return 1
 
 
 def _rows_by_person(
@@ -332,17 +380,11 @@ def _rows_by_person(
         ):
             continue
 
-        fields = (
-            ("배송담당(staff)", row.staff),
-            ("연번(sequence_display)", row.sequence_display),
-        )
-        for field_name, value in fields:
-            text = "" if value is None else str(value).strip()
-            if not text:
-                raise ValueError(
-                    f"{row.description}, 필드={field_name}: "
-                    f"{year}년 {month}월 실제 배송행의 값이 비어 있습니다."
-                )
+        if not row.staff.strip():
+            raise ValueError(
+                f"{row.description}, 필드=배송담당(staff): "
+                f"{year}년 {month}월 실제 배송행의 값이 비어 있습니다."
+            )
 
         grouped.setdefault(row.person, []).append(row)
     return {

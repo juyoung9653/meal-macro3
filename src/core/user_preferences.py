@@ -9,6 +9,9 @@ from PyQt6.QtCore import QSettings
 
 from .settings import SettingsManager, get_settings, get_template_profile
 
+_DB_IMPORT_CACHE_KEY = "annual_workbook/header_mapping_cache"
+_DB_IMPORT_CACHE_LIMIT = 20
+
 
 class UserPreferences:
     """Typed facade for user-managed state shared across application tabs."""
@@ -39,6 +42,102 @@ class UserPreferences:
     def set_annual_workbook_path(self, path: str) -> None:
         self._settings.setValue("annual_workbook/last_path", path)
         self._settings.sync()
+
+    def get_db_header_mapping(self) -> dict[str, str]:
+        value = self._settings.value("annual_workbook/header_mapping", None)
+        if not isinstance(value, Mapping):
+            return {}
+        return {
+            str(role): str(header)
+            for role, header in value.items()
+            if isinstance(role, str) and isinstance(header, str)
+        }
+
+    def set_db_header_mapping(self, mapping: Mapping[str, str]) -> None:
+        self._settings.setValue("annual_workbook/header_mapping", dict(mapping))
+        self._settings.sync()
+
+    def get_db_selected_year(self) -> int | None:
+        value = self._settings.value("annual_workbook/selected_year", None)
+        if isinstance(value, bool):
+            return None
+        try:
+            year = int(value)
+        except (TypeError, ValueError):
+            return None
+        return year if year >= 1 else None
+
+    def set_db_selected_year(self, year: int) -> None:
+        if isinstance(year, bool) or not isinstance(year, int) or year < 1:
+            raise ValueError("DB 선택 연도는 1 이상의 정수여야 합니다.")
+        self._settings.setValue("annual_workbook/selected_year", year)
+        self._settings.sync()
+
+    def get_cached_db_import(
+        self,
+        headers: Sequence[str],
+    ) -> tuple[dict[str, str], int] | None:
+        """같은 비날짜 헤더 구조에 저장된 DB 매핑과 연도를 반환한다."""
+        cache = self._read_db_import_cache()
+        entry = cache.get(_db_header_signature(headers))
+        if not isinstance(entry, Mapping):
+            return None
+        raw_mapping = entry.get("mapping")
+        raw_year = entry.get("year")
+        if not isinstance(raw_mapping, Mapping) or isinstance(raw_year, bool):
+            return None
+        mapping = {
+            str(role): str(header)
+            for role, header in raw_mapping.items()
+            if isinstance(role, str) and isinstance(header, str)
+        }
+        try:
+            year = int(raw_year)
+        except (TypeError, ValueError):
+            return None
+        if not mapping or year < 1:
+            return None
+        return mapping, year
+
+    def set_cached_db_import(
+        self,
+        headers: Sequence[str],
+        mapping: Mapping[str, str],
+        year: int,
+    ) -> None:
+        """DB 헤더 구조별 설정을 최근 20개까지 영구 캐시한다."""
+        if isinstance(year, bool) or not isinstance(year, int) or year < 1:
+            raise ValueError("DB 선택 연도는 1 이상의 정수여야 합니다.")
+        signature = _db_header_signature(headers)
+        cache = self._read_db_import_cache()
+        cache.pop(signature, None)
+        cache[signature] = {
+            "mapping": dict(mapping),
+            "year": year,
+        }
+        while len(cache) > _DB_IMPORT_CACHE_LIMIT:
+            del cache[next(iter(cache))]
+        self._settings.setValue(
+            _DB_IMPORT_CACHE_KEY,
+            json.dumps(cache, ensure_ascii=False),
+        )
+        self._settings.sync()
+
+    def _read_db_import_cache(self) -> dict[str, object]:
+        value = self._settings.value(_DB_IMPORT_CACHE_KEY, "")
+        if not isinstance(value, str) or not value:
+            return {}
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        if not isinstance(parsed, dict):
+            return {}
+        return {
+            key: entry
+            for key, entry in parsed.items()
+            if isinstance(key, str)
+        }
 
     def get_output_dir(self) -> str:
         return str(self._settings.value("output_dir", "") or "")
@@ -78,3 +177,8 @@ class UserPreferences:
             f"report/staff_order_{meal}", json.dumps(value, ensure_ascii=False)
         )
         self._settings.sync()
+
+
+def _db_header_signature(headers: Sequence[str]) -> str:
+    normalized = [str(header) for header in headers]
+    return json.dumps(normalized, ensure_ascii=False, separators=(",", ":"))

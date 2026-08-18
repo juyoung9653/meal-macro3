@@ -111,7 +111,6 @@ def _service_book() -> AnnualDeliveryBook:
             2,
             dates,
             delivered=(date(2026, 6, 30),),
-            paused=(date(2026, 6, 28),),
         ),
         _delivery_row(
             person,
@@ -133,7 +132,6 @@ def _service_book() -> AnnualDeliveryBook:
             "003",
             dates,
             delivered=(date(2026, 6, 14),),
-            paused=(date(2026, 6, 21),),
         ),
     )
     return AnnualDeliveryBook(
@@ -233,6 +231,43 @@ def test_counts_only_target_month_delivered_and_ignores_roster_flags(
     }.isdisjoint(person)
 
 
+def test_generates_invoice_for_people_with_one_meal_row_each(
+    template_path: str,
+    invoice_spy: Mock,
+):
+    day = date(2026, 6, 1)
+    people = tuple(
+        RosterEntry(source_row=row, extra={"성명": name})
+        for row, name in ((2, "김아침"), (3, "이저녁"), (4, "박점심"))
+    )
+    rows = tuple(
+        DeliveryRow(
+            person=person,
+            meal=meal,
+            staff="김기사",
+            sequence=None,
+            values={day: DeliveryCellValue.DELIVERED},
+            source_row=person.source_row,
+        )
+        for person, meal in zip(people, ("조식", "석식", "중식"))
+    )
+    book = AnnualDeliveryBook(2026, people, rows, (day,))
+
+    result = InvoiceService().generate(_config(template_path, book))
+
+    assert result.success, result.error
+    assert result.count == 3
+    counts_by_name = {
+        item["성명"]: (item["_bf_cnt"], item["_lh_cnt"], item["_dn_cnt"])
+        for item in result.enriched
+    }
+    assert counts_by_name == {
+        "김아침": (3, 0, 0),
+        "이저녁": (0, 0, 1),
+        "박점심": (0, 1, 0),
+    }
+
+
 def test_projects_staff_and_sequence_from_person_delivery_rows_deterministically(
     template_path: str, invoice_spy: Mock
 ):
@@ -288,19 +323,9 @@ def test_metadata_uses_only_rows_delivered_in_target_month(
     assert result.enriched[0]["연번"] == "006"
 
 
-@pytest.mark.parametrize(
-    ("staff", "sequence", "field"),
-    [
-        ("  ", "001", "배송담당(staff)"),
-        ("기사A", "  ", "연번(sequence_display)"),
-    ],
-)
-def test_rejects_blank_metadata_on_target_month_delivered_row(
+def test_rejects_blank_staff_on_target_month_delivered_row(
     template_path: str,
     invoice_spy: Mock,
-    staff: str,
-    sequence: object,
-    field: str,
 ):
     days = (date(2026, 6, 1),)
     person = RosterEntry(source_row=2, extra={"성명": "홍길동"})
@@ -313,8 +338,8 @@ def test_rejects_blank_metadata_on_target_month_delivered_row(
                 _delivery_row(
                     person,
                     "조식",
-                    staff,
-                    sequence,
+                    "  ",
+                    "001",
                     days,
                     delivered=days,
                 ),
@@ -328,11 +353,46 @@ def test_rejects_blank_metadata_on_target_month_delivered_row(
 
     assert not result.success
     assert result.error is not None
-    assert "'홍길동' (명단 2~4행)" in result.error
+    assert "'홍길동' (명단 2행)" in result.error
     assert "원본 2행" in result.error
     assert "조식" in result.error
-    assert field in result.error
+    assert "배송담당(staff)" in result.error
     invoice_spy.assert_not_called()
+
+
+def test_allows_blank_sequence_on_target_month_delivered_row(
+    template_path: str,
+    invoice_spy: Mock,
+):
+    days = (date(2026, 6, 1),)
+    person = RosterEntry(source_row=2, extra={"성명": "홍길동"})
+    book = AnnualDeliveryBook(
+        2026,
+        (person,),
+        _complete_meal_rows(
+            (person,),
+            (
+                _delivery_row(
+                    person,
+                    "조식",
+                    "기사A",
+                    "  ",
+                    days,
+                    delivered=days,
+                ),
+            ),
+            days,
+        ),
+        days,
+    )
+
+    result = InvoiceService().generate(_config(template_path, book))
+
+    assert result.success, result.error
+    assert result.enriched[0]["배송담당"] == "기사A"
+    assert result.enriched[0]["배송순서"] == ""
+    assert result.enriched[0]["연번"] == ""
+    invoice_spy.assert_called_once()
 
 
 def test_attaches_exact_weekly_meal_counts_once_from_typed_dates(
@@ -385,6 +445,78 @@ def test_attaches_exact_weekly_meal_counts_once_from_typed_dates(
     ]
 
 
+@pytest.mark.parametrize(
+    ("delivered", "paused", "expected_count"),
+    [
+        ((date(2026, 6, 5),), (), 3),
+        (
+            (
+                date(2026, 6, 5),
+                date(2026, 6, 6),
+                date(2026, 6, 7),
+            ),
+            (),
+            3,
+        ),
+        ((date(2026, 6, 5),), (date(2026, 6, 6),), 1),
+    ],
+)
+def test_breakfast_uses_weekend_cells_or_vba_three_meal_fallback(
+    template_path: str,
+    invoice_spy: Mock,
+    delivered: tuple[date, ...],
+    paused: tuple[date, ...],
+    expected_count: int,
+):
+    days = tuple(date(2026, 6, day) for day in range(5, 8))
+    person = RosterEntry(source_row=2, extra={"성명": "김아침"})
+    book = AnnualDeliveryBook(
+        2026,
+        (person,),
+        (
+            _delivery_row(
+                person,
+                "조식",
+                "기사A",
+                1,
+                days,
+                delivered=delivered,
+                paused=paused,
+            ),
+        ),
+        days,
+    )
+
+    result = InvoiceService().generate(_config(template_path, book))
+
+    assert result.success, result.error
+    assert result.enriched[0]["_bf_cnt"] == expected_count
+    assert sum(
+        week["조식"]
+        for week in result.enriched[0]["weekly_meal_counts"]
+    ) == expected_count
+    invoice_spy.assert_called_once()
+
+
+def test_blank_only_month_is_rejected_as_unentered(
+    template_path: str, invoice_spy: Mock
+):
+    days = (date(2026, 6, 1), date(2026, 6, 2))
+    person = RosterEntry(source_row=2, extra={"성명": "홍길동"})
+    book = AnnualDeliveryBook(
+        2026,
+        (person,),
+        (_delivery_row(person, "중식", "기사A", 1, days),),
+        days,
+    )
+
+    result = InvoiceService().generate(_config(template_path, book))
+
+    assert not result.success
+    assert "미입력" in (result.error or "")
+    invoice_spy.assert_not_called()
+
+
 def test_zero_only_entered_month_proceeds_with_zero_invoice(
     template_path: str, invoice_spy: Mock
 ):
@@ -397,7 +529,12 @@ def test_zero_only_entered_month_proceeds_with_zero_invoice(
             (person,),
             (
                 _delivery_row(
-                    person, "중식", "기사A", 1, days, paused=(date(2026, 6, 1),)
+                    person,
+                    "중식",
+                    "기사A",
+                    1,
+                    days,
+                    paused=(date(2026, 6, 1),),
                 ),
             ),
             days,
@@ -410,8 +547,8 @@ def test_zero_only_entered_month_proceeds_with_zero_invoice(
     assert result.success, result.error
     assert result.count == 0
     assert result.enriched == []
-    assert invoice_spy.call_args.args[0] is result.batch
     assert result.batch is not None and result.batch.deliveries == ()
+    invoice_spy.assert_called_once()
 
 
 @pytest.mark.parametrize(
@@ -504,7 +641,6 @@ def test_vacation_detection_uses_only_target_month_delivered_lunch():
                     "기사A",
                     1,
                     days,
-                    paused=(date(2026, 8, 1),),
                 ),
             ),
             days,

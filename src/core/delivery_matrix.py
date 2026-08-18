@@ -1,4 +1,4 @@
-"""단일 명단 시트의 연간 배송 매트릭스 도메인 모델."""
+"""``db`` 테이블의 연간 배송 매트릭스 도메인 모델."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ ALLOWED_MEALS = ("조식", "중식", "석식")
 
 
 class DeliveryCellValue(Enum):
-    """Excel 셀의 원시 tri-state 값."""
+    """Excel 배송 셀의 원시 3상태 값."""
 
     BLANK = None
     PAUSED = 0
@@ -46,11 +46,17 @@ class EffectiveDeliveryState(StrEnum):
 
 @dataclass(frozen=True, eq=False)
 class RosterEntry:
-    """명단 시트의 연속된 식종 3행으로 표현되는 한 사람."""
+    """``db`` 테이블의 한 사람과 그 사람을 구성한 원본 행 범위."""
 
     source_row: int
     extra: Mapping[str, Any] = field(
         default_factory=dict,
+        compare=False,
+        hash=False,
+    )
+    source_end_row: int | None = field(default=None, compare=False, hash=False)
+    source_rows: tuple[int, ...] | None = field(
+        default=None,
         compare=False,
         hash=False,
     )
@@ -60,7 +66,32 @@ class RosterEntry:
             raise TypeError("명단 시작 행은 정수여야 합니다.")
         if self.source_row < 2:
             raise ValueError("명단 시작 행은 헤더 다음인 2행 이상이어야 합니다.")
+        source_end_row = (
+            self.source_row if self.source_end_row is None else self.source_end_row
+        )
+        if isinstance(source_end_row, bool) or not isinstance(source_end_row, int):
+            raise TypeError("명단 마지막 행은 정수여야 합니다.")
+        if source_end_row < self.source_row:
+            raise ValueError("명단 마지막 행은 시작 행보다 앞설 수 없습니다.")
+        source_rows = (
+            tuple(range(self.source_row, source_end_row + 1))
+            if self.source_rows is None
+            else tuple(self.source_rows)
+        )
+        if not source_rows or any(
+            isinstance(row, bool) or not isinstance(row, int) or row < 2
+            for row in source_rows
+        ):
+            raise ValueError("명단 원본 행은 2 이상의 정수여야 합니다.")
+        if tuple(sorted(set(source_rows))) != source_rows:
+            raise ValueError("명단 원본 행은 중복 없이 오름차순이어야 합니다.")
+        if source_rows[0] != self.source_row:
+            raise ValueError("명단 시작 행은 원본 행 목록의 첫 행이어야 합니다.")
+        if source_rows[-1] != source_end_row:
+            raise ValueError("명단 마지막 행은 원본 행 목록의 마지막 행이어야 합니다.")
         object.__setattr__(self, "extra", MappingProxyType(dict(self.extra)))
+        object.__setattr__(self, "source_end_row", source_end_row)
+        object.__setattr__(self, "source_rows", source_rows)
 
     def as_dict(self) -> dict[str, Any]:
         """출력기가 안전하게 수정할 수 있는 명단 정보 복사본."""
@@ -79,7 +110,13 @@ class RosterEntry:
 
     @property
     def location_text(self) -> str:
-        return f"명단 {self.source_row}~{self.source_row + 2}행"
+        source_rows = self.source_rows or (self.source_row,)
+        if len(source_rows) == 1:
+            return f"명단 {self.source_row}행"
+        if source_rows == tuple(range(source_rows[0], source_rows[-1] + 1)):
+            return f"명단 {source_rows[0]}~{source_rows[-1]}행"
+        shown = ", ".join(str(row) for row in source_rows)
+        return f"명단 {shown}행"
 
     @property
     def description(self) -> str:
@@ -154,6 +191,18 @@ class DeliveryRow:
 
 
 @dataclass(frozen=True)
+class ProfileConflict:
+    """동일인 행에서 발견한 인적사항 불일치 검토 항목."""
+
+    name: str
+    birth_date: str
+    phone: str
+    field: str
+    selected_value: Any
+    values_by_row: tuple[tuple[int, Any], ...]
+
+
+@dataclass(frozen=True)
 class AnnualDeliveryBook:
     """한 연도의 사람·식종별 배송행과 조회 인덱스."""
 
@@ -161,6 +210,7 @@ class AnnualDeliveryBook:
     roster: tuple[RosterEntry, ...]
     delivery_rows: tuple[DeliveryRow, ...]
     dates: tuple[date, ...]
+    profile_conflicts: tuple[ProfileConflict, ...] = ()
     rows_by_person: Mapping[RosterEntry, tuple[DeliveryRow, ...]] = field(
         init=False,
         repr=False,
@@ -174,6 +224,12 @@ class AnnualDeliveryBook:
     def __post_init__(self) -> None:
         roster = tuple(self.roster)
         delivery_rows = tuple(self.delivery_rows)
+        profile_conflicts = tuple(self.profile_conflicts)
+        if any(
+            not isinstance(conflict, ProfileConflict)
+            for conflict in profile_conflicts
+        ):
+            raise TypeError("인적사항 검토 항목 형식이 올바르지 않습니다.")
         raw_dates = tuple(self.dates)
         if len(set(raw_dates)) != len(raw_dates):
             raise ValueError("날짜는 중복될 수 없습니다.")
@@ -225,14 +281,10 @@ class AnnualDeliveryBook:
             rows_by_key[key] = row
             mutable_rows_by_person[row.person].append(row)
 
-        required_meals = frozenset(ALLOWED_MEALS)
         for person, rows in mutable_rows_by_person.items():
-            present_meals = {row.meal for row in rows}
-            missing_meals = required_meals - present_meals
-            if missing_meals:
-                missing = ", ".join(meal for meal in ALLOWED_MEALS if meal in missing_meals)
+            if not rows:
                 raise ValueError(
-                    f"{person.description}의 배송 행이 누락되었습니다: {missing}"
+                    f"{person.description}에 연결된 배송 행이 하나도 없습니다."
                 )
 
         rows_by_person = {
@@ -242,6 +294,7 @@ class AnnualDeliveryBook:
         object.__setattr__(self, "roster", roster)
         object.__setattr__(self, "delivery_rows", delivery_rows)
         object.__setattr__(self, "dates", dates)
+        object.__setattr__(self, "profile_conflicts", profile_conflicts)
         object.__setattr__(self, "_date_set", date_set)
         object.__setattr__(
             self,
@@ -312,9 +365,9 @@ class AnnualDeliveryBook:
     ) -> EffectiveDeliveryState:
         """원시 값과 월/일 전역 상태를 함께 고려한 의미를 반환한다.
 
-        입력된 날짜의 개별 blank는 중지, 명시적 0은 일시중지로 구분한다.
-        월 전체가 미입력이거나 해당 날짜 열 전체가 blank이면 각각 별도
-        상태를 반환한다.
+        명시적 0은 일시중지다. 입력된 날짜의 개별 빈칸은 같은 행의 이후
+        배송(1)이 있으면 일시중지, 없으면 중지로 해석한다. 월 전체가
+        미입력이거나 해당 날짜 열 전체가 빈칸이면 각각 별도 상태를 반환한다.
         """
         row = self._require_delivery_row(person, meal)
         day_state = self.day_state(day)
@@ -329,6 +382,12 @@ class AnnualDeliveryBook:
         if raw_value is DeliveryCellValue.DELIVERED:
             return EffectiveDeliveryState.DELIVERED
         if raw_value is DeliveryCellValue.PAUSED:
+            return EffectiveDeliveryState.PAUSED
+        if any(
+            later_day > day
+            and row.raw_value_on(later_day) is DeliveryCellValue.DELIVERED
+            for later_day in self.dates
+        ):
             return EffectiveDeliveryState.PAUSED
         return EffectiveDeliveryState.STOPPED
 

@@ -177,20 +177,31 @@ class DeliveryService:
         self,
         start: date,
         end: date,
-        meal_filter: str | None = None,
+        meal_filter: str | Sequence[str] | None = None,
     ) -> list[DeliveryReport]:
         """범위 내 장부 날짜에서 준비된 리포트만 반환한다."""
         if end < start:
             raise ValueError("종료일은 시작일보다 빠를 수 없습니다.")
-        if meal_filter is not None and meal_filter not in ALLOWED_MEALS:
+
+        if meal_filter is None:
+            requested_meals: Sequence[str] = ALLOWED_MEALS
+        elif isinstance(meal_filter, str):
+            requested_meals = (meal_filter,)
+        else:
+            requested_meals = tuple(meal_filter)
+
+        if not requested_meals:
+            raise ValueError("식종 필터는 하나 이상 선택해야 합니다.")
+        invalid_meals = [
+            meal for meal in requested_meals if meal not in ALLOWED_MEALS
+        ]
+        if invalid_meals:
             raise ValueError(
-                f"유효하지 않은 식종 필터입니다: {meal_filter!r}. "
+                f"유효하지 않은 식종 필터입니다: {invalid_meals!r}. "
                 f"허용 식종: {', '.join(ALLOWED_MEALS)}"
             )
-
-        meals: Sequence[str] = (
-            (meal_filter,) if meal_filter is not None else ALLOWED_MEALS
-        )
+        selected_set = set(requested_meals)
+        meals = tuple(meal for meal in ALLOWED_MEALS if meal in selected_set)
         results: list[DeliveryReport] = []
 
         for day in self._book.dates:
@@ -225,33 +236,32 @@ class DeliveryService:
     def _aggregate_rows(
         rows: Sequence[DeliveryRow], *, context: str
     ) -> _DeliveryAggregate:
-        locations: dict[tuple[str, str], set[RosterEntry]] = defaultdict(set)
+        locations: dict[tuple[str, str, int | None], set[RosterEntry]] = defaultdict(
+            set
+        )
         persons_by_staff: dict[str, set[RosterEntry]] = defaultdict(set)
 
         for row in rows:
             staff = row.staff.strip()
             sequence = row.sequence_display.strip()
-            if not staff or not sequence:
-                if not staff and not sequence:
-                    missing_text = "배송담당자와 연번이"
-                elif not staff:
-                    missing_text = "배송담당자가"
-                else:
-                    missing_text = "연번이"
+            if not staff:
                 raise _InvalidDeliveryData(
-                    f"{context}: {missing_text} 빈칸입니다. {row.description}"
+                    f"{context}: 배송담당자가 빈칸입니다. {row.description}"
                 )
-            locations[(staff, sequence)].add(row.person)
+            # 순번이 없으면 서로 다른 대상자를 한 배송지로 잘못 합치지 않는다.
+            source_row = None if sequence else row.person.source_row
+            locations[(staff, sequence, source_row)].add(row.person)
             persons_by_staff[staff].add(row.person)
 
         buckets_by_staff: dict[str, list[int]] = defaultdict(lambda: [0] * 5)
-        for (staff, sequence), people in sorted(
+        for (staff, sequence, _source_row), people in sorted(
             locations.items(),
             key=lambda item: (
                 item[0][0].casefold(),
                 item[0][0],
                 item[0][1].casefold(),
                 item[0][1],
+                item[0][2] or 0,
             ),
         ):
             household_size = len(people)
