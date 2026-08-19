@@ -9,7 +9,6 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 from PyQt6.QtCore import QSettings
 from PyQt6.QtWidgets import QApplication
-
 from src.core.invoice_data import InvoiceData
 from src.widgets.daily_delivery_tab import DailyDeliveryTab
 
@@ -120,4 +119,19 @@ def test_meal_columns_can_use_arbitrary_sheet_headers(tmp_path, qapp):
     prepared = tab._prepare_people()
     assert [person["_breakfast"] for person in prepared] == [1, 1]
     assert [person["_dinner"] for person in prepared] == [0, 1]
+    tab.close()
+
+
+def test_memo_header_is_auto_selected(tmp_path, qapp):
+    tab = _tab_with_settings(tmp_path, qapp)
+    headers = ["기사", "구역", "주소", "조식", "메모"]
+
+    tab.set_invoice_data(
+        InvoiceData(
+            invoices=[{header: "값" for header in headers}],
+            roster_headers=headers,
+        )
+    )
+
+    assert tab.note_combo.currentData() == "메모"
     tab.close()

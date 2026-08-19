@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 from collections import Counter
 from collections.abc import Callable, Iterable
 from copy import copy
@@ -15,7 +16,7 @@ from openpyxl import load_workbook
 from openpyxl.styles import Side
 
 from ..core.meal_types import MealType
-from ..services.delivery_calculator import to_bool
+from ..services.delivery_calculator import get_week_ranges, to_bool
 from ..services.holiday_fetcher import get_kr_holidays
 from ..services.note_parser import expand_note_dates
 
@@ -162,6 +163,56 @@ def suspended_meals_on(note: object, target: date) -> set[str]:
     }
 
 
+_MEAL_MEMO_ENTRY_RE = re.compile(
+    r"(?P<meal>조식|석식)\s*[:：]\s*"
+    r"(?P<dates>(?:\d{2,4}/)?\d{1,2}/\d{1,2}"
+    r"(?:\s*[~～]\s*(?:(?:\d{2,4}/)?\d{1,2}/\d{1,2}|\d{1,2}))?)"
+)
+
+
+def _confirmation_week(target: date) -> tuple[date, date]:
+    """확인서 계산과 같은 일~토 주차에서 ``target``이 속한 범위를 반환한다."""
+
+    for _week, start, end in get_week_ranges(target.year, target.month):
+        if start <= target <= end:
+            return start, end
+    return target, target
+
+
+def weekly_confirmation_memo_entries(note: object, target: date) -> list[str]:
+    """확인서식 메모 중 ``target`` 주차와 날짜가 겹치는 항목만 반환한다.
+
+    지원 형식은 ``조식: 6/13~6/15``와 ``석식: 6/13``이며, 한 메모에
+    여러 항목이 있어도 각 식종 항목을 따로 판정한다.
+    """
+
+    text = _text(note)
+    if not text:
+        return []
+
+    week_start, week_end = _confirmation_week(target)
+    result: list[str] = []
+    seen: set[str] = set()
+    for match in _MEAL_MEMO_ENTRY_RE.finditer(text):
+        meal_label = match.group("meal")
+        meal_type = (
+            MealType.BREAKFAST if meal_label == "조식" else MealType.DINNER
+        )
+        date_text = re.sub(r"\s+", "", match.group("dates")).replace("～", "~")
+        parseable = f"{date_text} {meal_label} 일시중지"
+        overlaps = any(
+            week_start <= memo_date <= week_end and memo_meal == meal_type
+            for memo_date, memo_meal in _expanded_note_pairs(
+                parseable, target.year, target.month
+            )
+        )
+        entry = f"{meal_label}: {date_text}"
+        if overlaps and entry not in seen:
+            seen.add(entry)
+            result.append(entry)
+    return result
+
+
 def _household_key(person: dict, address_col: str, fallback_index: int) -> str:
     address = _compact(person.get(address_col, "")) if address_col else ""
     return address or f"__person_{fallback_index}"
@@ -182,7 +233,12 @@ def format_household_distribution(people: list[dict], address_col: str) -> str:
     return _format_distribution(keys)
 
 
-def _note_line(address: object, note: object, meals: set[str]) -> str:
+def _note_line(
+    address: object,
+    note: object,
+    meals: set[str],
+    household_size: int = 1,
+) -> str:
     address_text = " ".join(str(address or "").split())
     if len(address_text) > 28:
         address_text = address_text[:27] + "…"
@@ -195,8 +251,14 @@ def _note_line(address: object, note: object, meals: set[str]) -> str:
         if key in meals
     )
     note_text = " ".join(str(note or "").split())
-    prefix = f"{address_text} " if address_text else ""
-    return f"{prefix}[{meal_text} 제외] {note_text}".strip()
+    prefix = (
+        f"{address_text}({household_size}명)"
+        if address_text
+        else f"주소 공란({household_size}명)"
+    )
+    if not meals:
+        return f"{prefix} {note_text}".strip()
+    return f"{prefix} [{meal_text} 제외] {note_text}".strip()
 
 
 def build_daily_delivery_sheet(
@@ -245,6 +307,10 @@ def build_daily_delivery_sheet(
     rows: list[DailyDeliveryRow] = []
     for route in routes:
         entries = people_by_route[route.key]
+        household_sizes = Counter(
+            _household_key(person, address_col, index)
+            for index, person, _breakfast, _dinner, _inactive in entries
+        )
         dinner_keys = [
             _household_key(person, address_col, index)
             for index, person, _breakfast, dinner, _inactive in entries
@@ -253,11 +319,30 @@ def build_daily_delivery_sheet(
         note_lines: list[str] = []
         seen_notes: set[str] = set()
         for _index, person, _breakfast, _dinner, inactive in entries:
+            household_key = _household_key(person, address_col, _index)
+            address = person.get(address_col, "")
+            weekly_entries = weekly_confirmation_memo_entries(
+                person.get(note_col, ""), target
+            )
+            for memo_entry in weekly_entries:
+                line = _note_line(
+                    address,
+                    memo_entry,
+                    set(),
+                    household_sizes[household_key],
+                )
+                if line and line not in seen_notes:
+                    seen_notes.add(line)
+                    note_lines.append(line)
+
             affected = inactive & {MealType.BREAKFAST, MealType.DINNER}
             if not affected:
                 continue
             line = _note_line(
-                person.get(address_col, ""), person.get(note_col, ""), affected
+                address,
+                person.get(note_col, ""),
+                affected,
+                household_sizes[household_key],
             )
             if line and line not in seen_notes:
                 seen_notes.add(line)

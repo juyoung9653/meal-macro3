@@ -5,7 +5,6 @@ from pathlib import Path
 
 import pytest
 from openpyxl import load_workbook
-
 from src.generators.daily_delivery_generator import (
     build_daily_delivery_sheet,
     build_delivery_routes,
@@ -14,6 +13,7 @@ from src.generators.daily_delivery_generator import (
     prepare_daily_delivery_people,
     resolve_delivery_assignment,
     select_delivery_dates,
+    weekly_confirmation_memo_entries,
 )
 
 TEMPLATE_PATH = Path("assets/일일배송템플릿.xlsx")
@@ -199,6 +199,33 @@ class TestDailyAggregation:
             {"주소": "C"},
         ]
         assert format_household_distribution(people, "주소") == "3*1/2*1/1*1"
+
+    def test_confirmation_memos_are_filtered_to_the_sheet_week(self):
+        note = "석식: 6/13~6/15\n조식: 6/21~6/22\n일반 메모"
+
+        assert weekly_confirmation_memo_entries(note, date(2026, 6, 12)) == [
+            "석식: 6/13~6/15"
+        ]
+        assert weekly_confirmation_memo_entries(note, date(2026, 6, 15)) == [
+            "석식: 6/13~6/15"
+        ]
+        assert weekly_confirmation_memo_entries(note, date(2026, 6, 22)) == [
+            "조식: 6/21~6/22"
+        ]
+
+    def test_route_note_shows_address_household_size_and_current_week_memo(self):
+        note = "석식: 6/13~6/15\n조식: 6/21~6/22"
+        people = [
+            _person("기사 A", "A 구역", "", "A아파트 101동", note=note),
+            _person("기사 A", "A 구역", "", "A아파트 101동", note=note),
+        ]
+
+        sheet = _build(people, date(2026, 6, 12))
+
+        assert sheet.rows[0].note == (
+            "A아파트 101동(2명) 석식: 6/13~6/15"
+        )
+        assert "6/21" not in sheet.rows[0].note
 
 
 class TestDateRange:

@@ -113,7 +113,7 @@ class DailyDeliveryTab(QWidget):
         data_layout.addLayout(meal_row)
 
         note_row = QHBoxLayout()
-        note_row.addWidget(QLabel("비고 컬럼(선택):"))
+        note_row.addWidget(QLabel("비고/메모 컬럼(선택):"))
         self.note_combo = QComboBox()
         self.note_combo.setMinimumWidth(180)
         self.note_combo.currentIndexChanged.connect(self._save_settings)
@@ -130,6 +130,11 @@ class DailyDeliveryTab(QWidget):
         )
         priority_guide.setStyleSheet("color: #555;")
         data_layout.addWidget(priority_guide)
+        memo_guide = QLabel(
+            "비고는 '석식: 6/13~6/15' 형식 중 각 날짜 시트의 주차와 겹치는 항목만 표시합니다."
+        )
+        memo_guide.setStyleSheet("color: #555;")
+        data_layout.addWidget(memo_guide)
         layout.addWidget(data_group)
 
         date_group = QGroupBox("② 생성할 날짜 범위")
@@ -454,7 +459,9 @@ class DailyDeliveryTab(QWidget):
             if saved_note in columns
             else mapped_note
             if mapped_note in columns
-            else self._find_column(columns, ["학기중 비고", "비고", "특이사항"])
+            else self._find_column(
+                columns, ["학기중 비고", "비고", "메모", "특이사항"]
+            )
         )
         if driver:
             self.driver_combo.setCurrentIndex(self.driver_combo.findData(driver))
