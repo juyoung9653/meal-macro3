@@ -4,6 +4,8 @@ import csv
 import io
 import os
 import re
+from collections.abc import Callable
+from typing import Any, ClassVar
 
 import msoffcrypto
 from PyQt6.QtWidgets import (
@@ -20,7 +22,15 @@ from ..core.settings import get_settings
 class RosterParser:
     """Pure parser: raw rows → (headers, data). No UI dependencies."""
 
-    DEFAULT_NAME_KEYWORDS = ["성명", "이름", "성함", "학생명", "학생", "name", "Name"]
+    DEFAULT_NAME_KEYWORDS: ClassVar[list[str]] = [
+        "성명",
+        "이름",
+        "성함",
+        "학생명",
+        "학생",
+        "name",
+        "Name",
+    ]
 
     def __init__(self, name_keywords: list[str] | None = None):
         self._name_keywords = name_keywords
@@ -34,7 +44,9 @@ class RosterParser:
         if not rows:
             return [], []
 
-        raw_headers = [str(c) for c in rows[0]]
+        kw = name_keywords if name_keywords is not None else self._name_keywords
+        header_index = RosterParser._find_header_row(rows, kw)
+        raw_headers = [str(c) for c in rows[header_index]]
         headers = []
         seen: dict[str, int] = {}
         for h in raw_headers:
@@ -48,11 +60,10 @@ class RosterParser:
                 seen[h] = 1
             headers.append(h)
 
-        kw = name_keywords if name_keywords is not None else self._name_keywords
         name_idx = RosterParser._resolve_name_col(raw_headers, name_keywords=kw)
 
         data = []
-        for row in rows[1:]:
+        for row in rows[header_index + 1 :]:
             vals = [str(c) for c in row]
             name_val = vals[name_idx] if name_idx < len(vals) else ""
             if not RosterParser._is_name(name_val):
@@ -64,6 +75,23 @@ class RosterParser:
             data.append(entry)
 
         return headers, data
+
+    @staticmethod
+    def _find_header_row(
+        rows: list[list], name_keywords: list[str] | None = None
+    ) -> int:
+        """앞부분에서 이름 컬럼이 있는 실제 헤더 행을 찾고 없으면 첫 행을 쓴다."""
+
+        keywords = name_keywords or RosterParser.DEFAULT_NAME_KEYWORDS
+        for row_index, row in enumerate(rows[:20]):
+            for column in row:
+                value = str(column).strip()
+                if any(
+                    value == keyword or value.startswith(keyword)
+                    for keyword in keywords
+                ):
+                    return row_index
+        return 0
 
     @staticmethod
     def _col_letter(idx: int) -> str:
@@ -106,12 +134,9 @@ class FileReader:
     """Pure file I/O: path ŌåÆ raw rows. Handles Excel/CSV/TXT formats."""
 
     @staticmethod
-    def read_excel(path: str, password: str | None = None) -> list[list] | None:
-        """Read Excel file, optionally with password. Returns raw rows or None on failure.
-
-        Returns None only when the file is password-protected and no (correct) password
-        was provided. Other I/O errors propagate as exceptions.
-        """
+    def _open_excel(
+        path: str, password: str | None = None
+    ) -> CalamineWorkbook | None:
         try:
             if password:
                 with open(path, "rb") as f:
@@ -120,12 +145,46 @@ class FileReader:
                     buf = io.BytesIO()
                     off.decrypt(buf)
                 buf.seek(0)
-                wb = CalamineWorkbook.from_filelike(buf)
             else:
-                wb = CalamineWorkbook.from_path(path)
+                return CalamineWorkbook.from_path(path)
         except PasswordError:
             return None
-        sheet = wb.get_sheet_by_index(0)
+        return CalamineWorkbook.from_filelike(buf)
+
+    @staticmethod
+    def list_excel_sheets(
+        path: str, password: str | None = None
+    ) -> list[str] | None:
+        """워크북 시트명을 순서대로 반환한다.
+
+        암호가 필요하거나 틀리면 ``None``을 반환한다.
+        """
+
+        wb = FileReader._open_excel(path, password)
+        return None if wb is None else list(wb.sheet_names)
+
+    @staticmethod
+    def read_excel(
+        path: str,
+        password: str | None = None,
+        sheet_name: str | None = None,
+    ) -> list[list] | None:
+        """선택한 Excel 시트를 읽는다. 시트 미지정 시 첫 시트를 사용한다.
+
+        암호가 필요하거나 틀리면 ``None``을 반환하고, 그 밖의 I/O 오류는
+        호출자에게 전달한다.
+        """
+
+        wb = FileReader._open_excel(path, password)
+        if wb is None:
+            return None
+        if sheet_name is not None and sheet_name not in wb.sheet_names:
+            raise ValueError(f"시트 '{sheet_name}'을(를) 찾을 수 없습니다.")
+        sheet = (
+            wb.get_sheet_by_name(sheet_name)
+            if sheet_name is not None
+            else wb.get_sheet_by_index(0)
+        )
         return list(sheet.iter_rows())
 
     @staticmethod
@@ -151,10 +210,29 @@ class RosterLoader:
         self.roster_headers: list[str] = []
         self.roster_data: list[dict] = []
         self._parser = RosterParser()  # instance kept for method call consistency
+        self._excel_passwords: dict[str, str] = {}
 
     # ── Public API ──
 
-    def load(self, path: str) -> tuple[list[str], list[dict]] | None:
+    def list_sheets(self, path: str) -> list[str] | None:
+        """Excel 파일의 시트 목록을 반환하고 암호는 현재 실행 중에 재사용한다."""
+
+        ext = os.path.splitext(path)[1].lower()
+        if ext not in (".xlsx", ".xls", ".xlsb", ".ods"):
+            return []
+        try:
+            result = self._run_excel_operation(
+                path,
+                lambda password: FileReader.list_excel_sheets(path, password),
+            )
+            return list(result) if result is not None else None
+        except Exception as error:  # noqa: BLE001 - UI 경계에서 대화상자로 변환
+            QMessageBox.critical(self._parent, "오류", f"시트 목록 읽기 실패:\n{error}")
+            return None
+
+    def load(
+        self, path: str, sheet_name: str | None = None
+    ) -> tuple[list[str], list[dict]] | None:
         """파일 로드 ŌåÆ (headers, data) 또는 None (실패 시 에러 대화상자 표시)."""
         ext = os.path.splitext(path)[1].lower()
         try:
@@ -164,7 +242,7 @@ class RosterLoader:
             self._parser = RosterParser(name_keywords=name_keywords)
 
             if ext in (".xlsx", ".xls", ".xlsb", ".ods"):
-                raw = self._load_excel(path)
+                raw = self._load_excel(path, sheet_name)
                 if raw is None:
                     return None
                 headers, data = self._parser.parse(raw)
@@ -187,7 +265,7 @@ class RosterLoader:
             else:
                 QMessageBox.warning(self._parent, "알림", f"지원하지 않는 형식: {ext}")
                 return None
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - UI 경계에서 대화상자로 변환
             QMessageBox.critical(self._parent, "오류", f"파일 읽기 실패:\n{e}")
             return None
 
@@ -201,16 +279,17 @@ class RosterLoader:
 
     # ── 내부 UI 로직 ──
 
-    def _load_excel(self, path: str) -> list[list] | None:
+    def _load_excel(
+        self, path: str, sheet_name: str | None = None
+    ) -> list[list] | None:
         """Load Excel with UI for password prompts."""
-        raw = FileReader.read_excel(path)
-        if raw is not None:
-            return raw
-        # Password-protected: prompt user
-        pw = self._prompt_password()
-        if pw is None:
-            return None
-        return self._open_encrypted(path, pw)
+        result = self._run_excel_operation(
+            path,
+            lambda password: FileReader.read_excel(
+                path, password=password, sheet_name=sheet_name
+            ),
+        )
+        return result if isinstance(result, list) else None
 
     # ── 암호 해제 ──
 
@@ -222,36 +301,49 @@ class RosterLoader:
         dlg.resize(300, 120)
         return dlg.textValue().strip() if dlg.exec() else None
 
-    def _open_encrypted(self, path: str, password: str) -> list[list] | None:
-        """Retry loop: try password, show warning on failure, re-prompt up to 10 times."""
+    def _run_excel_operation(
+        self,
+        path: str,
+        operation: Callable[[str | None], Any | None],
+    ) -> Any | None:
+        """암호 입력 재시도를 포함해 Excel 조회 작업 하나를 실행한다."""
+
+        cached_password = self._excel_passwords.get(path)
+        try:
+            result = operation(cached_password)
+        except Exception as error:
+            if cached_password is None or not self._is_password_error(error):
+                raise
+            result = None
+        if result is not None:
+            return result
+
+        password = self._prompt_password()
         attempts = 0
         max_attempts = 10
-        while attempts < max_attempts:
+        while password is not None and attempts < max_attempts:
             try:
-                raw = FileReader.read_excel(path, password)
-            except Exception as e:
-                msg = str(e).lower()
-                if "password" in msg or "key" in msg or "wrong" in msg:
-                    QMessageBox.warning(
-                        self._parent, "암호 오류", "암호가 올바르지 않습니다."
-                    )
-                    pw = self._prompt_password()
-                    if pw is None:
-                        return None
-                    password = pw
-                    attempts += 1
-                    continue
-                raise
-            if raw is not None:
-                return raw
-            # read_excel returned None → PasswordError (wrong password)
+                result = operation(password)
+            except Exception as error:
+                if not self._is_password_error(error):
+                    raise
+                result = None
+            if result is not None:
+                self._excel_passwords[path] = password
+                return result
             QMessageBox.warning(self._parent, "암호 오류", "암호가 올바르지 않습니다.")
-            pw = self._prompt_password()
-            if pw is None:
-                return None
-            password = pw
             attempts += 1
+            if attempts >= max_attempts:
+                break
+            password = self._prompt_password()
+        if password is None:
+            return None
         QMessageBox.warning(
             self._parent, "암호 오류", "최대 재시도 횟수를 초과했습니다."
         )
         return None
+
+    @staticmethod
+    def _is_password_error(error: Exception) -> bool:
+        message = str(error).lower()
+        return any(word in message for word in ("password", "key", "wrong"))

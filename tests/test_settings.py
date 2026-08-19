@@ -1,8 +1,6 @@
 """Tests for src.core.settings — SettingsManager, get/set, defaults, deep_merge."""
 
-import pytest
-
-from src.core.settings import DEFAULTS, SettingsManager, get_settings, save_settings
+from src.core.settings import DEFAULTS, SettingsManager, get_settings
 
 from .conftest import make_settings_manager
 
@@ -37,6 +35,10 @@ class TestTypedAccessors:
     def test_get_confirm_template_path(self):
         sm = make_settings_manager()
         assert sm.get_confirm_template_path() == "assets/확인서템플릿.xlsx"
+
+    def test_get_daily_delivery_template_path(self):
+        sm = make_settings_manager()
+        assert sm.get_daily_delivery_template_path() == "assets/일일배송템플릿.xlsx"
 
     def test_get_template_sheet_name(self):
         sm = make_settings_manager()
@@ -108,6 +110,12 @@ class TestTypedAccessors:
         sm = make_settings_manager()
         assert "{year:04d}" in sm.get_invoice_output_filename_format()
 
+    def test_get_daily_delivery_output_filename_format(self):
+        sm = make_settings_manager()
+        fmt = sm.get_daily_delivery_output_filename_format()
+        assert "{start:%Y%m%d}" in fmt
+        assert "{end:%Y%m%d}" in fmt
+
     def test_get_semantic_columns(self):
         sm = make_settings_manager()
         cols = sm.get_semantic_columns()
@@ -133,6 +141,7 @@ class TestSettingsDefaults:
         assert "templates" in DEFAULTS
         assert "confirm" in DEFAULTS
         assert "invoice" in DEFAULTS
+        assert "daily_delivery" in DEFAULTS
         assert "roster" in DEFAULTS
         assert "semantic_columns" in DEFAULTS
         assert "flag_fields" in DEFAULTS

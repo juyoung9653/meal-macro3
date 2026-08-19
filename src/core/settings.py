@@ -52,6 +52,10 @@ DEFAULTS: dict[str, Any] = {
     "invoice": {
         "output_filename_format": "청구서_{year:04d}{month:02d}.xlsx",
     },
+    "daily_delivery": {
+        "output_filename_format": "일일배송_{start:%Y%m%d}_{end:%Y%m%d}.xlsx",
+        "template_path": "assets/일일배송템플릿.xlsx",
+    },
     "roster": {
         "name_keywords": ["성명", "이름", "성함", "학생명", "학생", "name", "Name"],
         "preview_name_kw": ["성명", "이름", "성함"],
@@ -120,7 +124,7 @@ class SettingsManager:
         schedule = s.get("schedule")  # 전체 dict
     """
 
-    _instance: "SettingsManager | None" = None
+    _instance: SettingsManager | None = None
 
     def __init__(self):
         self._data: dict = copy.deepcopy(DEFAULTS)
@@ -302,6 +306,24 @@ class SettingsManager:
             )
         )
 
+    def get_daily_delivery_output_filename_format(self) -> str:
+        return str(
+            self.get(
+                "daily_delivery",
+                "output_filename_format",
+                default="일일배송_{start:%Y%m%d}_{end:%Y%m%d}.xlsx",
+            )
+        )
+
+    def get_daily_delivery_template_path(self) -> str:
+        return str(
+            self.get(
+                "daily_delivery",
+                "template_path",
+                default="assets/일일배송템플릿.xlsx",
+            )
+        )
+
     def get_semantic_columns(self) -> dict:
         return dict(self.get("semantic_columns", default={}))
 
@@ -316,7 +338,6 @@ class SettingsManager:
 
 def get_settings() -> SettingsManager:
     """싱글턴 SettingsManager 반환 (최초 호출 시 자동 로드)."""
-    global SettingsManager
     if SettingsManager._instance is None:
         SettingsManager._instance = SettingsManager()
         SettingsManager._instance.load()

@@ -3,12 +3,14 @@
 import calendar
 import logging
 import os
-from datetime import date
+from datetime import date, datetime
+from typing import ClassVar
 
 from PyQt6.QtCore import QDate, QSettings, Qt, QUrl
 from PyQt6.QtGui import QDesktopServices, QTextCharFormat
 from PyQt6.QtWidgets import (
     QCalendarWidget,
+    QComboBox,
     QDialog,
     QFileDialog,
     QGroupBox,
@@ -24,12 +26,14 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from ..core.invoice_data import InvoiceData
 from ..core.settings import get_settings
+from ..generators.daily_delivery_generator import prepare_daily_delivery_people
 from ..services.holiday_fetcher import get_kr_holidays
 from ..services.invoice_controller import InvoiceController
 from ..services.lunch_data import LunchRoster, LunchSchoolEntry, parse_lunch_boolean
 from ..services.lunch_parser import parse_lunch_note
-from ..services.roster_loader import RosterLoader
+from ..services.roster_loader import FileReader, RosterLoader
 from ..templates.config import auto_detect_semantic_columns, read_template_columns
 from .lunch_mapping_dialog import LunchMappingDialog
 from .mapping_dialog import MappingDialog
@@ -41,6 +45,7 @@ class InvoiceTab(QWidget):
     """청구서 생성 탭 (명단 임포트 포함) — UI 전용, 로직은 Controller/Loader 위임."""
 
     MAX_RESULT_ROWS = 10
+    EXCEL_EXTENSIONS: ClassVar[set[str]] = {".xlsx", ".xls", ".xlsb", ".ods"}
 
     def __init__(self):
         super().__init__()
@@ -56,6 +61,9 @@ class InvoiceTab(QWidget):
         self._lunch_roster: LunchRoster | None = None
         self._lunch_mapping: dict = {}
         self._lunch_file_path: str = ""
+        self._lunch_sheet_name: str = ""
+        self._roster_file_path: str = ""
+        self._roster_sheet_name: str = ""
         self._last_output_path: str | None = None
         self._setup_ui()
         self._restore_ui_state()
@@ -76,7 +84,15 @@ class InvoiceTab(QWidget):
         self.mapping_btn = QPushButton("컬럼 매핑")
         self.mapping_btn.setEnabled(False)
         self.mapping_btn.clicked.connect(self._open_mapping)
+        self.roster_sheet_combo = QComboBox()
+        self.roster_sheet_combo.setMinimumWidth(150)
+        self.roster_sheet_combo.setEnabled(False)
+        self.roster_sheet_combo.currentIndexChanged.connect(
+            self._on_roster_sheet_changed
+        )
         import_layout.addWidget(self.file_label, stretch=1)
+        import_layout.addWidget(QLabel("시트:"))
+        import_layout.addWidget(self.roster_sheet_combo)
         import_layout.addWidget(self.select_btn)
         import_layout.addWidget(self.mapping_btn)
         layout.addWidget(import_group)
@@ -91,7 +107,15 @@ class InvoiceTab(QWidget):
         self.lunch_mapping_btn = QPushButton("중식 컬럼 매핑")
         self.lunch_mapping_btn.setEnabled(False)
         self.lunch_mapping_btn.clicked.connect(self._open_lunch_mapping)
+        self.lunch_sheet_combo = QComboBox()
+        self.lunch_sheet_combo.setMinimumWidth(150)
+        self.lunch_sheet_combo.setEnabled(False)
+        self.lunch_sheet_combo.currentIndexChanged.connect(
+            self._on_lunch_sheet_changed
+        )
         lunch_layout.addWidget(self.lunch_file_label, stretch=1)
+        lunch_layout.addWidget(QLabel("시트:"))
+        lunch_layout.addWidget(self.lunch_sheet_combo)
         lunch_layout.addWidget(self.lunch_file_btn)
         lunch_layout.addWidget(self.lunch_mapping_btn)
         layout.addWidget(lunch_group)
@@ -99,16 +123,17 @@ class InvoiceTab(QWidget):
         # ── 청구 기준 ──
         config_group = QGroupBox("② 청구 기준")
         config_row = QHBoxLayout(config_group)
+        today = datetime.now().astimezone().date()
 
         config_row.addWidget(QLabel("귀속 연월:"))
         self.year_spin = QSpinBox()
         self.year_spin.setRange(2020, 2030)
-        self.year_spin.setValue(date.today().year)
+        self.year_spin.setValue(today.year)
         config_row.addWidget(self.year_spin)
         config_row.addWidget(QLabel("년"))
         self.month_spin = QSpinBox()
         self.month_spin.setRange(1, 12)
-        self.month_spin.setValue(date.today().month)
+        self.month_spin.setValue(today.month)
         config_row.addWidget(self.month_spin)
         config_row.addWidget(QLabel("월"))
         config_row.addSpacing(20)
@@ -205,6 +230,106 @@ class InvoiceTab(QWidget):
 
     # ── 명단 파일 로드 ──
 
+    @staticmethod
+    def _populate_sheet_combo(
+        combo: QComboBox, sheet_names: list[str], preferred: str = ""
+    ) -> str:
+        combo.blockSignals(True)
+        combo.clear()
+        if not sheet_names:
+            combo.addItem("(해당 없음)")
+            combo.setEnabled(False)
+            selected = ""
+        else:
+            combo.addItems(sheet_names)
+            index = combo.findText(preferred) if preferred else 0
+            combo.setCurrentIndex(max(index, 0))
+            combo.setEnabled(True)
+            selected = combo.currentText()
+        combo.blockSignals(False)
+        return selected
+
+    def _apply_roster_result(
+        self,
+        path: str,
+        sheet_name: str,
+        result: tuple[list[str], list[dict]],
+        *,
+        invalidate_generated: bool = True,
+    ):
+        headers, data = result
+        if invalidate_generated:
+            self._controller.invoices.clear()
+            self.result_table.setRowCount(0)
+            self._last_output_path = None
+            self.open_file_btn.setEnabled(False)
+        self._roster_file_path = path
+        self._roster_sheet_name = sheet_name
+        self._controller.set_roster_headers(headers)
+        self._controller.set_roster_path(path)
+        self.file_label.setText(os.path.basename(path))
+        self.file_label.setStyleSheet("color: #000;")
+        self._settings.setValue("roster/last_path", path)
+        self._settings.setValue("roster/last_sheet", sheet_name)
+        self._settings.sync()
+        has_data = bool(data)
+        self.mapping_btn.setEnabled(has_data)
+        self.generate_btn.setEnabled(has_data)
+        if has_data and (invalidate_generated or not self._controller.invoices):
+            sheet_text = f" (시트: {sheet_name})" if sheet_name else ""
+            self.info_label.setText(
+                f"명단 {len(data)}명 로드됨{sheet_text}. 컬럼 매핑 → 생성"
+            )
+
+    def _load_roster_path(
+        self,
+        path: str,
+        preferred_sheet: str = "",
+        *,
+        invalidate_generated: bool = True,
+    ) -> bool:
+        is_excel = os.path.splitext(path)[1].lower() in self.EXCEL_EXTENSIONS
+        sheet_name = ""
+        if is_excel:
+            sheet_names = self._loader.list_sheets(path)
+            if sheet_names is None:
+                return False
+            if not sheet_names:
+                QMessageBox.warning(self, "알림", "선택한 파일에 시트가 없습니다.")
+                return False
+            sheet_name = self._populate_sheet_combo(
+                self.roster_sheet_combo, sheet_names, preferred_sheet
+            )
+        else:
+            self._populate_sheet_combo(self.roster_sheet_combo, [])
+
+        result = self._loader.load(path, sheet_name=sheet_name or None)
+        if not result:
+            return False
+        self._apply_roster_result(
+            path,
+            sheet_name,
+            result,
+            invalidate_generated=invalidate_generated,
+        )
+        return True
+
+    def _on_roster_sheet_changed(self, index: int):
+        if index < 0 or not self._roster_file_path:
+            return
+        sheet_name = self.roster_sheet_combo.currentText()
+        if not sheet_name or sheet_name == self._roster_sheet_name:
+            return
+        result = self._loader.load(self._roster_file_path, sheet_name=sheet_name)
+        if result:
+            self._apply_roster_result(self._roster_file_path, sheet_name, result)
+            return
+
+        self.roster_sheet_combo.blockSignals(True)
+        previous_index = self.roster_sheet_combo.findText(self._roster_sheet_name)
+        self.roster_sheet_combo.setCurrentIndex(previous_index)
+        self.roster_sheet_combo.blockSignals(False)
+
     def _select_file(self):
         path, _ = QFileDialog.getOpenFileName(
             self,
@@ -213,24 +338,66 @@ class InvoiceTab(QWidget):
             "지원 파일 (*.xlsx *.xls *.csv *.txt);;Excel (*.xlsx *.xls);;CSV (*.csv);;텍스트 (*.txt);;모든 파일 (*.*)",
         )
         if path:
-            result = self._loader.load(path)
-            if result:
-                headers, data = result
-                self._controller.set_roster_headers(headers)
-                self._controller.set_roster_path(path)
-                self.file_label.setText(os.path.basename(path))
-                self.file_label.setStyleSheet("color: #000;")
-                self._settings.setValue("roster/last_path", path)
-                self._settings.sync()
-                has = bool(data)
-                self.mapping_btn.setEnabled(has)
-                self.generate_btn.setEnabled(has)
-                if has:
-                    self.info_label.setText(
-                        f"명단 {len(data)}명 로드됨. 컬럼 매핑 → 생성"
-                    )
+            saved_path = str(self._settings.value("roster/last_path", "") or "")
+            preferred = (
+                str(self._settings.value("roster/last_sheet", "") or "")
+                if saved_path
+                and os.path.normcase(os.path.abspath(saved_path))
+                == os.path.normcase(os.path.abspath(path))
+                else ""
+            )
+            self._load_roster_path(path, preferred)
 
     # ── 중식 파일 로드 ──
+
+    def _configure_lunch_file(
+        self, path: str, preferred_sheet: str = "", *, persist: bool = True
+    ) -> bool:
+        try:
+            sheet_names = FileReader.list_excel_sheets(path)
+        except Exception as error:  # noqa: BLE001 - UI 경계에서 대화상자로 변환
+            QMessageBox.critical(self, "오류", f"중식 시트 목록 읽기 실패:\n{error}")
+            return False
+        if sheet_names is None:
+            QMessageBox.warning(
+                self,
+                "알림",
+                "암호로 보호된 중식 명단은 시트 선택을 지원하지 않습니다.",
+            )
+            return False
+        if not sheet_names:
+            QMessageBox.warning(self, "알림", "중식 명단에 시트가 없습니다.")
+            return False
+
+        self._lunch_file_path = path
+        self._lunch_sheet_name = self._populate_sheet_combo(
+            self.lunch_sheet_combo, sheet_names, preferred_sheet
+        )
+        self._lunch_roster = None
+        self._controller.set_lunch_roster(None, {}, path)
+        self._lunch_enabled = True
+        self.lunch_file_label.setText(os.path.basename(path))
+        self.lunch_file_label.setStyleSheet("color: #000;")
+        self.lunch_mapping_btn.setEnabled(True)
+        if persist:
+            self._settings.setValue("lunch/file_path", path)
+            self._settings.setValue("lunch/sheet_name", self._lunch_sheet_name)
+            self._settings.sync()
+        return True
+
+    def _on_lunch_sheet_changed(self, index: int):
+        if index < 0 or not self._lunch_file_path:
+            return
+        sheet_name = self.lunch_sheet_combo.currentText()
+        if not sheet_name or sheet_name == self._lunch_sheet_name:
+            return
+        self._lunch_sheet_name = sheet_name
+        self._lunch_roster = None
+        self._controller.set_lunch_roster(None, {}, self._lunch_file_path)
+        self._settings.setValue("lunch/sheet_name", sheet_name)
+        self._settings.sync()
+        if self._lunch_mapping:
+            self._reload_lunch_roster()
 
     def _select_lunch_file(self):
         """중식 명단 파일 로드. 로드 후 컬럼 매핑 버튼 활성화."""
@@ -238,14 +405,19 @@ class InvoiceTab(QWidget):
             self,
             "중식 명단 파일 선택",
             "",
-            "지원 파일 (*.xlsx *.xls *.csv *.txt);;Excel (*.xlsx *.xls);;CSV (*.csv);;텍스트 (*.txt);;모든 파일 (*.*)",
+            "Excel (*.xlsx *.xls *.xlsb *.ods);;모든 파일 (*.*)",
         )
         if path:
-            self.lunch_file_label.setText(os.path.basename(path))
-            self.lunch_file_label.setStyleSheet("color: #000;")
-            self._lunch_file_path = path
-            self._lunch_enabled = True
-            self.lunch_mapping_btn.setEnabled(True)
+            saved_path = str(self._settings.value("lunch/file_path", "") or "")
+            preferred = (
+                str(self._settings.value("lunch/sheet_name", "") or "")
+                if saved_path
+                and os.path.normcase(os.path.abspath(saved_path))
+                == os.path.normcase(os.path.abspath(path))
+                else ""
+            )
+            if not self._configure_lunch_file(path, preferred):
+                return
             # 저장된 매핑 있으면 자동 로드, 없으면 매핑 버튼 눌러야 함
             saved_mapping = self._settings.value("lunch/col_mapping", None)
             if saved_mapping and isinstance(saved_mapping, dict):
@@ -259,7 +431,15 @@ class InvoiceTab(QWidget):
             return
 
         # 중식 명단 전용 로딩 (RosterLoader는 이름 필터가 있어서 적합하지 않음)
-        lunch_headers, lunch_data = _load_lunch_file(self._lunch_file_path)
+        loaded = _load_lunch_file(
+            self._lunch_file_path, sheet_name=self._lunch_sheet_name or None
+        )
+        if not loaded:
+            QMessageBox.warning(
+                self, "알림", "선택한 중식 시트에서 데이터를 읽을 수 없습니다."
+            )
+            return
+        lunch_headers, lunch_data = loaded
 
         roster_headers = self._controller.get_roster_headers() or []
 
@@ -274,7 +454,7 @@ class InvoiceTab(QWidget):
                     if c not in all_tpl_cols:
                         all_tpl_cols.append(c)
             except Exception:
-                pass
+                log.debug("선택 템플릿 시트 '%s' 읽기 건너뜀", vac_sheet, exc_info=True)
 
         dlg = LunchMappingDialog(lunch_headers, roster_headers, all_tpl_cols, self)
 
@@ -305,6 +485,7 @@ class InvoiceTab(QWidget):
 
         self._settings.setValue("lunch/col_mapping", self._lunch_mapping)
         self._settings.setValue("lunch/file_path", self._lunch_file_path)
+        self._settings.setValue("lunch/sheet_name", self._lunch_sheet_name)
         self._settings.sync()
 
         log.info(
@@ -342,10 +523,13 @@ class InvoiceTab(QWidget):
             log.debug("[Lunch] 재로드 건너뜀: lunch_mapping 없음")
             return
 
-        lunch_headers, lunch_data = _load_lunch_file(self._lunch_file_path)
-        if not lunch_headers:
-            log.warning("[Lunch] 재로드 실패: 헤더 없음")
+        loaded = _load_lunch_file(
+            self._lunch_file_path, sheet_name=self._lunch_sheet_name or None
+        )
+        if not loaded:
+            log.warning("[Lunch] 재로드 실패: 선택 시트 데이터 없음")
             return
+        lunch_headers, lunch_data = loaded
 
         roster = _build_lunch_roster(
             lunch_headers,
@@ -434,6 +618,9 @@ class InvoiceTab(QWidget):
         lunch_file = self._settings.value("lunch/file_path", "")
         if lunch_file and os.path.exists(lunch_file):
             self._lunch_file_path = lunch_file
+            self._lunch_sheet_name = str(
+                self._settings.value("lunch/sheet_name", "") or ""
+            )
             self._lunch_enabled = True
             self.lunch_file_label.setText(os.path.basename(lunch_file))
             self.lunch_file_label.setStyleSheet("color: #000;")
@@ -458,20 +645,24 @@ class InvoiceTab(QWidget):
         """저장된 명단 자동 로드 (I/O 가능, 생성 후 호출)."""
         last = self._settings.value("roster/last_path", "")
         if last and os.path.exists(last):
-            self._controller.set_roster_path(last)
-            self.file_label.setText(os.path.basename(last))
-            self.file_label.setStyleSheet("color: #000;")
-            result = self._loader.load(last)
-            if result:
-                headers, data = result
-                self._controller.set_roster_headers(headers)
-                has = bool(data)
-                self.mapping_btn.setEnabled(has)
-                self.generate_btn.setEnabled(has)
+            preferred = str(
+                self._settings.value("roster/last_sheet", "") or ""
+            )
+            self._load_roster_path(
+                str(last), preferred, invalidate_generated=False
+            )
 
         # 중식명단 자동 재로드
         lunch_mapping = self._settings.value("lunch/col_mapping", None)
-        if lunch_mapping and isinstance(lunch_mapping, dict):
+        lunch_ready = bool(
+            self._lunch_file_path
+            and self._configure_lunch_file(
+                self._lunch_file_path,
+                self._lunch_sheet_name,
+                persist=False,
+            )
+        )
+        if lunch_ready and lunch_mapping and isinstance(lunch_mapping, dict):
             self._reload_lunch_roster()
 
     def post_init_load(self):
@@ -758,6 +949,10 @@ class InvoiceTab(QWidget):
         self._lunch_enabled = False
         self._lunch_roster = None
         self._lunch_mapping = {}
+        self._lunch_file_path = ""
+        self._lunch_sheet_name = ""
+        self._controller.set_lunch_roster(None, {}, "")
+        self._populate_sheet_combo(self.lunch_sheet_combo, [])
         self.lunch_file_label.setText("불러오지 않음")
         self.lunch_file_label.setStyleSheet("color: #888;")
         self.lunch_mapping_btn.setEnabled(False)
@@ -785,8 +980,70 @@ class InvoiceTab(QWidget):
     def get_roster_path(self):
         return self._controller.get_roster_path()
 
+    @staticmethod
+    def _find_roster_column(headers: list[str], candidates: list[str]) -> str:
+        for candidate in candidates:
+            if candidate in headers:
+                return candidate
+        for candidate in candidates:
+            for header in headers:
+                if candidate in header:
+                    return header
+        return ""
+
+    def _daily_delivery_mapping(self) -> dict:
+        """현재 명단에 유효한 조식·석식·비고 매핑을 반환한다."""
+
+        mapping = self.get_col_mapping()
+        headers = self.get_roster_headers()
+        search_terms = self._s.get_flag_search_terms()
+        for key in ("__breakfast", "__dinner", "__note"):
+            selected = str(mapping.get(key, "") or "")
+            if selected not in headers:
+                selected = self._find_roster_column(
+                    headers, list(search_terms.get(key, [key]))
+                )
+            mapping[key] = selected
+        return mapping
+
+    def get_daily_delivery_data(self) -> InvoiceData:
+        """청구서를 만들지 않아도 현재 명단으로 일일배송 데이터를 만든다."""
+
+        mapping = self._daily_delivery_mapping()
+        roster_data = self._loader.roster_data
+        if roster_data:
+            breakfast_col = mapping.get("__breakfast", "")
+            dinner_col = mapping.get("__dinner", "")
+            note_col = mapping.get("__note", "")
+            stop_col = next(
+                (
+                    header
+                    for header in self.get_roster_headers()
+                    if "중지" in header or "중단" in header
+                ),
+                None,
+            )
+            daily_people = prepare_daily_delivery_people(
+                roster_data,
+                breakfast_col=breakfast_col,
+                dinner_col=dinner_col,
+                note_col=note_col,
+                stop_col=stop_col or "",
+            )
+        else:
+            daily_people = list(self.get_invoices())
+
+        return InvoiceData(
+            invoices=daily_people,
+            col_mapping=mapping,
+            year=self.get_year(),
+            month=self.get_month(),
+            excluded_dates=self.get_excluded_dates(),
+            roster_headers=self.get_roster_headers(),
+            roster_path=self.get_roster_path(),
+        )
+
     def get_invoice_data(self):
-        from ..core.invoice_data import InvoiceData
 
         return InvoiceData(
             invoices=self.get_invoices(),
@@ -802,23 +1059,20 @@ class InvoiceTab(QWidget):
 # ── 모듈 레벨 헬퍼 ──
 
 
-def _load_lunch_file(file_path: str) -> tuple[list[str], list[dict]] | None:
+def _load_lunch_file(
+    file_path: str, sheet_name: str | None = None
+) -> tuple[list[str], list[dict]] | None:
     """중식 명단 파일을 이름 필터 없이 로드. 타이틀 행 자동 감지."""
-    import re
-
-    from python_calamine import CalamineWorkbook
-
     ext = os.path.splitext(file_path)[1].lower()
     if ext not in (".xlsx", ".xls", ".xlsb", ".ods"):
         return None
 
     try:
-        wb = CalamineWorkbook.from_path(file_path)
-    except Exception:
+        rows = FileReader.read_excel(file_path, sheet_name=sheet_name)
+    except Exception:  # noqa: BLE001 - 읽기 실패를 호출자용 None으로 변환
         return None
-
-    sheet = wb.get_sheet_by_index(0)
-    rows = list(sheet.iter_rows())
+    if rows is None:
+        return None
     if len(rows) < 2:
         return None
 

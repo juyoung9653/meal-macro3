@@ -146,6 +146,18 @@ class TestParse:
         assert data[0] == {"성명": "홍길동", "학교명": "분당초"}
         assert data[1] == {"성명": "김철수", "학교명": "수내초"}
 
+    def test_detects_header_below_title_row(self, parser):
+        rows = [
+            ["2026-06-12", "배송 기사별 명단"],
+            ["연번", "학생", "관할동", "주소"],
+            [1, "이*인", "백현동", "백현 401동"],
+        ]
+        headers, data = parser.parse(rows)
+        assert headers == ["연번", "학생", "관할동", "주소"]
+        assert data == [
+            {"연번": "1", "학생": "이*인", "관할동": "백현동", "주소": "백현 401동"}
+        ]
+
     def test_filters_non_name_rows(self, parser):
         rows = [
             ["성명", "학교명"],
