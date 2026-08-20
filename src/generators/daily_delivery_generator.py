@@ -348,16 +348,16 @@ def build_daily_delivery_sheet(
                 seen_notes.add(line)
                 note_lines.append(line)
 
-        rows.append(
-            DailyDeliveryRow(
-                route=route,
-                breakfast=sum(1 for _i, _p, bf, _dn, _x in entries if bf),
-                dinner=sum(1 for _i, _p, _bf, dn, _x in entries if dn),
-                dinner_packages=_format_distribution(dinner_keys),
-                note="\n".join(note_lines),
-                _dinner_household_keys=dinner_keys,
-            )
+        row = DailyDeliveryRow(
+            route=route,
+            breakfast=sum(1 for _i, _p, bf, _dn, _x in entries if bf),
+            dinner=sum(1 for _i, _p, _bf, dn, _x in entries if dn),
+            dinner_packages=_format_distribution(dinner_keys),
+            note="\n".join(note_lines),
+            _dinner_household_keys=dinner_keys,
         )
+        if row.breakfast or row.dinner:
+            rows.append(row)
 
     active_unmatched = [entry for entry in unmatched if entry[2] or entry[3]]
     if active_unmatched:
@@ -497,7 +497,8 @@ def _fill_daily_sheet(ws, sheet: DailyDeliverySheet):
         cell._style = copy(style)
         cell.value = None
 
-    ws.cell(data_start, 1, district_label)
+    if rows:
+        ws.cell(data_start, 1, district_label)
     ws.cell(total_row, 1, total_label)
     ws["A1"] = sheet.delivery_date
 
@@ -546,10 +547,14 @@ def _fill_daily_sheet(ws, sheet: DailyDeliverySheet):
         )
 
     # 합계 행
-    ws.cell(total_row, 4, f"=SUM(D{data_start}:D{data_end})")
-    ws.cell(total_row, 5, f"=SUM(E{data_start}:E{data_end})")
-    ws.cell(total_row, 6, f"=SUM(F{data_start}:F{data_end})")
-    ws.cell(total_row, 8, f"=SUM(H{data_start}:H{data_end})")
+    if rows:
+        ws.cell(total_row, 4, f"=SUM(D{data_start}:D{data_end})")
+        ws.cell(total_row, 5, f"=SUM(E{data_start}:E{data_end})")
+        ws.cell(total_row, 6, f"=SUM(F{data_start}:F{data_end})")
+        ws.cell(total_row, 8, f"=SUM(H{data_start}:H{data_end})")
+    else:
+        for column in (4, 5, 6, 8):
+            ws.cell(total_row, column, 0)
     ws.merge_cells(start_row=total_row, start_column=1, end_row=total_row, end_column=3)
     ws.print_area = f"A1:I{total_row}"
     ws.auto_filter.ref = None

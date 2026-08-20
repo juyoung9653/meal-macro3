@@ -186,8 +186,27 @@ class TestDailyAggregation:
         before = _build(people, date(2026, 5, 2))
         active = _build(people, date(2026, 5, 3))
 
-        assert (before.rows[0].breakfast, before.rows[0].dinner) == (0, 0)
+        assert before.rows == []
+        assert (before.breakfast_total, before.dinner_total) == (0, 0)
         assert (active.rows[0].breakfast, active.rows[0].dinner) == (1, 1)
+
+    def test_route_without_any_delivery_count_is_omitted(self):
+        people = [
+            _person("기사 A", "배송 구역", "", "주소 1"),
+            _person(
+                "기사 A",
+                "중지 구역",
+                "",
+                "주소 2",
+                note="5/2 일시중지",
+            ),
+        ]
+
+        sheet = _build(people, date(2026, 5, 2))
+
+        assert [(row.route.region, row.breakfast, row.dinner) for row in sheet.rows] == [
+            ("배송 구역", 1, 1)
+        ]
 
     def test_household_distribution_uses_same_address(self):
         people = [
@@ -334,3 +353,41 @@ def test_make_daily_delivery_rejects_all_zero_meal_columns(tmp_path):
         )
 
     assert not output.exists()
+
+
+def test_make_daily_delivery_renders_totals_only_when_date_has_no_deliveries(
+    tmp_path,
+):
+    output = tmp_path / "daily-empty.xlsx"
+    people = [
+        _person(
+            "기사 A",
+            "A 구역",
+            "",
+            "주소",
+            note="5/4 일시중지",
+        )
+    ]
+
+    results = make_daily_delivery(
+        people,
+        [date(2026, 5, 4)],
+        str(output),
+        template_path=str(TEMPLATE_PATH),
+        driver_col="기사",
+        region_primary_col="1순위",
+        address_col="주소",
+    )
+
+    assert results[0].rows == []
+    workbook = load_workbook(output, data_only=False)
+    worksheet = workbook["26.05.04"]
+    assert worksheet.max_row == 4
+    assert worksheet["A4"].value == "합계"
+    assert [worksheet.cell(4, column).value for column in (4, 5, 6, 8)] == [
+        0,
+        0,
+        0,
+        0,
+    ]
+    assert worksheet.print_area == "'26.05.04'!$A$1:$I$4"
