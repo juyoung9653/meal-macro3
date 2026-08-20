@@ -13,6 +13,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QMessageBox,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
@@ -40,6 +41,7 @@ class MappingFieldDef:
             this field's combo box lives in.
         source_index: Index into ``headers_list`` whose headers are used for
             this field's combo box.
+        required: Whether the dialog must have a selected source column.
     """
 
     key: str
@@ -48,6 +50,7 @@ class MappingFieldDef:
     search_terms: list[str] = field(default_factory=list)
     combo_column: int = 0
     source_index: int = 0
+    required: bool = False
 
 
 @dataclass
@@ -170,7 +173,8 @@ class BaseMappingDialog(QDialog):
         table.insertRow(row)
 
         # Label cell
-        label_item = QTableWidgetItem(field.label)
+        label = f"{field.label} *" if field.required else field.label
+        label_item = QTableWidgetItem(label)
         label_item.setFlags(label_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
         table.setItem(row, 0, label_item)
 
@@ -217,6 +221,20 @@ class BaseMappingDialog(QDialog):
 
     def _accept(self):
         """Validate and accept the dialog."""
+        missing = [
+            row_def.label
+            for row_def in self._rows
+            if isinstance(row_def, MappingFieldDef)
+            and row_def.required
+            and not self._combo_map[row_def.key].currentData()
+        ]
+        if missing:
+            QMessageBox.warning(
+                self,
+                "필수 컬럼 선택",
+                "다음 필수 컬럼을 선택하세요:\n" + ", ".join(missing),
+            )
+            return
         self.accept()
 
     # ── Internal helpers ───────────────────────────────────────────

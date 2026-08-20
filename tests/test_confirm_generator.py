@@ -1,5 +1,7 @@
 """확인서 대상자 동일인 병합 테스트."""
 
+import pytest
+
 from src.generators.confirm_generator import _merge_confirm_people
 
 
@@ -57,3 +59,20 @@ def test_confirm_does_not_merge_when_birthdate_is_missing():
     ]
 
     assert len(_merge_confirm_people(people, {})) == 2
+
+
+@pytest.mark.parametrize(
+    "alternate_birthdate",
+    ["100102", "100102-3******", "100102-3123456"],
+)
+def test_confirm_merges_common_birthdate_formats(alternate_birthdate):
+    people = [
+        {"성명": "홍길동", "생년월일": "2010-01-02", "_breakfast": 1},
+        {"성명": "홍 길동", "생년월일": alternate_birthdate, "_lunch": 1},
+    ]
+
+    merged = _merge_confirm_people(people, {})
+
+    assert len(merged) == 1
+    assert merged[0]["_breakfast"] == 1
+    assert merged[0]["_lunch"] == 1

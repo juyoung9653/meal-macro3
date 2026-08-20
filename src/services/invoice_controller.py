@@ -9,6 +9,7 @@ from typing import Any
 
 from PyQt6.QtWidgets import QMessageBox, QWidget
 
+from ..core.identity import normalize_birthdate, normalize_identity_name
 from ..core.meal_types import MealType
 from ..generators.invoice_generator import make_invoice
 from ..templates.config import auto_detect_semantic_columns
@@ -143,28 +144,30 @@ def _canonicalize_person(
     canonical = dict(person)
     for template_column in template_columns:
         source_column = str(mapping.get(template_column, "") or "")
-        if source_column:
+        if source_column and source_column in person:
             canonical[template_column] = person.get(source_column, "")
     return canonical
 
 
-def _normalize_identity_value(value: Any) -> str:
-    return re.sub(r"\s+", "", str(value or "")).casefold()
-
-
-def _normalize_birthdate(value: Any) -> str:
-    raw = str(value or "").strip()
-    digits = re.sub(r"\D", "", raw)
-    if len(digits) >= 8:
-        return digits[:8]
-    return digits or _normalize_identity_value(raw)
+def _missing_mapping_fields(
+    mapping: dict,
+    headers: list[str],
+    required_fields: tuple[str, ...],
+) -> list[str]:
+    header_set = set(headers)
+    return [
+        field_name
+        for field_name in required_fields
+        if not (source_column := str(mapping.get(field_name, "") or ""))
+        or source_column not in header_set
+    ]
 
 
 def _person_identity(person: dict) -> tuple[str, str] | None:
     """이름과 생년월일이 모두 있을 때만 동일인 키를 만든다."""
 
-    name = _normalize_identity_value(person.get("성명", ""))
-    birthdate = _normalize_birthdate(person.get("생년월일", ""))
+    name = normalize_identity_name(person.get("성명", ""))
+    birthdate = normalize_birthdate(person.get("생년월일", ""))
     if not name or not birthdate:
         return None
     return name, birthdate
@@ -293,22 +296,54 @@ class InvoiceService:
         if not roster_data and not lunch_rows:
             return InvoiceResult(success=False, error="명단 데이터가 없습니다.")
 
+        if separate_lunch_roster and lunch_rows:
+            lunch_map = lunch_person_mapping or {}
+            missing_fields = _missing_mapping_fields(
+                lunch_map,
+                lunch_person_headers or [],
+                ("성명", "생년월일", "학교명"),
+            )
+            if missing_fields:
+                return InvoiceResult(
+                    success=False,
+                    error=(
+                        "중식 명단 컬럼 매핑을 확인하세요.\n"
+                        "필수 항목: " + ", ".join(missing_fields)
+                    ),
+                )
+            if roster_data:
+                main_missing_fields = _missing_mapping_fields(
+                    col_mapping,
+                    roster_headers,
+                    ("성명", "생년월일"),
+                )
+                if main_missing_fields:
+                    return InvoiceResult(
+                        success=False,
+                        error=(
+                            "조식·석식 명단 컬럼 매핑을 확인하세요.\n"
+                            "중식 명단과 동일인을 합치기 위한 필수 항목: "
+                            + ", ".join(main_missing_fields)
+                        ),
+                    )
+
         warnings: list[InvoiceWarning] = []
-        schedule_available = lunch_roster is not None
+        schedule_available = bool(
+            lunch_roster is not None and getattr(lunch_roster, "entries", [])
+        )
         is_vacation_month = bool(
             lunch_roster and lunch_roster.is_vacation_month(year, month)
         )
         lunch_warned: set[str] = set()
+        missing_school_count = 0
 
         if separate_lunch_roster and lunch_rows and not schedule_available:
-            warnings.append(
-                InvoiceWarning(
-                    code="school_schedule_not_loaded",
-                    message=(
-                        "중식 명단은 불러왔지만 학교별 방학 일정이 없습니다.\n"
-                        "중식 배송 건수는 0으로 처리됩니다."
-                    ),
-                )
+            return InvoiceResult(
+                success=False,
+                error=(
+                    "학교별 방학 일정이 없거나 유효한 일정이 0건입니다.\n"
+                    "일정 파일의 학교명·시작일·종료일 컬럼을 확인하세요."
+                ),
             )
 
         def apply_lunch(
@@ -316,6 +351,8 @@ class InvoiceService:
             source_person: dict,
             source_mapping: dict,
         ) -> tuple[int, list[str], str, str]:
+            nonlocal missing_school_count
+
             if not schedule_available or lunch_roster is None:
                 return 0, [], "", ""
 
@@ -325,6 +362,10 @@ class InvoiceService:
                     lunch_mapping.get("roster_school_col", "") or ""
                 )
                 school_name = str(source_person.get(legacy_school_col, "") or "").strip()
+
+            if not school_name:
+                missing_school_count += 1
+                return 0, [], "", ""
 
             entry = lunch_roster.find_school(school_name)
             if entry is None:
@@ -455,6 +496,18 @@ class InvoiceService:
                 enriched_rows.append(canonical)
 
         enriched = _merge_people_by_identity(enriched_rows)
+
+        if missing_school_count:
+            warnings.append(
+                InvoiceWarning(
+                    code="missing_school_name",
+                    message=(
+                        f"학교명이 비어 있는 중식 대상자가 {missing_school_count}명 있습니다.\n"
+                        "해당 대상자의 중식 배송 건수는 0으로 처리됩니다."
+                    ),
+                    details={"count": missing_school_count},
+                )
+            )
 
         if lunch_warned and is_vacation_month:
             school_list = "\n".join(f"  • {name}" for name in sorted(lunch_warned))

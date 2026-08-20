@@ -40,6 +40,34 @@ from .mapping_dialog import MappingDialog
 
 log = logging.getLogger(__name__)
 
+_LUNCH_PERSON_REQUIRED_KEYS = ("성명", "생년월일", "학교명")
+_SCHEDULE_REQUIRED_KEYS = ("school_name_col", "start_date_col", "end_date_col")
+
+
+def _sanitize_column_mapping(mapping: dict, headers: list[str]) -> dict:
+    """현재 파일에 없는 예전 컬럼 선택값을 비운다."""
+
+    header_set = set(headers)
+    sanitized: dict = {}
+    for key, value in mapping.items():
+        selected = str(value or "")
+        is_output_mapping = key.startswith("__calc_") or key in {
+            "__delivery_start",
+            "__delivery_end",
+        }
+        sanitized[key] = selected if is_output_mapping or selected in header_set else ""
+    return sanitized
+
+
+def _has_required_mapping(
+    mapping: dict,
+    headers: list[str],
+    required_keys: tuple[str, ...],
+) -> bool:
+    header_set = set(headers)
+    selected_columns = [str(mapping.get(key, "") or "") for key in required_keys]
+    return all(selected and selected in header_set for selected in selected_columns)
+
 
 class InvoiceTab(QWidget):
     """청구서 생성 탭 (명단 임포트 포함) — UI 전용, 로직은 Controller/Loader 위임."""
@@ -318,6 +346,10 @@ class InvoiceTab(QWidget):
         self._roster_sheet_name = sheet_name
         self._controller.set_roster_headers(headers)
         self._controller.set_roster_path(path)
+        current_mapping = _sanitize_column_mapping(
+            self._controller.get_col_mapping(), headers
+        )
+        self._controller.set_col_mapping(current_mapping)
         self.file_label.setText(os.path.basename(path))
         self.file_label.setStyleSheet("color: #000;")
         self._settings.setValue("roster/last_path", path)
@@ -421,6 +453,9 @@ class InvoiceTab(QWidget):
         self.open_file_btn.setEnabled(False)
         self._lunch_person_file_path = path
         self._lunch_person_sheet_name = sheet_name
+        self._lunch_person_mapping = _sanitize_column_mapping(
+            self._lunch_person_mapping, headers
+        )
         self.lunch_person_file_label.setText(os.path.basename(path))
         self.lunch_person_file_label.setStyleSheet("color: #000;")
         self.lunch_person_mapping_btn.setEnabled(bool(data))
@@ -513,15 +548,14 @@ class InvoiceTab(QWidget):
             self,
             title="중식 명단 컬럼 매핑",
             flag_keys=("__note",),
+            required_keys=_LUNCH_PERSON_REQUIRED_KEYS,
             info_text=(
                 "중식 명단의 개인정보 컬럼을 청구서 필드에 연결하세요. "
                 "이 명단의 모든 행은 중식 대상으로 계산됩니다."
             ),
         )
-        if self._lunch_person_mapping:
-            dlg.set_values(self._lunch_person_mapping)
-        else:
-            dlg._reset_defaults()
+        dlg._reset_defaults()
+        dlg.set_values(self._lunch_person_mapping)
         if not dlg.exec():
             return
 
@@ -608,6 +642,7 @@ class InvoiceTab(QWidget):
             if not self._configure_lunch_file(path, preferred):
                 return
             # 저장된 매핑 있으면 자동 로드, 없으면 매핑 버튼 눌러야 함
+            self._lunch_mapping = {}
             saved_mapping = self._settings.value(
                 "school_schedule/col_mapping", None
             )
@@ -634,12 +669,11 @@ class InvoiceTab(QWidget):
         lunch_headers, lunch_data = loaded
 
         dlg = LunchMappingDialog(lunch_headers, self)
+        dlg._reset_defaults()
 
         saved = self._settings.value("school_schedule/col_mapping", None)
         if saved and isinstance(saved, dict):
-            dlg.set_values(saved)
-        else:
-            dlg._reset_defaults()
+            dlg.set_values(_sanitize_column_mapping(saved, lunch_headers))
 
         if not dlg.exec():
             return
@@ -653,6 +687,16 @@ class InvoiceTab(QWidget):
             self._lunch_file_path,
             self.year_spin.value(),
         )
+        if lunch_data and not roster.entries:
+            QMessageBox.warning(
+                self,
+                "일정 확인",
+                (
+                    "선택한 컬럼에서 유효한 학교 일정을 찾지 못했습니다.\n"
+                    "학교명·시작일·종료일의 값과 날짜 형식을 확인하세요."
+                ),
+            )
+            return
 
         self._lunch_roster = roster
         self._controller.set_lunch_roster(
@@ -679,17 +723,17 @@ class InvoiceTab(QWidget):
             f"학교별 방학 일정 {len(roster.entries)}개를 불러왔습니다.",
         )
 
-    def _reload_lunch_roster(self):
+    def _reload_lunch_roster(self) -> bool:
         """저장된 매핑으로 중식명단 재로드 (프로그램 재시작 시 자동 복원)."""
         if not self._lunch_file_path:
             log.debug("[Lunch] 재로드 건너뜀: lunch_file_path 없음")
-            return
+            return False
         if not os.path.exists(self._lunch_file_path):
             log.warning("[Lunch] 재로드 실패: 파일 없음 — %s", self._lunch_file_path)
-            return
+            return False
         if not self._lunch_mapping:
             log.debug("[Lunch] 재로드 건너뜀: lunch_mapping 없음")
-            return
+            return False
 
         loaded = self._schedule_loader.load(
             self._lunch_file_path,
@@ -698,8 +742,18 @@ class InvoiceTab(QWidget):
         )
         if not loaded:
             log.warning("[Lunch] 재로드 실패: 선택 시트 데이터 없음")
-            return
+            return False
         lunch_headers, lunch_data = loaded
+        self._lunch_mapping = _sanitize_column_mapping(
+            self._lunch_mapping, lunch_headers
+        )
+        if not _has_required_mapping(
+            self._lunch_mapping, lunch_headers, _SCHEDULE_REQUIRED_KEYS
+        ):
+            self._lunch_roster = None
+            self._controller.set_lunch_roster(None, {}, self._lunch_file_path)
+            log.warning("[Lunch] 재로드 중단: 현재 시트와 저장된 컬럼 매핑이 다름")
+            return False
 
         roster = _build_lunch_roster(
             lunch_headers,
@@ -708,6 +762,11 @@ class InvoiceTab(QWidget):
             self._lunch_file_path,
             self.year_spin.value(),
         )
+        if lunch_data and not roster.entries:
+            self._lunch_roster = None
+            self._controller.set_lunch_roster(None, {}, self._lunch_file_path)
+            log.warning("[Lunch] 재로드 중단: 유효한 학교 일정이 0건")
+            return False
 
         self._lunch_roster = roster
         self._controller.set_lunch_roster(
@@ -718,6 +777,7 @@ class InvoiceTab(QWidget):
             len(roster.entries),
             os.path.basename(self._lunch_file_path),
         )
+        return True
 
     # ── 설정 저장/복원 ──
 
@@ -874,6 +934,7 @@ class InvoiceTab(QWidget):
             )
         )
         if lunch_ready and lunch_mapping and isinstance(lunch_mapping, dict):
+            self._lunch_mapping = lunch_mapping
             self._reload_lunch_roster()
 
     def post_init_load(self):
@@ -971,14 +1032,10 @@ class InvoiceTab(QWidget):
             self,
             title="조식·석식 명단 컬럼 매핑",
             flag_keys=("__breakfast", "__dinner", "__note"),
+            required_keys=("성명", "생년월일"),
         )
+        dlg._reset_defaults()
         dlg.set_values(self._controller.get_col_mapping())
-        if not any(
-            v
-            for k, v in self._controller.get_col_mapping().items()
-            if k in self._all_template_columns
-        ):
-            dlg._reset_defaults()
         if dlg.exec():
             mapping = dlg.get_values()
             _sem = auto_detect_semantic_columns(self._all_template_columns)

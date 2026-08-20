@@ -69,6 +69,10 @@ class LunchRoster:
         """학교명(축약 또는 전체명)으로 중식 명단 항목 찾기. 부분일치 + difflib fallback."""
         import difflib
 
+        school_name = str(school_name or "").strip()
+        if not school_name:
+            return None
+
         # 1. 축약형 직접 매칭
         for entry in self.entries:
             if entry.school_name == school_name:

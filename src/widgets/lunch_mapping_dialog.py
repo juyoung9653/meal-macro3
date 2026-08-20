@@ -40,6 +40,7 @@ class LunchMappingDialog(BaseMappingDialog):
                     label=label,
                     tooltip=tooltip,
                     search_terms=search_terms,
+                    required=True,
                 )
             )
 

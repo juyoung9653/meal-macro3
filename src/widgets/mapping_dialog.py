@@ -25,11 +25,12 @@ class MappingDialog(BaseMappingDialog):
         title: str = "컬럼 매핑 설정",
         flag_keys: tuple[str, ...] | None = None,
         info_text: str | None = None,
+        required_keys: tuple[str, ...] = (),
     ):
         roster_headers = [h.strip() for h in roster_headers if h.strip()]
         self._custom_info_text = info_text
 
-        rows = self._build_rows(template_columns, flag_keys)
+        rows = self._build_rows(template_columns, flag_keys, required_keys)
         super().__init__(
             title=title,
             rows=rows,
@@ -41,7 +42,9 @@ class MappingDialog(BaseMappingDialog):
 
     @staticmethod
     def _build_rows(
-        template_columns: list[str], flag_keys: tuple[str, ...] | None = None
+        template_columns: list[str],
+        flag_keys: tuple[str, ...] | None = None,
+        required_keys: tuple[str, ...] = (),
     ) -> list:
         s = get_settings()
         flag_fields = s.get_flag_fields()
@@ -59,6 +62,7 @@ class MappingDialog(BaseMappingDialog):
                     key=col,
                     label=col,
                     search_terms=[col],
+                    required=col in required_keys,
                 )
             )
 

@@ -1,12 +1,12 @@
 """확인서 생성기 — 템플릿 채우기 (배송일 계산은 delivery_calculator 위임)."""
 
 import os
-import re
 from copy import copy
 from datetime import date
 
 import openpyxl
 
+from ..core.identity import normalize_birthdate, normalize_identity_name
 from ..core.meal_types import MealType
 from ..core.settings import get_settings
 from ..excel.excel_utils import (
@@ -33,12 +33,8 @@ def _mapped_value(person: dict, col_mapping: dict, semantic_name: str):
 
 
 def _confirm_identity(person: dict, col_mapping: dict) -> tuple[str, str] | None:
-    name = re.sub(
-        r"\s+", "", str(_mapped_value(person, col_mapping, "성명") or "")
-    ).casefold()
-    birth_raw = str(_mapped_value(person, col_mapping, "생년월일") or "").strip()
-    birth_digits = re.sub(r"\D", "", birth_raw)
-    birth = birth_digits[:8] if len(birth_digits) >= 8 else birth_digits
+    name = normalize_identity_name(_mapped_value(person, col_mapping, "성명"))
+    birth = normalize_birthdate(_mapped_value(person, col_mapping, "생년월일"))
     if not name or not birth:
         return None
     return name, birth
