@@ -18,6 +18,8 @@ class LunchSchoolEntry:
 
     school_name: str  # "검단초" (축약형)
     school_type: str = ""  # "초", "중", "고", "특수", "기타"
+    start_date: date | None = None  # 중식 배송 시작일 (포함)
+    end_date: date | None = None  # 중식 배송 종료일 (포함)
     vacation_date: date | None = None  # 방학식 일자
     opening_date: date | None = None  # 개학식 일자
     vacation_meal: bool = False  # 방학식 급식 제공 여부
@@ -31,6 +33,28 @@ class LunchSchoolEntry:
     all_grades_excluded_opening: bool = False
     special_schedules: list[dict] = field(default_factory=list)
     # special_schedules: [{"start": date, "end": date, "meals": bool, "note": str}, ...]
+
+    def effective_range(self) -> tuple[date | None, date | None]:
+        """실제 중식 배송 시작일과 종료일을 반환한다.
+
+        새 3컬럼 일정은 시작일·종료일을 그대로 사용한다. 예전 방학식/개학식
+        모델로 생성된 객체는 기존의 +1일/-1일 규칙을 유지한다.
+        """
+
+        if self.start_date is not None or self.end_date is not None:
+            return self.start_date, self.end_date
+
+        effective_start = (
+            self.vacation_date + timedelta(days=1)
+            if self.vacation_meal and self.vacation_date
+            else None
+        )
+        effective_end = (
+            self.opening_date - timedelta(days=1)
+            if self.opening_meal and self.opening_date
+            else None
+        )
+        return effective_start, effective_end
 
 
 @dataclass
@@ -104,19 +128,18 @@ class LunchRoster:
         )
 
         for entry in self.entries:
-            if not entry.vacation_meal and not entry.opening_meal:
+            if (
+                entry.start_date is None
+                and entry.end_date is None
+                and not entry.vacation_meal
+                and not entry.opening_meal
+            ):
                 _log.debug(
                     "[VacCheck] %s: meal 둘 다 False → 건너뜀", entry.school_name
                 )
                 continue
 
-            eff_start: date | None = None
-            eff_end: date | None = None
-
-            if entry.vacation_meal and entry.vacation_date:
-                eff_start = entry.vacation_date + timedelta(days=1)
-            if entry.opening_meal and entry.opening_date:
-                eff_end = entry.opening_date - timedelta(days=1)
+            eff_start, eff_end = entry.effective_range()
 
             if eff_start is None:
                 eff_start = month_start
@@ -149,8 +172,6 @@ class LunchRoster:
 
 def _shorten_school_name(name: str) -> str:
     """학교명 축약: '분당초등학교' → '분당초', '구미중학교' → '구미중'."""
-    import re
-
     suffixes = [
         "초등학교",
         "중학교",

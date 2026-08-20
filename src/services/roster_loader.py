@@ -231,15 +231,18 @@ class RosterLoader:
             return None
 
     def load(
-        self, path: str, sheet_name: str | None = None
+        self,
+        path: str,
+        sheet_name: str | None = None,
+        name_keywords: list[str] | None = None,
     ) -> tuple[list[str], list[dict]] | None:
         """파일 로드 ŌåÆ (headers, data) 또는 None (실패 시 에러 대화상자 표시)."""
         ext = os.path.splitext(path)[1].lower()
         try:
-            name_keywords = get_settings().get(
+            effective_name_keywords = name_keywords or get_settings().get(
                 "roster", "name_keywords", default=RosterParser.DEFAULT_NAME_KEYWORDS
             )
-            self._parser = RosterParser(name_keywords=name_keywords)
+            self._parser = RosterParser(name_keywords=effective_name_keywords)
 
             if ext in (".xlsx", ".xls", ".xlsb", ".ods"):
                 raw = self._load_excel(path, sheet_name)

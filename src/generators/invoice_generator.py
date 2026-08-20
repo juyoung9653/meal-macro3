@@ -64,6 +64,9 @@ def _map_person_to_row(
         roster_key = mapping.get(col, "")
         if col == "연번":
             row_data[col] = seq
+        elif col in person:
+            # 서로 다른 원본 명단을 템플릿 기준 키로 정규화한 값 우선
+            row_data[col] = person.get(col, "")
         elif roster_key:
             row_data[col] = person.get(roster_key, "")
     return row_data
@@ -111,6 +114,7 @@ def _fill_invoice_sheet(
     unit_price_dinner: int,
     unit_price_lunch: int,
     excluded_dates: set[date] | None = None,
+    provider_name: str = "",
 ) -> int:
     """단일 시트에 people 데이터를 채운다. 작성 건수 반환."""
     template_columns = read_template_columns(template_path, sheet_name=sheet_name)
@@ -138,6 +142,10 @@ def _fill_invoice_sheet(
         lunch_cnt = person.get("_lh_cnt", 0)
 
         row_data = _map_person_to_row(person, col_mapping, i + 1, template_columns)
+
+        # GUI에서 입력한 하나의 제공기관 값을 모든 행에 동일하게 적용
+        if "제공기관" in col_idx_map:
+            row_data["제공기관"] = provider_name
 
         # 식사 건수: 시트에 해당 컬럼이 있을 때만 기록
         if bf_col in col_idx_map:
@@ -269,6 +277,7 @@ def make_invoice(
     unit_price_lunch: int,
     excluded_dates: set[date] | None = None,
     is_vacation_month: bool = False,
+    provider_name: str = "",
 ):
     """roster_data → 청구서템플릿 다중 시트 채워서 output_path 에 저장.
 
@@ -323,6 +332,7 @@ def make_invoice(
             unit_price_dinner,
             unit_price_lunch,
             excluded_dates,
+            provider_name,
         )
         _fill_invoice_sheet(
             wb,
@@ -336,6 +346,7 @@ def make_invoice(
             unit_price_dinner,
             unit_price_lunch,
             excluded_dates,
+            provider_name,
         )
         total_count = _fill_invoice_sheet(
             wb,
@@ -349,6 +360,7 @@ def make_invoice(
             unit_price_dinner,
             unit_price_lunch,
             excluded_dates,
+            provider_name,
         )
 
         _rename_sheets(wb, "방학_")
@@ -373,6 +385,7 @@ def make_invoice(
             unit_price_dinner,
             unit_price_lunch,
             excluded_dates,
+            provider_name,
         )
         total_count = _fill_invoice_sheet(
             wb,
@@ -386,6 +399,7 @@ def make_invoice(
             unit_price_dinner,
             unit_price_lunch,
             excluded_dates,
+            provider_name,
         )
 
         _rename_sheets(wb, "학기_")

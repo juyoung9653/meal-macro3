@@ -1,6 +1,7 @@
 """확인서 생성기 — 템플릿 채우기 (배송일 계산은 delivery_calculator 위임)."""
 
 import os
+import re
 from copy import copy
 from datetime import date
 
@@ -20,6 +21,77 @@ from ..services.delivery_calculator import (
     week_date_str,
 )
 from ..templates.template_scanner import scan_placeholders, validate_placeholders
+
+
+def _mapped_value(person: dict, col_mapping: dict, semantic_name: str):
+    """정규화된 공통 키를 우선하고 없을 때 원본 매핑을 사용한다."""
+
+    if semantic_name in person:
+        return person.get(semantic_name, "")
+    source_column = col_mapping.get(semantic_name, semantic_name)
+    return person.get(source_column, "")
+
+
+def _confirm_identity(person: dict, col_mapping: dict) -> tuple[str, str] | None:
+    name = re.sub(
+        r"\s+", "", str(_mapped_value(person, col_mapping, "성명") or "")
+    ).casefold()
+    birth_raw = str(_mapped_value(person, col_mapping, "생년월일") or "").strip()
+    birth_digits = re.sub(r"\D", "", birth_raw)
+    birth = birth_digits[:8] if len(birth_digits) >= 8 else birth_digits
+    if not name or not birth:
+        return None
+    return name, birth
+
+
+def _merge_confirm_people(roster_data: list[dict], col_mapping: dict) -> list[dict]:
+    """이름+생년월일이 같은 확인서 대상자를 한 사람으로 합친다."""
+
+    merged: list[dict] = []
+    positions: dict[tuple[str, str], int] = {}
+    for raw_person in roster_data:
+        person = dict(raw_person)
+        identity = _confirm_identity(person, col_mapping)
+        if identity is None or identity not in positions:
+            if identity is not None:
+                positions[identity] = len(merged)
+            merged.append(person)
+            continue
+
+        target = merged[positions[identity]]
+        for key, value in person.items():
+            if key.startswith("_"):
+                continue
+            if not str(target.get(key, "") or "").strip() and str(value or "").strip():
+                target[key] = value
+        for key in ("_breakfast", "_dinner", "_lunch"):
+            target[key] = (
+                1
+                if to_bool(target.get(key, 0)) or to_bool(person.get(key, 0))
+                else 0
+            )
+        for key in ("_bf_cnt", "_dn_cnt", "_lh_cnt"):
+            target[key] = max(
+                int(target.get(key, 0) or 0), int(person.get(key, 0) or 0)
+            )
+        notes = []
+        for note in (target.get("_note", ""), person.get("_note", "")):
+            for line in str(note or "").splitlines():
+                if line.strip() and line.strip() not in notes:
+                    notes.append(line.strip())
+        target["_note"] = "\n".join(notes)
+        target["_lunch_dates"] = sorted(
+            {
+                str(item)
+                for item in (
+                    list(target.get("_lunch_dates", []))
+                    + list(person.get("_lunch_dates", []))
+                )
+                if str(item).strip()
+            }
+        )
+
+    return merged
 
 
 def _set_ph(ws, ph_map, key, current_row, value, tpl_anchor_map=None):
@@ -58,20 +130,17 @@ def make_confirm(
     """명단 데이터 → 확인서템플릿 채워서 단일 엑셀 파일 생성."""
     s = get_settings()
 
-    _LOOKUP = ["주소", "성명", "세대주성명", "핸드폰", "관할동"]
-    addr_col, name_col, head_col, phone_col, dong_col = (
-        col_mapping.get(k, k) for k in _LOOKUP
-    )
+    roster_data = _merge_confirm_people(roster_data, col_mapping)
 
     # 1. 주소 줄바꿈 → 공백
     for p in roster_data:
-        raw = str(p.get(addr_col, ""))
-        p[addr_col] = raw.replace("\n", " ").replace("\r", " ").strip()
+        raw = str(_mapped_value(p, col_mapping, "주소"))
+        p["주소"] = raw.replace("\n", " ").replace("\r", " ").strip()
 
     # 2. 관할동별 그룹핑
     dong_groups = {}
     for p in roster_data:
-        dong = str(p.get(dong_col, "")).strip()
+        dong = str(_mapped_value(p, col_mapping, "관할동")).strip()
         dong_groups.setdefault(dong, []).append(p)
 
     if not title_prefix:
@@ -107,7 +176,7 @@ def make_confirm(
         # 세대(주소)별 그룹핑
         hh_groups = {}
         for p in persons_in_dong:
-            addr = p.get(addr_col, "")
+            addr = _mapped_value(p, col_mapping, "주소")
             hh_groups.setdefault(addr, []).append(p)
 
         # 가구원 수 통계
@@ -243,9 +312,9 @@ def make_confirm(
             for ci, person in enumerate(members[:5]):
                 sheet_seq += 1
 
-                name = str(person.get(name_col, ""))
-                head = str(person.get(head_col, ""))
-                phone = str(person.get(phone_col, ""))
+                name = str(_mapped_value(person, col_mapping, "성명"))
+                head = str(_mapped_value(person, col_mapping, "세대주성명"))
+                phone = str(_mapped_value(person, col_mapping, "핸드폰"))
 
                 # 개인정보
                 _set_ph(
@@ -272,6 +341,21 @@ def make_confirm(
                     note_text,
                     excluded_dates,
                 )
+
+                # 청구서 계산 시 확정한 학교별 방학 범위를 주차별 중식에도 적용
+                lunch_dates: set[date] = set()
+                for raw_date in person.get("_lunch_dates", []):
+                    try:
+                        lunch_dates.add(date.fromisoformat(str(raw_date)))
+                    except ValueError:
+                        continue
+                if lunch_dates:
+                    for week_result in weekly:
+                        week_result[MealType.LUNCH] = sum(
+                            1
+                            for lunch_date in lunch_dates
+                            if week_result["start"] <= lunch_date <= week_result["end"]
+                        )
 
                 for wi, wdata in enumerate(weeks):
                     wd = (

@@ -13,6 +13,7 @@ from src.services.invoice_controller import (
     InvoiceService,
     InvoiceWarning,
 )
+from src.services.lunch_data import LunchRoster, LunchSchoolEntry
 
 
 class TestInvoiceService:
@@ -310,3 +311,102 @@ class TestInvoiceService:
             )
         )
         assert len(result.enriched) == 2
+
+    @patch("src.services.invoice_controller.get_kr_holidays", return_value=set())
+    @patch("src.services.vacation_calculator.get_kr_holidays", return_value=set())
+    @patch("src.services.invoice_controller.make_invoice")
+    @patch("src.services.invoice_controller.count_delivery_days")
+    @patch("src.services.invoice_controller.os.path.exists", return_value=True)
+    def test_separate_lunch_roster_merges_by_name_and_birthdate(
+        self,
+        mock_exists,
+        mock_count_delivery,
+        mock_make_invoice,
+        mock_vacation_holidays,
+        mock_controller_holidays,
+    ):
+        mock_count_delivery.return_value = {
+            "breakfast": 4,
+            "dinner": 0,
+            "lunch": 0,
+        }
+        mock_make_invoice.side_effect = lambda people, *_args, **_kwargs: (
+            len(people),
+            people,
+        )
+        schedule = LunchRoster(
+            entries=[
+                LunchSchoolEntry(
+                    school_name="분당초",
+                    start_date=date(2025, 6, 2),
+                    end_date=date(2025, 6, 6),
+                )
+            ]
+        )
+
+        result = InvoiceService().generate(
+            roster_data=[
+                {
+                    "이름": "홍길동",
+                    "생일": "2010-01-02",
+                    "조식여부": 1,
+                    "학교": "분당초",
+                }
+            ],
+            lunch_person_data=[
+                {
+                    "아동명": "홍길동",
+                    "생년": "2010.01.02",
+                    "소속학교": "분당초",
+                }
+            ],
+            output_path="test.xlsx",
+            year=2025,
+            month=6,
+            breakfast_price=1000,
+            dinner_price=2000,
+            lunch_price=1500,
+            template_path="template.xlsx",
+            col_mapping={
+                "성명": "이름",
+                "생년월일": "생일",
+                "학교명": "학교",
+                "__breakfast": "조식여부",
+                "__dinner": "석식여부",
+                "__note": "비고",
+            },
+            excluded_dates=set(),
+            roster_headers=["이름", "생일", "조식여부", "학교"],
+            template_columns=["성명", "생년월일", "학교명"],
+            has_lunch_file=True,
+            lunch_roster=schedule,
+            lunch_mapping={
+                "school_name_col": "학교명",
+                "start_date_col": "시작일",
+                "end_date_col": "종료일",
+            },
+            lunch_person_headers=["아동명", "생년", "소속학교"],
+            lunch_person_mapping={
+                "성명": "아동명",
+                "생년월일": "생년",
+                "학교명": "소속학교",
+                "__note": "",
+            },
+            provider_name="테스트 제공기관",
+        )
+
+        assert result.success
+        assert result.count == 1
+        assert len(result.enriched) == 1
+        assert result.enriched[0]["_bf_cnt"] == 4
+        assert result.enriched[0]["_lh_cnt"] == 5
+        assert result.enriched[0]["_lunch_dates"] == [
+            "2025-06-02",
+            "2025-06-03",
+            "2025-06-04",
+            "2025-06-05",
+            "2025-06-06",
+        ]
+        assert mock_make_invoice.call_args.kwargs["provider_name"] == (
+            "테스트 제공기관"
+        )

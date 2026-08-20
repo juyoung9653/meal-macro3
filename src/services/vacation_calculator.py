@@ -98,47 +98,72 @@ def count_lunch_vacation_days(
     return total
 
 
-def count_lunch_vacation_days_with_note(
+def get_lunch_delivery_dates_with_note(
     year: int,
     month: int,
     entry,  # LunchSchoolEntry
     grade: int = 0,
     excluded_dates: set[date] | None = None,
-) -> int:
-    """중식 방학 기간 배송일 수 계산 (비고에 따른 학년 제외 적용).
+) -> list[date]:
+    """해당 월의 실제 중식 배송일 목록을 반환한다.
 
-    entry: LunchSchoolEntry (방학/개학 일정 + 파싱된 비고)
-    grade: 학생 학년 (0 → 학년 정보 없음, 제외 로직 무시)
+    새 일정 모델의 ``start_date``/``end_date``는 양 끝 날짜를 포함한다.
+    예전 방학식/개학식 모델은 급식 여부, 학년 제외, 특수 일정 규칙을
+    그대로 적용한다.
     """
+    direct_range = entry.start_date is not None or entry.end_date is not None
     vacation_meal = entry.vacation_meal
     opening_meal = entry.opening_meal
 
     # ── 학년 제외 적용 ──
-    if grade > 0:
+    if grade > 0 and not direct_range:
         # 전학년 제외
-        if entry.all_grades_excluded_vacation:
-            vacation_meal = False
-        elif grade in entry.excluded_grades_vacation:
+        if (
+            entry.all_grades_excluded_vacation
+            or grade in entry.excluded_grades_vacation
+        ):
             vacation_meal = False
 
-        if entry.all_grades_excluded_opening:
-            opening_meal = False
-        elif grade in entry.excluded_grades_opening:
+        if (
+            entry.all_grades_excluded_opening
+            or grade in entry.excluded_grades_opening
+        ):
             opening_meal = False
 
-    # ── 기본 배송일 계산 ──
-    base_days = count_lunch_vacation_days(
-        year,
-        month,
-        entry.vacation_date,
-        entry.opening_date,
-        vacation_meal,
-        opening_meal,
-        excluded_dates,
-    )
+    if direct_range:
+        effective_start, effective_end = entry.effective_range()
+    else:
+        effective_start, effective_end = _calc_effective_range(
+            entry.vacation_date,
+            entry.opening_date,
+            vacation_meal,
+            opening_meal,
+        )
+
+    if effective_start is None and effective_end is None:
+        return []
+
+    last_day = calendar.monthrange(year, month)[1]
+    month_start = date(year, month, 1)
+    month_end = date(year, month, last_day)
+    range_start = max(effective_start or month_start, month_start)
+    range_end = min(effective_end or month_end, month_end)
+    if range_start > range_end:
+        delivery_dates: set[date] = set()
+    else:
+        blocked = set(get_kr_holidays(year)) | (excluded_dates or set())
+        schedule = _get_schedule()[MealType.LUNCH]
+        delivery_dates = set()
+        d = range_start
+        while d <= range_end:
+            if d.weekday() in schedule and d not in blocked:
+                delivery_dates.add(d)
+            d += timedelta(days=1)
 
     # ── 특수 일정 적용 ──
-    if entry.special_schedules:
+    if entry.special_schedules and not direct_range:
+        schedule = _get_schedule()[MealType.LUNCH]
+        blocked = set(get_kr_holidays(year)) | (excluded_dates or set())
         for sched in entry.special_schedules:
             sched_start = sched.get("start")
             sched_end = sched.get("end")
@@ -146,34 +171,39 @@ def count_lunch_vacation_days_with_note(
             if not sched_start or not sched_end:
                 continue
 
-            # 월과 교차
-            last_day = calendar.monthrange(year, month)[1]
-            month_start = date(year, month, 1)
-            month_end = date(year, month, last_day)
-
             if sched_start > month_end or sched_end < month_start:
                 continue
 
             r_start = max(sched_start, month_start)
             r_end = min(sched_end, month_end)
 
-            schedule = _get_schedule()[MealType.LUNCH]
-            holidays = get_kr_holidays(year)
-            blocked = set(holidays) | (excluded_dates or set())
+            d = r_start
+            while d <= r_end:
+                if d.weekday() in schedule and d not in blocked:
+                    if meals_provided:
+                        delivery_dates.add(d)
+                    else:
+                        delivery_dates.discard(d)
+                d += timedelta(days=1)
 
-            if meals_provided:
-                # 급식 제공 → 해당 기간에 배송일 추가
-                d = r_start
-                while d <= r_end:
-                    if d.weekday() in schedule and d not in blocked:
-                        base_days += 1
-                    d += timedelta(days=1)
-            else:
-                # 미급식 → 해당 기간에 배송일 제외
-                d = r_start
-                while d <= r_end:
-                    if d.weekday() in schedule and d not in blocked:
-                        base_days = max(0, base_days - 1)
-                    d += timedelta(days=1)
+    return sorted(delivery_dates)
 
-    return base_days
+
+def count_lunch_vacation_days_with_note(
+    year: int,
+    month: int,
+    entry,
+    grade: int = 0,
+    excluded_dates: set[date] | None = None,
+) -> int:
+    """중식 방학 기간 배송일 수 계산."""
+
+    return len(
+        get_lunch_delivery_dates_with_note(
+            year,
+            month,
+            entry,
+            grade=grade,
+            excluded_dates=excluded_dates,
+        )
+    )

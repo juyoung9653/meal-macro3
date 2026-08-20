@@ -75,3 +75,27 @@ def test_main_window_uses_roster_based_data_for_daily_tab():
     window.invoice_tab.get_daily_delivery_data.assert_called_once_with()
     window.invoice_tab.get_invoice_data.assert_not_called()
     window.daily_delivery_tab.set_invoice_data.assert_called_once_with(payload)
+
+
+def test_lunch_roster_is_independent_and_can_enable_invoice_generation(
+    tmp_path, monkeypatch, qapp
+):
+    ui_settings = QSettings(
+        str(tmp_path / "separate-rosters.ini"), QSettings.Format.IniFormat
+    )
+    monkeypatch.setattr(invoice_tab_module, "QSettings", lambda *_args: ui_settings)
+    monkeypatch.setattr(
+        invoice_tab_module, "get_settings", lambda: make_settings_manager()
+    )
+    tab = invoice_tab_module.InvoiceTab()
+    tab._loader.roster_data = []
+    tab._lunch_person_loader.roster_data = [
+        {"성명": "중식아동", "생년월일": "2010-01-01"}
+    ]
+
+    tab._update_generate_enabled()
+
+    assert tab.generate_btn.isEnabled()
+    assert tab.get_daily_delivery_data().invoices == []
+    assert tab.provider_name_edit.text() == "행복도시락"
+    tab.close()
