@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="급식비 정산 프로그램의 파일, 시트, 컬럼 선택 방법입니다.">
+  <title>처음 사용하기 | 급식비 정산 프로그램</title>
+  <link rel="stylesheet" href="assets/manual.css">
+  <script defer src="assets/manual.js"></script>
+</head>
+<body class="detail-page">
+  <a class="skip-link" href="#main-content">본문 바로가기</a>
+  <header class="site-header">
+    <div class="header-inner">
+      <a class="brand" href="../사용설명서.html" aria-label="사용설명서 첫 화면"><span class="brand-mark" aria-hidden="true">급식</span><span>작업 안내서<small>급식비 정산 프로그램</small></span></a>
+      <div class="header-actions"><button class="utility-button" type="button" data-font-toggle aria-pressed="false">글자 크게</button><button class="utility-button print-button" type="button" data-print>인쇄</button></div>
+    </div>
+  </header>
+  <div class="manual-shell">
+    <nav class="side-nav" aria-label="설명서 목차">
+      <strong>Manual route</strong><a href="../사용설명서.html">전체 안내</a><a href="처음사용하기.html" data-page="처음사용하기.html">처음 사용하기</a><div class="nav-divider"></div><a href="청구서.html" data-page="청구서.html">① 청구서</a><a href="확인서.html" data-page="확인서.html">② 확인서</a><a href="일일배송.html" data-page="일일배송.html">③ 일일배송</a><a href="식수현황.html" data-page="식수현황.html">④ 식수현황</a><div class="nav-divider"></div><a href="문제해결.html" data-page="문제해결.html">문제 해결</a>
+    </nav>
+    <main id="main-content">
+      <header class="page-head">
+        <p class="eyebrow">START HERE</p><h1>처음 사용하기</h1>
+        <p class="lede">파일, 시트, 컬럼의 차이만 알면 나머지는 각 탭의 순서대로 진행할 수 있습니다.</p>
+      </header>
+
+      <section aria-labelledby="basic-flow">
+        <h2 id="basic-flow">기본 조작 4단계</h2>
+        <ol class="step-list">
+          <li class="step"><h3><code>main.exe</code> 실행</h3><p>프로그램 폴더의 파일을 두 번 누릅니다.</p></li>
+          <li class="step"><h3><b>파일 탐색</b></h3><p>명단이나 일정 엑셀을 고릅니다. <code>.xlsx</code> 사용을 권장합니다.</p></li>
+          <li class="step"><h3><b>시트</b> 선택</h3><p>엑셀 아래쪽 탭과 같은 개념입니다. 실제 데이터가 있는 시트를 직접 고릅니다.</p></li>
+          <li class="step"><h3><b>컬럼 매핑</b></h3><p>프로그램 항목과 원본 엑셀의 세로 열을 연결합니다. 별표가 있는 항목은 필수입니다.</p></li>
+        </ol>
+      </section>
+
+      <section aria-labelledby="mapping">
+        <h2 id="mapping">컬럼 매핑 예시</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th scope="col">프로그램 항목</th><th scope="col">원본 파일에서 고를 수 있는 예</th></tr></thead>
+            <tbody>
+              <tr><td>성명</td><td>이름, 아동명, 학생명</td></tr>
+              <tr><td>생년월일</td><td>생년, 생일</td></tr>
+              <tr><td>학교명</td><td>학교, 소속학교</td></tr>
+              <tr><td>배송 담당</td><td>배송기사, 담당자</td></tr>
+              <tr><td>비고</td><td>학기중 비고, 메모, 특이사항</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="callout warning"><strong>자동 선택을 그대로 믿지 마세요.</strong><p>프로그램이 비슷한 이름을 먼저 골라 주지만, 각 항목이 올바른 원본 컬럼인지 확인한 뒤 <b>확인</b>을 누르세요.</p></div>
+      </section>
+
+      <section aria-labelledby="loading">
+        <h2 id="loading">명단이 0명으로 불러와질 때</h2>
+        <ul class="plain-list">
+          <li>실제 명단이 있는 시트를 골랐는지 확인합니다.</li>
+          <li>위쪽 20행 안에 <b>성명, 이름, 성함, 학생명, 학생</b> 같은 제목이 있는지 확인합니다.</li>
+          <li>이름 셀이 빈칸이나 숫자만 있는 값인지 확인합니다.</li>
+        </ul>
+      </section>
+
+      <section aria-labelledby="settings">
+        <h2 id="settings">설정은 필요할 때만</h2>
+        <p><b>파일 → 설정</b>에서 템플릿 경로와 급식별 배송 요일을 바꿀 수 있습니다. 기본 요일은 조식 금~일, 석식 월~목, 중식 월~금입니다.</p>
+        <div class="callout"><strong>일일배송 템플릿 위치</strong><p>조식·석식은 <code>assets/일일배송템플릿.xlsx</code>, 중식은 별도 파일인 <code>assets/중식일일배송템플릿.xlsx</code>를 사용합니다. 설정 화면에는 별도 선택란이 없습니다.</p></div>
+      </section>
+
+      <a class="next-page" href="청구서.html"><div><span>다음</span><strong>① 청구서 만들기</strong></div><b aria-hidden="true">→</b></a>
+    </main>
+  </div>
+  <footer class="site-footer"><p><a href="../사용설명서.html">설명서 첫 화면</a> · 처음 사용하기</p></footer>
+</body>
+</html>

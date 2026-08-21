@@ -12,13 +12,19 @@ from dataclasses import dataclass, field
 from datetime import date, timedelta
 from functools import lru_cache
 
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
+from openpyxl.cell.cell import MergedCell
 from openpyxl.styles import Side
 
 from ..core.meal_types import MealType
 from ..services.delivery_calculator import get_week_ranges, to_bool
 from ..services.holiday_fetcher import get_kr_holidays
 from ..services.note_parser import expand_note_dates
+
+DAILY_DRIVER_KEY = "_daily_driver"
+DAILY_REGION_PRIMARY_KEY = "_daily_region_primary"
+DAILY_REGION_SECONDARY_KEY = "_daily_region_secondary"
+DAILY_ADDRESS_KEY = "_daily_address"
 
 
 @dataclass(frozen=True)
@@ -38,9 +44,12 @@ class DailyDeliveryRow:
     route: DeliveryRoute
     breakfast: int = 0
     dinner: int = 0
+    lunch: int = 0
     dinner_packages: str = ""
+    lunch_packages: str = ""
     note: str = ""
     _dinner_household_keys: list[str] = field(default_factory=list, repr=False)
+    _lunch_household_keys: list[str] = field(default_factory=list, repr=False)
 
 
 @dataclass
@@ -49,6 +58,7 @@ class DailyDeliverySheet:
     rows: list[DailyDeliveryRow]
     breakfast_total: int
     dinner_total: int
+    lunch_total: int = 0
     unmatched_count: int = 0
 
 
@@ -64,14 +74,46 @@ def _text(value: object) -> str:
     return str(value).strip()
 
 
+def _lunch_delivery_dates(person: dict) -> set[str] | None:
+    raw_dates = person.get("_daily_lunch_dates")
+    if raw_dates is None:
+        raw_dates = person.get("_lunch_dates")
+    if raw_dates is None:
+        return None
+    if isinstance(raw_dates, (str, date)):
+        raw_dates = [raw_dates]
+
+    normalized: set[str] = set()
+    for value in raw_dates:
+        text = value.isoformat() if isinstance(value, date) else str(value).strip()
+        if text:
+            normalized.add(text)
+    return normalized
+
+
+def has_lunch_delivery(person: dict) -> bool:
+    """월 경계를 포함한 중식 배송일 또는 중식 대상 표시가 있는지 반환한다."""
+
+    dates = _lunch_delivery_dates(person)
+    return to_bool(person.get("_lunch", 0)) or bool(dates)
+
+
 def prepare_daily_delivery_people(
     roster_data: Iterable[dict],
     breakfast_col: str = "",
     dinner_col: str = "",
     note_col: str = "",
     stop_col: str = "",
+    driver_col: str = "",
+    region_primary_col: str = "",
+    region_secondary_col: str = "",
+    address_col: str = "",
 ) -> list[dict]:
-    """명단 원본 행에 일일배송 계산용 조식·석식·비고 값을 붙인다."""
+    """명단 행을 일일배송 계산용 공통 키로 정규화한다.
+
+    중식 명단에서 이미 만든 공통 키는 조식·석식 명단의 선택 컬럼 값이
+    비어 있을 때 보존한다.
+    """
 
     result: list[dict] = []
     for person in roster_data:
@@ -80,10 +122,25 @@ def prepare_daily_delivery_people(
             continue
         daily_person = dict(person)
         daily_person["_breakfast"] = (
-            person.get(breakfast_col, 0) if breakfast_col else 0
+            person.get(breakfast_col, 0)
+            if breakfast_col
+            else person.get("_breakfast", 0)
         )
-        daily_person["_dinner"] = person.get(dinner_col, 0) if dinner_col else 0
-        daily_person["_note"] = person.get(note_col, "") if note_col else ""
+        daily_person["_dinner"] = (
+            person.get(dinner_col, 0) if dinner_col else person.get("_dinner", 0)
+        )
+        daily_person["_note"] = (
+            person.get(note_col, "") if note_col else person.get("_note", "")
+        )
+        for stable_key, source_column in (
+            (DAILY_DRIVER_KEY, driver_col),
+            (DAILY_REGION_PRIMARY_KEY, region_primary_col),
+            (DAILY_REGION_SECONDARY_KEY, region_secondary_col),
+            (DAILY_ADDRESS_KEY, address_col),
+        ):
+            source_value = person.get(source_column, "") if source_column else ""
+            if _text(source_value):
+                daily_person[stable_key] = source_value
         result.append(daily_person)
     return result
 
@@ -164,7 +221,7 @@ def suspended_meals_on(note: object, target: date) -> set[str]:
 
 
 _MEAL_MEMO_ENTRY_RE = re.compile(
-    r"(?P<meal>조식|석식)\s*[:：]\s*"
+    r"(?P<meal>조식|석식|중식)\s*[:：]\s*"
     r"(?P<dates>(?:\d{2,4}/)?\d{1,2}/\d{1,2}"
     r"(?:\s*[~～]\s*(?:(?:\d{2,4}/)?\d{1,2}/\d{1,2}|\d{1,2}))?)"
 )
@@ -195,9 +252,11 @@ def weekly_confirmation_memo_entries(note: object, target: date) -> list[str]:
     seen: set[str] = set()
     for match in _MEAL_MEMO_ENTRY_RE.finditer(text):
         meal_label = match.group("meal")
-        meal_type = (
-            MealType.BREAKFAST if meal_label == "조식" else MealType.DINNER
-        )
+        meal_type = {
+            "조식": MealType.BREAKFAST,
+            "석식": MealType.DINNER,
+            "중식": MealType.LUNCH,
+        }[meal_label]
         date_text = re.sub(r"\s+", "", match.group("dates")).replace("～", "~")
         parseable = f"{date_text} {meal_label} 일시중지"
         overlaps = any(
@@ -247,6 +306,7 @@ def _note_line(
         for key, label in (
             (MealType.BREAKFAST, "조식"),
             (MealType.DINNER, "석식"),
+            (MealType.LUNCH, "중식"),
         )
         if key in meals
     )
@@ -270,26 +330,32 @@ def build_daily_delivery_sheet(
     region_secondary_col: str = "",
     note_col: str = "_note",
 ) -> DailyDeliverySheet:
-    """한 날짜의 기사/지역별 조식·석식 배송 수량을 계산한다."""
+    """한 날짜의 기사/지역별 조식·석식·중식 배송 수량을 계산한다."""
 
     routes, key_by_assignment = build_delivery_routes(
         roster_data, driver_col, region_primary_col, region_secondary_col
     )
     route_map = {route.key: route for route in routes}
-    people_by_route: dict[str, list[tuple[int, dict, bool, bool, set[str]]]] = {
+    people_by_route: dict[str, list[tuple[int, dict, bool, bool, bool, set[str]]]] = {
         route.key: [] for route in routes
     }
-    unmatched: list[tuple[int, dict, bool, bool, set[str]]] = []
+    unmatched: list[tuple[int, dict, bool, bool, bool, set[str]]] = []
 
     for index, person in enumerate(roster_data):
         breakfast_flag = to_bool(person.get("_breakfast", 0))
         dinner_flag = to_bool(person.get("_dinner", 0))
-        if not breakfast_flag and not dinner_flag:
+        lunch_flag = has_lunch_delivery(person)
+        if not breakfast_flag and not dinner_flag and not lunch_flag:
             continue
 
         inactive = suspended_meals_on(person.get(note_col, ""), target)
         breakfast = breakfast_flag and MealType.BREAKFAST not in inactive
         dinner = dinner_flag and MealType.DINNER not in inactive
+        lunch_dates = _lunch_delivery_dates(person)
+        if lunch_dates is None:
+            lunch = lunch_flag and MealType.LUNCH not in inactive
+        else:
+            lunch = target.isoformat() in lunch_dates and MealType.LUNCH not in inactive
 
         assignment = resolve_delivery_assignment(
             person,
@@ -298,7 +364,7 @@ def build_daily_delivery_sheet(
             region_secondary_col,
         )
         route_key = key_by_assignment.get(assignment) if assignment else None
-        item = (index, person, breakfast, dinner, inactive)
+        item = (index, person, breakfast, dinner, lunch, inactive)
         if route_key in route_map:
             people_by_route[route_key].append(item)
         else:
@@ -309,16 +375,21 @@ def build_daily_delivery_sheet(
         entries = people_by_route[route.key]
         household_sizes = Counter(
             _household_key(person, address_col, index)
-            for index, person, _breakfast, _dinner, _inactive in entries
+            for index, person, _breakfast, _dinner, _lunch, _inactive in entries
         )
         dinner_keys = [
             _household_key(person, address_col, index)
-            for index, person, _breakfast, dinner, _inactive in entries
+            for index, person, _breakfast, dinner, _lunch, _inactive in entries
             if dinner
+        ]
+        lunch_keys = [
+            _household_key(person, address_col, index)
+            for index, person, _breakfast, _dinner, lunch, _inactive in entries
+            if lunch
         ]
         note_lines: list[str] = []
         seen_notes: set[str] = set()
-        for _index, person, _breakfast, _dinner, inactive in entries:
+        for _index, person, _breakfast, _dinner, _lunch, inactive in entries:
             household_key = _household_key(person, address_col, _index)
             address = person.get(address_col, "")
             weekly_entries = weekly_confirmation_memo_entries(
@@ -335,7 +406,11 @@ def build_daily_delivery_sheet(
                     seen_notes.add(line)
                     note_lines.append(line)
 
-            affected = inactive & {MealType.BREAKFAST, MealType.DINNER}
+            affected = inactive & {
+                MealType.BREAKFAST,
+                MealType.DINNER,
+                MealType.LUNCH,
+            }
             if not affected:
                 continue
             line = _note_line(
@@ -350,32 +425,42 @@ def build_daily_delivery_sheet(
 
         row = DailyDeliveryRow(
             route=route,
-            breakfast=sum(1 for _i, _p, bf, _dn, _x in entries if bf),
-            dinner=sum(1 for _i, _p, _bf, dn, _x in entries if dn),
+            breakfast=sum(1 for _i, _p, bf, _dn, _lh, _x in entries if bf),
+            dinner=sum(1 for _i, _p, _bf, dn, _lh, _x in entries if dn),
+            lunch=sum(1 for _i, _p, _bf, _dn, lh, _x in entries if lh),
             dinner_packages=_format_distribution(dinner_keys),
+            lunch_packages=_format_distribution(lunch_keys),
             note="\n".join(note_lines),
             _dinner_household_keys=dinner_keys,
+            _lunch_household_keys=lunch_keys,
         )
-        if row.breakfast or row.dinner:
+        if row.breakfast or row.dinner or row.lunch:
             rows.append(row)
 
-    active_unmatched = [entry for entry in unmatched if entry[2] or entry[3]]
+    active_unmatched = [
+        entry for entry in unmatched if entry[2] or entry[3] or entry[4]
+    ]
     if active_unmatched:
         dinner_keys = [
             _household_key(person, address_col, index)
-            for index, person, _breakfast, dinner, _inactive in active_unmatched
+            for index, person, _breakfast, dinner, _lunch, _inactive in active_unmatched
             if dinner
+        ]
+        lunch_keys = [
+            _household_key(person, address_col, index)
+            for index, person, _breakfast, _dinner, lunch, _inactive in active_unmatched
+            if lunch
         ]
         missing_driver_count = sum(
             not _text(person.get(driver_col, ""))
-            for _index, person, _bf, _dn, _inactive in active_unmatched
+            for _index, person, _bf, _dn, _lh, _inactive in active_unmatched
         )
         missing_region_count = sum(
             not (
                 _text(person.get(region_primary_col, ""))
                 or _text(person.get(region_secondary_col, ""))
             )
-            for _index, person, _bf, _dn, _inactive in active_unmatched
+            for _index, person, _bf, _dn, _lh, _inactive in active_unmatched
         )
         reasons: list[str] = []
         if missing_driver_count:
@@ -385,11 +470,14 @@ def build_daily_delivery_sheet(
         rows.append(
             DailyDeliveryRow(
                 route=UNMATCHED_ROUTE,
-                breakfast=sum(1 for _i, _p, bf, _dn, _x in active_unmatched if bf),
-                dinner=sum(1 for _i, _p, _bf, dn, _x in active_unmatched if dn),
+                breakfast=sum(1 for _i, _p, bf, _dn, _lh, _x in active_unmatched if bf),
+                dinner=sum(1 for _i, _p, _bf, dn, _lh, _x in active_unmatched if dn),
+                lunch=sum(1 for _i, _p, _bf, _dn, lh, _x in active_unmatched if lh),
                 dinner_packages=_format_distribution(dinner_keys),
+                lunch_packages=_format_distribution(lunch_keys),
                 note="미분류: " + ", ".join(reasons),
                 _dinner_household_keys=dinner_keys,
+                _lunch_household_keys=lunch_keys,
             )
         )
 
@@ -398,6 +486,7 @@ def build_daily_delivery_sheet(
         rows=rows,
         breakfast_total=sum(row.breakfast for row in rows),
         dinner_total=sum(row.dinner for row in rows),
+        lunch_total=sum(row.lunch for row in rows),
         unmatched_count=len(active_unmatched),
     )
 
@@ -456,10 +545,69 @@ def _set_horizontal_border(cell, top: Side, bottom: Side) -> None:
     cell.border = border
 
 
-def _fill_daily_sheet(ws, sheet: DailyDeliverySheet):
-    """템플릿의 서식을 복제하면서 필요한 본문 행 수에 맞춰 값을 채운다."""
+def _copy_template_sheet(source_ws, target_wb: Workbook, title: str):
+    """서로 다른 통합문서 사이에서 템플릿 시트 서식을 복제한다."""
 
-    rows = sheet.rows
+    target_ws = target_wb.create_sheet(title)
+    for source_row in source_ws.iter_rows():
+        for source_cell in source_row:
+            target_cell = target_ws[source_cell.coordinate]
+            if not isinstance(source_cell, MergedCell):
+                target_cell.value = source_cell.value
+                if source_cell.comment is not None:
+                    target_cell.comment = copy(source_cell.comment)
+                if source_cell.hyperlink is not None:
+                    target_cell._hyperlink = copy(source_cell.hyperlink)
+            if source_cell.has_style:
+                target_cell._style = copy(source_cell._style)
+
+    for key, source_dimension in source_ws.column_dimensions.items():
+        target_dimension = target_ws.column_dimensions[key]
+        target_dimension.width = source_dimension.width
+        target_dimension.hidden = source_dimension.hidden
+        target_dimension.bestFit = source_dimension.bestFit
+        target_dimension.outlineLevel = source_dimension.outlineLevel
+        target_dimension.collapsed = source_dimension.collapsed
+
+    for key, source_dimension in source_ws.row_dimensions.items():
+        target_dimension = target_ws.row_dimensions[key]
+        target_dimension.height = source_dimension.height
+        target_dimension.hidden = source_dimension.hidden
+        target_dimension.outlineLevel = source_dimension.outlineLevel
+        target_dimension.collapsed = source_dimension.collapsed
+        target_dimension.thickTop = source_dimension.thickTop
+        target_dimension.thickBot = source_dimension.thickBot
+
+    for merged_range in source_ws.merged_cells.ranges:
+        target_ws.merge_cells(str(merged_range))
+
+    target_ws.sheet_format = copy(source_ws.sheet_format)
+    target_ws.sheet_properties = copy(source_ws.sheet_properties)
+    target_ws.page_margins = copy(source_ws.page_margins)
+    target_ws.page_setup = copy(source_ws.page_setup)
+    target_ws.print_options = copy(source_ws.print_options)
+    target_ws.oddHeader = copy(source_ws.oddHeader)
+    target_ws.oddFooter = copy(source_ws.oddFooter)
+    target_ws.evenHeader = copy(source_ws.evenHeader)
+    target_ws.evenFooter = copy(source_ws.evenFooter)
+    target_ws.firstHeader = copy(source_ws.firstHeader)
+    target_ws.firstFooter = copy(source_ws.firstFooter)
+    target_ws.freeze_panes = source_ws.freeze_panes
+    target_ws.sheet_view.showGridLines = source_ws.sheet_view.showGridLines
+    target_ws.sheet_view.zoomScale = source_ws.sheet_view.zoomScale
+    target_ws.sheet_view.zoomScaleNormal = source_ws.sheet_view.zoomScaleNormal
+    target_ws.sheet_state = source_ws.sheet_state
+    return target_ws
+
+
+def _fill_daily_sheet(ws, sheet: DailyDeliverySheet, *, lunch_only: bool = False):
+    """템플릿 서식을 복제해 학기중 또는 중식 전용 시트를 채운다."""
+
+    rows = [
+        row
+        for row in sheet.rows
+        if (row.lunch if lunch_only else row.breakfast or row.dinner)
+    ]
     data_start = 4
     data_end = data_start + len(rows) - 1
     total_row = data_end + 1
@@ -504,9 +652,18 @@ def _fill_daily_sheet(ws, sheet: DailyDeliverySheet):
 
     for row_no, row_data in enumerate(rows, start=data_start):
         ws.cell(row_no, 3, row_data.route.region)
-        ws.cell(row_no, 4, row_data.breakfast)
-        ws.cell(row_no, 5, row_data.dinner)
-        ws.cell(row_no, 7, row_data.dinner_packages)
+        if lunch_only:
+            ws.cell(row_no, 4, row_data.lunch)
+            ws.merge_cells(
+                start_row=row_no,
+                start_column=4,
+                end_row=row_no,
+                end_column=5,
+            )
+        else:
+            ws.cell(row_no, 4, row_data.breakfast)
+            ws.cell(row_no, 5, row_data.dinner)
+            ws.cell(row_no, 7, row_data.dinner_packages)
         ws.cell(row_no, 9, row_data.note)
 
     # 구청 및 기사별 병합/합계
@@ -516,11 +673,17 @@ def _fill_daily_sheet(ws, sheet: DailyDeliverySheet):
         last_row = data_start + end_idx
         driver_rows = rows[start_idx : end_idx + 1]
         ws.cell(first_row, 2, driver_rows[0].route.driver)
-        ws.cell(first_row, 6, f"=SUM(D{first_row}:D{last_row})")
-        ws.cell(first_row, 8, f"=SUM(E{first_row}:E{last_row})")
-        driver_households = [
-            key for row in driver_rows for key in row._dinner_household_keys
-        ]
+        if lunch_only:
+            ws.cell(first_row, 6, f"=SUM(D{first_row}:D{last_row})")
+            driver_households = [
+                key for row in driver_rows for key in row._lunch_household_keys
+            ]
+        else:
+            ws.cell(first_row, 6, f"=SUM(D{first_row}:D{last_row})")
+            ws.cell(first_row, 8, f"=SUM(E{first_row}:E{last_row})")
+            driver_households = [
+                key for row in driver_rows for key in row._dinner_household_keys
+            ]
         ws.cell(
             first_row, 10, _format_distribution(driver_households).replace("/", "\n")
         )
@@ -532,7 +695,22 @@ def _fill_daily_sheet(ws, sheet: DailyDeliverySheet):
                 bottom = _MEDIUM if row_no == last_row else _THIN
                 _set_horizontal_border(cell, top, bottom)
 
-        if first_row != last_row:
+        if lunch_only:
+            ws.merge_cells(
+                start_row=first_row,
+                start_column=6,
+                end_row=last_row,
+                end_column=8,
+            )
+            if first_row != last_row:
+                for col in (2, 10):
+                    ws.merge_cells(
+                        start_row=first_row,
+                        start_column=col,
+                        end_row=last_row,
+                        end_column=col,
+                    )
+        elif first_row != last_row:
             for col in (2, 6, 8, 10):
                 ws.merge_cells(
                     start_row=first_row,
@@ -548,14 +726,31 @@ def _fill_daily_sheet(ws, sheet: DailyDeliverySheet):
 
     # 합계 행
     if rows:
-        ws.cell(total_row, 4, f"=SUM(D{data_start}:D{data_end})")
-        ws.cell(total_row, 5, f"=SUM(E{data_start}:E{data_end})")
-        ws.cell(total_row, 6, f"=SUM(F{data_start}:F{data_end})")
-        ws.cell(total_row, 8, f"=SUM(H{data_start}:H{data_end})")
+        if lunch_only:
+            ws.cell(total_row, 4, f"=SUM(D{data_start}:D{data_end})")
+            ws.cell(total_row, 6, f"=SUM(F{data_start}:F{data_end})")
+        else:
+            ws.cell(total_row, 4, f"=SUM(D{data_start}:D{data_end})")
+            ws.cell(total_row, 5, f"=SUM(E{data_start}:E{data_end})")
+            ws.cell(total_row, 6, f"=SUM(F{data_start}:F{data_end})")
+            ws.cell(total_row, 8, f"=SUM(H{data_start}:H{data_end})")
     else:
-        for column in (4, 5, 6, 8):
+        for column in (4, 6) if lunch_only else (4, 5, 6, 8):
             ws.cell(total_row, column, 0)
     ws.merge_cells(start_row=total_row, start_column=1, end_row=total_row, end_column=3)
+    if lunch_only:
+        ws.merge_cells(
+            start_row=total_row,
+            start_column=4,
+            end_row=total_row,
+            end_column=5,
+        )
+        ws.merge_cells(
+            start_row=total_row,
+            start_column=6,
+            end_row=total_row,
+            end_column=8,
+        )
     ws.print_area = f"A1:I{total_row}"
     ws.auto_filter.ref = None
 
@@ -568,6 +763,7 @@ def make_daily_delivery(
     driver_col: str,
     region_primary_col: str,
     address_col: str,
+    lunch_template_path: str = "",
     region_secondary_col: str = "",
     note_col: str = "_note",
 ) -> list[DailyDeliverySheet]:
@@ -584,17 +780,22 @@ def make_daily_delivery(
         raise ValueError("담당 구역 1순위 컬럼을 선택하세요.")
     if not address_col:
         raise ValueError("세대 구분(주소) 컬럼을 선택하세요.")
-    if not any(
-        to_bool(person.get("_breakfast", 0))
-        or to_bool(person.get("_dinner", 0))
+    has_term_delivery = any(
+        to_bool(person.get("_breakfast", 0)) or to_bool(person.get("_dinner", 0))
         for person in roster_data
-    ):
+    )
+    has_lunch = any(has_lunch_delivery(person) for person in roster_data)
+    if not has_term_delivery and not has_lunch:
         raise ValueError(
-            "선택한 조식·석식 컬럼에서 대상자를 찾을 수 없습니다. "
+            "선택한 조식·석식 컬럼과 중식 명단에서 대상자를 찾을 수 없습니다. "
             "식종 컬럼과 셀 값을 확인하세요."
         )
-    if not os.path.isfile(template_path):
+    if has_term_delivery and not os.path.isfile(template_path):
         raise ValueError(f"일일배송 템플릿을 찾을 수 없습니다:\n{template_path}")
+    if has_lunch and not os.path.isfile(lunch_template_path):
+        raise ValueError(
+            f"중식 일일배송 템플릿을 찾을 수 없습니다:\n{lunch_template_path}"
+        )
 
     # 컬럼 선택 오류는 파일을 만들기 전에 한 번 검증한다.
     build_delivery_routes(
@@ -605,8 +806,9 @@ def make_daily_delivery(
     if output_dir and not os.path.isdir(output_dir):
         raise ValueError(f"출력 폴더를 찾을 수 없습니다:\n{output_dir}")
 
+    base_template_path = template_path if has_term_delivery else lunch_template_path
     try:
-        wb = load_workbook(template_path)
+        wb = load_workbook(base_template_path)
     except (OSError, ValueError) as error:
         raise ValueError(
             f"일일배송 템플릿을 읽을 수 없습니다:\n{template_path}"
@@ -617,6 +819,24 @@ def make_daily_delivery(
     template_ws = wb.worksheets[0]
     for extra_ws in list(wb.worksheets[1:]):
         wb.remove(extra_ws)
+
+    lunch_template_wb = None
+    lunch_template_ws = None
+    if has_lunch:
+        if base_template_path == lunch_template_path:
+            lunch_template_wb = wb
+            lunch_template_ws = template_ws
+        else:
+            try:
+                lunch_template_wb = load_workbook(lunch_template_path)
+            except (OSError, ValueError) as error:
+                raise ValueError(
+                    f"중식 일일배송 템플릿을 열 수 없습니다:\n{lunch_template_path}"
+                ) from error
+            if not lunch_template_wb.worksheets:
+                raise ValueError("중식 일일배송 템플릿에 시트가 없습니다.")
+            lunch_template_ws = lunch_template_wb.worksheets[0]
+
     results: list[DailyDeliverySheet] = []
     for target in unique_dates:
         sheet = build_daily_delivery_sheet(
@@ -628,13 +848,25 @@ def make_daily_delivery(
             address_col=address_col,
             note_col=note_col,
         )
-        ws = wb.copy_worksheet(template_ws)
-        ws.title = target.strftime("%y.%m.%d")
-        ws.freeze_panes = template_ws.freeze_panes
-        ws.sheet_view.showGridLines = template_ws.sheet_view.showGridLines
-        _fill_daily_sheet(ws, sheet)
-        results.append(sheet)
+        if has_term_delivery:
+            ws = wb.copy_worksheet(template_ws)
+            ws.title = target.strftime("%y.%m.%d")
+            ws.freeze_panes = template_ws.freeze_panes
+            ws.sheet_view.showGridLines = template_ws.sheet_view.showGridLines
+            _fill_daily_sheet(ws, sheet)
+        if sheet.lunch_total:
+            lunch_ws = _copy_template_sheet(
+                lunch_template_ws, wb, target.strftime("중식_%y.%m.%d")
+            )
+            _fill_daily_sheet(lunch_ws, sheet, lunch_only=True)
+        if has_term_delivery or sheet.lunch_total:
+            results.append(sheet)
+
+    if not results:
+        raise ValueError("선택한 날짜 범위에 중식 배송 건수가 없습니다.")
 
     wb.remove(template_ws)
     wb.save(output_path)
+    if lunch_template_wb is not None and lunch_template_wb is not wb:
+        lunch_template_wb.close()
     return results

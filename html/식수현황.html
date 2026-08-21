@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="선택한 달의 일자별·식종별 식수를 확인하는 방법입니다.">
+  <title>식수현황 보기 | 급식비 정산 프로그램</title>
+  <link rel="stylesheet" href="assets/manual.css">
+  <script defer src="assets/manual.js"></script>
+</head>
+<body class="detail-page">
+  <a class="skip-link" href="#main-content">본문 바로가기</a>
+  <header class="site-header"><div class="header-inner"><a class="brand" href="../사용설명서.html" aria-label="사용설명서 첫 화면"><span class="brand-mark" aria-hidden="true">급식</span><span>작업 안내서<small>급식비 정산 프로그램</small></span></a><div class="header-actions"><button class="utility-button" type="button" data-font-toggle aria-pressed="false">글자 크게</button><button class="utility-button print-button" type="button" data-print>인쇄</button></div></div></header>
+  <div class="manual-shell">
+    <nav class="side-nav" aria-label="설명서 목차"><strong>Manual route</strong><a href="../사용설명서.html">전체 안내</a><a href="처음사용하기.html" data-page="처음사용하기.html">처음 사용하기</a><div class="nav-divider"></div><a href="청구서.html" data-page="청구서.html">① 청구서</a><a href="확인서.html" data-page="확인서.html">② 확인서</a><a href="일일배송.html" data-page="일일배송.html">③ 일일배송</a><a href="식수현황.html" data-page="식수현황.html">④ 식수현황</a><div class="nav-divider"></div><a href="문제해결.html" data-page="문제해결.html">문제 해결</a></nav>
+    <main id="main-content">
+      <header class="page-head"><p class="eyebrow">TAB 04</p><h1>식수현황 보기</h1><p class="lede">선택한 달의 조식·석식·중식 수량을 날짜별 표와 월 합계로 확인합니다.</p></header>
+
+      <div class="callout"><strong>확인서와 같은 계산 기준을 사용합니다.</strong><p>급식별 배송 요일, 공휴일·배송 제외일, 비고의 일시중지, 학교별 중식 배송 기간을 반영합니다. 청구서 파일을 생성하지 않아도 현재 불러온 명단으로 조회할 수 있습니다.</p></div>
+
+      <section aria-labelledby="summary-steps">
+        <h2 id="summary-steps">조회 순서</h2>
+        <ol class="step-list">
+          <li class="step"><h3>① 청구서 탭에서 명단 준비</h3><p>조식·석식 명단의 식종·비고를 연결합니다. 중식은 중식 명단과 학교별 방학 일정까지 준비합니다.</p></li>
+          <li class="step"><h3>④ 식수현황 탭 이동</h3><p>처음에는 ① 청구서 탭에서 선택한 귀속 연월이 표시됩니다.</p></li>
+          <li class="step"><h3>조회 월 선택</h3><p>연도와 월을 바꾸면 해당 월의 명단과 일정이 즉시 다시 계산됩니다.</p></li>
+          <li class="step"><h3>표와 월 합계 확인</h3><p>매일의 조식·석식·중식·합계를 확인하고 마지막 <b>월 합계</b> 행에서 식종별 총량을 확인합니다.</p></li>
+        </ol>
+      </section>
+
+      <section aria-labelledby="summary-columns">
+        <h2 id="summary-columns">표 읽는 법</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th scope="col">열</th><th scope="col">내용</th></tr></thead>
+            <tbody>
+              <tr><td>일자·요일</td><td>선택 월의 1일부터 말일까지 모두 표시</td></tr>
+              <tr><td>조식·석식·중식</td><td>해당 날짜에 실제 제공할 식종별 인원 수</td></tr>
+              <tr><td>합계</td><td>그 날짜의 세 식종 수량 합계</td></tr>
+              <tr><td>월 합계</td><td>선택 월 전체의 식종별 수량과 총합</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section aria-labelledby="summary-notes">
+        <h2 id="summary-notes">비고 입력 예시</h2>
+        <p><code>17일 중지 19일 배송</code>은 19일부터 배송을 재개한다는 뜻입니다. 따라서 선택한 달의 <b>17일과 18일만 일시중지</b>하고 19일 수량은 다시 포함합니다. <code>8/17 석식 중지 8/19 배송</code>처럼 식종을 적으면 석식에만 적용됩니다.</p>
+      </section>
+
+      <section aria-labelledby="summary-checks">
+        <h2 id="summary-checks">수량이 예상과 다를 때</h2>
+        <ul class="plain-list">
+          <li>① 청구서 탭의 식종·비고 컬럼 매핑을 확인합니다.</li>
+          <li>중식은 학교명과 학교별 시작일·종료일이 정확히 연결됐는지 확인합니다.</li>
+          <li>공휴일과 ① 청구서 탭의 배송 제외일은 해당 날짜 수량에서 빠집니다.</li>
+          <li>수량이 없는 날도 월의 흐름을 확인할 수 있도록 0으로 표시됩니다.</li>
+        </ul>
+      </section>
+
+      <a class="next-page" href="문제해결.html"><div><span>수량 또는 명단 문제</span><strong>문제 해결</strong></div><b aria-hidden="true">→</b></a>
+    </main>
+  </div>
+  <footer class="site-footer"><p><a href="../사용설명서.html">설명서 첫 화면</a> · 식수현황 보기</p></footer>
+</body>
+</html>

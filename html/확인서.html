@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="청구서 데이터로 확인서를 만드는 핵심 순서입니다.">
+  <title>확인서 만들기 | 급식비 정산 프로그램</title>
+  <link rel="stylesheet" href="assets/manual.css">
+  <script defer src="assets/manual.js"></script>
+</head>
+<body class="detail-page">
+  <a class="skip-link" href="#main-content">본문 바로가기</a>
+  <header class="site-header"><div class="header-inner"><a class="brand" href="../사용설명서.html" aria-label="사용설명서 첫 화면"><span class="brand-mark" aria-hidden="true">급식</span><span>작업 안내서<small>급식비 정산 프로그램</small></span></a><div class="header-actions"><button class="utility-button" type="button" data-font-toggle aria-pressed="false">글자 크게</button><button class="utility-button print-button" type="button" data-print>인쇄</button></div></div></header>
+  <div class="manual-shell">
+    <nav class="side-nav" aria-label="설명서 목차"><strong>Manual route</strong><a href="../사용설명서.html">전체 안내</a><a href="처음사용하기.html" data-page="처음사용하기.html">처음 사용하기</a><div class="nav-divider"></div><a href="청구서.html" data-page="청구서.html">① 청구서</a><a href="확인서.html" data-page="확인서.html">② 확인서</a><a href="일일배송.html" data-page="일일배송.html">③ 일일배송</a><a href="식수현황.html" data-page="식수현황.html">④ 식수현황</a><div class="nav-divider"></div><a href="문제해결.html" data-page="문제해결.html">문제 해결</a></nav>
+    <main id="main-content">
+      <header class="page-head"><p class="eyebrow">TAB 02</p><h1>확인서 만들기</h1><p class="lede">확인서는 계산이 끝난 청구서 데이터를 사용합니다.</p></header>
+
+      <div class="callout warning"><strong>청구서를 먼저 생성하세요.</strong><p>① 청구서 탭에서 생성 완료 후 ② 확인서 탭으로 이동해야 <b>확인서 생성</b> 버튼이 켜집니다.</p></div>
+
+      <section aria-labelledby="confirm-steps">
+        <h2 id="confirm-steps">핵심 순서</h2>
+        <ol class="step-list">
+          <li class="step"><h3>청구서 생성</h3><p>① 청구서 탭에서 청구서 생성 완료창까지 확인합니다.</p></li>
+          <li class="step"><h3>② 확인서 탭 이동</h3><p><b>청구서 ○건 로드됨</b>이 표시되는지 확인합니다.</p></li>
+          <li class="step"><h3>출력 경로 선택</h3><p><b>폴더 선택</b>으로 저장할 위치를 고릅니다.</p></li>
+          <li class="step"><h3>배송담당 정보</h3><p>필요하면 배송담당자 컬럼을 고르고 담당자별 연락처를 직접 입력합니다. 필요 없으면 <b>(선택 안 함)</b>을 둡니다.</p></li>
+          <li class="step"><h3><b>확인서 생성</b></h3><p><code>확인서_YYYYMM.xlsx</code> 파일의 관할동별 시트와 가구 수를 확인합니다.</p></li>
+        </ol>
+      </section>
+
+      <section aria-labelledby="confirm-rules">
+        <h2 id="confirm-rules">계산 기준</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th scope="col">항목</th><th scope="col">기준</th></tr></thead>
+            <tbody>
+              <tr><td>대상자</td><td>조식·석식·중식 중 하나라도 실제 건수가 1건 이상인 사람</td></tr>
+              <tr><td>동일인</td><td><b>이름 + 생년월일</b>이 모두 같을 때 한 사람으로 합침</td></tr>
+              <tr><td>시트</td><td>관할동별로 구분하며 공란은 기타가 될 수 있음</td></tr>
+              <tr><td>세대</td><td>같은 관할동에서 주소가 같은 사람을 한 세대로 계산</td></tr>
+              <tr><td>5명</td><td>한 주소에 5명 이상이면 5명 가구에 포함</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section aria-labelledby="lunch-confirm">
+        <h2 id="lunch-confirm">중식 명단 정보도 반영됩니다</h2>
+        <p>중식 명단의 관할동·주소·세대주성명·핸드폰 등은 필수 매핑값을 사용합니다. 조식·석식 명단의 같은 항목이 비어 있으면 중식 값으로 채웁니다.</p>
+        <div class="callout warning"><strong>자동 선택값도 확인하세요.</strong><p>주소나 관할동을 잘못 연결하면 확인서의 지역·세대 구분도 달라집니다.</p></div>
+      </section>
+
+      <section aria-labelledby="representative">
+        <h2 id="representative">배송담당 대표값</h2>
+        <p>현재 확인서에는 청구서 데이터의 첫 번째 대상자에게 연결된 배송담당자와 연락처가 대표값으로 사용됩니다.</p>
+      </section>
+
+      <a class="next-page" href="일일배송.html"><div><span>다른 출력 문서</span><strong>③ 일일배송 만들기</strong></div><b aria-hidden="true">→</b></a>
+    </main>
+  </div>
+  <footer class="site-footer"><p><a href="../사용설명서.html">설명서 첫 화면</a> · 확인서 만들기</p></footer>
+</body>
+</html>

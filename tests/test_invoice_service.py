@@ -6,11 +6,54 @@ Pure business logic — no PyQt imports, no UI dependencies.
 from datetime import date
 from unittest.mock import MagicMock, patch
 
+from src.generators.daily_delivery_generator import (
+    DAILY_ADDRESS_KEY,
+    DAILY_DRIVER_KEY,
+    DAILY_REGION_PRIMARY_KEY,
+    DAILY_REGION_SECONDARY_KEY,
+)
 from src.services.invoice_controller import (
+    LUNCH_PERSON_REQUIRED_FIELDS,
     InvoiceService,
     _canonicalize_person,
+    _merge_people_by_identity,
 )
 from src.services.lunch_data import LunchRoster, LunchSchoolEntry
+
+
+def _complete_lunch_person(**overrides) -> dict:
+    person = {
+        "구분": "아동",
+        "학교명": "분당초",
+        "학년": "3",
+        "성명": "홍길동",
+        "생년월일": "2010-01-02",
+        "세대주성명": "홍부모",
+        "아동과의관계": "자녀",
+        "관할동": "정자동",
+        "주소": "정자동 1-1",
+        "핸드폰": "010-0000-0000",
+        "배송담당": "기사 A",
+        "담당 구역 1순위": "정자 구역",
+        "담당 구역 2순위": "",
+        "비고": "",
+    }
+    person.update(overrides)
+    return person
+
+
+def _complete_lunch_mapping(**overrides) -> dict:
+    mapping = {field_name: field_name for field_name in LUNCH_PERSON_REQUIRED_FIELDS}
+    mapping.update(
+        {
+            DAILY_DRIVER_KEY: "배송담당",
+            DAILY_REGION_PRIMARY_KEY: "담당 구역 1순위",
+            DAILY_REGION_SECONDARY_KEY: "담당 구역 2순위",
+            "__note": "비고",
+        }
+    )
+    mapping.update(overrides)
+    return mapping
 
 
 class TestInvoiceService:
@@ -340,11 +383,11 @@ class TestInvoiceService:
                 }
             ],
             lunch_person_data=[
-                {
-                    "아동명": "홍길동",
-                    "생년": "2010.01.02",
-                    "소속학교": "분당초",
-                }
+                _complete_lunch_person(
+                    아동명="홍길동",
+                    생년="2010.01.02",
+                    소속학교="분당초",
+                )
             ],
             output_path="test.xlsx",
             year=2025,
@@ -371,13 +414,18 @@ class TestInvoiceService:
                 "start_date_col": "시작일",
                 "end_date_col": "종료일",
             },
-            lunch_person_headers=["아동명", "생년", "소속학교"],
-            lunch_person_mapping={
-                "성명": "아동명",
-                "생년월일": "생년",
-                "학교명": "소속학교",
-                "__note": "",
-            },
+            lunch_person_headers=list(
+                _complete_lunch_person(
+                    아동명="홍길동",
+                    생년="2010.01.02",
+                    소속학교="분당초",
+                )
+            ),
+            lunch_person_mapping=_complete_lunch_mapping(
+                성명="아동명",
+                생년월일="생년",
+                학교명="소속학교",
+            ),
             provider_name="테스트 제공기관",
         )
 
@@ -396,6 +444,42 @@ class TestInvoiceService:
         assert mock_make_invoice.call_args.kwargs["provider_name"] == (
             "테스트 제공기관"
         )
+
+    @patch("src.services.invoice_controller.get_kr_holidays", return_value=set())
+    @patch("src.services.vacation_calculator.get_kr_holidays", return_value=set())
+    def test_daily_lunch_dates_cover_the_full_cross_month_school_range(
+        self,
+        mock_vacation_holidays,
+        mock_controller_holidays,
+    ):
+        person = _complete_lunch_person(학교명="분당초")
+        args = self._minimal_args(
+            roster_data=[],
+            lunch_person_data=[person],
+            lunch_person_headers=list(person),
+            lunch_person_mapping=_complete_lunch_mapping(),
+            lunch_roster=LunchRoster(
+                entries=[
+                    LunchSchoolEntry(
+                        school_name="분당초",
+                        start_date=date(2025, 6, 30),
+                        end_date=date(2025, 7, 2),
+                    )
+                ]
+            ),
+            has_lunch_file=True,
+            write_workbook=False,
+        )
+
+        result = InvoiceService().generate(**args)
+
+        assert result.success
+        assert result.enriched[0]["_lunch_dates"] == ["2025-06-30"]
+        assert result.enriched[0]["_daily_lunch_dates"] == [
+            "2025-06-30",
+            "2025-07-01",
+            "2025-07-02",
+        ]
 
     def test_stale_mapping_does_not_blank_existing_canonical_values(self):
         person = {
@@ -419,18 +503,58 @@ class TestInvoiceService:
         assert canonical["생년월일"] == "2010-01-02"
         assert canonical["학교명"] == "분당초"
 
+    def test_lunch_only_columns_fill_blank_main_roster_fields(self):
+        main_person = {
+            "성명": "홍길동",
+            "생년월일": "2010-01-02",
+            "학교명": "분당초",
+            "주소": "",
+            "_breakfast": 1,
+            "_lunch": 0,
+        }
+        lunch_person = _canonicalize_person(
+            {
+                "아동명": "홍길동",
+                "생년": "2010.01.02",
+                "소속학교": "다른학교",
+                "거주지": "정자동 1-1",
+                "행정동": "정자동",
+            },
+            {
+                "성명": "아동명",
+                "생년월일": "생년",
+                "학교명": "소속학교",
+                "주소": "거주지",
+                "관할동": "행정동",
+            },
+            ["성명", "생년월일", "학교명", "주소", "관할동"],
+        )
+        lunch_person.update(
+            {
+                "_breakfast": 0,
+                "_lunch": 1,
+                DAILY_DRIVER_KEY: "기사 A",
+                DAILY_ADDRESS_KEY: "정자동 1-1",
+            }
+        )
+
+        merged = _merge_people_by_identity([main_person, lunch_person])
+
+        assert len(merged) == 1
+        assert merged[0]["학교명"] == "분당초"
+        assert merged[0]["주소"] == "정자동 1-1"
+        assert merged[0]["관할동"] == "정자동"
+        assert merged[0][DAILY_DRIVER_KEY] == "기사 A"
+        assert merged[0][DAILY_ADDRESS_KEY] == "정자동 1-1"
+        assert merged[0]["_breakfast"] == 1
+        assert merged[0]["_lunch"] == 1
+
     def test_separate_lunch_roster_requires_person_column_mapping(self):
         args = self._minimal_args(
             roster_data=[],
-            lunch_person_data=[
-                {"아동명": "홍길동", "생년": "100102", "소속학교": "분당초"}
-            ],
-            lunch_person_headers=["아동명", "생년", "소속학교"],
-            lunch_person_mapping={
-                "성명": "예전 이름 컬럼",
-                "생년월일": "생년",
-                "학교명": "소속학교",
-            },
+            lunch_person_data=[_complete_lunch_person()],
+            lunch_person_headers=list(_complete_lunch_person()),
+            lunch_person_mapping=_complete_lunch_mapping(성명="예전 이름 컬럼"),
             lunch_roster=LunchRoster(
                 entries=[
                     LunchSchoolEntry(
@@ -448,18 +572,35 @@ class TestInvoiceService:
         assert "중식 명단 컬럼 매핑" in result.error
         assert "성명" in result.error
 
+    def test_separate_lunch_roster_requires_address_mapping(self):
+        person = _complete_lunch_person()
+        args = self._minimal_args(
+            roster_data=[],
+            lunch_person_data=[person],
+            lunch_person_headers=list(person),
+            lunch_person_mapping=_complete_lunch_mapping(주소=""),
+            lunch_roster=LunchRoster(
+                entries=[
+                    LunchSchoolEntry(
+                        school_name="분당초",
+                        start_date=date(2025, 6, 2),
+                        end_date=date(2025, 6, 6),
+                    )
+                ]
+            ),
+        )
+
+        result = InvoiceService().generate(**args)
+
+        assert not result.success
+        assert "주소" in result.error
+
     def test_separate_lunch_roster_rejects_empty_schedule(self):
         args = self._minimal_args(
             roster_data=[],
-            lunch_person_data=[
-                {"아동명": "홍길동", "생년": "100102", "소속학교": "분당초"}
-            ],
-            lunch_person_headers=["아동명", "생년", "소속학교"],
-            lunch_person_mapping={
-                "성명": "아동명",
-                "생년월일": "생년",
-                "학교명": "소속학교",
-            },
+            lunch_person_data=[_complete_lunch_person()],
+            lunch_person_headers=list(_complete_lunch_person()),
+            lunch_person_mapping=_complete_lunch_mapping(),
             lunch_roster=LunchRoster(entries=[]),
         )
 
@@ -479,15 +620,9 @@ class TestInvoiceService:
                 "__dinner": "",
                 "__note": "",
             },
-            lunch_person_data=[
-                {"아동명": "홍길동", "생년": "100102", "소속학교": "분당초"}
-            ],
-            lunch_person_headers=["아동명", "생년", "소속학교"],
-            lunch_person_mapping={
-                "성명": "아동명",
-                "생년월일": "생년",
-                "학교명": "소속학교",
-            },
+            lunch_person_data=[_complete_lunch_person()],
+            lunch_person_headers=list(_complete_lunch_person()),
+            lunch_person_mapping=_complete_lunch_mapping(),
             lunch_roster=LunchRoster(
                 entries=[
                     LunchSchoolEntry(
@@ -523,15 +658,9 @@ class TestInvoiceService:
         )
         args = self._minimal_args(
             roster_data=[],
-            lunch_person_data=[
-                {"아동명": "홍길동", "생년": "100102", "소속학교": ""}
-            ],
-            lunch_person_headers=["아동명", "생년", "소속학교"],
-            lunch_person_mapping={
-                "성명": "아동명",
-                "생년월일": "생년",
-                "학교명": "소속학교",
-            },
+            lunch_person_data=[_complete_lunch_person(학교명="")],
+            lunch_person_headers=list(_complete_lunch_person()),
+            lunch_person_mapping=_complete_lunch_mapping(),
             lunch_roster=LunchRoster(
                 entries=[
                     LunchSchoolEntry(
@@ -547,6 +676,4 @@ class TestInvoiceService:
 
         assert result.success
         assert result.enriched[0]["_lh_cnt"] == 0
-        assert [warning.code for warning in result.warnings] == [
-            "missing_school_name"
-        ]
+        assert [warning.code for warning in result.warnings] == ["missing_school_name"]

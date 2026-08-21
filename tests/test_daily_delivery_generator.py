@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 from openpyxl import load_workbook
+
 from src.generators.daily_delivery_generator import (
     build_daily_delivery_sheet,
     build_delivery_routes,
@@ -17,6 +18,7 @@ from src.generators.daily_delivery_generator import (
 )
 
 TEMPLATE_PATH = Path("assets/일일배송템플릿.xlsx")
+LUNCH_TEMPLATE_PATH = Path("assets/중식일일배송템플릿.xlsx")
 
 
 def _person(
@@ -27,17 +29,23 @@ def _person(
     *,
     breakfast: int = 1,
     dinner: int = 1,
+    lunch: int = 0,
+    lunch_dates: list[str] | None = None,
     note: str = "",
 ) -> dict:
-    return {
+    person = {
         "기사": driver,
         "1순위": primary,
         "2순위": secondary,
         "주소": address,
         "_breakfast": breakfast,
         "_dinner": dinner,
+        "_lunch": lunch,
         "_note": note,
     }
+    if lunch_dates is not None:
+        person["_lunch_dates"] = lunch_dates
+    return person
 
 
 def _build(people: list[dict], target: date = date(2026, 5, 2)):
@@ -180,6 +188,46 @@ class TestDailyAggregation:
         assert len(sheet.rows) == 1
         assert (sheet.rows[0].breakfast, sheet.rows[0].dinner) == (2, 2)
 
+    def test_lunch_uses_each_persons_calculated_delivery_dates(self):
+        people = [
+            _person(
+                "기사 A",
+                "같은 구역",
+                "",
+                "A",
+                breakfast=0,
+                dinner=0,
+                lunch=1,
+                lunch_dates=["2026-05-04"],
+            )
+        ]
+
+        active = _build(people, date(2026, 5, 4))
+        inactive = _build(people, date(2026, 5, 5))
+
+        assert active.rows[0].lunch == 1
+        assert active.lunch_total == 1
+        assert inactive.rows == []
+        assert inactive.lunch_total == 0
+
+    def test_lunch_daily_dates_can_cross_the_invoice_month(self):
+        person = _person(
+            "기사 A",
+            "같은 구역",
+            "",
+            "A",
+            breakfast=0,
+            dinner=0,
+            lunch=0,
+        )
+        person["_daily_lunch_dates"] = ["2026-07-01"]
+
+        active = _build([person], date(2026, 7, 1))
+        inactive = _build([person], date(2026, 6, 30))
+
+        assert active.lunch_total == 1
+        assert inactive.lunch_total == 0
+
     def test_new_delivery_is_inactive_before_start(self):
         people = [_person("기사 A", "A 구역", "", "주소", note="5/3~신규배송")]
 
@@ -204,9 +252,9 @@ class TestDailyAggregation:
 
         sheet = _build(people, date(2026, 5, 2))
 
-        assert [(row.route.region, row.breakfast, row.dinner) for row in sheet.rows] == [
-            ("배송 구역", 1, 1)
-        ]
+        assert [
+            (row.route.region, row.breakfast, row.dinner) for row in sheet.rows
+        ] == [("배송 구역", 1, 1)]
 
     def test_household_distribution_uses_same_address(self):
         people = [
@@ -241,9 +289,7 @@ class TestDailyAggregation:
 
         sheet = _build(people, date(2026, 6, 12))
 
-        assert sheet.rows[0].note == (
-            "A아파트 101동(2명) 석식: 6/13~6/15"
-        )
+        assert sheet.rows[0].note == ("A아파트 101동(2명) 석식: 6/13~6/15")
         assert "6/21" not in sheet.rows[0].note
 
 
@@ -284,6 +330,27 @@ def test_daily_delivery_template_is_single_sanitized_sheet():
     assert all(worksheet.cell(5, column).value is None for column in range(4, 11))
 
 
+def test_lunch_daily_delivery_template_is_a_separate_ready_to_use_file():
+    workbook = load_workbook(LUNCH_TEMPLATE_PATH, data_only=False)
+    worksheet = workbook.active
+
+    assert workbook.sheetnames == ["중식일일배송"]
+    assert worksheet.max_row == 5
+    assert worksheet["D2"].value == "중식"
+    assert worksheet["D3"].value == "중식"
+    assert worksheet["F3"].value == "중식합계"
+    assert worksheet["J3"].value == "중식갯수"
+    merges = {str(value) for value in worksheet.merged_cells.ranges}
+    assert {
+        "D3:E3",
+        "F3:H3",
+        "D4:E4",
+        "F4:H4",
+        "D5:E5",
+        "F5:H5",
+    } <= merges
+
+
 def test_make_daily_delivery_uses_template_and_resizes_rows(tmp_path):
     output = tmp_path / "daily.xlsx"
     people = [
@@ -296,6 +363,7 @@ def test_make_daily_delivery_uses_template_and_resizes_rows(tmp_path):
         [date(2026, 5, 4), date(2026, 5, 5)],
         str(output),
         template_path=str(TEMPLATE_PATH),
+        lunch_template_path=str(LUNCH_TEMPLATE_PATH),
         driver_col="기사",
         region_primary_col="1순위",
         region_secondary_col="2순위",
@@ -353,6 +421,113 @@ def test_make_daily_delivery_rejects_all_zero_meal_columns(tmp_path):
         )
 
     assert not output.exists()
+
+
+def test_make_daily_delivery_creates_lunch_sheet_with_merged_meal_columns(
+    tmp_path,
+):
+    output = tmp_path / "daily-lunch.xlsx"
+    people = [
+        _person(
+            "기사 A",
+            "A 구역",
+            "",
+            "A아파트 101동",
+            breakfast=0,
+            dinner=0,
+            lunch=1,
+            lunch_dates=["2026-05-04"],
+        )
+    ]
+
+    results = make_daily_delivery(
+        people,
+        [date(2026, 5, 4), date(2026, 5, 5)],
+        str(output),
+        template_path=str(TEMPLATE_PATH),
+        lunch_template_path=str(LUNCH_TEMPLATE_PATH),
+        driver_col="기사",
+        region_primary_col="1순위",
+        address_col="주소",
+    )
+
+    assert [item.delivery_date for item in results] == [date(2026, 5, 4)]
+    workbook = load_workbook(output, data_only=False)
+    assert workbook.sheetnames == ["중식_26.05.04"]
+    worksheet = workbook.active
+    assert worksheet["D2"].value == "중식"
+    assert worksheet["D3"].value == "중식"
+    assert worksheet["F3"].value == "중식합계"
+    assert worksheet["D4"].value == 1
+    assert worksheet["F4"].value == "=SUM(D4:D4)"
+    merges = {str(value) for value in worksheet.merged_cells.ranges}
+    assert {"D3:E3", "F3:H3", "D4:E4", "F4:H4"} <= merges
+
+
+def test_lunch_generation_requires_the_separate_lunch_template(tmp_path):
+    output = tmp_path / "daily-lunch.xlsx"
+    people = [
+        _person(
+            "기사 A",
+            "A 구역",
+            "",
+            "주소",
+            breakfast=0,
+            dinner=0,
+            lunch=1,
+            lunch_dates=["2026-05-04"],
+        )
+    ]
+
+    with pytest.raises(ValueError, match="중식 일일배송 템플릿"):
+        make_daily_delivery(
+            people,
+            [date(2026, 5, 4)],
+            str(output),
+            template_path=str(TEMPLATE_PATH),
+            lunch_template_path=str(tmp_path / "missing.xlsx"),
+            driver_col="기사",
+            region_primary_col="1순위",
+            address_col="주소",
+        )
+
+    assert not output.exists()
+
+
+def test_term_and_lunch_sheets_each_omit_zero_delivery_rows(tmp_path):
+    output = tmp_path / "daily-combined.xlsx"
+    people = [
+        _person("기사 A", "학기중 구역", "", "주소 1"),
+        _person(
+            "기사 A",
+            "중식 구역",
+            "",
+            "주소 2",
+            breakfast=0,
+            dinner=0,
+            lunch=1,
+            lunch_dates=["2026-05-04"],
+        ),
+    ]
+
+    results = make_daily_delivery(
+        people,
+        [date(2026, 5, 4)],
+        str(output),
+        template_path=str(TEMPLATE_PATH),
+        lunch_template_path=str(LUNCH_TEMPLATE_PATH),
+        driver_col="기사",
+        region_primary_col="1순위",
+        address_col="주소",
+    )
+
+    assert results[0].lunch_total == 1
+    workbook = load_workbook(output, data_only=False)
+    assert workbook.sheetnames == ["26.05.04", "중식_26.05.04"]
+    assert workbook["26.05.04"]["C4"].value == "학기중 구역"
+    assert workbook["26.05.04"]["C5"].value is None
+    assert workbook["중식_26.05.04"]["C4"].value == "중식 구역"
+    assert workbook["중식_26.05.04"]["C5"].value is None
 
 
 def test_make_daily_delivery_renders_totals_only_when_date_has_no_deliveries(

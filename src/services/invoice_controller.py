@@ -1,5 +1,6 @@
 """청구서 컨트롤러 — 데이터 보강, 배송 계산, 청구서 생성 오케스트레이션"""
 
+import calendar
 import logging
 import os
 import re
@@ -11,6 +12,12 @@ from PyQt6.QtWidgets import QMessageBox, QWidget
 
 from ..core.identity import normalize_birthdate, normalize_identity_name
 from ..core.meal_types import MealType
+from ..generators.daily_delivery_generator import (
+    DAILY_ADDRESS_KEY,
+    DAILY_DRIVER_KEY,
+    DAILY_REGION_PRIMARY_KEY,
+    DAILY_REGION_SECONDARY_KEY,
+)
 from ..generators.invoice_generator import make_invoice
 from ..templates.config import auto_detect_semantic_columns
 from .delivery_calculator import (
@@ -24,6 +31,32 @@ from .schedule_counter import _get_schedule
 from .vacation_calculator import get_lunch_delivery_dates_with_note
 
 log = logging.getLogger(__name__)
+
+
+LUNCH_PERSON_REQUIRED_FIELDS = (
+    "구분",
+    "학교명",
+    "학년",
+    "성명",
+    "생년월일",
+    "세대주성명",
+    "아동과의관계",
+    "관할동",
+    "주소",
+    "핸드폰",
+)
+LUNCH_DAILY_REQUIRED_FIELDS = (DAILY_DRIVER_KEY, DAILY_REGION_PRIMARY_KEY)
+LUNCH_DAILY_MAPPING_FIELDS = (
+    DAILY_DRIVER_KEY,
+    DAILY_REGION_PRIMARY_KEY,
+    DAILY_REGION_SECONDARY_KEY,
+)
+DAILY_DELIVERY_VALUE_FIELDS = LUNCH_DAILY_MAPPING_FIELDS + (DAILY_ADDRESS_KEY,)
+LUNCH_MAPPING_LABELS = {
+    DAILY_DRIVER_KEY: "배송 담당",
+    DAILY_REGION_PRIMARY_KEY: "담당 구역 1순위",
+    DAILY_REGION_SECONDARY_KEY: "담당 구역 2순위",
+}
 
 
 # ── Result types (pure data, no UI) ──
@@ -64,8 +97,6 @@ def _calc_delivery_dates(
     배송기간: 방학식+1일 ~ 개학식-1일 (급식여부 무관, 월 경계 무관).
     급식여부 + 학년제외로 배송 없음 판정 시 None 반환.
     """
-    import calendar
-
     direct_range = entry.start_date is not None or entry.end_date is not None
 
     # 급식여부 + 학년제외 → 배송 발생 여부만 판단 (예전 일정 모델)
@@ -89,13 +120,9 @@ def _calc_delivery_dates(
         eff_start, eff_end = entry.effective_range()
     else:
         eff_start = (
-            entry.vacation_date + timedelta(days=1)
-            if entry.vacation_date
-            else None
+            entry.vacation_date + timedelta(days=1) if entry.vacation_date else None
         )
-        eff_end = (
-            entry.opening_date - timedelta(days=1) if entry.opening_date else None
-        )
+        eff_end = entry.opening_date - timedelta(days=1) if entry.opening_date else None
 
     if eff_start is None:
         return None, None
@@ -198,16 +225,14 @@ def _merge_people_by_identity(people: list[dict]) -> list[dict]:
 
         target = merged[positions[identity]]
         for key, value in person.items():
-            if key.startswith("_"):
+            if key.startswith("_") and key not in DAILY_DELIVERY_VALUE_FIELDS:
                 continue
             if not str(target.get(key, "") or "").strip() and str(value or "").strip():
                 target[key] = value
 
         for key in ("_breakfast", "_dinner", "_lunch"):
             target[key] = (
-                1
-                if to_bool(target.get(key, 0)) or to_bool(person.get(key, 0))
-                else 0
+                1 if to_bool(target.get(key, 0)) or to_bool(person.get(key, 0)) else 0
             )
         for key in ("_bf_cnt", "_dn_cnt", "_lh_cnt"):
             target[key] = max(
@@ -218,17 +243,14 @@ def _merge_people_by_identity(people: list[dict]) -> list[dict]:
         target["_note"] = _combine_notes(
             target.get("_note", ""), person.get("_note", "")
         )
-        lunch_dates = {
-            str(item)
-            for item in target.get("_lunch_dates", [])
-            if str(item).strip()
-        }
-        lunch_dates.update(
-            str(item)
-            for item in person.get("_lunch_dates", [])
-            if str(item).strip()
-        )
-        target["_lunch_dates"] = sorted(lunch_dates)
+        for date_key in ("_lunch_dates", "_daily_lunch_dates"):
+            lunch_dates = {
+                str(item) for item in target.get(date_key, []) if str(item).strip()
+            }
+            lunch_dates.update(
+                str(item) for item in person.get(date_key, []) if str(item).strip()
+            )
+            target[date_key] = sorted(lunch_dates)
         if not target.get("_delivery_start") and person.get("_delivery_start"):
             target["_delivery_start"] = person["_delivery_start"]
         if not target.get("_delivery_end") and person.get("_delivery_end"):
@@ -245,8 +267,7 @@ def _parse_grade(value: Any) -> int:
 def _is_stopped(person: dict, headers: list[str]) -> bool:
     stop_columns = [h for h in headers if "중지" in h or "중단" in h]
     return any(
-        "중지" in str(person.get(column, ""))
-        or "중단" in str(person.get(column, ""))
+        "중지" in str(person.get(column, "")) or "중단" in str(person.get(column, ""))
         for column in stop_columns
     )
 
@@ -281,6 +302,7 @@ class InvoiceService:
         lunch_person_headers: list[str] | None = None,
         lunch_person_mapping: dict | None = None,
         provider_name: str = "",
+        write_workbook: bool = True,
     ) -> InvoiceResult:
         """두 개인 명단과 학교별 방학 일정을 결합해 청구서를 만든다.
 
@@ -301,14 +323,18 @@ class InvoiceService:
             missing_fields = _missing_mapping_fields(
                 lunch_map,
                 lunch_person_headers or [],
-                ("성명", "생년월일", "학교명"),
+                LUNCH_PERSON_REQUIRED_FIELDS + LUNCH_DAILY_REQUIRED_FIELDS,
             )
             if missing_fields:
+                missing_labels = [
+                    LUNCH_MAPPING_LABELS.get(field_name, field_name)
+                    for field_name in missing_fields
+                ]
                 return InvoiceResult(
                     success=False,
                     error=(
                         "중식 명단 컬럼 매핑을 확인하세요.\n"
-                        "필수 항목: " + ", ".join(missing_fields)
+                        "필수 항목: " + ", ".join(missing_labels)
                     ),
                 )
             if roster_data:
@@ -350,28 +376,30 @@ class InvoiceService:
             canonical: dict,
             source_person: dict,
             source_mapping: dict,
-        ) -> tuple[int, list[str], str, str]:
+        ) -> tuple[int, list[str], list[str], str, str]:
             nonlocal missing_school_count
 
             if not schedule_available or lunch_roster is None:
-                return 0, [], "", ""
+                return 0, [], [], "", ""
 
             school_name = str(canonical.get("학교명", "") or "").strip()
             if not school_name and lunch_mapping:
                 legacy_school_col = str(
                     lunch_mapping.get("roster_school_col", "") or ""
                 )
-                school_name = str(source_person.get(legacy_school_col, "") or "").strip()
+                school_name = str(
+                    source_person.get(legacy_school_col, "") or ""
+                ).strip()
 
             if not school_name:
                 missing_school_count += 1
-                return 0, [], "", ""
+                return 0, [], [], "", ""
 
             entry = lunch_roster.find_school(school_name)
             if entry is None:
                 if school_name:
                     lunch_warned.add(school_name)
-                return 0, [], "", ""
+                return 0, [], [], "", ""
 
             grade_value = canonical.get("학년", "")
             if not grade_value and lunch_mapping:
@@ -379,21 +407,45 @@ class InvoiceService:
                 grade_value = source_person.get(legacy_grade_col, "")
             grade = _parse_grade(grade_value)
 
-            dates = get_lunch_delivery_dates_with_note(
-                year,
-                month,
-                entry,
-                grade=grade,
-                excluded_dates=excluded_dates.copy() if excluded_dates else None,
-            )
-            lunch_note_exclusions = {
-                note_date
-                for note_date, meals in expand_note_dates(
-                    _mapped_note(source_person, source_mapping), year, month
+            effective_start, effective_end = entry.effective_range()
+            month_start = date(year, month, 1)
+            month_end = date(year, month, calendar.monthrange(year, month)[1])
+            range_start = effective_start or month_start
+            range_end = effective_end or month_end
+            note = _mapped_note(source_person, source_mapping)
+            all_dates: set[date] = set()
+            cursor = date(range_start.year, range_start.month, 1)
+            last_month = date(range_end.year, range_end.month, 1)
+            while cursor <= last_month and range_start <= range_end:
+                month_dates = get_lunch_delivery_dates_with_note(
+                    cursor.year,
+                    cursor.month,
+                    entry,
+                    grade=grade,
+                    excluded_dates=(excluded_dates.copy() if excluded_dates else None),
                 )
-                if MealType.LUNCH in meals
-            }
-            dates = [d for d in dates if d not in lunch_note_exclusions]
+                lunch_note_exclusions = {
+                    note_date
+                    for note_date, meals in expand_note_dates(
+                        note, cursor.year, cursor.month
+                    )
+                    if MealType.LUNCH in meals
+                }
+                all_dates.update(
+                    delivery_date
+                    for delivery_date in month_dates
+                    if delivery_date not in lunch_note_exclusions
+                )
+                if cursor.month == 12:
+                    cursor = date(cursor.year + 1, 1, 1)
+                else:
+                    cursor = date(cursor.year, cursor.month + 1, 1)
+
+            dates = sorted(
+                delivery_date
+                for delivery_date in all_dates
+                if delivery_date.year == year and delivery_date.month == month
+            )
             delivery_start, delivery_end = _calc_delivery_dates(
                 year,
                 month,
@@ -404,6 +456,7 @@ class InvoiceService:
             return (
                 len(dates),
                 [delivery_date.isoformat() for delivery_date in dates],
+                [delivery_date.isoformat() for delivery_date in sorted(all_dates)],
                 delivery_start.isoformat() if delivery_start else "",
                 delivery_end.isoformat() if delivery_end else "",
             )
@@ -433,6 +486,7 @@ class InvoiceService:
 
             lunch_count = 0
             lunch_dates: list[str] = []
+            daily_lunch_dates: list[str] = []
             delivery_start = ""
             delivery_end = ""
             legacy_lunch_target = (
@@ -444,6 +498,7 @@ class InvoiceService:
                 (
                     lunch_count,
                     lunch_dates,
+                    daily_lunch_dates,
                     delivery_start,
                     delivery_end,
                 ) = apply_lunch(canonical, person, col_mapping)
@@ -458,6 +513,7 @@ class InvoiceService:
                     "_dn_cnt": counts["dinner"],
                     "_lh_cnt": lunch_count,
                     "_lunch_dates": lunch_dates,
+                    "_daily_lunch_dates": daily_lunch_dates,
                     "_delivery_start": delivery_start,
                     "_delivery_end": delivery_end,
                 }
@@ -471,11 +527,17 @@ class InvoiceService:
                 if _is_stopped(person, lunch_headers):
                     continue
 
-                canonical = _canonicalize_person(person, lunch_map, template_columns)
+                canonical = _canonicalize_person(
+                    person,
+                    lunch_map,
+                    template_columns + list(LUNCH_DAILY_MAPPING_FIELDS),
+                )
+                canonical[DAILY_ADDRESS_KEY] = canonical.get("주소", "")
                 note = _mapped_note(person, lunch_map)
                 (
                     lunch_count,
                     lunch_dates,
+                    daily_lunch_dates,
                     delivery_start,
                     delivery_end,
                 ) = apply_lunch(canonical, person, lunch_map)
@@ -489,6 +551,7 @@ class InvoiceService:
                         "_dn_cnt": 0,
                         "_lh_cnt": lunch_count,
                         "_lunch_dates": lunch_dates,
+                        "_daily_lunch_dates": daily_lunch_dates,
                         "_delivery_start": delivery_start,
                         "_delivery_end": delivery_end,
                     }
@@ -522,6 +585,14 @@ class InvoiceService:
                     ),
                     details={"schools": sorted(lunch_warned)},
                 )
+            )
+
+        if not write_workbook:
+            return InvoiceResult(
+                success=True,
+                count=len(enriched),
+                enriched=enriched,
+                warnings=warnings,
             )
 
         if not os.path.exists(template_path):
@@ -655,6 +726,37 @@ class InvoiceController:
 
         self.invoices = result.enriched
         return result.success, result.count, result.enriched
+
+    def prepare_daily_delivery_people(
+        self,
+        roster_data: list[dict],
+        year: int,
+        month: int,
+        col_mapping: dict | None = None,
+    ) -> InvoiceResult:
+        """엑셀 청구서를 저장하지 않고 세 명단을 일일배송용으로 결합한다."""
+
+        return self._service.generate(
+            roster_data=roster_data,
+            output_path="",
+            year=year,
+            month=month,
+            breakfast_price=0,
+            dinner_price=0,
+            lunch_price=0,
+            template_path="",
+            col_mapping=col_mapping or self._col_mapping,
+            excluded_dates=self._excluded_dates,
+            roster_headers=self.roster_headers,
+            template_columns=self._template_columns,
+            has_lunch_file=bool(self._lunch_roster),
+            lunch_roster=self._lunch_roster,
+            lunch_mapping=self._lunch_mapping,
+            lunch_person_data=self._lunch_person_data,
+            lunch_person_headers=self._lunch_person_headers,
+            lunch_person_mapping=self._lunch_person_mapping,
+            write_workbook=False,
+        )
 
     # ── Getter ──
 

@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="조식·석식 명단과 중식 명단으로 청구서를 만드는 핵심 순서입니다.">
+  <title>청구서 만들기 | 급식비 정산 프로그램</title>
+  <link rel="stylesheet" href="assets/manual.css">
+  <script defer src="assets/manual.js"></script>
+</head>
+<body class="detail-page">
+  <a class="skip-link" href="#main-content">본문 바로가기</a>
+  <header class="site-header"><div class="header-inner"><a class="brand" href="../사용설명서.html" aria-label="사용설명서 첫 화면"><span class="brand-mark" aria-hidden="true">급식</span><span>작업 안내서<small>급식비 정산 프로그램</small></span></a><div class="header-actions"><button class="utility-button" type="button" data-font-toggle aria-pressed="false">글자 크게</button><button class="utility-button print-button" type="button" data-print>인쇄</button></div></div></header>
+  <div class="manual-shell">
+    <nav class="side-nav" aria-label="설명서 목차"><strong>Manual route</strong><a href="../사용설명서.html">전체 안내</a><a href="처음사용하기.html" data-page="처음사용하기.html">처음 사용하기</a><div class="nav-divider"></div><a href="청구서.html" data-page="청구서.html">① 청구서</a><a href="확인서.html" data-page="확인서.html">② 확인서</a><a href="일일배송.html" data-page="일일배송.html">③ 일일배송</a><a href="식수현황.html" data-page="식수현황.html">④ 식수현황</a><div class="nav-divider"></div><a href="문제해결.html" data-page="문제해결.html">문제 해결</a></nav>
+    <main id="main-content">
+      <header class="page-head"><p class="eyebrow">TAB 01</p><h1>청구서 만들기</h1><p class="lede">사용하는 식종의 명단만 불러오고, 중식이 있으면 학교별 방학 일정을 추가합니다.</p></header>
+
+      <section aria-labelledby="invoice-steps">
+        <h2 id="invoice-steps">핵심 순서</h2>
+        <ol class="step-list">
+          <li class="step"><h3>조식·석식 명단</h3><p><b>파일 탐색 → 시트 선택 → 컬럼 매핑</b> 순서로 진행합니다. 성명·생년월일과 조식·석식 여부, 비고, 청구서에 넣을 정보를 연결합니다.</p></li>
+          <li class="step"><h3>중식 명단</h3><p>중식을 청구할 때 불러옵니다. 별표가 붙은 개인정보 10개와 배송 담당·담당 구역 1순위를 모두 연결합니다.</p></li>
+          <li class="step"><h3>학교별 방학 일정</h3><p>중식이 있으면 반드시 불러옵니다. <b>학교명·시작일·종료일</b> 세 컬럼만 연결하며 두 날짜를 모두 배송 기간에 포함합니다.</p></li>
+          <li class="step"><h3>청구 기준</h3><p>귀속 연월, 조식·석식·중식 단가, 제공기관을 확인합니다. 제공기관 한 값이 모든 청구 행에 들어갑니다.</p></li>
+          <li class="step"><h3>출력 경로와 제외일</h3><p>저장 폴더를 고르고 필요하면 <b>📅 제외일 선택</b>에서 배송하지 않는 평일을 추가합니다.</p></li>
+          <li class="step"><h3><b>청구서 생성</b></h3><p>완료 후 <b>파일 열기</b>로 인원과 급식 건수를 확인합니다.</p></li>
+        </ol>
+      </section>
+
+      <section aria-labelledby="lunch-columns">
+        <h2 id="lunch-columns">중식 명단 컬럼 기준</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th scope="col">구분</th><th scope="col">컬럼</th><th scope="col">용도</th></tr></thead>
+            <tbody>
+              <tr><td><b>필수 개인정보</b></td><td>구분, 학교명, 학년, 성명, 생년월일, 세대주성명, 아동과의관계, 관할동, 주소, 핸드폰</td><td>청구서·확인서 출력과 동일인·세대 판정</td></tr>
+              <tr><td><b>필수 배송 정보</b></td><td>배송 담당, 담당 구역 1순위</td><td>중식 일일배송 경로</td></tr>
+              <tr><td><b>선택</b></td><td>담당 구역 2순위, 비고</td><td>1순위 공란 시 대체 구역, 중식 일시중지 날짜</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="callout">
+          <strong>중식에만 있는 사람도 빠지지 않습니다.</strong>
+          <p>필수 매핑값이 청구서·확인서와 중식 일일배송에 그대로 전달됩니다.</p>
+        </div>
+      </section>
+
+      <section aria-labelledby="merge">
+        <h2 id="merge">두 명단을 합치는 규칙</h2>
+        <ul class="plain-list">
+          <li><b>이름과 생년월일이 모두 같을 때</b> 한 사람으로 합칩니다.</li>
+          <li>같은 항목이 두 명단에 모두 있으면 조식·석식 명단의 기존 값을 유지합니다.</li>
+          <li>조식·석식 명단의 값이 비어 있으면 중식 명단 값으로 채웁니다.</li>
+          <li>이름 또는 생년월일이 비어 있으면 자동으로 합치지 않습니다.</li>
+        </ul>
+      </section>
+
+      <section aria-labelledby="invoice-rules">
+        <h2 id="invoice-rules">꼭 확인할 규칙</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th scope="col">항목</th><th scope="col">규칙</th></tr></thead>
+            <tbody>
+              <tr><td>생성 버튼</td><td>조식·석식 명단 또는 중식 명단 중 한 곳에 사람이 있으면 켜집니다.</td></tr>
+              <tr><td>중식 대상</td><td>중식 명단의 모든 행을 대상으로 보고 학교 일정과 겹치는 날짜만 셉니다.</td></tr>
+              <tr><td>학교명 불일치</td><td>일정에서 학교를 찾지 못하면 해당 사람의 중식은 0건이며 경고가 나옵니다.</td></tr>
+              <tr><td>0건 대상자</td><td>조식·석식·중식이 모두 0건이면 청구서 출력 행에서 빠집니다.</td></tr>
+              <tr><td>결과 파일</td><td><code>청구서_YYYYMM.xlsx</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <a class="next-page" href="확인서.html"><div><span>청구서 생성 후</span><strong>② 확인서 만들기</strong></div><b aria-hidden="true">→</b></a>
+    </main>
+  </div>
+  <footer class="site-footer"><p><a href="../사용설명서.html">설명서 첫 화면</a> · 청구서 만들기</p></footer>
+</body>
+</html>

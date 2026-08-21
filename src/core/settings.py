@@ -55,6 +55,7 @@ DEFAULTS: dict[str, Any] = {
     "daily_delivery": {
         "output_filename_format": "일일배송_{start:%Y%m%d}_{end:%Y%m%d}.xlsx",
         "template_path": "assets/일일배송템플릿.xlsx",
+        "lunch_template_path": "assets/중식일일배송템플릿.xlsx",
     },
     "roster": {
         "name_keywords": ["성명", "이름", "성함", "학생명", "학생", "name", "Name"],
@@ -102,12 +103,37 @@ DEFAULTS: dict[str, Any] = {
             "label": "방중 여부",
             "tooltip": "1.0=해당, 0/공란=미해당 (방학중 월~금 배송)",
         },
+        "_daily_driver": {
+            "label": "배송 담당",
+            "tooltip": "중식 일일배송을 담당하는 기사 또는 담당자 컬럼",
+        },
+        "_daily_region_primary": {
+            "label": "담당 구역 1순위",
+            "tooltip": "값이 있으면 중식 일일배송 구역으로 먼저 사용",
+        },
+        "_daily_region_secondary": {
+            "label": "담당 구역 2순위",
+            "tooltip": "1순위 값이 비어 있을 때만 사용하는 선택 컬럼",
+        },
         "__note": {"label": "비고 (일시중지 등)", "tooltip": ""},
     },
     "flag_search_terms": {
         "__breakfast": ["조식"],
         "__dinner": ["석식"],
         "__vacation": ["중식", "방중"],
+        "_daily_driver": ["배송담당", "배송 담당", "담당기사", "배송기사", "기사"],
+        "_daily_region_primary": [
+            "담당 구역 1순위",
+            "담당구역 1순위",
+            "담당구역1순위",
+            "배송구역",
+        ],
+        "_daily_region_secondary": [
+            "담당 구역 2순위",
+            "담당구역 2순위",
+            "담당구역2순위",
+            "관할동",
+        ],
         "__note": ["비고"],
     },
 }
@@ -321,6 +347,15 @@ class SettingsManager:
                 "daily_delivery",
                 "template_path",
                 default="assets/일일배송템플릿.xlsx",
+            )
+        )
+
+    def get_daily_delivery_lunch_template_path(self) -> str:
+        return str(
+            self.get(
+                "daily_delivery",
+                "lunch_template_path",
+                default="assets/중식일일배송템플릿.xlsx",
             )
         )
 

@@ -29,9 +29,13 @@ from PyQt6.QtWidgets import (
 
 from ..core.invoice_data import InvoiceData
 from ..core.settings import get_settings
-from ..generators.daily_delivery_generator import prepare_daily_delivery_people
 from ..services.holiday_fetcher import get_kr_holidays
-from ..services.invoice_controller import InvoiceController
+from ..services.invoice_controller import (
+    LUNCH_DAILY_MAPPING_FIELDS,
+    LUNCH_DAILY_REQUIRED_FIELDS,
+    LUNCH_PERSON_REQUIRED_FIELDS,
+    InvoiceController,
+)
 from ..services.lunch_data import LunchRoster, LunchSchoolEntry
 from ..services.roster_loader import FileReader, RosterLoader
 from ..templates.config import auto_detect_semantic_columns, read_template_columns
@@ -40,7 +44,9 @@ from .mapping_dialog import MappingDialog
 
 log = logging.getLogger(__name__)
 
-_LUNCH_PERSON_REQUIRED_KEYS = ("성명", "생년월일", "학교명")
+_LUNCH_PERSON_REQUIRED_KEYS = (
+    LUNCH_PERSON_REQUIRED_FIELDS + LUNCH_DAILY_REQUIRED_FIELDS
+)
 _SCHEDULE_REQUIRED_KEYS = ("school_name_col", "start_date_col", "end_date_col")
 
 
@@ -547,11 +553,12 @@ class InvoiceTab(QWidget):
             self._all_template_columns,
             self,
             title="중식 명단 컬럼 매핑",
-            flag_keys=("__note",),
+            flag_keys=LUNCH_DAILY_MAPPING_FIELDS + ("__note",),
             required_keys=_LUNCH_PERSON_REQUIRED_KEYS,
             info_text=(
-                "중식 명단의 개인정보 컬럼을 청구서 필드에 연결하세요. "
-                "이 명단의 모든 행은 중식 대상으로 계산됩니다."
+                "별표가 붙은 개인정보·배송 담당·1순위 구역 컬럼을 모두 "
+                "연결하세요. 2순위 구역과 비고는 선택사항이며, 이 명단의 "
+                "모든 행은 중식 대상으로 계산됩니다."
             ),
         )
         dlg._reset_defaults()
@@ -1297,41 +1304,31 @@ class InvoiceTab(QWidget):
             mapping[key] = selected
         return mapping
 
-    def get_daily_delivery_data(self) -> InvoiceData:
+    def get_daily_delivery_data(
+        self, year: int | None = None, month: int | None = None
+    ) -> InvoiceData:
         """청구서를 만들지 않아도 현재 명단으로 일일배송 데이터를 만든다."""
 
+        target_year = year if year is not None else self.get_year()
+        target_month = month if month is not None else self.get_month()
         mapping = self._daily_delivery_mapping()
-        roster_data = self._loader.roster_data
-        if roster_data:
-            breakfast_col = mapping.get("__breakfast", "")
-            dinner_col = mapping.get("__dinner", "")
-            note_col = mapping.get("__note", "")
-            stop_col = next(
-                (
-                    header
-                    for header in self.get_roster_headers()
-                    if "중지" in header or "중단" in header
-                ),
-                None,
-            )
-            daily_people = prepare_daily_delivery_people(
-                roster_data,
-                breakfast_col=breakfast_col,
-                dinner_col=dinner_col,
-                note_col=note_col,
-                stop_col=stop_col or "",
-            )
-        else:
-            daily_people = list(self.get_invoices())
+        prepared = self._controller.prepare_daily_delivery_people(
+            self._loader.roster_data,
+            target_year,
+            target_month,
+            col_mapping=mapping,
+        )
 
         return InvoiceData(
-            invoices=daily_people,
+            invoices=prepared.enriched if prepared.success else [],
             col_mapping=mapping,
-            year=self.get_year(),
-            month=self.get_month(),
+            year=target_year,
+            month=target_month,
             excluded_dates=self.get_excluded_dates(),
             roster_headers=self.get_roster_headers(),
             roster_path=self.get_roster_path(),
+            preparation_error=prepared.error,
+            preparation_warnings=[warning.message for warning in prepared.warnings],
         )
 
     def get_invoice_data(self):

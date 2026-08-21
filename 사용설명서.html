@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="급식비 정산 프로그램의 청구서, 확인서, 일일배송, 식수현황 핵심 사용법입니다.">
+  <title>급식비 정산 프로그램 사용설명서</title>
+  <link rel="stylesheet" href="html/assets/manual.css">
+  <script defer src="html/assets/manual.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#main-content">본문 바로가기</a>
+  <header class="site-header">
+    <div class="header-inner">
+      <a class="brand" href="사용설명서.html" aria-label="사용설명서 첫 화면">
+        <span class="brand-mark" aria-hidden="true">급식</span>
+        <span>작업 안내서<small>급식비 정산 프로그램</small></span>
+      </a>
+      <div class="header-actions">
+        <button class="utility-button" type="button" data-font-toggle aria-pressed="false">글자 크게</button>
+        <button class="utility-button print-button" type="button" data-print>인쇄</button>
+      </div>
+    </div>
+  </header>
+
+  <div class="manual-shell home-shell">
+    <main id="main-content">
+      <section class="home-hero" aria-labelledby="manual-title">
+        <p class="eyebrow">처음 사용하는 분을 위한 핵심 안내</p>
+        <h1 id="manual-title">파일 선택 → 컬럼 연결 → 엑셀 생성</h1>
+        <p class="lede">만들 문서를 고른 뒤 상세 순서를 따라가세요. 화면에 적힌 버튼 이름을 그대로 사용했습니다.</p>
+        <span class="issue-stamp">현재 기능 기준 · 2026-08-21</span>
+      </section>
+
+      <section aria-labelledby="difference">
+        <h2 id="difference">네 탭의 차이</h2>
+        <div class="quick-answer">
+          <div><span class="answer-number">01 · 청구서</span><strong>명단으로 월별 정산</strong><p>조식·석식 명단 또는 중식 명단 중 하나부터 시작합니다.</p></div>
+          <div><span class="answer-number">02 · 확인서</span><strong>청구서 생성 후 사용</strong><p>계산이 끝난 청구서 데이터를 관할동·주소별로 정리합니다.</p></div>
+          <div><span class="answer-number">03 · 일일배송</span><strong>청구서 생성 불필요</strong><p>조식·석식 또는 중식 명단으로 바로 날짜별 배송표를 만듭니다.</p></div>
+          <div><span class="answer-number">04 · 식수현황</span><strong>선택 월의 식수 조회</strong><p>확인서 계산 기준으로 일자별 조식·석식·중식 수량과 월 합계를 확인합니다.</p></div>
+        </div>
+      </section>
+
+      <section aria-labelledby="choose-guide">
+        <h2 id="choose-guide">만들 문서 선택</h2>
+        <div class="card-grid">
+          <a class="task-card" href="html/청구서.html">
+            <span class="card-index">TAB 01</span><h3>청구서</h3>
+            <p>두 명단과 학교별 방학 일정을 합쳐 급식 건수와 금액을 계산합니다.</p>
+            <span class="card-link">핵심 순서 보기 →</span>
+          </a>
+          <a class="task-card" href="html/확인서.html">
+            <span class="card-index">TAB 02</span><h3>확인서</h3>
+            <p>이름·생년월일이 같은 사람을 합치고 주소별 세대를 계산합니다.</p>
+            <span class="card-link">핵심 순서 보기 →</span>
+          </a>
+          <a class="task-card" href="html/일일배송.html">
+            <span class="card-index">TAB 03</span><h3>일일배송</h3>
+            <p>배송담당·구역·식종 컬럼과 날짜 범위를 골라 생성합니다.</p>
+            <span class="card-link">핵심 순서 보기 →</span>
+          </a>
+          <a class="task-card" href="html/식수현황.html">
+            <span class="card-index">TAB 04</span><h3>식수현황</h3>
+            <p>연·월을 골라 날짜별 식종 수량과 월 합계를 표로 확인합니다.</p>
+            <span class="card-link">조회 방법 보기 →</span>
+          </a>
+        </div>
+      </section>
+
+      <section aria-labelledby="files">
+        <h2 id="files">준비 파일</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th scope="col">파일</th><th scope="col">필수 컬럼</th><th scope="col">추가로 연결할 컬럼</th></tr></thead>
+            <tbody>
+              <tr><td><b>조식·석식 명단</b></td><td>성명, 생년월일</td><td>조식·석식 여부, 비고, 주소, 관할동 등</td></tr>
+              <tr><td><b>중식 명단</b></td><td>구분, 학교명, 학년, 성명, 생년월일, 세대주성명, 아동과의관계, 관할동, 주소, 핸드폰, 배송 담당, 담당 구역 1순위</td><td>담당 구역 2순위, 비고</td></tr>
+              <tr><td><b>학교별 방학 일정</b></td><td>학교명, 시작일, 종료일</td><td>다른 컬럼은 사용하지 않음</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="callout">
+          <strong>중식 명단의 별표 항목은 모두 필수입니다.</strong>
+          <p>중식에만 있는 사람도 청구서·확인서·일일배송에 정확히 들어가도록 개인정보 10개와 배송 담당·1순위 구역을 모두 연결합니다.</p>
+        </div>
+      </section>
+
+      <section aria-labelledby="shortcuts">
+        <h2 id="shortcuts">바로 기억할 것</h2>
+        <ul class="plain-list">
+          <li>엑셀 파일을 고른 뒤 실제 데이터가 있는 <b>시트</b>를 직접 선택합니다.</li>
+          <li>컬럼 매핑의 별표 항목은 필수이고, 자동 선택된 값도 직접 확인합니다.</li>
+          <li>중식을 계산하면 학교별 방학 일정이 반드시 필요합니다.</li>
+          <li>일일배송 식종 대상값은 <code>1</code>, <code>Y</code>, <code>예</code>, <code>있음</code> 등을 사용합니다. <code>O</code>는 대상이 아닙니다.</li>
+          <li>기존 결과 엑셀을 닫은 뒤 생성합니다.</li>
+        </ul>
+        <p><a href="html/처음사용하기.html"><b>파일·시트·컬럼 선택이 낯설다면 처음 사용하기 →</b></a></p>
+        <p><a href="html/문제해결.html"><b>버튼이 꺼져 있거나 수량이 0이라면 문제 해결 →</b></a></p>
+      </section>
+    </main>
+  </div>
+
+  <footer class="site-footer"><p>급식비 정산 프로그램 사용설명서 · PC 사용 기준</p></footer>
+</body>
+</html>

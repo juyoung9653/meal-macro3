@@ -304,6 +304,24 @@ class TestExpandNoteDates:
         days = {d.day for d, _ in result}
         assert days == {1, 2, 3, 4, 5, 6}
 
+    def test_day_only_stop_pauses_until_day_before_delivery(
+        self, mock_holidays, mock_settings
+    ):
+        result = expand_note_dates("17일 중지 19일 배송", 2026, 8)
+
+        days = {target.day for target, _meals in result}
+        meals = set().union(*[meal_set for _target, meal_set in result])
+        assert days == {17, 18}
+        assert meals == {"breakfast", "dinner", "lunch"}
+
+    def test_month_day_stop_and_delivery_keeps_meal_scope(
+        self, mock_holidays, mock_settings
+    ):
+        result = expand_note_dates("8/17 석식 중지 8/19 배송", 2026, 8)
+
+        assert {target.day for target, _meals in result} == {17, 18}
+        assert all(meals == {"dinner"} for _target, meals in result)
+
 
 # ══════════════════════════════════════════════════════
 #  apply_note_to_month

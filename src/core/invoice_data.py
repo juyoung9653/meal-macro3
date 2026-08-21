@@ -13,3 +13,5 @@ class InvoiceData:
     excluded_dates: set[date] = field(default_factory=set)
     roster_headers: list[str] = field(default_factory=list)
     roster_path: str | None = None
+    preparation_error: str | None = None
+    preparation_warnings: list[str] = field(default_factory=list)

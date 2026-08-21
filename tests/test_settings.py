@@ -40,6 +40,13 @@ class TestTypedAccessors:
         sm = make_settings_manager()
         assert sm.get_daily_delivery_template_path() == "assets/일일배송템플릿.xlsx"
 
+    def test_get_daily_delivery_lunch_template_path(self):
+        sm = make_settings_manager()
+        assert (
+            sm.get_daily_delivery_lunch_template_path()
+            == "assets/중식일일배송템플릿.xlsx"
+        )
+
     def test_get_template_sheet_name(self):
         sm = make_settings_manager()
         assert sm.get_template_sheet_name() == "학기_총괄"

@@ -9,7 +9,13 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 from PyQt6.QtCore import QSettings
 from PyQt6.QtWidgets import QApplication
+
 from src.core.invoice_data import InvoiceData
+from src.generators.daily_delivery_generator import (
+    DAILY_ADDRESS_KEY,
+    DAILY_DRIVER_KEY,
+    DAILY_REGION_PRIMARY_KEY,
+)
 from src.widgets.daily_delivery_tab import DailyDeliveryTab
 
 
@@ -115,7 +121,7 @@ def test_meal_columns_can_use_arbitrary_sheet_headers(tmp_path, qapp):
     assert tab.breakfast_combo.currentData() == "48.0"
     assert tab.dinner_combo.currentData() == "44.0"
     assert tab.note_combo.currentData() == "메모"
-    assert tab.meal_summary_label.text() == "대상: 조식 2명 · 석식 1명"
+    assert tab.meal_summary_label.text() == "대상: 조식 2명 · 석식 1명 · 중식 0명"
     prepared = tab._prepare_people()
     assert [person["_breakfast"] for person in prepared] == [1, 1]
     assert [person["_dinner"] for person in prepared] == [0, 1]
@@ -134,4 +140,28 @@ def test_memo_header_is_auto_selected(tmp_path, qapp):
     )
 
     assert tab.note_combo.currentData() == "메모"
+    tab.close()
+
+
+def test_lunch_only_data_needs_no_main_roster_column_selection(tmp_path, qapp):
+    tab = _tab_with_settings(tmp_path, qapp)
+    lunch_person = {
+        DAILY_DRIVER_KEY: "기사 A",
+        DAILY_REGION_PRIMARY_KEY: "정자 구역",
+        DAILY_ADDRESS_KEY: "정자동 1-1",
+        "_breakfast": 0,
+        "_dinner": 0,
+        "_lunch": 1,
+        "_lunch_dates": ["2026-05-04"],
+        "_note": "",
+    }
+
+    tab.set_invoice_data(InvoiceData(invoices=[lunch_person]))
+
+    assert tab.driver_combo.currentData() == ""
+    assert tab.region_primary_combo.currentData() == ""
+    assert tab.address_combo.currentData() == ""
+    assert tab.meal_summary_label.text() == "대상: 조식 0명 · 석식 0명 · 중식 1명"
+    assert tab.generate_btn.isEnabled()
+    assert tab._prepare_people()[0][DAILY_DRIVER_KEY] == "기사 A"
     tab.close()

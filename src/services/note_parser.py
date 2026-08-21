@@ -21,10 +21,29 @@ from ..core.date_utils import SAT, SUN, date_range
 from ..core.meal_types import MealType
 from ..core.settings import get_settings
 from .holiday_fetcher import get_kr_holidays
-from .note_parsers._patterns import _KOREAN_WEEKDAY, _action_type, _detect_meals
+from .note_parsers._patterns import (
+    _KOREAN_WEEKDAY,
+    _action_type,
+    _detect_meals,
+    _resolve_year,
+)
 from .note_parsers.date_patterns import _parse_date_patterns
 
 log = logging.getLogger(__name__)
+
+
+_PAUSE_THROUGH_DELIVERY_RE = re.compile(
+    r"(?:(?P<start_year>\d{2,4})\s*[./년]\s*)?"
+    r"(?:(?P<start_month>\d{1,2})\s*[./월]\s*)?"
+    r"(?P<start_day>\d{1,2})\s*일?\s*"
+    r"(?P<middle>(?:(?!\d{1,2}\s*(?:일|[./월])).){0,30}?)"
+    r"(?:일시\s*)?중지\s*"
+    r"(?:(?P<end_year>\d{2,4})\s*[./년]\s*)?"
+    r"(?:(?P<end_month>\d{1,2})\s*[./월]\s*)?"
+    r"(?P<end_day>\d{1,2})\s*일?\s*"
+    r"(?P<suffix>.{0,20}?)"
+    r"(?:부터\s*)?(?:재)?배송"
+)
 
 
 # ── 무시할 내용 필터 ──
@@ -84,7 +103,7 @@ def _split_segments(text: str) -> list[str]:
 # ══════════════════════════════════════════════════════
 
 
-def parse_note(note: str, ref_year: int) -> list[dict]:
+def parse_note(note: str, ref_year: int, ref_month: int | None = None) -> list[dict]:
     """비고 문자열에서 배송 일정 변경사항 파싱.
 
     반환:
@@ -104,7 +123,7 @@ def parse_note(note: str, ref_year: int) -> list[dict]:
         if not seg:
             continue
         # 먼저 파싱 후, 각 결과의 raw가 무시할 내용이면 제외
-        results = _parse_segment(seg, ref_year)
+        results = _parse_segment(seg, ref_year, ref_month)
         for r in results:
             if not _is_irrelevant(r.get("raw", "")):
                 all_results.append(r)
@@ -134,7 +153,7 @@ def expand_note_dates(
     """
     import calendar
 
-    adjustments = parse_note(note, ref_year)
+    adjustments = parse_note(note, ref_year, month)
     if not adjustments:
         return []
 
@@ -246,12 +265,61 @@ def expand_note_dates(
 # ══════════════════════════════════════════════════════
 
 
-def _parse_segment(seg: str, ref_year: int) -> list[dict]:
+def _parse_segment(
+    seg: str, ref_year: int, ref_month: int | None = None
+) -> list[dict]:
     """단일 세그먼트 처리."""
     results: list[dict] = []
     remaining = seg
 
-    # 0. "방학중식 중지" 특수 패턴
+    # 0. "17일 중지 19일 배송"은 배송 재개 전날인 18일까지 중지한다.
+    # 월이 생략되면 expand_note_dates()가 전달한 조회 월을 사용한다.
+    while True:
+        m = _PAUSE_THROUGH_DELIVERY_RE.search(remaining)
+        if not m:
+            break
+        start_month_text = m.group("start_month")
+        end_month_text = m.group("end_month")
+        if not start_month_text and ref_month is None:
+            break
+
+        start_year = (
+            _resolve_year(int(m.group("start_year")), ref_year)
+            if m.group("start_year")
+            else ref_year
+        )
+        start_month = int(start_month_text or ref_month)
+        end_month = int(end_month_text or start_month)
+        if m.group("end_year"):
+            end_year = _resolve_year(int(m.group("end_year")), ref_year)
+        elif end_month < start_month:
+            end_year = start_year + 1
+        else:
+            end_year = start_year
+
+        try:
+            start = date(start_year, start_month, int(m.group("start_day")))
+            resume_date = date(end_year, end_month, int(m.group("end_day")))
+        except ValueError:
+            remaining = remaining[: m.start()] + remaining[m.end() :]
+            continue
+
+        matched = m.group(0)
+        end = resume_date - timedelta(days=1)
+        if start <= end:
+            results.append(
+                {
+                    "type": "pause",
+                    "meals": _detect_meals(matched),
+                    "start": start,
+                    "end": end,
+                    "weekdays": None,
+                    "raw": matched,
+                }
+            )
+        remaining = remaining[: m.start()] + remaining[m.end() :]
+
+    # 1. "방학중식 중지" 특수 패턴
     m = re.search(r"방학중식\s*중지", remaining)
     if m:
         remaining = remaining[: m.start()] + remaining[m.end() :]
@@ -266,7 +334,7 @@ def _parse_segment(seg: str, ref_year: int) -> list[dict]:
             }
         )
 
-    # 1. 매주X요일 패턴 (예: 매주월,목일시중지(석식만))
+    # 2. 매주X요일 패턴 (예: 매주월,목일시중지(석식만))
     #    (조식/석식/중식은 요일 뒤 또는 괄호 안에 올 수 있음)
     m = re.search(
         r"매주\s*"
@@ -304,7 +372,7 @@ def _parse_segment(seg: str, ref_year: int) -> list[dict]:
                 }
             )
 
-    # 2. 요일 지정 배송 패턴 (예: 화,목(석식)만 배송희망, 월,수 배송(석식))
+    # 3. 요일 지정 배송 패턴 (예: 화,목(석식)만 배송희망, 월,수 배송(석식))
     m = re.search(
         r"([월화수목금토일]+(?:,\s*[월화수목금토일]+)*)\s*"
         r"(?:요일)?\s*"
@@ -331,7 +399,7 @@ def _parse_segment(seg: str, ref_year: int) -> list[dict]:
             }
         )
 
-    # 3. 날짜 기반 패턴들
+    # 4. 날짜 기반 패턴들
     results.extend(_parse_date_patterns(remaining, ref_year))
 
     return results

@@ -78,6 +78,7 @@ class MappingDialog(BaseMappingDialog):
                     label=info.get("label", key),
                     tooltip=info.get("tooltip", ""),
                     search_terms=terms or [key],
+                    required=key in required_keys,
                 )
             )
 

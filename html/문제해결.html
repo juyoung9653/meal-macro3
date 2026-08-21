@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="급식비 정산 프로그램의 버튼, 수량, 매핑 문제 해결 방법입니다.">
+  <title>문제 해결 | 급식비 정산 프로그램</title>
+  <link rel="stylesheet" href="assets/manual.css">
+  <script defer src="assets/manual.js"></script>
+</head>
+<body class="detail-page">
+  <a class="skip-link" href="#main-content">본문 바로가기</a>
+  <header class="site-header"><div class="header-inner"><a class="brand" href="../사용설명서.html" aria-label="사용설명서 첫 화면"><span class="brand-mark" aria-hidden="true">급식</span><span>작업 안내서<small>급식비 정산 프로그램</small></span></a><div class="header-actions"><button class="utility-button" type="button" data-font-toggle aria-pressed="false">글자 크게</button><button class="utility-button print-button" type="button" data-print>인쇄</button></div></div></header>
+  <div class="manual-shell">
+    <nav class="side-nav" aria-label="설명서 목차"><strong>Manual route</strong><a href="../사용설명서.html">전체 안내</a><a href="처음사용하기.html" data-page="처음사용하기.html">처음 사용하기</a><div class="nav-divider"></div><a href="청구서.html" data-page="청구서.html">① 청구서</a><a href="확인서.html" data-page="확인서.html">② 확인서</a><a href="일일배송.html" data-page="일일배송.html">③ 일일배송</a><a href="식수현황.html" data-page="식수현황.html">④ 식수현황</a><div class="nav-divider"></div><a href="문제해결.html" data-page="문제해결.html">문제 해결</a></nav>
+    <main id="main-content">
+      <header class="page-head"><p class="eyebrow">QUICK CHECK</p><h1>문제 해결</h1><p class="lede">현재 증상과 같은 제목을 열어 위에서부터 확인하세요.</p></header>
+      <button class="utility-button no-print" type="button" data-expand-all aria-expanded="false">질문 모두 펼치기</button>
+
+      <section aria-labelledby="faq">
+        <h2 id="faq">자주 생기는 문제</h2>
+
+        <details open><summary>청구서 생성 버튼이 꺼져 있습니다</summary><div class="details-body"><p>조식·석식 명단 또는 중식 명단 중 한 곳에 사람이 1명 이상 불러와져야 합니다. 실제 데이터가 있는 시트를 골랐고 <b>명단 ○명 로드됨</b>이 표시되는지 확인하세요. 학교 일정만 불러와서는 켜지지 않습니다.</p></div></details>
+
+        <details><summary>확인서 생성 버튼이 꺼져 있습니다</summary><div class="details-body"><p>① 청구서 탭에서 청구서 생성을 완료한 뒤 ② 확인서 탭으로 다시 이동하세요. 확인서는 원본 명단만으로 만들 수 없습니다.</p></div></details>
+
+        <details><summary>일일배송 생성 버튼이 꺼져 있습니다</summary><div class="details-body"><p>① 청구서 탭에서 조식·석식 또는 중식 명단을 불러온 뒤 ③ 일일배송 탭으로 다시 이동하세요. 중식은 필수 컬럼 매핑과 학교별 방학 일정도 필요하지만 청구서 생성은 필요 없습니다.</p></div></details>
+
+        <details><summary>조식·석식 수량이 모두 0입니다</summary><div class="details-body"><p>올바른 식종 컬럼을 골랐는지 확인하세요. 대상값은 <code>1</code>, <code>1.0</code>, <code>Y</code>, <code>y</code>, <code>예</code>, <code>있음</code>, 0보다 큰 숫자입니다. <code>O</code>, <code>TRUE</code>, <code>대상</code>은 대상이 아닙니다.</p></div></details>
+
+        <details><summary>중식이 0건입니다</summary><div class="details-body"><p>중식 명단의 별표 항목과 일정 파일의 학교명·시작일·종료일 매핑을 확인하세요. 두 파일의 학교명이 같고 일정이 귀속 월과 겹쳐야 합니다.</p></div></details>
+
+        <details><summary>중식 명단 매핑 오류가 납니다</summary><div class="details-body"><p><b>중식 명단 컬럼 매핑</b>에서 구분·학교명·학년·성명·생년월일·세대주성명·아동과의관계·관할동·주소·핸드폰·배송 담당·담당 구역 1순위를 모두 연결하세요.</p></div></details>
+
+        <details><summary>일일배송에 미분류가 나옵니다</summary><div class="details-body"><p>배송 대상자의 배송담당이 비었거나 담당 구역 1·2순위가 모두 비었습니다. 선택한 컬럼과 해당 사람의 원본 셀을 확인하세요.</p></div></details>
+
+        <details><summary>일일배송 비고가 나오지 않습니다</summary><div class="details-body"><p>비고/메모 컬럼을 고르고 <code>석식: 6/13~6/15</code> 또는 <code>중식: 6/13~6/15</code>처럼 입력하세요. 현재 날짜 시트의 일요일~토요일 주차와 겹치는 항목만 표시합니다.</p></div></details>
+
+        <details><summary>특정 사람이 청구서에서 빠졌습니다</summary><div class="details-body"><p>세 식종이 모두 0건이면 출력에서 빠집니다. 또한 제목에 <b>중지</b> 또는 <b>중단</b>이 있는 컬럼의 해당 셀에도 중지·중단이 적혀 있으면 그 사람을 제외합니다.</p></div></details>
+
+        <details><summary>템플릿 또는 저장 오류가 납니다</summary><div class="details-body"><p>기존 결과 엑셀을 닫고 출력 폴더를 다시 고르세요. <code>assets</code> 폴더에 청구서·확인서·일일배송 템플릿이 있는지도 확인합니다. 조식·석식은 <code>assets/일일배송템플릿.xlsx</code>, 중식은 <code>assets/중식일일배송템플릿.xlsx</code>가 필요합니다.</p></div></details>
+      </section>
+
+      <a class="next-page" href="../사용설명서.html"><div><span>처음으로</span><strong>전체 사용설명서</strong></div><b aria-hidden="true">→</b></a>
+    </main>
+  </div>
+  <footer class="site-footer"><p><a href="../사용설명서.html">설명서 첫 화면</a> · 문제 해결</p></footer>
+</body>
+</html>

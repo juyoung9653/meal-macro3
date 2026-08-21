@@ -29,7 +29,12 @@ from PyQt6.QtWidgets import (
 from ..core.invoice_data import InvoiceData
 from ..core.settings import get_settings
 from ..generators.daily_delivery_generator import (
+    DAILY_ADDRESS_KEY,
+    DAILY_DRIVER_KEY,
+    DAILY_REGION_PRIMARY_KEY,
+    DAILY_REGION_SECONDARY_KEY,
     DailyDeliverySheet,
+    has_lunch_delivery,
     make_daily_delivery,
     prepare_daily_delivery_people,
     select_delivery_dates,
@@ -99,9 +104,7 @@ class DailyDeliveryTab(QWidget):
         meal_row.addWidget(QLabel("조식 여부 컬럼:"))
         self.breakfast_combo = QComboBox()
         self.breakfast_combo.setMinimumWidth(180)
-        self.breakfast_combo.currentIndexChanged.connect(
-            self._on_meal_column_changed
-        )
+        self.breakfast_combo.currentIndexChanged.connect(self._on_meal_column_changed)
         meal_row.addWidget(self.breakfast_combo)
         meal_row.addSpacing(20)
         meal_row.addWidget(QLabel("석식 여부 컬럼:"))
@@ -119,7 +122,7 @@ class DailyDeliveryTab(QWidget):
         self.note_combo.currentIndexChanged.connect(self._save_settings)
         note_row.addWidget(self.note_combo)
         note_row.addSpacing(20)
-        self.meal_summary_label = QLabel("조식·석식 컬럼을 선택하세요.")
+        self.meal_summary_label = QLabel("조식·석식 컬럼 또는 중식 명단을 확인하세요.")
         self.meal_summary_label.setStyleSheet("color: #555;")
         note_row.addWidget(self.meal_summary_label)
         note_row.addStretch()
@@ -190,9 +193,9 @@ class DailyDeliveryTab(QWidget):
         result_group = QGroupBox("생성 결과")
         result_layout = QVBoxLayout(result_group)
         self.result_table = QTableWidget()
-        self.result_table.setColumnCount(5)
+        self.result_table.setColumnCount(6)
         self.result_table.setHorizontalHeaderLabels(
-            ["날짜", "요일", "조식 합계", "석식 합계", "미분류 인원"]
+            ["날짜", "요일", "조식 합계", "석식 합계", "중식 합계", "미분류 인원"]
         )
         self.result_table.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.Stretch
@@ -200,7 +203,7 @@ class DailyDeliveryTab(QWidget):
         self.result_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.result_table.setAlternatingRowColors(True)
         result_layout.addWidget(self.result_table)
-        self.info_label = QLabel("생성된 날짜 시트: 0개")
+        self.info_label = QLabel("생성된 배송일: 0일")
         self.info_label.setAlignment(Qt.AlignmentFlag.AlignRight)
         result_layout.addWidget(self.info_label)
         layout.addWidget(result_group, stretch=1)
@@ -279,9 +282,7 @@ class DailyDeliveryTab(QWidget):
         self._settings.setValue(
             "daily/dinner_col", self.dinner_combo.currentData() or ""
         )
-        self._settings.setValue(
-            "daily/note_col", self.note_combo.currentData() or ""
-        )
+        self._settings.setValue("daily/note_col", self.note_combo.currentData() or "")
         if self.output_dir:
             self._settings.setValue("daily/output_dir", self.output_dir)
         self._settings.sync()
@@ -295,23 +296,29 @@ class DailyDeliveryTab(QWidget):
             return
         breakfast_col = self.breakfast_combo.currentData() or ""
         dinner_col = self.dinner_combo.currentData() or ""
-        if not breakfast_col and not dinner_col:
-            self.meal_summary_label.setText("조식·석식 중 하나 이상 선택하세요.")
-            self.meal_summary_label.setStyleSheet("color: #b00020;")
-            return
-
         breakfast_count = sum(
-            to_bool(person.get(breakfast_col, 0))
+            to_bool(
+                person.get(breakfast_col, 0)
+                if breakfast_col
+                else person.get("_breakfast", 0)
+            )
             for person in self._data.invoices
         )
         dinner_count = sum(
-            to_bool(person.get(dinner_col, 0)) for person in self._data.invoices
+            to_bool(
+                person.get(dinner_col, 0) if dinner_col else person.get("_dinner", 0)
+            )
+            for person in self._data.invoices
         )
+        lunch_count = sum(has_lunch_delivery(person) for person in self._data.invoices)
         self.meal_summary_label.setText(
-            f"대상: 조식 {breakfast_count}명 · 석식 {dinner_count}명"
+            f"대상: 조식 {breakfast_count}명 · 석식 {dinner_count}명 · "
+            f"중식 {lunch_count}명"
         )
         self.meal_summary_label.setStyleSheet(
-            "color: #b00020;" if breakfast_count + dinner_count == 0 else "color: #555;"
+            "color: #b00020;"
+            if breakfast_count + dinner_count + lunch_count == 0
+            else "color: #555;"
         )
 
     def _on_start_date_changed(self, value: QDate):
@@ -347,16 +354,12 @@ class DailyDeliveryTab(QWidget):
             columns = [key for key in data.invoices[0] if not key.startswith("_")]
 
         saved_driver = str(self._settings.value("daily/driver_col", "") or "")
-        saved_primary = str(
-            self._settings.value("daily/region_primary_col", "") or ""
-        )
+        saved_primary = str(self._settings.value("daily/region_primary_col", "") or "")
         saved_secondary = str(
             self._settings.value("daily/region_secondary_col", "") or ""
         )
         saved_address = str(self._settings.value("daily/address_col", "") or "")
-        saved_breakfast = str(
-            self._settings.value("daily/breakfast_col", "") or ""
-        )
+        saved_breakfast = str(self._settings.value("daily/breakfast_col", "") or "")
         saved_dinner = str(self._settings.value("daily/dinner_col", "") or "")
         saved_note = str(self._settings.value("daily/note_col", "") or "")
         mapped_region = str(data.col_mapping.get("관할동", "") or "")
@@ -459,9 +462,7 @@ class DailyDeliveryTab(QWidget):
             if saved_note in columns
             else mapped_note
             if mapped_note in columns
-            else self._find_column(
-                columns, ["학기중 비고", "비고", "메모", "특이사항"]
-            )
+            else self._find_column(columns, ["학기중 비고", "비고", "메모", "특이사항"])
         )
         if driver:
             self.driver_combo.setCurrentIndex(self.driver_combo.findData(driver))
@@ -513,17 +514,26 @@ class DailyDeliveryTab(QWidget):
             return None
 
     def set_invoice_data(self, data: InvoiceData):
-        if not data.invoices:
+        if not data.invoices and not data.preparation_error:
             cached = self._load_cached_invoice_data()
             if cached and cached.invoices:
                 data = cached
         self._data = data
         self._populate_column_combos(data)
-        self.generate_btn.setEnabled(bool(data.invoices))
+        self.generate_btn.setEnabled(bool(data.invoices) and not data.preparation_error)
 
-        if data.invoices:
+        if data.preparation_error:
+            self.data_label.setText(data.preparation_error.replace("\n", " "))
+            self.data_label.setStyleSheet("color: #b00020;")
+        elif data.invoices:
+            warning_suffix = (
+                f" · 경고 {len(data.preparation_warnings)}건"
+                if data.preparation_warnings
+                else ""
+            )
             self.data_label.setText(
-                f"명단 데이터 {len(data.invoices)}명 로드됨 — 청구서 생성 없이 일일배송을 만들 수 있습니다."
+                f"명단 데이터 {len(data.invoices)}명 로드됨{warning_suffix} — "
+                "청구서 생성 없이 일일배송을 만들 수 있습니다."
             )
             self.data_label.setStyleSheet("color: #000;")
         else:
@@ -555,6 +565,10 @@ class DailyDeliveryTab(QWidget):
             breakfast_col=self.breakfast_combo.currentData() or "",
             dinner_col=self.dinner_combo.currentData() or "",
             note_col=self.note_combo.currentData() or "",
+            driver_col=self.driver_combo.currentData() or "",
+            region_primary_col=self.region_primary_combo.currentData() or "",
+            region_secondary_col=self.region_secondary_combo.currentData() or "",
+            address_col=self.address_combo.currentData() or "",
         )
 
     def _generate(self):
@@ -567,25 +581,27 @@ class DailyDeliveryTab(QWidget):
             )
             return
 
-        driver_col = self.driver_combo.currentData() or ""
-        region_primary_col = self.region_primary_combo.currentData() or ""
-        region_secondary_col = self.region_secondary_combo.currentData() or ""
-        address_col = self.address_combo.currentData() or ""
-        breakfast_col = self.breakfast_combo.currentData() or ""
-        dinner_col = self.dinner_combo.currentData() or ""
-        if not driver_col:
+        people = self._prepare_people()
+        has_term_delivery = any(
+            to_bool(person.get("_breakfast", 0)) or to_bool(person.get("_dinner", 0))
+            for person in people
+        )
+        has_lunch = any(has_lunch_delivery(person) for person in people)
+        if not has_term_delivery and not has_lunch:
+            QMessageBox.warning(
+                self,
+                "알림",
+                "선택한 조식·석식 컬럼과 중식 명단에서 대상자를 찾을 수 없습니다.",
+            )
+            return
+        if has_term_delivery and not self.driver_combo.currentData():
             QMessageBox.warning(self, "알림", "배송 담당 컬럼을 선택하세요.")
             return
-        if not region_primary_col:
+        if has_term_delivery and not self.region_primary_combo.currentData():
             QMessageBox.warning(self, "알림", "담당 구역 1순위 컬럼을 선택하세요.")
             return
-        if not address_col:
+        if has_term_delivery and not self.address_combo.currentData():
             QMessageBox.warning(self, "알림", "세대 구분(주소) 컬럼을 선택하세요.")
-            return
-        if not breakfast_col and not dinner_col:
-            QMessageBox.warning(
-                self, "알림", "조식 여부 또는 석식 여부 컬럼을 하나 이상 선택하세요."
-            )
             return
 
         start = self._to_date(self.start_date.date())
@@ -610,14 +626,15 @@ class DailyDeliveryTab(QWidget):
                 self.output_dir, self._output_filename(start, end)
             )
             self.deliveries = make_daily_delivery(
-                self._prepare_people(),
+                people,
                 dates,
                 output_path,
                 template_path=self._s.get_daily_delivery_template_path(),
-                driver_col=driver_col,
-                region_primary_col=region_primary_col,
-                region_secondary_col=region_secondary_col,
-                address_col=address_col,
+                lunch_template_path=(self._s.get_daily_delivery_lunch_template_path()),
+                driver_col=DAILY_DRIVER_KEY,
+                region_primary_col=DAILY_REGION_PRIMARY_KEY,
+                region_secondary_col=DAILY_REGION_SECONDARY_KEY,
+                address_col=DAILY_ADDRESS_KEY,
             )
         except ValueError as error:
             QMessageBox.warning(self, "생성 오류", str(error))
@@ -630,8 +647,12 @@ class DailyDeliveryTab(QWidget):
         self.open_file_btn.setEnabled(True)
         self._update_table()
         unmatched = max((sheet.unmatched_count for sheet in self.deliveries), default=0)
+        workbook_sheet_count = (len(self.deliveries) if has_term_delivery else 0) + sum(
+            sheet.lunch_total > 0 for sheet in self.deliveries
+        )
         message = (
-            f"일일배송 날짜 시트 {len(self.deliveries)}개 생성 완료!\n{output_path}"
+            f"일일배송 {len(self.deliveries)}일, 시트 {workbook_sheet_count}개 "
+            f"생성 완료!\n{output_path}"
         )
         if unmatched:
             message += (
@@ -649,11 +670,12 @@ class DailyDeliveryTab(QWidget):
                 weekdays[delivery.delivery_date.weekday()],
                 str(delivery.breakfast_total),
                 str(delivery.dinner_total),
+                str(delivery.lunch_total),
                 str(delivery.unmatched_count),
             )
             for column, value in enumerate(values):
                 self.result_table.setItem(row, column, QTableWidgetItem(value))
-        self.info_label.setText(f"생성된 날짜 시트: {len(self.deliveries)}개")
+        self.info_label.setText(f"생성된 배송일: {len(self.deliveries)}일")
 
     def _open_output_file(self):
         if self._last_output_path and os.path.exists(self._last_output_path):
@@ -666,7 +688,7 @@ class DailyDeliveryTab(QWidget):
     def _clear(self):
         self.deliveries.clear()
         self.result_table.setRowCount(0)
-        self.info_label.setText("생성된 날짜 시트: 0개")
+        self.info_label.setText("생성된 배송일: 0일")
         self._last_output_path = None
         self.open_file_btn.setEnabled(False)
 
