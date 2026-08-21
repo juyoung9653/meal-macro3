@@ -65,6 +65,54 @@ def _sanitize_column_mapping(mapping: dict, headers: list[str]) -> dict:
     return sanitized
 
 
+def _source_mapping_columns(template_columns: list[str]) -> list[str]:
+    """명단에서 사용자가 직접 선택해야 하는 컬럼만 반환한다."""
+
+    calculated_columns = {
+        column
+        for column in auto_detect_semantic_columns(template_columns).values()
+        if column
+    }
+    result: list[str] = []
+    for column in template_columns:
+        compact = "".join(str(column).split())
+        if column == "제공기관" or column in calculated_columns:
+            continue
+        if "비고" in compact:
+            # 비고는 내부 계산용 __note 선택 하나로 출력까지 함께 연결한다.
+            continue
+        if "배송시작" in compact or "배송종료" in compact:
+            continue
+        result.append(column)
+    return result
+
+
+def _unify_note_mapping(mapping: dict, template_columns: list[str]) -> dict:
+    """비고 선택 하나를 계산용 키와 템플릿 비고 컬럼에 함께 적용한다."""
+
+    unified = dict(mapping)
+    note_columns = [
+        column
+        for column in template_columns
+        if "비고" in "".join(str(column).split())
+    ]
+    selected = str(unified.get("__note", "") or "")
+    if not selected:
+        selected = next(
+            (
+                str(unified.get(column, "") or "")
+                for column in note_columns
+                if unified.get(column)
+            ),
+            "",
+        )
+
+    unified["__note"] = selected
+    for column in note_columns:
+        unified[column] = selected
+    return unified
+
+
 def _has_required_mapping(
     mapping: dict,
     headers: list[str],
@@ -96,6 +144,9 @@ class InvoiceTab(QWidget):
                         self._all_template_columns.append(column)
             except Exception:
                 log.debug("템플릿 시트 '%s' 컬럼 읽기 건너뜀", sheet_name, exc_info=True)
+        self._source_mapping_columns = _source_mapping_columns(
+            self._all_template_columns
+        )
         self._controller = InvoiceController(self, self._all_template_columns)
         self._loader = RosterLoader(self)
         self._lunch_person_loader = RosterLoader(self)
@@ -550,7 +601,7 @@ class InvoiceTab(QWidget):
 
         dlg = MappingDialog(
             headers,
-            self._all_template_columns,
+            self._source_mapping_columns,
             self,
             title="중식 명단 컬럼 매핑",
             flag_keys=LUNCH_DAILY_MAPPING_FIELDS + ("__note",),
@@ -566,7 +617,9 @@ class InvoiceTab(QWidget):
         if not dlg.exec():
             return
 
-        self._lunch_person_mapping = dlg.get_values()
+        self._lunch_person_mapping = _unify_note_mapping(
+            dlg.get_values(), self._all_template_columns
+        )
         self._lunch_person_mapping.update(
             auto_detect_semantic_columns(self._all_template_columns)
         )
@@ -807,7 +860,19 @@ class InvoiceTab(QWidget):
 
         # 컬럼 매핑
         mapping = self._settings.value("invoice/col_mapping", None)
-        if mapping is not None:
+        mapping_is_dict = isinstance(mapping, dict)
+        if mapping_is_dict:
+            mapping = _unify_note_mapping(mapping, self._all_template_columns)
+        saved_source_keys = (
+            *self._source_mapping_columns,
+            "__breakfast",
+            "__dinner",
+            "__note",
+        )
+        has_saved_mapping = mapping_is_dict and any(
+            str(mapping.get(key, "") or "").strip() for key in saved_source_keys
+        )
+        if mapping_is_dict:
             self._controller.set_col_mapping(
                 {
                     k: mapping.get(k, v)
@@ -857,7 +922,9 @@ class InvoiceTab(QWidget):
             "lunch_roster/col_mapping", None
         )
         if lunch_person_mapping and isinstance(lunch_person_mapping, dict):
-            self._lunch_person_mapping = lunch_person_mapping
+            self._lunch_person_mapping = _unify_note_mapping(
+                lunch_person_mapping, self._all_template_columns
+            )
         lunch_person_file = self._settings.value("lunch_roster/file_path", "")
         if lunch_person_file and os.path.exists(lunch_person_file):
             self._lunch_person_file_path = str(lunch_person_file)
@@ -893,13 +960,18 @@ class InvoiceTab(QWidget):
             self.lunch_file_label.setStyleSheet("color: #000;")
             self.lunch_mapping_btn.setEnabled(True)
 
-        self._save_settings()
-
         # ── 캐시된 InvoiceData 복원 (청구서 재생성 없이 확인서 탭 사용 가능) ──
         cached = self._load_cached_invoice_data()
         if cached and cached.invoices:
             self._controller.invoices = cached.invoices
-            self._controller.set_col_mapping(cached.col_mapping)
+            # 결과 캐시는 과거 청구서를 다시 보여주기 위한 데이터다.
+            # 사용자가 확정한 영구 매핑이 있으면 캐시의 옛 매핑으로 덮지 않는다.
+            if not has_saved_mapping:
+                self._controller.set_col_mapping(
+                    _unify_note_mapping(
+                        cached.col_mapping, self._all_template_columns
+                    )
+                )
             self._controller._year = cached.year
             self._controller._month = cached.month
             self._controller.set_excluded_dates(cached.excluded_dates)
@@ -907,6 +979,9 @@ class InvoiceTab(QWidget):
             self._controller.roster_path = cached.roster_path
             self._update_result(cached.invoices)
             self._update_exclude_label()
+
+        # 캐시 fallback까지 반영한 최종 매핑을 다음 실행에도 유지한다.
+        self._save_settings()
 
     def _try_auto_load_roster(self):
         """저장된 명단 자동 로드 (I/O 가능, 생성 후 호출)."""
@@ -1035,7 +1110,7 @@ class InvoiceTab(QWidget):
             return
         dlg = MappingDialog(
             self._controller.get_roster_headers(),
-            self._all_template_columns,
+            self._source_mapping_columns,
             self,
             title="조식·석식 명단 컬럼 매핑",
             flag_keys=("__breakfast", "__dinner", "__note"),
@@ -1044,7 +1119,9 @@ class InvoiceTab(QWidget):
         dlg._reset_defaults()
         dlg.set_values(self._controller.get_col_mapping())
         if dlg.exec():
-            mapping = dlg.get_values()
+            mapping = _unify_note_mapping(
+                dlg.get_values(), self._all_template_columns
+            )
             _sem = auto_detect_semantic_columns(self._all_template_columns)
             mapping.update(_sem)
             self._controller.set_col_mapping(mapping)

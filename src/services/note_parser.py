@@ -45,6 +45,11 @@ _PAUSE_THROUGH_DELIVERY_RE = re.compile(
     r"(?:부터\s*)?(?:재)?배송"
 )
 
+_MEAL_LINE_PREFIX_RE = re.compile(
+    r"^\s*((?:조식|석식|중식|방중)(?:\s*[,/·]\s*(?:조식|석식|중식|방중))*)"
+    r"\s*[:：]\s*"
+)
+
 
 # ── 무시할 내용 필터 ──
 
@@ -270,7 +275,10 @@ def _parse_segment(
 ) -> list[dict]:
     """단일 세그먼트 처리."""
     results: list[dict] = []
-    remaining = seg
+    meal_prefix = _MEAL_LINE_PREFIX_RE.match(seg)
+    prefix_text = meal_prefix.group(1) if meal_prefix else ""
+    prefix_meals = _detect_meals(prefix_text) if prefix_text else set()
+    remaining = seg[meal_prefix.end() :] if meal_prefix else seg
 
     # 0. "17일 중지 19일 배송"은 배송 재개 전날인 18일까지 중지한다.
     # 월이 생략되면 expand_note_dates()가 전달한 조회 월을 사용한다.
@@ -401,6 +409,11 @@ def _parse_segment(
 
     # 4. 날짜 기반 패턴들
     results.extend(_parse_date_patterns(remaining, ref_year))
+
+    if prefix_meals:
+        for result in results:
+            result["meals"] = set(prefix_meals)
+            result["raw"] = f"{prefix_text}: {result.get('raw', '')}".strip()
 
     return results
 

@@ -45,7 +45,16 @@
 
       <section aria-labelledby="summary-notes">
         <h2 id="summary-notes">비고 입력 예시</h2>
-        <p><code>17일 중지 19일 배송</code>은 19일부터 배송을 재개한다는 뜻입니다. 따라서 선택한 달의 <b>17일과 18일만 일시중지</b>하고 19일 수량은 다시 포함합니다. <code>8/17 석식 중지 8/19 배송</code>처럼 식종을 적으면 석식에만 적용됩니다.</p>
+        <p>명단 엑셀의 비고 셀에 여러 식종을 입력할 때는 식종마다 한 줄씩 적습니다. 줄을 바꿀 자리에서 <code>Alt+Enter</code>를 누르세요.</p>
+        <div class="callout">
+          <strong>셀 한 칸에 입력하는 예시</strong>
+          <p><code>조식: 6/10~6/12 일시중지</code><br><code>석식: 6/16~6/19 일시중지</code></p>
+        </div>
+        <ul class="plain-list">
+          <li><b>식종을 적은 줄:</b> 적힌 식종에만 적용합니다. 예를 들어 <code>석식: 6/16~6/19 일시중지</code>는 석식만 중지합니다.</li>
+          <li><b>식종을 적지 않은 줄:</b> 해당 명단 파일의 식종 전체에 적용합니다. 조식·석식 명단에서는 조식과 석식 모두, 중식 명단에서는 중식에 적용합니다.</li>
+          <li><b>배송 재개일을 함께 적을 때:</b> <code>17일 중지 19일 배송</code>은 <b>17일과 18일만 일시중지</b>하고 19일부터 다시 배송합니다.</li>
+        </ul>
       </section>
 
       <section aria-labelledby="summary-checks">

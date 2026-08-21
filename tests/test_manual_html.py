@@ -112,10 +112,17 @@ def test_manual_mentions_current_high_risk_contracts():
         "구분, 학교명, 학년, 성명, 생년월일, 세대주성명, 아동과의관계, 관할동, 주소, 핸드폰",
         "해당 시트에서 배송 수량이 0인 구역 행은 자동으로 빠지고",
         "중식_yy.mm.dd",
-        "석식: 6/13~6/15",
         "17일 중지 19일 배송",
         "17일과 18일만 일시중지",
         "월 합계",
+        "비고는 한 번만 연결합니다",
+        "프로그램을 종료해도 저장",
+        "Alt+Enter",
+        "석식: 6/16~6/19 일시중지",
+        "식종을 적지 않은 줄",
+        "조식과 석식 모두",
+        "중식 명단에서는 중식에 적용",
+        "식종 대상값은 <code>1</code>만",
     }
     missing = {phrase for phrase in required_phrases if phrase not in combined}
     assert not missing

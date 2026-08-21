@@ -136,6 +136,31 @@ def test_prepare_people_from_roster_without_generating_invoice():
     assert "_breakfast" not in original[0]
 
 
+@pytest.mark.parametrize(
+    "value", ["1.0", "Y", "y", "예", "있음", "O", 2, 0.5, True]
+)
+def test_daily_delivery_rejects_non_one_meal_markers(value):
+    sheet = _build(
+        [_person("기사 A", "1순위 구역", "", "주소", breakfast=value, dinner=0)]
+    )
+
+    assert sheet.rows == []
+    assert (sheet.breakfast_total, sheet.dinner_total, sheet.lunch_total) == (
+        0,
+        0,
+        0,
+    )
+
+
+@pytest.mark.parametrize("value", [1, 1.0, "1", " 1 "])
+def test_daily_delivery_accepts_numeric_or_text_one(value):
+    sheet = _build(
+        [_person("기사 A", "1순위 구역", "", "주소", breakfast=value, dinner=0)]
+    )
+
+    assert sheet.breakfast_total == 1
+
+
 class TestDailyAggregation:
     def test_sheet_can_be_built_with_primary_region_only(self):
         sheet = build_daily_delivery_sheet(

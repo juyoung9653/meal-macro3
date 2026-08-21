@@ -124,6 +124,21 @@ class TestParseNote:
             assert r["meals"] == {"dinner"}
             assert r["type"] == "pause"
 
+    def test_alt_enter_lines_keep_each_meal_scope(self):
+        result = parse_note(
+            "조식: 6/10~6/12 일시중지\n석식: 6/16~6/19 일시중지",
+            2026,
+        )
+
+        breakfast = [item for item in result if item["meals"] == {"breakfast"}]
+        dinner = [item for item in result if item["meals"] == {"dinner"}]
+        assert [(item["start"].day, item["end"].day) for item in breakfast] == [
+            (10, 12)
+        ]
+        assert [(item["start"].day, item["end"].day) for item in dinner] == [
+            (16, 19)
+        ]
+
     # ── Year range ──
 
     def test_yr_range_open(self):

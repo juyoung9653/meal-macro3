@@ -69,45 +69,47 @@ def mock_both_holidays():
 
 
 class TestToBool:
-    def test_int_positive(self):
+    def test_int_one_only(self):
         assert to_bool(1) is True
-        assert to_bool(42) is True
-
-    def test_int_non_positive(self):
         assert to_bool(0) is False
         assert to_bool(-1) is False
+        assert to_bool(2) is False
+        assert to_bool(42) is False
 
-    def test_float_positive(self):
+    def test_numeric_float_one_is_same_excel_value(self):
         assert to_bool(1.0) is True
-        assert to_bool(0.5) is True
-
-    def test_float_non_positive(self):
         assert to_bool(0.0) is False
         assert to_bool(-0.5) is False
+        assert to_bool(0.5) is False
+        assert to_bool(2.0) is False
 
-    def test_str_true_values(self):
+    def test_string_one_only(self):
         assert to_bool("1") is True
-        assert to_bool("1.0") is True
-        assert to_bool("Y") is True
-        assert to_bool("y") is True
-        assert to_bool("예") is True
-        assert to_bool("있음") is True
+        assert to_bool(" 1 ") is True
 
     def test_str_false_values(self):
         assert to_bool("") is False
         assert to_bool("0") is False
         assert to_bool("0.0") is False
+        assert to_bool("1.0") is False
+        assert to_bool("Y") is False
+        assert to_bool("y") is False
+        assert to_bool("예") is False
+        assert to_bool("있음") is False
+        assert to_bool("O") is False
+        assert to_bool("TRUE") is False
+        assert to_bool("대상") is False
         assert to_bool("N") is False
         assert to_bool("n") is False
         assert to_bool("아니오") is False
         assert to_bool("없음") is False
 
     def test_bool_input(self):
-        assert to_bool(True) is True
+        assert to_bool(True) is False
         assert to_bool(False) is False
 
     def test_none(self):
-        assert to_bool(None) is False  # bool(None) → False
+        assert to_bool(None) is False
 
 
 # ══════════════════════════════════════════════════════

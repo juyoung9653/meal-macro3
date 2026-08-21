@@ -93,15 +93,15 @@ DEFAULTS: dict[str, Any] = {
     "flag_fields": {
         "__breakfast": {
             "label": "조식 여부",
-            "tooltip": "1.0=해당, 0/공란=미해당 (금요일 배송)",
+            "tooltip": "1=해당, 그 외/공란=미해당 (금요일 배송)",
         },
         "__dinner": {
             "label": "석식 여부",
-            "tooltip": "1.0=해당, 0/공란=미해당 (월~목 배송)",
+            "tooltip": "1=해당, 그 외/공란=미해당 (월~목 배송)",
         },
         "__vacation": {
             "label": "방중 여부",
-            "tooltip": "1.0=해당, 0/공란=미해당 (방학중 월~금 배송)",
+            "tooltip": "1=해당, 그 외/공란=미해당 (방학중 월~금 배송)",
         },
         "_daily_driver": {
             "label": "배송 담당",

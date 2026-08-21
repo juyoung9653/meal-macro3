@@ -11,9 +11,7 @@ from .base_mapping_dialog import (
 class MappingDialog(BaseMappingDialog):
     """
     템플릿 컬럼 목록을 template_columns 기준으로 동적 생성.
-    2개 섹션:
-      1. 템플릿 컬럼 ↔ 명단 컬럼 매핑
-      2. 배송일 계산용 플래그
+    개인정보·급식 대상·비고 등 명단에서 가져올 항목을 한 구역에 표시한다.
     """
 
     def __init__(
@@ -52,8 +50,7 @@ class MappingDialog(BaseMappingDialog):
 
         rows: list = []
 
-        # ── 섹션 1: 템플릿 컬럼 → 명단 컬럼 ──
-        rows.append(MappingSection("템플릿 컬럼 → 명단 컬럼"))
+        rows.append(MappingSection("명단에서 가져올 컬럼"))
         for col in template_columns:
             if col == "제공기관":
                 continue
@@ -66,8 +63,6 @@ class MappingDialog(BaseMappingDialog):
                 )
             )
 
-        # ── 섹션 2: 배송일 계산용 플래그 ──
-        rows.append(MappingSection("배송일 계산용"))
         selected_flag_keys = flag_keys or tuple(flag_fields)
         for key in selected_flag_keys:
             info = flag_fields.get(key, {"label": key, "tooltip": ""})

@@ -91,8 +91,12 @@ def count_weekdays_in_range(
 
 
 def to_bool(val) -> bool:
+    """식종 대상 셀은 숫자 1 또는 문자열 ``1``일 때만 참이다."""
+
+    if isinstance(val, bool):
+        return False
     if isinstance(val, (int, float)):
-        return val > 0
+        return val == 1
     if isinstance(val, str):
-        return val.strip() in ("1", "1.0", "Y", "y", "예", "있음")
-    return bool(val)
+        return val.strip() == "1"
+    return False

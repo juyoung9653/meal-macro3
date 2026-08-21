@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from datetime import date
 from unittest.mock import Mock
@@ -154,3 +155,69 @@ def test_lunch_roster_is_independent_and_becomes_daily_delivery_data(
     assert daily_data.preparation_error is None
     assert tab.provider_name_edit.text() == "행복도시락"
     tab.close()
+
+
+def test_saved_mapping_survives_restart_and_beats_stale_result_cache(
+    tmp_path, monkeypatch, qapp
+):
+    settings_path = tmp_path / "persistent-mapping.ini"
+    monkeypatch.setattr(
+        invoice_tab_module,
+        "QSettings",
+        lambda *_args: QSettings(str(settings_path), QSettings.Format.IniFormat),
+    )
+    monkeypatch.setattr(
+        invoice_tab_module, "get_settings", lambda: make_settings_manager()
+    )
+
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    saved_mapping = {
+        "성명": "이름",
+        "생년월일": "생일",
+        "__breakfast": "조식 대상",
+        "__dinner": "석식 대상",
+        "__note": "특이사항",
+    }
+
+    first_tab = invoice_tab_module.InvoiceTab()
+    first_tab._controller.set_col_mapping(saved_mapping)
+    first_tab._controller.output_dir = str(output_dir)
+    first_tab._save_settings()
+    first_tab.close()
+
+    stale_payload = {
+        "invoices": [{"성명": "캐시 대상자"}],
+        "col_mapping": {
+            "성명": "오래된 이름 컬럼",
+            "생년월일": "오래된 생일 컬럼",
+            "__breakfast": "오래된 조식 컬럼",
+        },
+        "year": 2025,
+        "month": 1,
+        "excluded_dates": [],
+        "roster_headers": [],
+        "roster_path": None,
+    }
+    (output_dir / ".invoice_data_cache.json").write_text(
+        json.dumps(stale_payload, ensure_ascii=False), encoding="utf-8"
+    )
+
+    restarted_tab = invoice_tab_module.InvoiceTab()
+    restored = restarted_tab.get_col_mapping()
+
+    for key, value in saved_mapping.items():
+        assert restored[key] == value
+    note_template_columns = [
+        column for column in restarted_tab._all_template_columns if "비고" in column
+    ]
+    for column in note_template_columns:
+        assert restored[column] == saved_mapping["__note"]
+    persisted = QSettings(
+        str(settings_path), QSettings.Format.IniFormat
+    ).value("invoice/col_mapping")
+    for key, value in saved_mapping.items():
+        assert persisted[key] == value
+    for column in note_template_columns:
+        assert persisted[column] == saved_mapping["__note"]
+    restarted_tab.close()

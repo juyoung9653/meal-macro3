@@ -26,7 +26,7 @@
 
         <details><summary>일일배송 생성 버튼이 꺼져 있습니다</summary><div class="details-body"><p>① 청구서 탭에서 조식·석식 또는 중식 명단을 불러온 뒤 ③ 일일배송 탭으로 다시 이동하세요. 중식은 필수 컬럼 매핑과 학교별 방학 일정도 필요하지만 청구서 생성은 필요 없습니다.</p></div></details>
 
-        <details><summary>조식·석식 수량이 모두 0입니다</summary><div class="details-body"><p>올바른 식종 컬럼을 골랐는지 확인하세요. 대상값은 <code>1</code>, <code>1.0</code>, <code>Y</code>, <code>y</code>, <code>예</code>, <code>있음</code>, 0보다 큰 숫자입니다. <code>O</code>, <code>TRUE</code>, <code>대상</code>은 대상이 아닙니다.</p></div></details>
+        <details><summary>조식·석식 수량이 모두 0입니다</summary><div class="details-body"><p>올바른 식종 컬럼을 골랐는지 확인하고 대상자의 원본 셀에 <code>1</code>을 입력하세요. <code>1</code> 이외의 문자나 숫자는 모두 대상이 아닙니다.</p></div></details>
 
         <details><summary>중식이 0건입니다</summary><div class="details-body"><p>중식 명단의 별표 항목과 일정 파일의 학교명·시작일·종료일 매핑을 확인하세요. 두 파일의 학교명이 같고 일정이 귀속 월과 겹쳐야 합니다.</p></div></details>
 
@@ -34,7 +34,7 @@
 
         <details><summary>일일배송에 미분류가 나옵니다</summary><div class="details-body"><p>배송 대상자의 배송담당이 비었거나 담당 구역 1·2순위가 모두 비었습니다. 선택한 컬럼과 해당 사람의 원본 셀을 확인하세요.</p></div></details>
 
-        <details><summary>일일배송 비고가 나오지 않습니다</summary><div class="details-body"><p>비고/메모 컬럼을 고르고 <code>석식: 6/13~6/15</code> 또는 <code>중식: 6/13~6/15</code>처럼 입력하세요. 현재 날짜 시트의 일요일~토요일 주차와 겹치는 항목만 표시합니다.</p></div></details>
+        <details><summary>일일배송 비고가 나오지 않습니다</summary><div class="details-body"><p>비고/메모 컬럼을 고르고 <code>석식: 6/16~6/19 일시중지</code>처럼 입력하세요. 여러 식종은 셀 안에서 <code>Alt+Enter</code>로 줄을 나눕니다. 현재 날짜 시트의 일요일~토요일 주차와 겹치는 항목만 표시합니다.</p></div></details>
 
         <details><summary>특정 사람이 청구서에서 빠졌습니다</summary><div class="details-body"><p>세 식종이 모두 0건이면 출력에서 빠집니다. 또한 제목에 <b>중지</b> 또는 <b>중단</b>이 있는 컬럼의 해당 셀에도 중지·중단이 적혀 있으면 그 사람을 제외합니다.</p></div></details>
 
