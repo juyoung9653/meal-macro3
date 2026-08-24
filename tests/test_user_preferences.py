@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -92,6 +93,10 @@ def test_db_import_cache_is_scoped_by_header_structure(qsettings: QSettings):
     preferences.set_cached_db_import(first_headers, mapping, 2026)
 
     assert preferences.get_cached_db_import(first_headers) == (mapping, 2026)
+    assert preferences.get_cached_db_import(tuple(reversed(first_headers))) == (
+        mapping,
+        2026,
+    )
     assert preferences.get_cached_db_import(second_headers) is None
     assert isinstance(
         qsettings.value("annual_workbook/header_mapping_cache"),
@@ -105,6 +110,34 @@ def test_db_import_cache_ignores_malformed_data(qsettings: QSettings):
     qsettings.setValue("annual_workbook/header_mapping_cache", "{broken")
 
     assert preferences.get_cached_db_import(headers) is None
+
+
+def test_db_import_cache_reuses_legacy_ordered_header_key(qsettings: QSettings):
+    preferences = UserPreferences(qsettings=qsettings)
+    headers = ("성명", "급식 구분", "담당 기사")
+    mapping = {"식종": "급식 구분", "배송담당": "담당 기사"}
+    legacy_signature = json.dumps(
+        list(headers),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    qsettings.setValue(
+        "annual_workbook/header_mapping_cache",
+        json.dumps(
+            {
+                legacy_signature: {
+                    "mapping": mapping,
+                    "year": 2026,
+                }
+            },
+            ensure_ascii=False,
+        ),
+    )
+
+    assert preferences.get_cached_db_import(tuple(reversed(headers))) == (
+        mapping,
+        2026,
+    )
 
 
 def test_invoice_mapping_round_trips_existing_key(qsettings: QSettings):

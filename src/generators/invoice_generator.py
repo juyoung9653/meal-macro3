@@ -8,12 +8,11 @@
 """
 
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 
 import openpyxl
-from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.styles import Alignment
 
-from ..core.delivery_matrix import ProfileConflict
 from ..core.diff_format import to_numeric
 from ..core.invoice_data import (
     EnrichedPersonDict,
@@ -251,75 +250,6 @@ def _rename_sheets(wb, keep_prefix: str):
             del wb[sn]
 
 
-def _add_profile_review_sheet(
-    wb,
-    conflicts: Sequence[ProfileConflict],
-) -> str | None:
-    """인적사항 불일치를 사람이 확인할 수 있는 별도 시트로 기록한다."""
-    if not conflicts:
-        return None
-
-    base_title = "DB검토"
-    title = base_title
-    suffix = 2
-    while title in wb.sheetnames:
-        title = f"{base_title}_{suffix}"
-        suffix += 1
-
-    ws = wb.create_sheet(title=title)
-    headers = (
-        "성명",
-        "생년월일",
-        "핸드폰",
-        "원본 행",
-        "불일치 항목",
-        "자동 선택값",
-        "원본별 값",
-    )
-    ws.append(headers)
-    header_fill = PatternFill(fill_type="solid", fgColor="1F4E78")
-    for cell in ws[1]:
-        cell.font = Font(bold=True, color="FFFFFF")
-        cell.fill = header_fill
-        cell.alignment = CENTER_ALIGN
-
-    for conflict in conflicts:
-        source_rows = ", ".join(
-            str(row) for row, _value in conflict.values_by_row
-        )
-        source_values = "\n".join(
-            f"{row}행: {value}" for row, value in conflict.values_by_row
-        )
-        ws.append(
-            (
-                conflict.name,
-                conflict.birth_date,
-                conflict.phone,
-                source_rows,
-                conflict.field,
-                conflict.selected_value,
-                source_values,
-            )
-        )
-
-    for row in ws.iter_rows(min_row=2):
-        for cell in row:
-            cell.alignment = Alignment(vertical="top", wrap_text=True)
-    ws.freeze_panes = "A2"
-    ws.auto_filter.ref = f"A1:G{ws.max_row}"
-    for column, width in {
-        "A": 14,
-        "B": 14,
-        "C": 14,
-        "D": 16,
-        "E": 18,
-        "F": 24,
-        "G": 42,
-    }.items():
-        ws.column_dimensions[column].width = width
-    return title
-
-
 # ── 시트 분할 계획 ────────────────────────────────
 
 
@@ -379,7 +309,6 @@ def make_invoice(
     unit_prices: Mapping[str, int],
     is_vacation_month: bool = False,
     meal_type: str = "급식",
-    profile_conflicts: Sequence[ProfileConflict] = (),
 ):
     """roster_data → 청구서템플릿 다중 시트 채워서 output_path 에 저장.
 
@@ -443,7 +372,6 @@ def make_invoice(
             )
         if rename_prefix:
             _rename_sheets(wb, rename_prefix)
-        _add_profile_review_sheet(wb, profile_conflicts)
 
         publication_started = True
         publish_workbook(wb, output_path)

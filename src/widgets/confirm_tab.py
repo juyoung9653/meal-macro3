@@ -116,7 +116,11 @@ class ConfirmTab(QWidget):
             self.path_label.setStyleSheet("color: #000;")
 
     def _select_output_dir(self):
-        dir_path = QFileDialog.getExistingDirectory(self, "출력 폴더 선택")
+        dir_path = QFileDialog.getExistingDirectory(
+            self,
+            "출력 폴더 선택",
+            self.output_dir or "",
+        )
         if dir_path:
             self.output_dir = dir_path
             self.path_label.setText(dir_path)

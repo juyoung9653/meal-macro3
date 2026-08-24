@@ -80,6 +80,17 @@ class UserPreferences:
         """같은 비날짜 헤더 구조에 저장된 DB 매핑과 연도를 반환한다."""
         cache = self._read_db_import_cache()
         entry = cache.get(_db_header_signature(headers))
+        if entry is None:
+            # 이전 버전의 순서 의존 키도 같은 헤더 집합이면 재사용한다.
+            entry = next(
+                (
+                    candidate
+                    for signature, candidate in cache.items()
+                    if _db_header_signature_from_cache_key(signature)
+                    == _db_header_signature(headers)
+                ),
+                None,
+            )
         if not isinstance(entry, Mapping):
             return None
         raw_mapping = entry.get("mapping")
@@ -180,5 +191,18 @@ class UserPreferences:
 
 
 def _db_header_signature(headers: Sequence[str]) -> str:
-    normalized = [str(header) for header in headers]
+    # 매핑은 헤더 이름을 가리키므로 물리적 열 순서는 캐시 키가 아니다.
+    normalized = sorted(str(header) for header in headers)
     return json.dumps(normalized, ensure_ascii=False, separators=(",", ":"))
+
+
+def _db_header_signature_from_cache_key(value: str) -> str | None:
+    try:
+        headers = json.loads(value)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(headers, list) or not all(
+        isinstance(header, str) for header in headers
+    ):
+        return None
+    return _db_header_signature(headers)

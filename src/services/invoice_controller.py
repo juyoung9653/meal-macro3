@@ -148,7 +148,6 @@ class InvoiceService:
                 unit_prices=unit_prices,
                 is_vacation_month=batch.is_vacation_month,
                 meal_type=config.meal_type,
-                profile_conflicts=book.profile_conflicts,
             )
         except Exception as error:  # noqa: BLE001 - 생성 실패를 결과로 반환
             return InvoiceResult(success=False, error=f"청구서 생성 실패:\n{error}")
@@ -163,26 +162,11 @@ class InvoiceService:
                     f"작성 {count}건, 출력 대상 {len(rendered.deliveries)}건"
                 ),
             )
-        warnings = []
-        if book.profile_conflicts:
-            warnings.append(
-                InvoiceWarning(
-                    code="DB 데이터 검토",
-                    message=(
-                        "같은 사람의 인적사항에서 서로 다른 값 "
-                        f"{len(book.profile_conflicts)}건을 발견했습니다. "
-                        "빈칸은 자동 보완했고, 불일치는 생성된 청구서의 "
-                        "'DB검토' 시트에 기록했습니다."
-                    ),
-                    details={"count": len(book.profile_conflicts)},
-                )
-            )
         return InvoiceResult(
             success=True,
             count=count,
             batch=batch,
             enriched=[_legacy_record(item, batch.prices) for item in batch.deliveries],
-            warnings=warnings,
         )
 
     def _resolve_book(self, config: InvoiceGenerationConfig) -> AnnualDeliveryBook:

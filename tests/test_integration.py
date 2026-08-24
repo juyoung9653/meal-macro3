@@ -561,8 +561,7 @@ def test_real_annual_xlsx_to_invoice_and_confirm_end_to_end(
 
     assert result.success, result.error
     assert result.count == len(result.enriched) == 1
-    assert len(result.warnings) == 1
-    assert result.warnings[0].details == {"count": 1}
+    assert result.warnings == []
     assert "ID" not in result.enriched[0]
     assert invoice_path.is_file()
     assert result.enriched[0]["_bf_cnt"] == 2
@@ -588,22 +587,7 @@ def test_real_annual_xlsx_to_invoice_and_confirm_end_to_end(
         invoice_ws = invoice_wb["청구서"]
         assert invoice_ws["A4"].value == "003"
         assert invoice_ws["O4"].value == 2
-        review_ws = invoice_wb["DB검토"]
-        assert tuple(cell.value for cell in review_ws[1]) == (
-            "성명",
-            "생년월일",
-            "핸드폰",
-            "원본 행",
-            "불일치 항목",
-            "자동 선택값",
-            "원본별 값",
-        )
-        assert review_ws["A2"].value == "홍길동"
-        assert review_ws["B2"].value == "2015-03-02"
-        assert review_ws["C2"].value == "010-1111-1111"
-        assert review_ws["E2"].value == "학교명"
-        assert review_ws["F2"].value == "분당초"
-        assert review_ws["G2"].value == "3행: 분당초\n4행: 다른 학교 표기"
+        assert "DB검토" not in invoice_wb.sheetnames
     finally:
         invoice_wb.close()
 

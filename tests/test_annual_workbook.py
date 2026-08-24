@@ -884,7 +884,7 @@ def test_accepts_person_with_only_selected_meal_rows(tmp_path: Path):
     )
 
 
-def test_blank_ward_is_separate_under_vba_identity(tmp_path: Path):
+def test_same_name_and_birth_merge_even_when_ward_is_blank(tmp_path: Path):
     headers = [*IDENTITY_PROFILE_HEADERS, *CONTROL_HEADERS, "20260728"]
     rows = [
         [
@@ -932,17 +932,13 @@ def test_blank_ward_is_separate_under_vba_identity(tmp_path: Path):
 
     book = AnnualWorkbook(path).load()
 
-    assert len(book.roster) == 2
+    assert len(book.roster) == 1
     person = book.roster[0]
-    assert person.source_rows == (2, 5)
-    assert person.location_text == "명단 2, 5행"
+    assert person.source_rows == (2, 4, 5)
     assert tuple(row.meal for row in book.rows_by_person[person]) == (
         "조식",
-        "석식",
-    )
-    assert book.roster[1].source_rows == (4,)
-    assert tuple(row.meal for row in book.rows_by_person[book.roster[1]]) == (
         "중식",
+        "석식",
     )
 
 
@@ -1019,7 +1015,7 @@ def test_nonconsecutive_matching_identity_merges_across_other_people(
     )
 
 
-def test_vba_identity_merges_on_birth_or_phone_within_same_ward(
+def test_same_phone_does_not_merge_different_birth_dates(
     tmp_path: Path,
 ):
     path = _write_workbook(
@@ -1067,17 +1063,17 @@ def test_vba_identity_merges_on_birth_or_phone_within_same_ward(
 
     book = AnnualWorkbook(path).load()
 
-    assert len(book.roster) == 1
-    person = book.roster[0]
-    assert person.source_rows == (2, 3, 4)
-    assert tuple(row.meal for row in book.rows_by_person[person]) == (
+    assert len(book.roster) == 2
+    first = book.roster[0]
+    second = book.roster[1]
+    assert first.source_rows == (2, 3)
+    assert tuple(row.meal for row in book.rows_by_person[first]) == (
         "조식",
         "중식",
-        "석식",
     )
-    assert tuple(item.field for item in book.profile_conflicts) == (
-        "생년월일",
-    )
+    assert second.source_rows == (4,)
+    assert tuple(row.meal for row in book.rows_by_person[second]) == ("석식",)
+    assert book.profile_conflicts == ()
 
 
 def test_birth_and_resident_number_with_same_first_six_digits_do_not_conflict(
@@ -1121,7 +1117,56 @@ def test_birth_and_resident_number_with_same_first_six_digits_do_not_conflict(
     assert book.profile_conflicts == ()
 
 
-def test_vba_identity_uses_ward_but_not_detail_or_road_address(
+@pytest.mark.parametrize(
+    ("first_birth", "second_birth", "expected_people"),
+    [
+        ("1503021234567", "1503027654321", 2),
+        ("20150302", "2015031234567", 1),
+    ],
+)
+def test_same_name_birth_uses_full_value_only_when_long_lengths_match(
+    tmp_path: Path,
+    first_birth: str,
+    second_birth: str,
+    expected_people: int,
+):
+    path = _write_workbook(
+        tmp_path / f"birth_length_rule_{expected_people}.xlsx",
+        headers=[*IDENTITY_PROFILE_HEADERS, *CONTROL_HEADERS, "20260728"],
+        rows=[
+            [
+                "홍길동",
+                first_birth,
+                "010-1111-1111",
+                "성남대로 1",
+                "정자동",
+                "101호",
+                "조식",
+                "김기사",
+                1,
+                1,
+            ],
+            [
+                "홍길동",
+                second_birth,
+                "010-1111-1111",
+                "성남대로 1",
+                "정자동",
+                "101호",
+                "중식",
+                "김기사",
+                1,
+                1,
+            ],
+        ],
+    )
+
+    book = AnnualWorkbook(path).load()
+
+    assert len(book.roster) == expected_people
+
+
+def test_same_name_and_birth_ignore_ward_and_address_for_grouping(
     tmp_path: Path,
 ):
     path = _write_workbook(
@@ -1181,12 +1226,8 @@ def test_vba_identity_uses_ward_but_not_detail_or_road_address(
 
     book = AnnualWorkbook(path).load()
 
-    assert len(book.roster) == 3
-    assert tuple(person.source_rows for person in book.roster) == (
-        (2,),
-        (3, 4),
-        (5,),
-    )
+    assert len(book.roster) == 1
+    assert book.roster[0].source_rows == (2, 3, 4, 5)
     assert book.profile_conflicts == ()
 
 

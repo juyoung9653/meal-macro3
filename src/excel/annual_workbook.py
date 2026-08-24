@@ -518,7 +518,7 @@ def _parse_roster_matrix(
         )
 
         groups: list[list[_MaterializedRow]] = []
-        groups_by_identity: dict[tuple[str, ...], list[_MaterializedRow]] = {}
+        group_identities: list[tuple[str, str]] = []
         for row_number, sparse_row in rows:
             row = _materialize_row(
                 sparse_row,
@@ -530,20 +530,21 @@ def _parse_roster_matrix(
             ):
                 continue
             profile = _profile_values(row, profile_columns)
-            identities = _person_identity_keys(profile)
-            group = next(
-                (
-                    groups_by_identity[identity]
-                    for identity in identities
-                    if identity in groups_by_identity
-                ),
-                None,
+            identity = _person_identity(profile)
+            group_index = _matching_person_group_index(
+                identity,
+                group_identities,
             )
-            if group is None:
-                group = []
-                groups.append(group)
-                for identity in identities:
-                    groups_by_identity[identity] = group
+            if group_index is None:
+                group_index = len(groups)
+                groups.append([])
+                group_identities.append(identity or ("", f"__row_{row_number}__"))
+            elif identity is not None:
+                group_identities[group_index] = _preferred_person_identity(
+                    group_identities[group_index],
+                    identity,
+                )
+            group = groups[group_index]
             group.append((row_number, row))
 
         for group in groups:
@@ -878,28 +879,66 @@ def _profile_values(
     return {header: _cell(row, column) for header, column in profile_columns}
 
 
-def _person_identity_keys(
-    profile: Mapping[str, Any],
-) -> tuple[tuple[str, ...], ...]:
-    """VBA와 같이 성명·관할동에 생년월일 또는 핸드폰을 조합한다."""
+def _person_identity(profile: Mapping[str, Any]) -> tuple[str, str] | None:
+    """성명과 비교 가능한 생년월일을 대상자 식별값으로 만든다."""
     name = _person_name_key(profile.get("성명"))
     if not name:
-        return ()
-    ward = _profile_text_key(profile.get("관할동"))
-    if not any(
-        header in profile for header in ("생년월일", "핸드폰", "전화번호")
-    ):
-        # 간소화된 테스트/API 입력은 VBA 식별 열 자체가 없으므로 이름으로 묶는다.
-        return ((name, ward, "N", "__name_only__"),)
-    birth_prefix = _birth_date_prefix_key(profile.get("생년월일"))
-    phone_header = "핸드폰" if "핸드폰" in profile else "전화번호"
-    phone = _phone_key(profile.get(phone_header))
-    identities: list[tuple[str, ...]] = []
-    if birth_prefix:
-        identities.append((name, ward, "J", birth_prefix))
-    if phone:
-        identities.append((name, ward, "M", phone))
-    return tuple(identities)
+        return None
+    if "생년월일" not in profile:
+        # 생년월일 열 자체를 생략한 간소화 테스트/API 입력만 이름으로 묶는다.
+        return name, "__name_only__"
+    birth = _birth_date_full_key(profile.get("생년월일"))
+    if not birth:
+        return None
+    return name, birth
+
+
+def _matching_person_group_index(
+    identity: tuple[str, str] | None,
+    group_identities: Sequence[tuple[str, str]],
+) -> int | None:
+    if identity is None:
+        return None
+    matches = [
+        index
+        for index, existing in enumerate(group_identities)
+        if _person_identities_match(existing, identity)
+    ]
+    if not matches:
+        return None
+    exact_matches = [
+        index for index in matches if group_identities[index] == identity
+    ]
+    if exact_matches:
+        return exact_matches[0]
+    if len(matches) == 1:
+        return matches[0]
+    # 짧은 생년월일 하나가 서로 다른 전체 생년월일들을 연결하면 합치지 않는다.
+    return None
+
+
+def _person_identities_match(
+    first: tuple[str, str],
+    second: tuple[str, str],
+) -> bool:
+    first_name, first_birth = first
+    second_name, second_birth = second
+    if first_name != second_name:
+        return False
+    if "__name_only__" in {first_birth, second_birth}:
+        return first_birth == second_birth
+    if len(first_birth) > 6 and len(first_birth) == len(second_birth):
+        return first_birth == second_birth
+    return first_birth[:6] == second_birth[:6]
+
+
+def _preferred_person_identity(
+    current: tuple[str, str],
+    candidate: tuple[str, str],
+) -> tuple[str, str]:
+    if len(candidate[1]) > len(current[1]):
+        return candidate
+    return current
 
 
 def _person_name_key(value: Any) -> str:
@@ -949,6 +988,18 @@ def _birth_date_key(value: Any) -> str:
 def _birth_date_prefix_key(value: Any) -> str:
     """생년월일·주민번호를 비교할 때 정규화한 앞 6자리만 사용한다."""
     return _birth_date_key(value)[:6]
+
+
+def _birth_date_full_key(value: Any) -> str:
+    """대상자 묶음용 생년월일 숫자를 구분자 없이 보존한다."""
+    if _is_blank(value):
+        return ""
+    if isinstance(value, date):
+        return value.strftime("%Y%m%d")
+    digits = "".join(
+        character for character in _text(value) if character.isdigit()
+    )
+    return digits or _birth_date_key(value)
 
 
 def _merge_profiles(

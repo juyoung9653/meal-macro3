@@ -18,8 +18,8 @@ from openpyxl.worksheet.table import Table
 from PyQt6.QtCore import QSettings
 from PyQt6.QtWidgets import QApplication, QLabel, QLineEdit
 
-from src.excel.annual_workbook import TABLE_NAME
-from src.main_window import MainWindow
+from src.excel.annual_workbook import TABLE_NAME, AnnualWorkbook
+from src.main_window import MainWindow, _db_mapping_cache_headers
 from src.widgets.db_header_mapping_dialog import DbImportSelection
 
 
@@ -120,6 +120,7 @@ def test_valid_annual_file_is_loaded_once_and_shared_by_all_tabs(
         assert all(row.person is person for row in person_rows)
         assert window._annual_workbook is not None
         assert window.invoice_tab._book is book
+        assert window.review_tab._book is book
         assert window.report_tab._book is book
         assert window.delivery_tab._book is book
         assert window.invoice_tab.month_combo.currentData() == 7
@@ -129,6 +130,52 @@ def test_valid_annual_file_is_loaded_once_and_shared_by_all_tabs(
         assert "2026년 · 1명" in window.roster_label.text()
         assert window._s.get("annual_workbook", "path") == str(path)
         assert window._preferences.get_annual_workbook_path() == str(path)
+    finally:
+        window.close()
+
+
+def test_common_db_controls_are_above_four_separate_tool_buttons(
+    qapp: QApplication,
+):
+    window = MainWindow()
+    try:
+        central = window.centralWidget()
+        assert central is not None
+        layout = central.layout()
+        assert layout is not None
+        assert layout.indexOf(window.work_group) == 1
+        assert list(window.work_titles) == [
+            "청구서 생성",
+            "확인서 생성",
+            "명단 합치기",
+            "검토하기",
+        ]
+        assert [button.text() for button in window.work_buttons] == ["열기  ›"] * 4
+        assert len(window.work_item_frames) == 4
+        assert not any(button.isEnabled() for button in window.work_buttons)
+        assert window.invoice_tab.parent() is window.invoice_window
+        assert window.confirm_tab.parent() is window.confirm_window
+        assert window.merge_tab.parent() is window.merge_window
+        assert window.review_tab.parent() is window.review_window
+
+        for button in window.work_buttons:
+            button.setEnabled(True)
+        windows = (
+            window.invoice_window,
+            window.confirm_window,
+            window.merge_window,
+            window.review_window,
+        )
+        for button, tool_window in zip(window.work_buttons, windows, strict=True):
+            with (
+                patch.object(tool_window, "show") as show,
+                patch.object(tool_window, "raise_") as raise_window,
+                patch.object(tool_window, "activateWindow") as activate,
+            ):
+                button.click()
+            show.assert_called_once_with()
+            raise_window.assert_called_once_with()
+            activate.assert_called_once_with()
     finally:
         window.close()
 
@@ -154,11 +201,51 @@ def test_invalid_replacement_preserves_the_previously_loaded_book(
         assert window._annual_book is original_book
         assert window._annual_workbook is original_workbook
         assert window.invoice_tab._book is original_book
+        assert window.review_tab._book is original_book
         assert window.report_tab._book is original_book
         assert window.delivery_tab._book is original_book
         assert window._s.get("annual_workbook", "path") == str(valid_path)
         assert "기존 db 파일" in window.roster_label.text()
         assert "계속 사용" in window.statusbar.currentMessage()
+    finally:
+        window.close()
+
+
+def test_output_directory_is_restored_and_used_as_folder_dialog_start(
+    qapp: QApplication,
+    tmp_path: Path,
+):
+    output_dir = str(tmp_path / "저장 폴더")
+    settings = QSettings("분당구", "급식비 정산 프로그램")
+    settings.setValue("output_dir", output_dir)
+    settings.sync()
+
+    window = MainWindow()
+    try:
+        assert window.invoice_tab.output_dir == output_dir
+        assert window.confirm_tab.output_dir == output_dir
+
+        with patch(
+            "src.widgets.invoice_tab.QFileDialog.getExistingDirectory",
+            return_value="",
+        ) as invoice_dialog:
+            window.invoice_tab._select_output_dir()
+        invoice_dialog.assert_called_once_with(
+            window.invoice_tab,
+            "출력 폴더 선택",
+            output_dir,
+        )
+
+        with patch(
+            "src.widgets.confirm_tab.QFileDialog.getExistingDirectory",
+            return_value="",
+        ) as confirm_dialog:
+            window.confirm_tab._select_output_dir()
+        confirm_dialog.assert_called_once_with(
+            window.confirm_tab,
+            "출력 폴더 선택",
+            output_dir,
+        )
     finally:
         window.close()
 
@@ -344,6 +431,55 @@ def test_saved_header_mapping_restores_custom_header_file_without_dialog(
         window.close()
 
 
+def test_startup_prefers_structure_cache_before_loading_last_db(
+    qapp: QApplication,
+    tmp_path: Path,
+):
+    path = tmp_path / "cached_at_startup.xlsx"
+    mapping = {
+        "식종": "급식 구분",
+        "배송담당": "담당 기사",
+        "연번": "배달 순서",
+    }
+    _write_annual_workbook(path, control_headers=tuple(mapping.values()))
+
+    bootstrap = MainWindow()
+    try:
+        assert bootstrap._annual_workbook is None
+        table_headers = AnnualWorkbook(path).table_headers()
+        bootstrap._preferences.set_cached_db_import(
+            _db_mapping_cache_headers(table_headers),
+            mapping,
+            2026,
+        )
+        bootstrap._preferences.set_annual_workbook_path(str(path))
+        bootstrap._preferences.set_db_header_mapping(
+            {
+                "식종": "다른 식종",
+                "배송담당": "다른 담당",
+                "연번": "다른 순서",
+            }
+        )
+        bootstrap._preferences.set_db_selected_year(2025)
+    finally:
+        bootstrap.close()
+
+    with patch("src.main_window.DbHeaderMappingDialog.get_selection") as dialog:
+        window = MainWindow()
+    try:
+        dialog.assert_not_called()
+        assert window._annual_book is not None
+        assert window._annual_workbook is not None
+        assert window._annual_workbook.path == path
+        assert _mapping_subset(
+            window._annual_workbook.header_mapping,
+            mapping,
+        ) == mapping
+        assert window._annual_workbook.selected_year == 2026
+    finally:
+        window.close()
+
+
 def test_file_selection_uses_and_remembers_selected_date_year(
     qapp: QApplication,
     tmp_path: Path,
@@ -448,6 +584,8 @@ def test_last_db_file_is_loaded_automatically_when_window_starts(
         assert window.invoice_tab._book is book
         assert window.report_tab._book is book
         assert window.delivery_tab._book is book
+        assert window.merge_tab._target_path == path
+        assert all(button.isEnabled() for button in window.work_buttons)
         assert "remembered.xlsx" in window.roster_label.text()
         assert "db 파일 로드 완료" in window.statusbar.currentMessage()
     finally:

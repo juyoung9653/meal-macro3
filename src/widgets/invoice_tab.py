@@ -199,7 +199,11 @@ class InvoiceTab(QWidget):
         self._preferences.set_output_dir(self.output_dir or "")
 
     def _select_output_dir(self):
-        selected = QFileDialog.getExistingDirectory(self, "출력 폴더 선택")
+        selected = QFileDialog.getExistingDirectory(
+            self,
+            "출력 폴더 선택",
+            self.output_dir or "",
+        )
         if selected:
             self.output_dir = selected
             self.path_label.setText(selected)

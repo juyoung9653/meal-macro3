@@ -1,8 +1,12 @@
 import os
 
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QComboBox,
+    QDialog,
     QFileDialog,
+    QFrame,
+    QGroupBox,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -11,7 +15,6 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QStatusBar,
-    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -30,6 +33,21 @@ from src.widgets.db_header_mapping_dialog import DbHeaderMappingDialog
 from src.widgets.delivery_substitute_tab import DeliverySubstituteTab
 from src.widgets.invoice_tab import InvoiceTab
 from src.widgets.report_tab import ReportTab
+from src.widgets.review_tab import ReviewTab
+from src.widgets.roster_merge_tab import RosterMergeTab
+
+
+class _ToolWindow(QDialog):
+    """메인 선택 화면에서 여는 재사용 가능한 비모달 작업 창."""
+
+    def __init__(self, title: str, content: QWidget, parent: QWidget):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setMinimumSize(900, 650)
+        self.resize(1000, 700)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(content)
 
 
 class MainWindow(QMainWindow):
@@ -82,8 +100,122 @@ class MainWindow(QMainWindow):
         meal_layout.addStretch()
         layout.addLayout(meal_layout)
 
-        self.tab_widget = QTabWidget()
-        layout.addWidget(self.tab_widget)
+        self.work_group = QGroupBox("작업 선택")
+        self.work_group.setStyleSheet(
+            """
+            QGroupBox {
+                background: #f7f9fc;
+                border: 1px solid #d9e0ea;
+                border-radius: 12px;
+                font-size: 17px;
+                font-weight: 700;
+                margin-top: 14px;
+                padding: 18px 14px 14px 14px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 16px;
+                padding: 0 7px;
+                color: #26364a;
+            }
+            QFrame#workItem {
+                background: white;
+                border: 1px solid #dce3ec;
+                border-radius: 9px;
+            }
+            QLabel#workNumber {
+                background: #e8f0fb;
+                color: #285f9f;
+                border-radius: 18px;
+                font-size: 13px;
+                font-weight: 700;
+            }
+            QLabel#workTitle {
+                color: #1e2937;
+                font-size: 16px;
+                font-weight: 700;
+            }
+            QLabel#workDescription {
+                color: #6c7888;
+                font-size: 12px;
+                font-weight: 400;
+            }
+            QPushButton#workOpenButton {
+                background: #2f6fab;
+                color: white;
+                border: none;
+                border-radius: 7px;
+                padding: 9px 18px;
+                font-size: 13px;
+                font-weight: 700;
+            }
+            QPushButton#workOpenButton:hover { background: #255e95; }
+            QPushButton#workOpenButton:pressed { background: #1f507f; }
+            QPushButton#workOpenButton:disabled {
+                background: #c7ced8;
+                color: #f4f5f7;
+            }
+            """
+        )
+        work_layout = QVBoxLayout(self.work_group)
+        work_layout.setSpacing(9)
+        work_layout.setContentsMargins(10, 12, 10, 10)
+        work_definitions = (
+            ("청구서 생성", "선택한 월의 급식비 청구서를 만듭니다."),
+            ("확인서 생성", "대상자별 급식 확인서를 만듭니다."),
+            ("명단 합치기", "최신 한-행 명단을 백업 후 db에 반영합니다."),
+            ("검토하기", "db 인적사항 불일치를 별도 Excel로 확인합니다."),
+        )
+        self.work_titles = tuple(title for title, _description in work_definitions)
+        self.work_item_frames: list[QFrame] = []
+        buttons: list[QPushButton] = []
+        for index, (title, description) in enumerate(work_definitions, start=1):
+            item = QFrame()
+            item.setObjectName("workItem")
+            item.setMinimumHeight(76)
+            item_layout = QHBoxLayout(item)
+            item_layout.setContentsMargins(14, 10, 14, 10)
+            item_layout.setSpacing(14)
+
+            number_label = QLabel(f"{index:02d}")
+            number_label.setObjectName("workNumber")
+            number_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            number_label.setFixedSize(36, 36)
+            item_layout.addWidget(number_label)
+
+            text_layout = QVBoxLayout()
+            text_layout.setSpacing(3)
+            title_label = QLabel(title)
+            title_label.setObjectName("workTitle")
+            description_label = QLabel(description)
+            description_label.setObjectName("workDescription")
+            text_layout.addWidget(title_label)
+            text_layout.addWidget(description_label)
+            item_layout.addLayout(text_layout, 1)
+
+            button = QPushButton("열기  ›")
+            button.setObjectName("workOpenButton")
+            button.setEnabled(False)
+            button.setFixedWidth(105)
+            item_layout.addWidget(button)
+            work_layout.addWidget(item)
+            self.work_item_frames.append(item)
+            buttons.append(button)
+
+        (
+            self.invoice_window_btn,
+            self.confirm_window_btn,
+            self.merge_window_btn,
+            self.review_window_btn,
+        ) = buttons
+        self.work_buttons = (
+            self.invoice_window_btn,
+            self.confirm_window_btn,
+            self.merge_window_btn,
+            self.review_window_btn,
+        )
+        layout.addWidget(self.work_group)
+        layout.addStretch(1)
 
         self.setCentralWidget(central)
 
@@ -93,13 +225,19 @@ class MainWindow(QMainWindow):
         self.confirm_tab = ConfirmTab(meal_type=meal_type)
         self.report_tab = ReportTab(meal_type=meal_type)
         self.delivery_tab = DeliverySubstituteTab(meal_type=meal_type)
-        self.tab_widget.addTab(self.invoice_tab, "① 청구서")
-        self.tab_widget.addTab(self.confirm_tab, "② 확인서")
-        self.tab_widget.addTab(self.report_tab, "③ 배송리포트")
-        self.tab_widget.addTab(self.delivery_tab, "④ 배송대타")
+        self.review_tab = ReviewTab(preferences=self._preferences)
+        self.merge_tab = RosterMergeTab()
+        self.invoice_window = _ToolWindow("청구서 생성", self.invoice_tab, self)
+        self.confirm_window = _ToolWindow("확인서 생성", self.confirm_tab, self)
+        self.merge_window = _ToolWindow("명단 합치기", self.merge_tab, self)
+        self.review_window = _ToolWindow("검토하기", self.review_tab, self)
 
     def _connect_signals(self):
-        self.tab_widget.currentChanged.connect(self._on_tab_changed)
+        self.invoice_window_btn.clicked.connect(self._show_invoice_window)
+        self.confirm_window_btn.clicked.connect(self._show_confirm_window)
+        self.merge_window_btn.clicked.connect(self._show_merge_window)
+        self.review_window_btn.clicked.connect(self._show_review_window)
+        self.merge_tab.merge_completed.connect(self._reload_after_merge)
 
     def _setup_statusbar(self):
         self.statusbar = QStatusBar()
@@ -179,42 +317,41 @@ class MainWindow(QMainWindow):
             )
             password = None
             try:
-                if prompt_mapping:
-                    table_headers = workbook.table_headers()
-                    cache_headers = _db_mapping_cache_headers(table_headers)
-                    cached = self._preferences.get_cached_db_import(cache_headers)
-                    cached_mapping: dict[str, str] | None = None
-                    cached_year: int | None = None
-                    if cached is not None:
-                        cached_mapping, raw_cached_year = cached
-                        cached_year = _usable_cached_year(
-                            raw_cached_year,
-                            table_headers,
-                        )
+                table_headers = workbook.table_headers()
+                cache_headers = _db_mapping_cache_headers(table_headers)
+                cached = self._preferences.get_cached_db_import(cache_headers)
+                cached_mapping: dict[str, str] | None = None
+                cached_year: int | None = None
+                if cached is not None:
+                    cached_mapping, raw_cached_year = cached
+                    cached_year = _usable_cached_year(
+                        raw_cached_year,
+                        table_headers,
+                    )
 
-                    if (
-                        not force_mapping_dialog
-                        and cached_mapping is not None
-                        and cached_year is not None
-                    ):
-                        workbook.header_mapping = cached_mapping
-                        workbook.selected_year = cached_year
-                    else:
-                        selection = DbHeaderMappingDialog.get_selection(
-                            table_headers,
-                            current_mapping=(
-                                cached_mapping or workbook.header_mapping
-                            ),
-                            current_year=(
-                                cached_year or workbook.selected_year
-                            ),
-                            parent=self,
-                        )
-                        if selection is None:
-                            self._show_header_mapping_cancelled(path)
-                            return False
-                        workbook.header_mapping = selection.mapping
-                        workbook.selected_year = selection.year
+                if (
+                    not force_mapping_dialog
+                    and cached_mapping is not None
+                    and cached_year is not None
+                ):
+                    workbook.header_mapping = cached_mapping
+                    workbook.selected_year = cached_year
+                elif prompt_mapping or force_mapping_dialog:
+                    selection = DbHeaderMappingDialog.get_selection(
+                        table_headers,
+                        current_mapping=(
+                            cached_mapping or workbook.header_mapping
+                        ),
+                        current_year=(
+                            cached_year or workbook.selected_year
+                        ),
+                        parent=self,
+                    )
+                    if selection is None:
+                        self._show_header_mapping_cancelled(path)
+                        return False
+                    workbook.header_mapping = selection.mapping
+                    workbook.selected_year = selection.year
                 book = workbook.load()
             except WorkbookPasswordRequiredError:
                 prompt_reason = "required"
@@ -244,6 +381,8 @@ class MainWindow(QMainWindow):
             )
 
         self.invoice_tab.set_annual_book(book)
+        self.review_tab.set_annual_book(book)
+        self.merge_tab.set_target(path, workbook.header_mapping)
         self.report_tab.set_annual_book(book)
         self.delivery_tab.set_annual_book(book)
         self.confirm_tab.set_invoice_data(self.invoice_tab.get_invoice_data())
@@ -254,6 +393,8 @@ class MainWindow(QMainWindow):
         )
         self.roster_label.setStyleSheet("color: #0a0; font-weight: bold;")
         self.header_mapping_btn.setEnabled(True)
+        for button in self.work_buttons:
+            button.setEnabled(True)
         self.statusbar.showMessage(
             f"db 파일 로드 완료: {book.year}년, 명단 {len(book.roster)}명"
         )
@@ -360,26 +501,37 @@ class MainWindow(QMainWindow):
 
         return self._load_annual_file(path, show_error=False)
 
-    def _on_tab_changed(self, index: int):
-        # 출력 경로 양방향 동기화
-        inv_dir = self.invoice_tab.output_dir
-        cnf_dir = self.confirm_tab.output_dir
-        if inv_dir and inv_dir != cnf_dir:
-            self.confirm_tab.set_output_dir(inv_dir)
-        elif cnf_dir and cnf_dir != inv_dir:
-            self.invoice_tab.set_output_dir(cnf_dir)
+    def _show_invoice_window(self) -> None:
+        self._sync_output_dirs()
+        self._show_tool_window(self.invoice_window, "청구서 생성")
 
-        if index == 1:
-            self.confirm_tab.set_invoice_data(self.invoice_tab.get_invoice_data())
+    def _show_confirm_window(self) -> None:
+        self._sync_output_dirs()
+        self.confirm_tab.set_invoice_data(self.invoice_tab.get_invoice_data())
+        self._show_tool_window(self.confirm_window, "확인서 생성")
 
-        self.statusbar.showMessage(
-            {
-                0: "① 청구서 탭",
-                1: "② 확인서 탭",
-                2: "③ 배송리포트 탭",
-                3: "④ 배송대타 탭",
-            }.get(index, "")
-        )
+    def _show_merge_window(self) -> None:
+        self._show_tool_window(self.merge_window, "명단 합치기")
+
+    def _show_review_window(self) -> None:
+        self.review_tab.set_output_dir(self._preferences.get_output_dir())
+        self._show_tool_window(self.review_window, "검토하기")
+
+    def _sync_output_dirs(self) -> None:
+        output_dir = self._preferences.get_output_dir()
+        if output_dir:
+            self.invoice_tab.set_output_dir(output_dir)
+            self.confirm_tab.set_output_dir(output_dir)
+
+    def _show_tool_window(self, window: QDialog, status: str) -> None:
+        window.show()
+        window.raise_()
+        window.activateWindow()
+        self.statusbar.showMessage(status)
+
+    def _reload_after_merge(self, path: str) -> None:
+        if self._load_annual_file(path, show_error=True):
+            self.statusbar.showMessage("명단 합치기 완료 · db 파일 다시 불러옴")
 
 
 def _db_mapping_cache_headers(headers: tuple[str, ...]) -> tuple[str, ...]:
