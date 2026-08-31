@@ -51,6 +51,8 @@ class InvoiceGenerationConfig:
     col_mapping: dict = field(default_factory=dict)
     unit_prices: Mapping[str, int] | None = None
     meal_type: str = "급식"
+    global_note: str | None = None
+    output_password: str | None = None
 
 
 @dataclass
@@ -148,6 +150,8 @@ class InvoiceService:
                 unit_prices=unit_prices,
                 is_vacation_month=batch.is_vacation_month,
                 meal_type=config.meal_type,
+                global_note=config.global_note,
+                output_password=config.output_password,
             )
         except Exception as error:  # noqa: BLE001 - 생성 실패를 결과로 반환
             return InvoiceResult(success=False, error=f"청구서 생성 실패:\n{error}")

@@ -128,6 +128,24 @@ def test_export_multi_creates_the_exact_requested_file(
         workbook.close()
 
 
+def test_make_report_publication_returns_verified_file_facts(tmp_path: Path):
+    template = tmp_path / "report_template.xlsx"
+    output = tmp_path / "published.xlsx"
+    _write_minimal_template(template)
+
+    publication = report_generator.make_report_publication(
+        _report_results(),
+        output,
+        template,
+    )
+
+    assert publication.output_path == output
+    assert publication.password_protected is False
+    assert len(publication.content_sha256) == 64
+    assert len(publication.output_sha256) == 64
+    assert publication.output_byte_size == output.stat().st_size
+
+
 def test_export_multi_rejects_empty_results(tmp_path: Path):
     output = tmp_path / "requested.xlsx"
 

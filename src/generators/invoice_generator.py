@@ -8,7 +8,9 @@
 """
 
 import logging
+import math
 from collections.abc import Mapping
+from copy import copy
 
 import openpyxl
 from openpyxl.styles import Alignment
@@ -23,7 +25,7 @@ from ..core.invoice_data import (
 )
 from ..core.models import FULL_ADDRESS_FIELD, combine_address
 from ..excel.excel_utils import CENTER_ALIGN, adjust_formula, copy_style
-from ..excel.publication import publish_workbook
+from ..excel.publication import WorkbookPublicationResult, publish_workbook
 from ..templates.config import (
     col_name_to_index,
     get_template_data_start_row,
@@ -109,6 +111,7 @@ def _fill_invoice_sheet(
     unit_price_dinner: int,
     unit_price_lunch: int,
     meal_type: str = "급식",
+    global_note: str | None = None,
 ) -> int:
     """단일 시트에 people 데이터를 채운다. 작성 건수 반환."""
     template_columns = read_template_columns(template_path, sheet_name=sheet_name)
@@ -129,6 +132,14 @@ def _fill_invoice_sheet(
     data_start_row = row_idx
     written_cols: set[int] = set()
 
+    _write_global_note(
+        ws,
+        col_idx_map,
+        subtotal_row=data_start_row - 1,
+        sample_data_row=data_start_row,
+        global_note=global_note,
+    )
+
     for person in people:
         breakfast_cnt = person.breakfast_count
         dinner_cnt = person.dinner_count
@@ -146,17 +157,22 @@ def _fill_invoice_sheet(
 
 
 
-        # 청구금액 수식: 시트에 존재하는 컬럼만 포함
+        # 단일 단가면 기존 수식을 유지하고, 월중 단가 변경이 있으면
+        # 서비스일별 계산이 끝난 정확한 금액을 숫자로 기록한다.
         if price_col in col_idx_map:
-            row_data[price_col] = _build_price_formula(
-                col_idx_map,
-                bf_col,
-                dn_col,
-                lh_col,
-                row_idx,
-                unit_price_breakfast,
-                unit_price_dinner,
-                unit_price_lunch,
+            row_data[price_col] = (
+                person.billing_amount
+                if person.billing_amount is not None
+                else _build_price_formula(
+                    col_idx_map,
+                    bf_col,
+                    dn_col,
+                    lh_col,
+                    row_idx,
+                    unit_price_breakfast,
+                    unit_price_dinner,
+                    unit_price_lunch,
+                )
             )
 
 
@@ -213,6 +229,39 @@ def _fill_invoice_sheet(
 
 
     return data_end_row - data_start_row + 1
+
+
+def _write_global_note(
+    ws,
+    col_idx_map: Mapping[str, int],
+    *,
+    subtotal_row: int,
+    sample_data_row: int,
+    global_note: str | None,
+) -> None:
+    """Write one document-wide note in the template's subtotal-row note cell."""
+
+    if global_note is None:
+        return
+    note_col_idx = col_idx_map.get("비고")
+    if note_col_idx is None:
+        raise ValueError(f"{ws.title} 시트에 전체 비고 열이 없습니다.")
+
+    cell = ws.cell(row=subtotal_row, column=note_col_idx)
+    sample = ws.cell(row=sample_data_row, column=note_col_idx)
+    cell.value = global_note
+    cell.font = copy(sample.font)
+    cell.alignment = _MEMO_ALIGN
+
+    column_letter = _col_idx_to_letter(note_col_idx)
+    column_width = ws.column_dimensions[column_letter].width or 13
+    visual_length = sum(2 if ord(character) > 127 else 1 for character in global_note)
+    estimated_lines = max(
+        global_note.count("\n") + 1,
+        math.ceil(visual_length / max(column_width, 1)),
+    )
+    current_height = ws.row_dimensions[subtotal_row].height or 15
+    ws.row_dimensions[subtotal_row].height = max(current_height, estimated_lines * 15)
 
 
 # ── 시트명 prefix 제거 + 미사용 prefix 시트 삭제 ──
@@ -299,7 +348,7 @@ def _get_sheet_plan(
 # ── 메인 진입점 ────────────────────────────────────
 
 
-def make_invoice(
+def make_invoice_publication(
     roster_data: MonthlyDeliveryBatch | list[EnrichedPersonDict],
     col_mapping: dict,
     output_path: str,
@@ -309,7 +358,9 @@ def make_invoice(
     unit_prices: Mapping[str, int],
     is_vacation_month: bool = False,
     meal_type: str = "급식",
-):
+    global_note: str | None = None,
+    output_password: str | None = None,
+) -> tuple[int, MonthlyDeliveryBatch, WorkbookPublicationResult]:
     """roster_data → 청구서템플릿 다중 시트 채워서 output_path 에 저장.
 
     meal_type="급식": 시트 분할 없이 단일 시트에 모든 인원 출력 (방중/학기중 구분 없음).
@@ -318,6 +369,11 @@ def make_invoice(
       - 방학 X: 학기_총괄(전체) / 학기_학기중(전체)
       출력 시트명은 prefix 제거 (총괄, 학기중, 방중).
     """
+
+    if global_note is not None:
+        if not isinstance(global_note, str):
+            raise TypeError("전체 비고는 문자열이어야 합니다.")
+        global_note = global_note.strip() or None
 
     wb = openpyxl.load_workbook(template_path)
     publication_started = False
@@ -369,13 +425,45 @@ def make_invoice(
                 unit_price_dinner,
                 unit_price_lunch,
                 meal_type=meal_type,
+                global_note=global_note,
             )
         if rename_prefix:
             _rename_sheets(wb, rename_prefix)
 
         publication_started = True
-        publish_workbook(wb, output_path)
-        return total_count, batch
+        publication = publish_workbook(wb, output_path, password=output_password)
+        return total_count, batch, publication
     finally:
         if not publication_started:
             wb.close()
+
+
+def make_invoice(
+    roster_data: MonthlyDeliveryBatch | list[EnrichedPersonDict],
+    col_mapping: dict,
+    output_path: str,
+    template_path: str,
+    year: int,
+    month: int,
+    unit_prices: Mapping[str, int],
+    is_vacation_month: bool = False,
+    meal_type: str = "급식",
+    global_note: str | None = None,
+    output_password: str | None = None,
+):
+    """Legacy-compatible writer result without publication metadata."""
+
+    total_count, batch, _publication = make_invoice_publication(
+        roster_data,
+        col_mapping,
+        output_path,
+        template_path,
+        year,
+        month,
+        unit_prices,
+        is_vacation_month=is_vacation_month,
+        meal_type=meal_type,
+        global_note=global_note,
+        output_password=output_password,
+    )
+    return total_count, batch

@@ -671,6 +671,36 @@ def test_uses_default_prices_and_allows_partial_explicit_override(
     }
 
 
+def test_passes_global_note_to_invoice_writer(
+    template_path: str,
+    invoice_spy: Mock,
+):
+    note = "단가 변경: 중식 1~14일 10,000원 / 15~30일 11,000원"
+
+    result = InvoiceService().generate(
+        _config(template_path, _service_book(), global_note=note)
+    )
+
+    assert result.success, result.error
+    assert invoice_spy.call_args.kwargs["global_note"] == note
+
+
+def test_passes_output_password_to_invoice_writer(
+    template_path: str,
+    invoice_spy: Mock,
+):
+    result = InvoiceService().generate(
+        _config(
+            template_path,
+            _service_book(),
+            output_password="shared-1234",
+        )
+    )
+
+    assert result.success, result.error
+    assert invoice_spy.call_args.kwargs["output_password"] == "shared-1234"
+
+
 def test_uses_central_settings_unit_price_override(
     template_path: str, invoice_spy: Mock
 ):

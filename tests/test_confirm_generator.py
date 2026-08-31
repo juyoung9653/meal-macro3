@@ -8,7 +8,16 @@ from pathlib import Path
 import openpyxl
 import pytest
 
-from src.generators.confirm_generator import make_confirm
+from datetime import date
+
+from src.core.delivery_matrix import RosterEntry
+from src.core.invoice_data import (
+    MealPrices,
+    MonthlyDelivery,
+    MonthlyDeliveryBatch,
+    WeeklyDelivery,
+)
+from src.generators.confirm_generator import make_confirm, make_confirm_publication
 from src.templates.template_scanner import scan_placeholders
 
 
@@ -53,6 +62,88 @@ def _roster_person(
         "배송담당": "기사A",
         "weekly_meal_counts": _weekly_counts(lunch=1),
     }
+
+
+def _typed_delivery(name: str, household_key: str, address: str) -> MonthlyDelivery:
+    return MonthlyDelivery(
+        RosterEntry(
+            2 if name == "첫째" else 3,
+            {
+                "성명": name,
+                "세대주 성명": "홍보호",
+                "핸드폰": "010-1111-1111",
+                "관할동": "정자동",
+                "도로명주소": address,
+                "상세주소": "101호",
+            },
+        ),
+        "",
+        "기사A",
+        "001",
+        0,
+        1,
+        0,
+        (
+            WeeklyDelivery(1, date(2026, 6, 1), date(2026, 6, 6), 0, 1, 0),
+        ),
+        billing_amount=10_000,
+        household_key=household_key,
+    )
+
+
+def test_typed_db_household_ids_do_not_merge_same_address(
+    tmp_path: Path,
+    confirm_template: str,
+):
+    batch = MonthlyDeliveryBatch(
+        2026,
+        6,
+        MealPrices(10_000, 10_000, 10_000),
+        False,
+        (
+            _typed_delivery("첫째", "household-1", "성남대로 1"),
+            _typed_delivery("둘째", "household-2", "성남대로 1"),
+        ),
+    )
+
+    created, publication = make_confirm_publication(
+        batch,
+        {},
+        tmp_path / "stable-households.xlsx",
+        confirm_template,
+        2026,
+        6,
+        meal_type="급식",
+    )
+
+    assert publication.output_path == tmp_path / "stable-households.xlsx"
+    assert created[0]["total_hh"] == 2
+    assert created[0]["count_1"] == 2
+    assert created[0]["count_2"] == 0
+
+
+def test_typed_same_household_requires_one_consistent_address(tmp_path: Path):
+    batch = MonthlyDeliveryBatch(
+        2026,
+        6,
+        MealPrices(10_000, 10_000, 10_000),
+        False,
+        (
+            _typed_delivery("첫째", "household-1", "성남대로 1"),
+            _typed_delivery("둘째", "household-1", "성남대로 2"),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="같은 DB 가구.*주소"):
+        make_confirm_publication(
+            batch,
+            {},
+            tmp_path / "invalid-household.xlsx",
+            "사용되지않는.xlsx",
+            2026,
+            6,
+            meal_type="급식",
+        )
 
 
 @pytest.fixture

@@ -4,6 +4,7 @@ import logging
 import os
 from collections.abc import Mapping, Sequence
 from copy import copy
+from pathlib import Path
 
 import openpyxl
 from openpyxl.utils import get_column_letter
@@ -17,7 +18,7 @@ from ..core.invoice_data import (
 from ..core.models import combine_address
 from ..core.settings import get_settings
 from ..excel.excel_utils import adjust_formula, build_merged_anchor_map, copy_cell
-from ..excel.publication import publish_workbook
+from ..excel.publication import WorkbookPublicationResult, publish_workbook
 from ..templates.template_scanner import scan_placeholders, validate_placeholders
 
 log = logging.getLogger(__name__)
@@ -110,10 +111,11 @@ def _validated_household_groups(
     detail_address_col: str,
     dong_col: str,
     name_col: str,
-) -> dict[str, dict[tuple[str, str], list[MonthlyDelivery]]]:
-    """전체 주소를 정규화하고 관할동별 가구를 렌더링 전에 검증한다."""
-    groups: dict[str, dict[tuple[str, str], list[MonthlyDelivery]]] = {}
+) -> dict[str, dict[str, list[MonthlyDelivery]]]:
+    """Use stable DB household keys, retaining address fallback for legacy callers."""
+    groups: dict[str, dict[str, list[MonthlyDelivery]]] = {}
     blank_addresses: list[str] = []
+    stable_facts: dict[str, tuple[str, str, str]] = {}
 
     for person in roster_data:
         source = person.roster.extra
@@ -131,8 +133,18 @@ def _validated_household_groups(
             )
             continue
 
-        address_key = (road_address, detail_address)
-        groups.setdefault(dong, {}).setdefault(address_key, []).append(person)
+        if person.household_key is None:
+            group_key = f"address:{road_address}\u0000{detail_address}"
+        else:
+            group_key = f"household:{person.household_key}"
+            facts = (dong, road_address, detail_address)
+            previous = stable_facts.setdefault(person.household_key, facts)
+            if previous != facts:
+                raise ValueError(
+                    "확인서 생성 불가: 같은 DB 가구의 관할동 또는 주소가 서로 "
+                    f"다릅니다. 가구 key={person.household_key}"
+                )
+        groups.setdefault(dong, {}).setdefault(group_key, []).append(person)
 
     if blank_addresses:
         raise ValueError(
@@ -142,13 +154,21 @@ def _validated_household_groups(
 
     oversized_households: list[str] = []
     for dong, households in groups.items():
-        for address_parts, members in households.items():
+        for members in households.values():
             if len(members) < 6:
                 continue
             identifiers = ", ".join(
                 _person_identifier(member, name_col) for member in members
             )
-            address = combine_address(*address_parts)
+            source = members[0].roster.extra
+            address = combine_address(
+                _normalized_text(source.get(road_address_col, "")),
+                (
+                    ""
+                    if detail_address_col == road_address_col
+                    else _normalized_text(source.get(detail_address_col, ""))
+                ),
+            )
             oversized_households.append(
                 f"관할동={dong or '(빈 값)'}, 주소={address}, "
                 f"인원수={len(members)}명, 대상자=[{identifiers}]"
@@ -164,16 +184,17 @@ def _validated_household_groups(
     return groups
 
 
-def make_confirm(
+def make_confirm_publication(
     roster_data: MonthlyDeliveryBatch | Sequence[Mapping[str, object]],
     col_mapping: Mapping[str, str],
-    output_dir: str,
+    output_path: str | Path,
     template_path: str,
     year: int,
     month: int,
     title_prefix: str = "",
     meal_type: str = "급식",
-) -> list[dict]:
+    output_password: str | None = None,
+) -> tuple[list[dict], WorkbookPublicationResult]:
     """명단 데이터 → 확인서템플릿 채워서 단일 엑셀 파일 생성."""
     s = get_settings()
 
@@ -276,8 +297,16 @@ def make_confirm(
         sheet_seq = 0
         col_widths_copied = False
 
-        for address_parts, members in hh_groups.items():
-            address = combine_address(*address_parts)
+        for members in hh_groups.values():
+            first_source = members[0].roster.extra
+            address = combine_address(
+                _normalized_text(first_source.get(road_address_col, "")),
+                (
+                    ""
+                    if detail_address_col == road_address_col
+                    else _normalized_text(first_source.get(detail_address_col, ""))
+                ),
+            )
             n = len(members)
             tpl_key = f"{n}명"
             src = wb[tpl_key]
@@ -447,12 +476,41 @@ def make_confirm(
         if sn in tpl_sheets:
             del wb[sn]
 
-    fname_fmt = s.get("confirm", "output_filename_format")
-    fname = fname_fmt.format(year=year, month=month)
-    out_path = os.path.join(output_dir, fname)
-    publish_workbook(wb, out_path)
+    out_path = Path(output_path)
+    fname = out_path.name
+    publication = publish_workbook(wb, out_path, password=output_password)
 
     for item in created:
         item["file"] = fname
 
+    return created, publication
+
+
+def make_confirm(
+    roster_data: MonthlyDeliveryBatch | Sequence[Mapping[str, object]],
+    col_mapping: Mapping[str, str],
+    output_dir: str,
+    template_path: str,
+    year: int,
+    month: int,
+    title_prefix: str = "",
+    meal_type: str = "급식",
+    output_password: str | None = None,
+) -> list[dict]:
+    """Legacy-compatible writer that keeps its historical automatic filename."""
+
+    settings = get_settings()
+    filename_format = settings.get("confirm", "output_filename_format")
+    filename = filename_format.format(year=year, month=month)
+    created, _publication = make_confirm_publication(
+        roster_data,
+        col_mapping,
+        os.path.join(output_dir, filename),
+        template_path,
+        year,
+        month,
+        title_prefix=title_prefix,
+        meal_type=meal_type,
+        output_password=output_password,
+    )
     return created

@@ -1,0 +1,365 @@
+"""Password session, automatic backup, and restoration integration tests."""
+
+from __future__ import annotations
+
+from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
+from uuid import UUID
+import zipfile
+
+import pytest
+
+apsw = pytest.importorskip(
+    "apsw",
+    reason="install requirements-sqlite-v2.txt for encrypted DB integration tests",
+)
+
+from src.domain.revisions import (
+    AuditChange,
+    ChangeOperation,
+    RevisionActor,
+    RevisionMetadata,
+    RevisionRecord,
+    RevisionSource,
+)
+from src.domain import DocumentKind, DocumentRun
+from src.storage import (
+    BACKUP_EXTENSION,
+    BackupFormatError,
+    BackupRestoreConflictError,
+    CredentialUnlockError,
+    DEFAULT_MAX_BACKUPS,
+    DatabaseBackupService,
+    DatabaseSession,
+    inspect_backup,
+)
+
+
+REVISION_ID = UUID("70000000-0000-0000-0000-000000000001")
+ENTITY_ID = UUID("70000000-0000-0000-0000-000000000002")
+DOCUMENT_RUN_ID = UUID("70000000-0000-0000-0000-000000000003")
+
+
+def _record() -> RevisionRecord:
+    return RevisionRecord(
+        RevisionMetadata(
+            revision_id=REVISION_ID,
+            parent_revision_id=None,
+            recorded_at=datetime(2026, 8, 24, 18, 0, tzinfo=UTC),
+            effective_on=date(2026, 8, 24),
+            actor=RevisionActor("tester", "S-1-5-21-test"),
+            reason="자동 백업 테스트",
+            source=RevisionSource.UI,
+        ),
+        (
+            AuditChange(
+                entity_kind="backup-probe",
+                entity_id=ENTITY_ID,
+                operation=ChangeOperation.INSERT,
+                before=None,
+                after={"value": "saved"},
+            ),
+        ),
+    )
+
+
+def _document_run() -> DocumentRun:
+    return DocumentRun(
+        run_id=DOCUMENT_RUN_ID,
+        kind=DocumentKind.CONFIRMATION,
+        source_revision_id=REVISION_ID,
+        source_revision_display_code="20260825-001",
+        period_start=date(2026, 8, 1),
+        period_end=date(2026, 8, 31),
+        generated_at=datetime(2026, 8, 25, 2, 0, tzinfo=UTC),
+        actor=RevisionActor("tester", "S-1-5-21-test"),
+        calculation_manifest={"entitlement_policy_version": 1},
+        template_manifest={"filename": "확인서.xlsx", "sha256": "b" * 64},
+        output_filename="확인서_202608.xlsx",
+        output_sha256="c" * 64,
+        output_byte_size=2048,
+    )
+
+
+def test_user_password_opens_db_and_recovery_password_resets_it(tmp_path: Path):
+    database_path = tmp_path / "operations.sqlite3"
+    with DatabaseSession.create(
+        database_path,
+        "everyday-password",
+        "institution-recovery",
+    ) as session:
+        session.database.check_integrity()
+
+    with DatabaseSession.open(database_path, "everyday-password") as session:
+        assert session.path == database_path.resolve()
+
+    with DatabaseSession.recover_and_open(
+        database_path,
+        "institution-recovery",
+        "new-everyday-password",
+    ) as recovered:
+        recovered.database.check_integrity()
+
+    with pytest.raises(CredentialUnlockError):
+        DatabaseSession.open(database_path, "everyday-password")
+    DatabaseSession.open(database_path, "new-everyday-password").close()
+
+
+def test_successful_revision_creates_one_verified_single_file_backup(tmp_path: Path):
+    database_path = tmp_path / "operations.sqlite3"
+    backup_directory = tmp_path / "automatic-backups"
+    backup_directory.mkdir()
+
+    with DatabaseSession.create(
+        database_path,
+        "everyday-password",
+        "institution-recovery",
+        backup_directory=backup_directory,
+    ) as session:
+        result = session.append_revision(_record())
+
+    assert result.succeeded
+    assert result.error is None
+    assert result.record is not None
+    assert result.record.path.suffix == BACKUP_EXTENSION
+    assert result.record.latest_revision_id == REVISION_ID
+    assert tuple(backup_directory.iterdir()) == (result.record.path,)
+    assert inspect_backup(result.record.path) == result.record
+
+    with zipfile.ZipFile(result.record.path) as archive:
+        assert set(archive.namelist()) == {
+            "database.sqlite3",
+            "credentials.json",
+            "manifest.json",
+        }
+        encrypted_header = archive.read("database.sqlite3")[:16]
+    assert encrypted_header != b"SQLite format 3\x00"
+
+
+def test_backup_restores_exact_revision_with_everyday_password(tmp_path: Path):
+    source = tmp_path / "operations.sqlite3"
+    backup_directory = tmp_path / "automatic-backups"
+    backup_directory.mkdir()
+    with DatabaseSession.create(
+        source,
+        "everyday-password",
+        "institution-recovery",
+        backup_directory=backup_directory,
+    ) as session:
+        backup = session.append_revision(_record()).record
+    assert backup is not None
+
+    restored_path = tmp_path / "restored.sqlite3"
+    with DatabaseSession.restore_and_open_with_user_password(
+        backup.path,
+        restored_path,
+        "everyday-password",
+    ) as restored:
+        revision = restored.database.latest_revision()
+        assert revision is not None
+        assert revision.metadata.revision_id == REVISION_ID
+        assert revision.metadata.display_code == "20260825-001"
+        restored.database.check_integrity()
+
+
+def test_document_run_creates_backup_and_restores_append_only_history(tmp_path: Path):
+    source = tmp_path / "operations.sqlite3"
+    backup_directory = tmp_path / "automatic-backups"
+    backup_directory.mkdir()
+    with DatabaseSession.create(
+        source,
+        "everyday-password",
+        "institution-recovery",
+        backup_directory=backup_directory,
+    ) as session:
+        session.append_revision(_record())
+        result = session.append_document_run(_document_run())
+    assert result.record is not None
+
+    restored_path = tmp_path / "restored-document-history.sqlite3"
+    with DatabaseSession.restore_and_open_with_user_password(
+        result.record.path,
+        restored_path,
+        "everyday-password",
+    ) as restored:
+        assert restored.database.document_run(DOCUMENT_RUN_ID) == _document_run()
+        assert restored.database.latest_revision().metadata.revision_id == REVISION_ID
+        restored.database.check_integrity()
+
+
+def test_backup_restores_with_recovery_and_sets_new_everyday_password(
+    tmp_path: Path,
+):
+    source = tmp_path / "operations.sqlite3"
+    backup_directory = tmp_path / "automatic-backups"
+    backup_directory.mkdir()
+    with DatabaseSession.create(
+        source,
+        "forgotten-password",
+        "institution-recovery",
+        backup_directory=backup_directory,
+    ) as session:
+        backup = session.append_revision(_record()).record
+    assert backup is not None
+
+    restored_path = tmp_path / "restored.sqlite3"
+    with DatabaseSession.restore_and_open_with_recovery_password(
+        backup.path,
+        restored_path,
+        "institution-recovery",
+        "new-everyday-password",
+    ) as restored:
+        assert restored.database.latest_revision().metadata.revision_id == REVISION_ID
+
+    with pytest.raises(CredentialUnlockError):
+        DatabaseSession.open(restored_path, "forgotten-password")
+    DatabaseSession.open(restored_path, "new-everyday-password").close()
+
+
+def test_backup_failure_does_not_rollback_successful_database_change(tmp_path: Path):
+    database_path = tmp_path / "operations.sqlite3"
+    missing_backup_directory = tmp_path / "disconnected-drive"
+    with DatabaseSession.create(
+        database_path,
+        "everyday-password",
+        "institution-recovery",
+        backup_directory=missing_backup_directory,
+    ) as session:
+        result = session.append_revision(_record())
+        assert result.error is not None
+        assert not result.succeeded
+        assert session.database.latest_revision().metadata.revision_id == REVISION_ID
+
+    with DatabaseSession.open(database_path, "everyday-password") as reopened:
+        assert reopened.database.latest_revision().metadata.revision_id == REVISION_ID
+
+
+def test_restore_refuses_to_overwrite_existing_database(tmp_path: Path):
+    source = tmp_path / "operations.sqlite3"
+    backup_directory = tmp_path / "automatic-backups"
+    backup_directory.mkdir()
+    with DatabaseSession.create(
+        source,
+        "everyday-password",
+        "institution-recovery",
+        backup_directory=backup_directory,
+    ) as session:
+        backup = session.append_revision(_record()).record
+    assert backup is not None
+
+    destination = tmp_path / "existing.sqlite3"
+    destination.write_bytes(b"do-not-overwrite")
+    with pytest.raises(BackupRestoreConflictError):
+        DatabaseSession.restore_and_open_with_user_password(
+            backup.path,
+            destination,
+            "everyday-password",
+        )
+    assert destination.read_bytes() == b"do-not-overwrite"
+
+
+def test_truncated_archive_is_rejected(tmp_path: Path):
+    broken = tmp_path / f"broken{BACKUP_EXTENSION}"
+    broken.write_bytes(b"not-a-zip")
+
+    with pytest.raises(BackupFormatError):
+        inspect_backup(broken)
+
+
+def test_retention_keeps_latest_for_same_database_only_and_preserves_unknown_files(
+    tmp_path: Path,
+):
+    backup_directory = tmp_path / "automatic-backups"
+    backup_directory.mkdir()
+    first_path = tmp_path / "first.sqlite3"
+    second_path = tmp_path / "second.sqlite3"
+    first = DatabaseSession.create(first_path, "first-user", "first-recovery")
+    second = DatabaseSession.create(second_path, "second-user", "second-recovery")
+    service = DatabaseBackupService(backup_directory, max_backups=2)
+    base = datetime(2026, 8, 24, 9, 0, tzinfo=UTC)
+    try:
+        first_key = first.credentials.unlock_user("first-user")
+        second_key = second.credentials.unlock_user("second-user")
+        first_oldest = service.create_backup(
+            first.database,
+            first.credentials,
+            first_key,
+            created_at=base,
+        )
+        first_middle = service.create_backup(
+            first.database,
+            first.credentials,
+            first_key,
+            created_at=base + timedelta(minutes=1),
+        )
+        other_database = service.create_backup(
+            second.database,
+            second.credentials,
+            second_key,
+            created_at=base,
+        )
+        malformed = backup_directory / "직접_넣은_손상파일.mealbackup"
+        malformed.write_bytes(b"keep-unknown")
+
+        first_latest = service.create_backup(
+            first.database,
+            first.credentials,
+            first_key,
+            created_at=base + timedelta(minutes=2),
+        )
+    finally:
+        first.close()
+        second.close()
+
+    assert not first_oldest.path.exists()
+    assert first_middle.path.exists()
+    assert first_latest.path.exists()
+    assert other_database.path.exists()
+    assert malformed.read_bytes() == b"keep-unknown"
+    assert {
+        record.path
+        for record in service.list_backups(database_id=first_latest.database_id)
+    } == {first_middle.path, first_latest.path}
+
+
+def test_new_backup_survives_when_old_backup_cleanup_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    backup_directory = tmp_path / "automatic-backups"
+    backup_directory.mkdir()
+    database_path = tmp_path / "operations.sqlite3"
+    service = DatabaseBackupService(backup_directory, max_backups=1)
+    with DatabaseSession.create(
+        database_path,
+        "everyday-password",
+        "institution-recovery",
+    ) as session:
+        key = session.credentials.unlock_user("everyday-password")
+        first = service.create_backup(
+            session.database,
+            session.credentials,
+            key,
+        )
+
+        def fail_cleanup(*_args, **_kwargs):
+            raise OSError("backup is open elsewhere")
+
+        monkeypatch.setattr(service, "prune_backups", fail_cleanup)
+        second = service.create_backup(
+            session.database,
+            session.credentials,
+            key,
+        )
+
+    assert first.path.exists()
+    assert second.path.exists()
+
+
+def test_default_retention_is_100_and_invalid_counts_are_rejected(tmp_path: Path):
+    assert DatabaseBackupService(tmp_path).max_backups == DEFAULT_MAX_BACKUPS == 100
+    assert DatabaseBackupService(tmp_path, max_backups=None).max_backups is None
+    with pytest.raises(ValueError, match="1 이상의 정수"):
+        DatabaseBackupService(tmp_path, max_backups=0)
+    with pytest.raises(ValueError, match="1 이상의 정수"):
+        DatabaseBackupService(tmp_path, max_backups=True)

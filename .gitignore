@@ -27,6 +27,10 @@ assets/*[0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F]
 
 # Cache
 .cache.json
+.pytest_cache/
+
+# Local encrypted database, credentials, and backups
+data/
 
 nul
 main.exe

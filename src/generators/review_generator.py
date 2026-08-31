@@ -25,6 +25,8 @@ REVIEW_HEADERS = (
 def make_profile_review(
     conflicts: Sequence[ProfileConflict],
     output_path: str | Path,
+    *,
+    output_password: str | None = None,
 ) -> int:
     """불일치 내역만 든 검토용 파일을 만들고 기록 건수를 반환한다."""
     workbook = openpyxl.Workbook()
@@ -67,5 +69,5 @@ def make_profile_review(
     }.items():
         worksheet.column_dimensions[column].width = width
 
-    publish_workbook(workbook, output_path)
+    publish_workbook(workbook, output_path, password=output_password)
     return len(conflicts)

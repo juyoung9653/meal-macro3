@@ -67,12 +67,33 @@ class MonthlyDelivery:
     lunch_count: int
     dinner_count: int
     weekly: tuple[WeeklyDelivery, ...]
+    billing_amount: int | None = None
+    household_key: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.billing_amount is not None:
+            if isinstance(self.billing_amount, bool) or not isinstance(
+                self.billing_amount,
+                int,
+            ):
+                raise TypeError("청구금액은 정수 또는 None이어야 합니다.")
+            if self.billing_amount < 0:
+                raise ValueError("청구금액은 0원 이상이어야 합니다.")
+        if self.household_key is not None:
+            if not isinstance(self.household_key, str):
+                raise TypeError("가구 key는 문자열 또는 None이어야 합니다.")
+            normalized = self.household_key.strip()
+            if not normalized:
+                raise ValueError("가구 key는 비어 있을 수 없습니다.")
+            object.__setattr__(self, "household_key", normalized)
 
     @property
     def total_count(self) -> int:
         return self.breakfast_count + self.lunch_count + self.dinner_count
 
     def amount(self, prices: MealPrices) -> int:
+        if self.billing_amount is not None:
+            return self.billing_amount
         return (
             self.breakfast_count * prices.breakfast
             + self.lunch_count * prices.lunch

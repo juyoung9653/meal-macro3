@@ -16,7 +16,7 @@ from openpyxl.worksheet.page import PageMargins
 
 from ..core.diff_format import has_diff, strip_diff
 from ..core.settings import get_settings
-from ..excel.publication import publish_workbook
+from ..excel.publication import WorkbookPublicationResult, publish_workbook
 from ..services.delivery_service import DeliveryReport
 
 log = logging.getLogger(__name__)
@@ -44,13 +44,32 @@ def _format_korean_date(date_str: str) -> str:
 def export_multi(
     results: Sequence[DeliveryReport],
     filepath: str | Path,
+    *,
+    output_password: str | None = None,
 ) -> None:
     """여러 날짜 리포트를 하나의 Excel 파일로 저장 (날짜별 시트)."""
+    make_report_publication(
+        results,
+        filepath,
+        get_template_path(),
+        output_password=output_password,
+    )
+
+
+def make_report_publication(
+    results: Sequence[DeliveryReport],
+    filepath: str | Path,
+    template_path: str | Path,
+    *,
+    output_password: str | None = None,
+) -> WorkbookPublicationResult:
+    """Publish one verified report workbook from an explicit template."""
+
     if not results:
         raise ValueError("내보낼 리포트 결과가 없습니다.")
 
     out_file = Path(filepath)
-    tpl_file = Path(get_template_path())
+    tpl_file = Path(template_path)
     if not tpl_file.is_file():
         raise FileNotFoundError(
             f"배송 리포트 템플릿을 찾을 수 없습니다: {tpl_file}"
@@ -76,17 +95,24 @@ def export_multi(
             _stretch_rows_to_page(ws, last_row)
             _apply_page_setup(ws)
 
-        publish_workbook(out, out_file)
+        publication = publish_workbook(out, out_file, password=output_password)
     finally:
         tpl.close()
+        out.close()
 
     if not out_file.is_file():
         raise OSError(f"리포트 파일이 생성되지 않았습니다: {out_file}")
+    return publication
 
 
-def export(report: DeliveryReport, filepath: str | Path) -> None:
+def export(
+    report: DeliveryReport,
+    filepath: str | Path,
+    *,
+    output_password: str | None = None,
+) -> None:
     """export_multi 래퍼 (단일 시트)."""
-    export_multi((report,), filepath)
+    export_multi((report,), filepath, output_password=output_password)
 
 
 # ═══════════════════════════════════════════════════
