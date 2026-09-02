@@ -2,20 +2,29 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, replace
 from datetime import date, timedelta
 from enum import StrEnum
 from types import MappingProxyType
 from uuid import UUID
 
 from src.domain.roster import (
-    DeliveryAssignment,
+    CustomFieldDefinition,
+    CustomFieldType,
     InclusiveDateRange,
     Meal,
     MealEnrollment,
     Person,
+    PersonProfile,
     RosterSnapshot,
+    additional_mobile_phone_field_id,
+    additional_mobile_phone_field_name,
+    additional_mobile_phone_field_ordinal,
+    additional_telephone_field_id,
+    additional_telephone_field_name,
+    additional_telephone_field_ordinal,
+    normalize_phone,
 )
 
 from .reconciliation import (
@@ -23,7 +32,6 @@ from .reconciliation import (
     ReconciliationPlan,
     StagedPerson,
 )
-
 
 PROFILE_UPDATE_POLICY_VERSION = 1
 PROFILE_BLANK_VALUE_POLICY = "preserve_existing"
@@ -128,11 +136,14 @@ def apply_reconciliation(
         (assignment.person_id, assignment.meal): assignment
         for assignment in (() if roster is None else roster.assignments)
     }
+    custom_fields = list(() if roster is None else roster.custom_fields)
     enrollments = list(() if roster is None else roster.enrollments)
     applied: dict[UUID, UUID] = {}
     ignored: list[UUID] = []
     used_person_ids: set[UUID] = set()
     preserved_blank_profile_fields: dict[UUID, tuple[str, ...]] = {}
+    additional_mobile_phone_fields: dict[int, CustomFieldDefinition] = {}
+    additional_telephone_fields: dict[int, CustomFieldDefinition] = {}
 
     for staged in plan.staged_people:
         decision = decision_by_id.get(staged.observation.observation_id)
@@ -164,10 +175,38 @@ def apply_reconciliation(
                     tuple(field.value for field in preserved_fields)
                 )
 
-        persons_by_id[person_id] = Person(
-            person_id,
-            staged.observation.merged_profile(base_profile),
+        merged_profile = staged.observation.merged_profile(base_profile)
+        merged_profile, used_telephone_fields = _merge_additional_phones(
+            merged_profile,
+            merged_profile.telephone,
+            staged.observation.additional_telephones,
+            custom_fields,
+            field_id=additional_telephone_field_id,
+            field_name=additional_telephone_field_name,
+            field_ordinal=additional_telephone_field_ordinal,
         )
+        additional_telephone_fields.update(
+            _definitions_by_ordinal(
+                used_telephone_fields,
+                additional_telephone_field_ordinal,
+            )
+        )
+        merged_profile, used_mobile_phone_fields = _merge_additional_phones(
+            merged_profile,
+            merged_profile.mobile_phone,
+            staged.observation.additional_mobile_phones,
+            custom_fields,
+            field_id=additional_mobile_phone_field_id,
+            field_name=additional_mobile_phone_field_name,
+            field_ordinal=additional_mobile_phone_field_ordinal,
+        )
+        additional_mobile_phone_fields.update(
+            _definitions_by_ordinal(
+                used_mobile_phone_fields,
+                additional_mobile_phone_field_ordinal,
+            )
+        )
+        persons_by_id[person_id] = Person(person_id, merged_profile)
         enrollments = _replace_active_meals(
             enrollments,
             person_id,
@@ -204,7 +243,9 @@ def apply_reconciliation(
                 ),
             )
         ),
-        custom_fields=() if roster is None else roster.custom_fields,
+        custom_fields=tuple(
+            sorted(custom_fields, key=lambda item: item.display_order)
+        ),
     )
     ignored_ids = tuple(sorted(ignored, key=str))
     manifest = {
@@ -228,8 +269,149 @@ def apply_reconciliation(
                 key=lambda item: str(item[0]),
             )
         },
+        "additional_mobile_phone_fields": {
+            additional_mobile_phone_field_name(ordinal): str(definition.definition_id)
+            for ordinal, definition in sorted(additional_mobile_phone_fields.items())
+        },
+        "additional_telephone_fields": {
+            additional_telephone_field_name(ordinal): str(definition.definition_id)
+            for ordinal, definition in sorted(additional_telephone_fields.items())
+        },
     }
     return ReconciliationResult(snapshot, applied, ignored_ids, manifest)
+
+
+def _merge_additional_phones(
+    profile: PersonProfile,
+    primary_phone: str | None,
+    observed_additional_phones: tuple[str, ...],
+    custom_fields: list[CustomFieldDefinition],
+    *,
+    field_id: Callable[[int], UUID],
+    field_name: Callable[[int], str],
+    field_ordinal: Callable[[str], int | None],
+) -> tuple[PersonProfile, tuple[CustomFieldDefinition, ...]]:
+    phone_definitions = tuple(
+        sorted(
+            (
+                definition
+                for definition in custom_fields
+                if definition.field_type is CustomFieldType.TEXT
+                and field_ordinal(definition.name) is not None
+            ),
+            key=lambda definition: field_ordinal(definition.name) or 0,
+        )
+    )
+    existing_additional_phones = tuple(
+        value
+        for definition in phone_definitions
+        if isinstance(
+            (value := profile.custom_values.get(definition.definition_id)),
+            str,
+        )
+        and value.strip()
+    )
+    primary_key = _phone_identity_key(primary_phone)
+    merged_phones: list[str] = []
+    seen = {primary_key} if primary_key is not None else set()
+    for phone in (*observed_additional_phones, *existing_additional_phones):
+        key = _phone_identity_key(phone)
+        if key is None or key in seen:
+            continue
+        seen.add(key)
+        merged_phones.append(phone)
+
+    custom_values = dict(profile.custom_values)
+    for definition in phone_definitions:
+        custom_values.pop(definition.definition_id, None)
+
+    used_definitions: list[CustomFieldDefinition] = []
+    for ordinal, phone in enumerate(merged_phones, start=2):
+        definition = _ensure_additional_phone_field(
+            custom_fields,
+            ordinal,
+            field_id=field_id,
+            field_name=field_name,
+        )
+        custom_values[definition.definition_id] = phone
+        used_definitions.append(definition)
+    return (
+        replace(profile, custom_values=custom_values),
+        tuple(used_definitions),
+    )
+
+
+def _ensure_additional_phone_field(
+    custom_fields: list[CustomFieldDefinition],
+    ordinal: int,
+    *,
+    field_id: Callable[[int], UUID],
+    field_name: Callable[[int], str],
+) -> CustomFieldDefinition:
+    name = field_name(ordinal)
+    by_name = next(
+        (
+            definition
+            for definition in custom_fields
+            if definition.name.casefold() == name.casefold()
+        ),
+        None,
+    )
+    if by_name is not None:
+        if by_name.field_type is not CustomFieldType.TEXT:
+            raise ValueError(
+                f"기존 ‘{name}’ 사용자 정의 필드가 문자 형식이 아닙니다. "
+                "필드 형식을 확인해주세요."
+            )
+        return by_name
+
+    definition_id = field_id(ordinal)
+    id_collision = next(
+        (
+            definition
+            for definition in custom_fields
+            if definition.definition_id == definition_id
+        ),
+        None,
+    )
+    if id_collision is not None:
+        raise ValueError(
+            f"‘{name}’ 자동 필드 ID가 기존 ‘{id_collision.name}’ 필드와 겹칩니다."
+        )
+    definition = CustomFieldDefinition(
+        definition_id,
+        name,
+        CustomFieldType.TEXT,
+        max(
+            (item.display_order for item in custom_fields),
+            default=-1,
+        )
+        + 1,
+    )
+    custom_fields.append(definition)
+    return definition
+
+
+def _definitions_by_ordinal(
+    definitions: tuple[CustomFieldDefinition, ...],
+    field_ordinal: Callable[[str], int | None],
+) -> dict[int, CustomFieldDefinition]:
+    result: dict[int, CustomFieldDefinition] = {}
+    for definition in definitions:
+        ordinal = field_ordinal(definition.name)
+        if ordinal is not None:
+            result[ordinal] = definition
+    return result
+
+
+def _phone_identity_key(value: str | None) -> tuple[str, str] | None:
+    if value is None:
+        return None
+    digits = normalize_phone(value)
+    if digits:
+        return "digits", digits
+    compact = "".join(value.split()).casefold()
+    return None if not compact else ("text", compact)
 
 
 def _resolve_identity(

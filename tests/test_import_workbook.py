@@ -567,6 +567,175 @@ def test_duplicate_rows_choose_latest_school_stage_merge_notes_and_drop_str_phon
     )
 
 
+def test_duplicate_move_uses_latest_location_and_keeps_every_mobile_phone(
+    tmp_path: Path,
+):
+    path = tmp_path / "move-location-and-phones.xlsx"
+    workbook = openpyxl.Workbook()
+    worksheet = workbook.active
+    worksheet.append(
+        ("성명", "생년월일", "주소", "관할동", "전화번호", "핸드폰", "식종")
+    )
+    worksheet.append(
+        (
+            "이사아동",
+            "20150302",
+            "이전 주소 1",
+            "이전동",
+            "ｓｔｒ",
+            "010-1111-2222",
+            "조식",
+        )
+    )
+    worksheet.append(
+        (
+            "이사아동",
+            "20150302",
+            "현재 주소 9",
+            "현재동",
+            "STR placeholder",
+            "010-3333-4444",
+            "중식",
+        )
+    )
+    workbook.save(path)
+    workbook.close()
+    profile = ImportMappingProfile(
+        UUID("81000000-0000-0000-0000-000000000096"),
+        1,
+        "이사 연락처 명단",
+        "roster-split-xlsx",
+        {
+            ProfileField.NAME: "A",
+            ProfileField.BIRTH_DATE: "B",
+            ProfileField.ROAD_ADDRESS: "C",
+            ProfileField.JURISDICTION: "D",
+            ProfileField.TELEPHONE: "E",
+            ProfileField.MOBILE_PHONE: "F",
+        },
+        combined_meals_column="G",
+    )
+
+    preview = parse_workbook(path, profile)
+
+    assert preview.can_continue
+    assert preview.issues == ()
+    observation = preview.observations[0]
+    assert observation.profile_values[ProfileField.ROAD_ADDRESS] == "현재 주소 9"
+    assert observation.profile_values[ProfileField.JURISDICTION] == "현재동"
+    assert observation.profile_values[ProfileField.TELEPHONE] is None
+    assert observation.profile_values[ProfileField.MOBILE_PHONE] == (
+        "010-3333-4444"
+    )
+    assert observation.additional_mobile_phones == ("010-1111-2222",)
+    resolutions = {
+        item.field: item for item in preview.automatic_source_resolutions
+    }
+    assert set(resolutions) == {"road_address", "jurisdiction", "mobile_phone"}
+    assert all(item.selected_row == 3 for item in resolutions.values())
+    assert resolutions["mobile_phone"].manifest()["kind"] == "contact"
+
+
+def test_phone_text_containing_str_is_kept_when_it_also_has_digits(tmp_path: Path):
+    path = tmp_path / "phone-str-with-digits.xlsx"
+    workbook = openpyxl.Workbook()
+    worksheet = workbook.active
+    worksheet.append(("성명", "생년월일", "전화번호", "식종"))
+    worksheet.append(("전화아동", "20150302", "str 031-123-4567", "조식"))
+    workbook.save(path)
+    workbook.close()
+    profile = ImportMappingProfile(
+        UUID("81000000-0000-0000-0000-000000000097"),
+        1,
+        "전화번호 자리표시자 명단",
+        "roster-xlsx",
+        {
+            ProfileField.NAME: "A",
+            ProfileField.BIRTH_DATE: "B",
+            ProfileField.TELEPHONE: "C",
+        },
+        combined_meals_column="D",
+    )
+
+    preview = parse_workbook(path, profile)
+
+    assert preview.can_continue
+    assert preview.observations[0].profile_values[ProfileField.TELEPHONE] == (
+        "031-123-4567"
+    )
+
+
+def test_duplicate_telephone_numbers_become_numbered_contact_values(tmp_path: Path):
+    path = tmp_path / "multiple-telephones.xlsx"
+    workbook = openpyxl.Workbook()
+    worksheet = workbook.active
+    worksheet.append(("성명", "생년월일", "전화번호", "식종"))
+    worksheet.append(("전화아동", "20150302", "031-111-2222", "조식"))
+    worksheet.append(("전화아동", "20150302", "031-333-4444", "중식"))
+    workbook.save(path)
+    workbook.close()
+    profile = ImportMappingProfile(
+        UUID("81000000-0000-0000-0000-000000000099"),
+        1,
+        "복수 전화번호 명단",
+        "roster-xlsx",
+        {
+            ProfileField.NAME: "A",
+            ProfileField.BIRTH_DATE: "B",
+            ProfileField.TELEPHONE: "C",
+        },
+        combined_meals_column="D",
+    )
+
+    preview = parse_workbook(path, profile)
+
+    assert preview.can_continue
+    observation = preview.observations[0]
+    assert observation.profile_values[ProfileField.TELEPHONE] == "031-333-4444"
+    assert observation.additional_telephones == ("031-111-2222",)
+    resolution = next(
+        item
+        for item in preview.automatic_source_resolutions
+        if item.field == "telephone"
+    )
+    assert resolution.field_label == "전화번호1"
+    assert resolution.selected_row == 3
+    assert resolution.manifest()["kind"] == "contact"
+
+
+def test_preserved_phone_format_differences_do_not_create_duplicate_columns(
+    tmp_path: Path,
+):
+    path = tmp_path / "same-phone-formatting.xlsx"
+    workbook = openpyxl.Workbook()
+    worksheet = workbook.active
+    worksheet.append(("성명", "생년월일", "핸드폰", "식종"))
+    worksheet.append(("같은번호아동", "20150302", "010-1111-2222", "조식"))
+    worksheet.append(("같은번호아동", "20150302", "01011112222", "중식"))
+    workbook.save(path)
+    workbook.close()
+    profile = ImportMappingProfile(
+        UUID("81000000-0000-0000-0000-000000000098"),
+        1,
+        "전화번호 원형 유지 명단",
+        "roster-xlsx",
+        {
+            ProfileField.NAME: "A",
+            ProfileField.BIRTH_DATE: "B",
+            ProfileField.MOBILE_PHONE: "C",
+        },
+        combined_meals_column="D",
+        phone_normalization=PhoneNormalization.PRESERVE,
+    )
+
+    preview = parse_workbook(path, profile)
+
+    assert preview.can_continue
+    observation = preview.observations[0]
+    assert observation.profile_values[ProfileField.MOBILE_PHONE] == "01011112222"
+    assert observation.additional_mobile_phones == ()
+
+
 def test_duplicate_comparison_ignores_all_whitespace(tmp_path: Path):
     path = tmp_path / "whitespace-equivalent.xlsx"
     workbook = openpyxl.Workbook()

@@ -45,12 +45,13 @@ from src.importing import (
     stage_reconciliation,
 )
 
-
 REVISION_ID = UUID("80000000-0000-0000-0000-000000000001")
 FIRST_PERSON_ID = UUID("80000000-0000-0000-0000-000000000002")
 SECOND_PERSON_ID = UUID("80000000-0000-0000-0000-000000000003")
 HOUSEHOLD_ID = UUID("80000000-0000-0000-0000-000000000004")
 CUSTOM_FIELD_ID = UUID("80000000-0000-0000-0000-000000000005")
+SECOND_MOBILE_FIELD_ID = UUID("80000000-0000-0000-0000-000000000015")
+SECOND_TELEPHONE_FIELD_ID = UUID("80000000-0000-0000-0000-000000000016")
 EVENT_ID = UUID("80000000-0000-0000-0000-000000000006")
 FIRST_OBSERVATION_ID = UUID("80000000-0000-0000-0000-000000000007")
 SECOND_OBSERVATION_ID = UUID("80000000-0000-0000-0000-000000000008")
@@ -143,6 +144,82 @@ def test_model_filters_by_selected_meal_and_exposes_dynamic_columns(app):
 
     model.set_active_only(False)
     assert model.rowCount() == 2
+
+
+def test_numbered_contact_columns_are_adjacent_searchable_and_inspected(app):
+    roster = _roster()
+    first = roster.person(FIRST_PERSON_ID)
+    phone_roster = RosterSnapshot(
+        roster.revision_id,
+        persons=(
+            Person(
+                first.person_id,
+                PersonProfile(
+                    first.profile.name,
+                    birth_date=first.profile.birth_date,
+                    school_name=first.profile.school_name,
+                    grade=first.profile.grade,
+                    telephone="031-123-4567",
+                    mobile_phone=first.profile.mobile_phone,
+                    road_address=first.profile.road_address,
+                    custom_values={
+                        **first.profile.custom_values,
+                        SECOND_MOBILE_FIELD_ID: "010-9876-5432",
+                        SECOND_TELEPHONE_FIELD_ID: "031-987-6543",
+                    },
+                ),
+            ),
+            roster.person(SECOND_PERSON_ID),
+        ),
+        households=roster.households,
+        memberships=roster.memberships,
+        enrollments=roster.enrollments,
+        assignments=roster.assignments,
+        custom_fields=(
+            *roster.custom_fields,
+            CustomFieldDefinition(
+                SECOND_TELEPHONE_FIELD_ID,
+                "전화번호2",
+                CustomFieldType.TEXT,
+                1,
+            ),
+            CustomFieldDefinition(
+                SECOND_MOBILE_FIELD_ID,
+                "핸드폰2",
+                CustomFieldType.TEXT,
+                2,
+            ),
+        ),
+    )
+    model = RosterTableModel(phone_roster, _histories())
+    labels = tuple(column.label for column in model.columns)
+    telephone1_index = labels.index("전화번호1")
+    phone1_index = labels.index("핸드폰1")
+
+    assert labels[telephone1_index + 1] == "전화번호2"
+    assert model.data(model.index(0, telephone1_index)) == "031-123-4567"
+    assert model.data(model.index(0, telephone1_index + 1)) == "031-987-6543"
+    assert labels[phone1_index + 1] == "핸드폰2"
+    assert model.data(model.index(0, phone1_index)) == "010-1234-5678"
+    assert model.data(model.index(0, phone1_index + 1)) == "010-9876-5432"
+
+    model.set_search("9876-5432")
+    assert model.rowCount() == 1
+    assert model.person_at(0).person_id == FIRST_PERSON_ID
+
+    model.set_search("987-6543")
+    assert model.rowCount() == 1
+    assert model.person_at(0).person_id == FIRST_PERSON_ID
+
+    window = RosterWindow(phone_roster, _histories())
+    window._set_day(SERVICE_DAY)
+    window._set_meal(Meal.LUNCH)
+    window.show()
+    window._table.selectRow(0)
+    app.processEvents()
+    assert "010-1234-5678 / 010-9876-5432" in window._inspector_detail.text()
+    assert "031-123-4567 / 031-987-6543" in window._inspector_detail.text()
+    window.close()
 
 
 def test_model_sorts_blank_cells_to_one_side(app):

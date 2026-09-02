@@ -42,7 +42,6 @@ from .contracts import (
     SourceReference,
 )
 
-
 _MAX_COLUMNS = 256
 _MAX_DATA_ROWS = 50_000
 _BLANK_ROW_STOP = 100
@@ -244,6 +243,12 @@ class AutomaticSourceResolution:
             "kind": (
                 "delivery_assignment"
                 if self.field in {"driver", "sequence"}
+                else "contact"
+                if self.field
+                in {
+                    ProfileField.TELEPHONE.value,
+                    ProfileField.MOBILE_PHONE.value,
+                }
                 else "address"
             ),
             "field": self.field,
@@ -907,7 +912,7 @@ def _profile_value(
     if text is None:
         return None
     if field in (ProfileField.TELEPHONE, ProfileField.MOBILE_PHONE):
-        if "str" in text.casefold():
+        if not normalize_phone(text):
             return None
         return _phone_value(text, profile.phone_normalization)
     return text
@@ -1206,6 +1211,8 @@ def _merge_observations(
         )
         group_resolutions: list[AutomaticSourceResolution] = []
         merged_values: dict[ProfileField, str | date | None] = {}
+        additional_mobile_phones: tuple[str, ...] = ()
+        additional_telephones: tuple[str, ...] = ()
         conflicting = False
         school_values_differ = any(
             len(
@@ -1236,6 +1243,73 @@ def _merge_observations(
                 continue
             if field in _SCHOOL_FIELDS and school_values_differ:
                 merged_values[field] = preferred_school_row.profile_values.get(field)
+                continue
+            if field in {
+                ProfileField.TELEPHONE,
+                ProfileField.MOBILE_PHONE,
+            } and len(nonblank) > 1:
+                row_values = tuple(
+                    (item.row_number, str(value))
+                    for item in grouped_rows
+                    if (value := item.profile_values.get(field)) is not None
+                )
+                latest_first: list[str] = []
+                seen_phone_values: set[tuple[object, ...]] = set()
+                for _row_number, value in sorted(
+                    row_values,
+                    key=lambda item: item[0],
+                    reverse=True,
+                ):
+                    key = _phone_comparison_key(value)
+                    if key in seen_phone_values:
+                        continue
+                    seen_phone_values.add(key)
+                    latest_first.append(value)
+                selected_row, selected_value = max(
+                    row_values,
+                    key=lambda item: item[0],
+                )
+                merged_values[field] = selected_value
+                if field is ProfileField.MOBILE_PHONE:
+                    additional_mobile_phones = tuple(latest_first[1:])
+                    field_label = "핸드폰1"
+                else:
+                    additional_telephones = tuple(latest_first[1:])
+                    field_label = "전화번호1"
+                group_resolutions.append(
+                    _automatic_source_resolution(
+                        observation_id,
+                        field=field.value,
+                        field_label=field_label,
+                        row_values=row_values,
+                        selected_row=selected_row,
+                        selected_value=selected_value,
+                        selection_rule="later_excel_row",
+                    )
+                )
+                continue
+            if field is ProfileField.JURISDICTION and len(nonblank) > 1:
+                row_values = tuple(
+                    (item.row_number, value)
+                    for item in grouped_rows
+                    if (value := item.profile_values.get(field)) is not None
+                )
+                selected_row, selected_value = max(
+                    row_values,
+                    key=lambda item: item[0],
+                )
+                merged_values[field] = selected_value
+                group_resolutions.append(
+                    _automatic_source_resolution(
+                        observation_id,
+                        field=field.value,
+                        field_label=_PROFILE_FIELD_LABELS[field],
+                        row_values=row_values,
+                        selected_row=selected_row,
+                        selected_value=selected_value,
+                        selection_rule="later_excel_row",
+                    )
+                )
                 continue
             if field in _ADDRESS_FIELDS and len(nonblank) > 1:
                 row_values = tuple(
@@ -1363,20 +1437,22 @@ def _merge_observations(
         )
         observations.append(
             PersonObservation(
-                observation_id,
-                SourceReference(
+                observation_id=observation_id,
+                source=SourceReference(
                     source_filename,
                     sheet_name,
                     row_numbers,
                     external_reference,
                 ),
-                merged_values,
-                tuple(meal for meal in Meal if meal in meal_set),
-                tuple(
+                profile_values=merged_values,
+                meals=tuple(meal for meal in Meal if meal in meal_set),
+                assignments=tuple(
                     assignments[key]
                     for key in (None, *Meal)
                     if key in assignments
                 ),
+                additional_mobile_phones=additional_mobile_phones,
+                additional_telephones=additional_telephones,
             )
         )
         automatic_source_resolutions.extend(group_resolutions)
@@ -1435,6 +1511,11 @@ def _comparison_key(value: str | date) -> tuple[object, ...]:
     if isinstance(value, str):
         return ("text", _compact_comparison_text(value))
     return (type(value).__name__, value)
+
+
+def _phone_comparison_key(value: str) -> tuple[object, ...]:
+    digits = normalize_phone(value)
+    return ("phone", digits) if digits else _comparison_key(value)
 
 
 def _compact_comparison_text(value: str) -> str:

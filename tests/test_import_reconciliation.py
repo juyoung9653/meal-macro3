@@ -24,8 +24,8 @@ from src.importing import (
     PersonObservation,
     PhoneNormalization,
     ProfileField,
-    ReconciliationDisposition,
     ReconciliationDecision,
+    ReconciliationDisposition,
     ReviewReason,
     SourceReference,
     StoredImportProfile,
@@ -34,7 +34,6 @@ from src.importing import (
     import_profiles_from_snapshot,
     stage_reconciliation,
 )
-
 
 REVISION_ID = UUID("70000000-0000-0000-0000-000000000001")
 PERSON_ID = UUID("70000000-0000-0000-0000-000000000002")
@@ -560,4 +559,97 @@ def test_initial_import_uses_no_fake_base_revision_and_creates_first_snapshot():
     assert result.snapshot.person(NEW_PERSON_ID).profile.name == "첫아동"
     assert result.snapshot.meals_for(NEW_PERSON_ID, on=EFFECTIVE_ON) == (
         Meal.LUNCH,
+    )
+
+
+def test_reconciliation_creates_and_reuses_numbered_contact_fields():
+    observation = PersonObservation(
+        OBSERVATION_ID,
+        SourceReference("first.xlsx", "명단", (2, 3)),
+        {
+            ProfileField.NAME: "연락처아동",
+            ProfileField.BIRTH_DATE: date(2018, 6, 7),
+            ProfileField.TELEPHONE: "031-333-4444",
+            ProfileField.MOBILE_PHONE: "010-3333-4444",
+        },
+        (Meal.LUNCH,),
+        additional_mobile_phones=("010-1111-2222",),
+        additional_telephones=("031-111-2222",),
+    )
+    first_plan = stage_reconciliation(
+        None,
+        (observation,),
+        effective_on=EFFECTIVE_ON,
+    )
+    first = apply_reconciliation(
+        None,
+        first_plan,
+        new_revision_id=NEW_REVISION_ID,
+        decisions={
+            OBSERVATION_ID: ReconciliationDecision(
+                OBSERVATION_ID,
+                IdentityResolution.CREATE_NEW,
+                NEW_PERSON_ID,
+            )
+        },
+    )
+
+    phone2 = next(field for field in first.snapshot.custom_fields if field.name == "핸드폰2")
+    telephone2 = next(
+        field for field in first.snapshot.custom_fields if field.name == "전화번호2"
+    )
+    first_profile = first.snapshot.person(NEW_PERSON_ID).profile
+    assert first_profile.telephone == "031-333-4444"
+    assert first_profile.mobile_phone == "010-3333-4444"
+    assert first_profile.custom_values[telephone2.definition_id] == "031-111-2222"
+    assert first_profile.custom_values[phone2.definition_id] == "010-1111-2222"
+    assert first.decision_manifest["additional_mobile_phone_fields"] == {
+        "핸드폰2": str(phone2.definition_id)
+    }
+    assert first.decision_manifest["additional_telephone_fields"] == {
+        "전화번호2": str(telephone2.definition_id)
+    }
+
+    later_observation_id = UUID("70000000-0000-0000-0000-000000000009")
+    later_observation = PersonObservation(
+        later_observation_id,
+        SourceReference("later.xlsx", "명단", (2, 3)),
+        {
+            ProfileField.NAME: "연락처아동",
+            ProfileField.BIRTH_DATE: date(2018, 6, 7),
+            ProfileField.TELEPHONE: "031-555-6666",
+            ProfileField.MOBILE_PHONE: "010-5555-6666",
+        },
+        (Meal.LUNCH,),
+        additional_mobile_phones=("010-3333-4444",),
+        additional_telephones=("031-333-4444",),
+    )
+    later_plan = stage_reconciliation(
+        first.snapshot,
+        (later_observation,),
+        effective_on=EFFECTIVE_ON,
+    )
+    later = apply_reconciliation(
+        first.snapshot,
+        later_plan,
+        new_revision_id=UUID("70000000-0000-0000-0000-000000000010"),
+    )
+
+    definitions = {field.name: field for field in later.snapshot.custom_fields}
+    later_profile = later.snapshot.person(NEW_PERSON_ID).profile
+    assert definitions["핸드폰2"].definition_id == phone2.definition_id
+    assert definitions["전화번호2"].definition_id == telephone2.definition_id
+    assert later_profile.telephone == "031-555-6666"
+    assert later_profile.mobile_phone == "010-5555-6666"
+    assert later_profile.custom_values[definitions["전화번호2"].definition_id] == (
+        "031-333-4444"
+    )
+    assert later_profile.custom_values[definitions["전화번호3"].definition_id] == (
+        "031-111-2222"
+    )
+    assert later_profile.custom_values[definitions["핸드폰2"].definition_id] == (
+        "010-3333-4444"
+    )
+    assert later_profile.custom_values[definitions["핸드폰3"].definition_id] == (
+        "010-1111-2222"
     )

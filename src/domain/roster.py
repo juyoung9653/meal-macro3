@@ -9,7 +9,7 @@ from enum import StrEnum
 from math import isfinite
 from types import MappingProxyType
 from unicodedata import normalize
-from uuid import UUID
+from uuid import UUID, uuid5
 
 type CustomFieldValue = str | int | float | bool | date | None
 
@@ -21,6 +21,14 @@ class Meal(StrEnum):
 
 
 _MEAL_ORDER = (Meal.BREAKFAST, Meal.LUNCH, Meal.DINNER)
+_ADDITIONAL_MOBILE_PHONE_FIELD_NAMESPACE = UUID(
+    "f14fac32-36de-4a7e-b6f0-5520890e5acd"
+)
+_ADDITIONAL_TELEPHONE_FIELD_NAMESPACE = UUID(
+    "8d4988b6-1a2e-4ddb-ae93-ff05bd086ba7"
+)
+_MOBILE_PHONE_FIELD_PREFIX = "핸드폰"
+_TELEPHONE_FIELD_PREFIX = "전화번호"
 
 
 class CustomFieldType(StrEnum):
@@ -420,6 +428,71 @@ def normalize_phone(value: str | None) -> str:
         raise TypeError("핸드폰은 문자열 또는 None이어야 합니다.")
     normalized = normalize("NFKC", value)
     return "".join(character for character in normalized if character in "0123456789")
+
+
+def additional_mobile_phone_field_name(ordinal: int) -> str:
+    """Return the reserved dynamic-field name for a second-or-later mobile phone."""
+
+    _validate_additional_mobile_phone_ordinal(ordinal)
+    return f"{_MOBILE_PHONE_FIELD_PREFIX}{ordinal}"
+
+
+def additional_mobile_phone_field_id(ordinal: int) -> UUID:
+    """Return a stable ID so repeated imports reuse the same phone column."""
+
+    _validate_additional_mobile_phone_ordinal(ordinal)
+    return uuid5(_ADDITIONAL_MOBILE_PHONE_FIELD_NAMESPACE, str(ordinal))
+
+
+def additional_mobile_phone_field_ordinal(name: str) -> int | None:
+    """Recognize reserved ``핸드폰2`` and later dynamic fields."""
+
+    return _additional_phone_field_ordinal(name, _MOBILE_PHONE_FIELD_PREFIX)
+
+
+def additional_telephone_field_name(ordinal: int) -> str:
+    """Return the reserved dynamic-field name for a second-or-later telephone."""
+
+    _validate_additional_phone_ordinal(ordinal, "추가 전화번호")
+    return f"{_TELEPHONE_FIELD_PREFIX}{ordinal}"
+
+
+def additional_telephone_field_id(ordinal: int) -> UUID:
+    """Return a stable ID so repeated imports reuse the same telephone column."""
+
+    _validate_additional_phone_ordinal(ordinal, "추가 전화번호")
+    return uuid5(_ADDITIONAL_TELEPHONE_FIELD_NAMESPACE, str(ordinal))
+
+
+def additional_telephone_field_ordinal(name: str) -> int | None:
+    """Recognize reserved ``전화번호2`` and later dynamic fields."""
+
+    return _additional_phone_field_ordinal(name, _TELEPHONE_FIELD_PREFIX)
+
+
+def _validate_additional_mobile_phone_ordinal(ordinal: int) -> None:
+    _validate_additional_phone_ordinal(ordinal, "추가 핸드폰 번호")
+
+
+def _additional_phone_field_ordinal(name: str, prefix: str) -> int | None:
+    if not isinstance(name, str):
+        raise TypeError("사용자 정의 필드명은 문자열이어야 합니다.")
+    if not name.startswith(prefix):
+        return None
+    suffix = name[len(prefix) :]
+    if not suffix.isdigit():
+        return None
+    ordinal = int(suffix)
+    if ordinal < 2 or suffix != str(ordinal):
+        return None
+    return ordinal
+
+
+def _validate_additional_phone_ordinal(ordinal: int, label: str) -> None:
+    if isinstance(ordinal, bool) or not isinstance(ordinal, int):
+        raise TypeError(f"{label} 순서는 정수여야 합니다.")
+    if ordinal < 2:
+        raise ValueError(f"{label} 순서는 2 이상이어야 합니다.")
 
 
 def _validate_custom_value(value: object) -> None:

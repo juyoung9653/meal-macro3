@@ -10,7 +10,7 @@ from pathlib import PurePosixPath, PureWindowsPath
 from types import MappingProxyType
 from uuid import UUID
 
-from src.domain.roster import DeliveryAssignment, Meal, PersonProfile
+from src.domain.roster import DeliveryAssignment, Meal, PersonProfile, normalize_phone
 
 
 class ProfileField(StrEnum):
@@ -385,6 +385,8 @@ class PersonObservation:
     profile_values: Mapping[ProfileField, str | date | None]
     meals: tuple[Meal, ...]
     assignments: tuple[ObservedDeliveryAssignment, ...] = ()
+    additional_mobile_phones: tuple[str, ...] = ()
+    additional_telephones: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _validate_uuid(self.observation_id, "observation ID")
@@ -411,9 +413,21 @@ class PersonObservation:
         assignment_keys = tuple(assignment.meal for assignment in assignments)
         if len(set(assignment_keys)) != len(assignment_keys):
             raise ValueError("관찰 배송 배정은 같은 식종에 중복될 수 없습니다.")
+        additional_mobile_phones = _validated_additional_phones(
+            self.additional_mobile_phones,
+            values.get(ProfileField.MOBILE_PHONE),
+            "핸드폰 번호",
+        )
+        additional_telephones = _validated_additional_phones(
+            self.additional_telephones,
+            values.get(ProfileField.TELEPHONE),
+            "전화번호",
+        )
         object.__setattr__(self, "profile_values", MappingProxyType(values))
         object.__setattr__(self, "meals", canonical_meals)
         object.__setattr__(self, "assignments", assignments)
+        object.__setattr__(self, "additional_mobile_phones", additional_mobile_phones)
+        object.__setattr__(self, "additional_telephones", additional_telephones)
 
     @property
     def name(self) -> str:
@@ -480,6 +494,29 @@ def _profile_field(value: object) -> ProfileField:
     if isinstance(value, ProfileField):
         return value
     raise TypeError("profile field key는 ProfileField여야 합니다.")
+
+
+def _phone_comparison_key(value: str) -> tuple[str, str]:
+    digits = normalize_phone(value)
+    if digits:
+        return "digits", digits
+    return "text", "".join(value.split()).casefold()
+
+
+def _validated_additional_phones(
+    raw_values: tuple[str, ...],
+    primary_value: str | date | None,
+    label: str,
+) -> tuple[str, ...]:
+    values = tuple(_required_text(value, f"추가 {label}") for value in raw_values)
+    all_values = (
+        *((primary_value,) if isinstance(primary_value, str) else ()),
+        *values,
+    )
+    phone_keys = tuple(_phone_comparison_key(value) for value in all_values)
+    if len(set(phone_keys)) != len(phone_keys):
+        raise ValueError(f"관찰 {label}는 중복될 수 없습니다.")
+    return values
 
 
 def _meal(value: object) -> Meal:

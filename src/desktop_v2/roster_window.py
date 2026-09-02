@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date
 from uuid import UUID
@@ -31,7 +31,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from src.domain.roster import CustomFieldDefinition, Meal, Person, RosterSnapshot
+from src.domain.roster import (
+    CustomFieldDefinition,
+    CustomFieldType,
+    Meal,
+    Person,
+    RosterSnapshot,
+    additional_mobile_phone_field_ordinal,
+    additional_telephone_field_ordinal,
+)
 from src.domain.status import MealStatus, StatusHistory
 
 from .theme import (
@@ -43,7 +51,6 @@ from .theme import (
     application_stylesheet,
     register_application_fonts,
 )
-
 
 _WEEKDAYS = ("월요일", "화요일", "수요일", "목요일", "금요일", "토요일", "일요일")
 _STATUS_COLORS = {
@@ -60,6 +67,75 @@ class _Column:
     label: str
     width: int
     custom_field: CustomFieldDefinition | None = None
+
+
+def _additional_mobile_phone_definitions(
+    definitions: tuple[CustomFieldDefinition, ...],
+) -> tuple[CustomFieldDefinition, ...]:
+    return _additional_phone_definitions(
+        definitions,
+        additional_mobile_phone_field_ordinal,
+    )
+
+
+def _additional_telephone_definitions(
+    definitions: tuple[CustomFieldDefinition, ...],
+) -> tuple[CustomFieldDefinition, ...]:
+    return _additional_phone_definitions(
+        definitions,
+        additional_telephone_field_ordinal,
+    )
+
+
+def _additional_phone_definitions(
+    definitions: tuple[CustomFieldDefinition, ...],
+    field_ordinal: Callable[[str], int | None],
+) -> tuple[CustomFieldDefinition, ...]:
+    return tuple(
+        sorted(
+            (
+                definition
+                for definition in definitions
+                if definition.field_type is CustomFieldType.TEXT
+                and field_ordinal(definition.name) is not None
+            ),
+            key=lambda definition: field_ordinal(definition.name) or 0,
+        )
+    )
+
+
+def _mobile_phone_display(roster: RosterSnapshot, person: Person) -> str:
+    profile = person.profile
+    mobile_phones = _phone_values(
+        profile.mobile_phone,
+        profile.custom_values,
+        _additional_mobile_phone_definitions(roster.custom_fields),
+    )
+    telephones = _phone_values(
+        profile.telephone,
+        profile.custom_values,
+        _additional_telephone_definitions(roster.custom_fields),
+    )
+    contacts = (
+        *((f"핸드폰 {' / '.join(mobile_phones)}",) if mobile_phones else ()),
+        *((f"전화 {' / '.join(telephones)}",) if telephones else ()),
+    )
+    return " · ".join(contacts) or "미등록"
+
+
+def _phone_values(
+    primary_phone: str | None,
+    custom_values: Mapping[UUID, object],
+    definitions: tuple[CustomFieldDefinition, ...],
+) -> tuple[str, ...]:
+    phones = [primary_phone] if primary_phone else []
+    phones.extend(
+        str(value)
+        for definition in definitions
+        if (value := custom_values.get(definition.definition_id)) is not None
+        and str(value).strip()
+    )
+    return tuple(phones)
 
 
 class RosterTableModel(QAbstractTableModel):
@@ -228,19 +304,63 @@ class RosterTableModel(QAbstractTableModel):
         return section + 1
 
     def _build_columns(self) -> tuple[_Column, ...]:
-        base = (
+        additional_telephone_definitions = _additional_telephone_definitions(
+            self._roster.custom_fields
+        )
+        additional_mobile_definitions = _additional_mobile_phone_definitions(
+            self._roster.custom_fields
+        )
+        base_before_contacts = (
             _Column("status", "상태", 82),
             _Column("name", "성명", 92),
             _Column("birth_date", "생년월일", 96),
             _Column("meals", "이용 식종", 110),
             _Column("school", "학교", 120),
             _Column("grade", "학년", 82),
-            _Column("mobile", "핸드폰", 118),
+        )
+        contact_columns = (
+            _Column(
+                "telephone",
+                "전화번호1" if additional_telephone_definitions else "전화번호",
+                118,
+            ),
+            *(
+                _Column(
+                    f"custom:{definition.definition_id}",
+                    definition.name,
+                    118,
+                    definition,
+                )
+                for definition in additional_telephone_definitions
+            ),
+            _Column(
+                "mobile",
+                "핸드폰1" if additional_mobile_definitions else "핸드폰",
+                118,
+            ),
+            *(
+                _Column(
+                    f"custom:{definition.definition_id}",
+                    definition.name,
+                    118,
+                    definition,
+                )
+                for definition in additional_mobile_definitions
+            ),
+        )
+        base_after_contacts = (
             _Column("jurisdiction", "관할동", 82),
             _Column("address", "주소", 220),
             _Column("driver", "배송담당", 92),
             _Column("sequence", "순서", 68),
         )
+        additional_contact_ids = {
+            definition.definition_id
+            for definition in (
+                *additional_telephone_definitions,
+                *additional_mobile_definitions,
+            )
+        }
         custom = tuple(
             _Column(
                 f"custom:{definition.definition_id}",
@@ -249,11 +369,20 @@ class RosterTableModel(QAbstractTableModel):
                 definition,
             )
             for definition in sorted(
-                self._roster.custom_fields,
+                (
+                    definition
+                    for definition in self._roster.custom_fields
+                    if definition.definition_id not in additional_contact_ids
+                ),
                 key=lambda item: item.display_order,
             )
         )
-        return (*base, *custom)
+        return (
+            *base_before_contacts,
+            *contact_columns,
+            *base_after_contacts,
+            *custom,
+        )
 
     def _refresh_people(self) -> None:
         people: list[Person] = []
@@ -288,14 +417,20 @@ class RosterTableModel(QAbstractTableModel):
     def _search_text(self, person: Person) -> str:
         profile = person.profile
         return " ".join(
-            value.casefold()
+            str(value).casefold()
             for value in (
                 profile.name,
                 profile.school_name or "",
+                profile.telephone or "",
                 profile.mobile_phone or "",
                 profile.road_address or "",
                 profile.detail_address or "",
                 profile.jurisdiction or "",
+                *(
+                    value
+                    for value in profile.custom_values.values()
+                    if value is not None
+                ),
             )
         )
 
@@ -317,6 +452,8 @@ class RosterTableModel(QAbstractTableModel):
             return profile.school_name or ""
         if column.key == "grade":
             return profile.grade or ""
+        if column.key == "telephone":
+            return profile.telephone or ""
         if column.key == "mobile":
             return profile.mobile_phone or ""
         if column.key == "jurisdiction":
@@ -858,7 +995,7 @@ class RosterWindow(QMainWindow):
         details = [
             f"{self._meal.value} 배송담당  {assignment.driver or '미지정'}",
             f"배송순서  {assignment.sequence or '미지정'}",
-            f"연락처  {profile.mobile_phone or profile.telephone or '미등록'}",
+            f"연락처  {_mobile_phone_display(self._roster, person)}",
             f"주소  {address or '미등록'}",
         ]
         self._inspector_detail.setText("\n".join(details))
