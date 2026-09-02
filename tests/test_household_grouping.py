@@ -241,6 +241,49 @@ def test_multiple_selected_criteria_use_and_not_or():
     assert len(same_head.proposals) == 1
 
 
+def test_text_household_criteria_ignore_all_whitespace():
+    rule = HouseholdMatchingRule(
+        RULE_ID,
+        1,
+        (
+            HouseholdMatchCriterion.HOUSEHOLD_HEAD_NAME,
+            HouseholdMatchCriterion.ADDRESS,
+        ),
+    )
+    observations = (
+        _observation(
+            OBSERVATION_1,
+            2,
+            "첫째",
+            household_head_name="홍 보호자",
+            road_address="경기 성남시 분당구",
+            detail_address="101 호",
+        ),
+        _observation(
+            OBSERVATION_2,
+            3,
+            "둘째",
+            household_head_name="홍보호자",
+            road_address="경기성남시분당구",
+            detail_address="101호",
+        ),
+    )
+
+    plan = stage_household_grouping(
+        observations,
+        rule,
+        effective_on=EFFECTIVE_ON,
+        household_id_factory=_uuid_factory(
+            "83000000-0000-0000-0000-000000000056",
+            "83000000-0000-0000-0000-000000000057",
+            "83000000-0000-0000-0000-000000000058",
+        ),
+    )
+
+    assert len(plan.proposals) == 1
+    assert plan.proposals[0].observation_ids == (OBSERVATION_1, OBSERVATION_2)
+
+
 def test_applying_group_keeps_people_distinct_and_split_is_reversible_decision():
     observations = (
         _observation(OBSERVATION_1, 2, "첫째", mobile_phone="010-1234-5678"),

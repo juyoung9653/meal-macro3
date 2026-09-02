@@ -243,6 +243,30 @@ def test_exact_name_and_full_birth_match_is_staged_without_identity_prompt():
     assert not plan.requires_decision
 
 
+def test_identity_and_profile_comparison_ignore_whitespace():
+    observation = PersonObservation(
+        OBSERVATION_ID,
+        SourceReference("latest.xlsx", "명단", (2,)),
+        {
+            ProfileField.NAME: "홍 길 동",
+            ProfileField.BIRTH_DATE: date(2015, 3, 2),
+            ProfileField.SCHOOL_NAME: "이 전 초",
+            ProfileField.MOBILE_PHONE: "010 1234 5678",
+        },
+        (Meal.BREAKFAST,),
+    )
+
+    staged = stage_reconciliation(
+        _roster(),
+        (observation,),
+        effective_on=EFFECTIVE_ON,
+    ).staged_people[0]
+
+    assert staged.disposition is ReconciliationDisposition.MATCHED
+    assert staged.matched_person_id == PERSON_ID
+    assert staged.profile_differences == ()
+
+
 def test_same_name_different_birth_requires_review_instead_of_false_new():
     observation = _observation(birth_date=date(2016, 3, 2))
 
@@ -282,6 +306,20 @@ def test_missing_birth_and_duplicate_source_identity_are_never_auto_matched():
         item.review_reasons == (ReviewReason.DUPLICATE_SOURCE_IDENTITY,)
         for item in duplicates
     )
+
+
+def test_initial_import_defaults_missing_birth_date_to_new_person():
+    observation = _observation(birth_date=None)
+
+    staged = stage_reconciliation(
+        None,
+        (observation,),
+        effective_on=EFFECTIVE_ON,
+    ).staged_people[0]
+
+    assert staged.disposition is ReconciliationDisposition.NEW
+    assert staged.review_reasons == ()
+    assert staged.meals_added == observation.meals
 
 
 def test_phone_only_proposes_household_and_never_person_identity():

@@ -210,6 +210,18 @@ def _stage_person(
     exact: tuple[Person, ...] = ()
     reasons: list[ReviewReason] = []
     if birth is None:
+        if roster is None:
+            return StagedPerson(
+                observation,
+                ReconciliationDisposition.NEW,
+                None,
+                (),
+                (),
+                (),
+                tuple(observation.meals),
+                (),
+                (),
+            )
         reasons.append(ReviewReason.MISSING_BIRTH_DATE)
     else:
         identity = (name_key, birth)
@@ -285,6 +297,10 @@ def _profile_values_equal(
 ) -> bool:
     if field in (ProfileField.TELEPHONE, ProfileField.MOBILE_PHONE):
         return normalize_phone(before) == normalize_phone(after)
+    if isinstance(before, str) and isinstance(after, str):
+        return "".join(before.split()).casefold() == "".join(
+            after.split()
+        ).casefold()
     return before == after
 
 
@@ -314,7 +330,7 @@ def _household_candidates(
 
 
 def _name_key(value: str) -> str:
-    return " ".join(value.split()).casefold()
+    return "".join(value.split()).casefold()
 
 
 def _uuid_tuple(values: tuple[UUID, ...], label: str) -> tuple[UUID, ...]:

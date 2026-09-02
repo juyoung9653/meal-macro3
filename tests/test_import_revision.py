@@ -39,6 +39,7 @@ def _source(path: Path) -> Path:
     worksheet.title = "기존 명단"
     worksheet.append(("성명", "생년월일", "식종", "핸드폰"))
     worksheet.append(("홍길동", "20150302", "조식 / 중식", "010-1234-5678"))
+    worksheet.append((None, "20160403", "석식", "010-9999-9999"))
     workbook.save(path)
     workbook.close()
     return path
@@ -59,8 +60,18 @@ def _profile() -> ImportMappingProfile:
     )
 
 
-def _prepared(path: Path, *, ignore: bool = False):
-    preview = parse_workbook(path, _profile())
+def _prepared(
+    path: Path,
+    *,
+    ignore: bool = False,
+    cell_overrides: dict[tuple[int, str], object] | None = None,
+    profile: ImportMappingProfile | None = None,
+):
+    preview = parse_workbook(
+        path,
+        _profile() if profile is None else profile,
+        cell_overrides=cell_overrides,
+    )
     plan = stage_reconciliation(
         None,
         preview.observations,
@@ -99,6 +110,66 @@ def test_initial_import_cannot_finish_with_every_row_excluded(tmp_path: Path):
         _prepared(path, ignore=True)
 
 
+def test_initial_import_stores_blank_optional_fields_and_no_meal(
+    tmp_path: Path,
+):
+    path = tmp_path / "name-only.xlsx"
+    workbook = openpyxl.Workbook()
+    worksheet = workbook.active
+    worksheet.append(("성명", "식종", "학교명"))
+    worksheet.append(("빈값대상자", None, None))
+    workbook.save(path)
+    workbook.close()
+    profile = ImportMappingProfile(
+        PROFILE_ID,
+        1,
+        "빈값 허용 명단",
+        "roster-combined-xlsx",
+        {
+            ProfileField.NAME: "A",
+            ProfileField.SCHOOL_NAME: "C",
+        },
+        combined_meals_column="B",
+    )
+    preview = parse_workbook(path, profile)
+    observation_id = preview.observations[0].observation_id
+    plan = stage_reconciliation(
+        None,
+        preview.observations,
+        effective_on=EFFECTIVE_ON,
+    )
+    household_plan = stage_household_grouping(
+        preview.observations,
+        HouseholdMatchingRule(HOUSEHOLD_RULE_ID, 1),
+        effective_on=EFFECTIVE_ON,
+        household_id_factory=lambda: HOUSEHOLD_ID,
+    )
+
+    prepared = build_import_revision(
+        None,
+        preview,
+        plan,
+        decisions={
+            observation_id: ReconciliationDecision(
+                observation_id,
+                IdentityResolution.CREATE_NEW,
+                PERSON_ID,
+            )
+        },
+        actor=RevisionActor("tester", "S-1-5-21-test"),
+        recorded_at=datetime(2026, 8, 26, 10, 30, tzinfo=UTC),
+        revision_id=REVISION_ID,
+        batch_id=BATCH_ID,
+        household_plan=household_plan,
+        household_decisions=household_plan.default_decisions(),
+    )
+
+    person = prepared.result.snapshot.person(PERSON_ID)
+    assert person.profile.birth_date is None
+    assert person.profile.school_name is None
+    assert prepared.result.snapshot.meals_for(PERSON_ID, on=EFFECTIVE_ON) == ()
+
+
 def test_first_import_profile_roster_and_source_are_one_revision(tmp_path: Path):
     path = _source(tmp_path / "existing.xlsx")
     prepared = _prepared(path)
@@ -111,6 +182,13 @@ def test_first_import_profile_roster_and_source_are_one_revision(tmp_path: Path)
         PROFILE_ID
     )
     assert prepared.record.metadata.decisions["observation_sources"]
+    source_notices = prepared.record.metadata.decisions["source_notices"]
+    assert len(source_notices) == 1
+    assert dict(source_notices[0]) == {
+        "row": 3,
+        "column": "A",
+        "message": "성명이 없어 이 행은 가져오지 않습니다.",
+    }
     assert any(change.entity_kind == "import_profile" for change in prepared.record.changes)
     assert any(
         change.entity_kind == "household_matching_rule"
@@ -131,6 +209,95 @@ def test_first_import_profile_roster_and_source_are_one_revision(tmp_path: Path)
         Meal.BREAKFAST,
         Meal.LUNCH,
     )
+
+
+def test_in_memory_source_correction_location_is_audited(tmp_path: Path):
+    path = _source(tmp_path / "corrected.xlsx")
+
+    prepared = _prepared(
+        path,
+        cell_overrides={(2, "D"): "010-2222-3333"},
+    )
+
+    corrections = prepared.record.metadata.decisions["source_corrections"]
+    assert tuple(dict(item) for item in corrections) == (
+        {"row": 2, "column": "D"},
+    )
+    person = prepared.result.snapshot.person(PERSON_ID)
+    assert person.profile.mobile_phone == "010-2222-3333"
+
+
+def test_imported_delivery_history_is_stored_in_revision_and_batch(
+    tmp_path: Path,
+):
+    path = tmp_path / "move-history.xlsx"
+    workbook = openpyxl.Workbook()
+    worksheet = workbook.active
+    worksheet.append(("성명", "생년월일", "주소", "식종", "담당", "순서"))
+    worksheet.append(("이사아동", "20150302", "이전 주소", "조식", "기사A", "001"))
+    worksheet.append(("이사아동", "20150302", "현재 주소", "조식", "기사B", "009"))
+    workbook.save(path)
+    workbook.close()
+    profile = ImportMappingProfile(
+        PROFILE_ID,
+        1,
+        "이사 전후 명단",
+        "roster-combined-xlsx",
+        {
+            ProfileField.NAME: "A",
+            ProfileField.BIRTH_DATE: "B",
+            ProfileField.ROAD_ADDRESS: "C",
+        },
+        combined_meals_column="D",
+        driver_column="E",
+        sequence_column="F",
+    )
+
+    prepared = _prepared(path, profile=profile)
+
+    history = prepared.record.metadata.decisions["imported_delivery_history"]
+    assert tuple(item["field"] for item in history) == (
+        "road_address",
+        "driver",
+        "sequence",
+    )
+    road_address = history[0]
+    assert road_address["person_id"] == str(PERSON_ID)
+    assert road_address["selection_rule"] == "later_excel_row"
+    assert road_address["effective_on"] is None
+    assert road_address["effective_on_status"] == "unknown_from_source"
+    assert tuple(dict(item) for item in road_address["previous"]) == (
+        {"row": 2, "value": "이전 주소"},
+    )
+    assert dict(road_address["current"]) == {
+        "row": 3,
+        "value": "현재 주소",
+    }
+    assert prepared.record.import_batch is not None
+    assert (
+        prepared.record.import_batch.decisions["imported_delivery_history"]
+        == history
+    )
+    person = prepared.result.snapshot.person(PERSON_ID)
+    assert person.profile.road_address == "현재 주소"
+    assignment = prepared.result.snapshot.assignments[0]
+    assert assignment.driver == "기사B"
+    assert assignment.sequence == "009"
+
+    database_path = tmp_path / "move-history.sqlite3"
+    backup_directory = tmp_path / "move-history-backups"
+    backup_directory.mkdir()
+    with DatabaseSession.create(
+        database_path,
+        "user-password",
+        "institution-recovery",
+        backup_directory=backup_directory,
+    ) as session:
+        assert session.append_revision(prepared.record).succeeded
+        stored = session.database.revision(REVISION_ID)
+        assert stored.metadata.decisions["imported_delivery_history"] == history
+        assert stored.import_batch is not None
+        assert stored.import_batch.decisions["imported_delivery_history"] == history
 
 
 def test_committed_initial_import_is_automatically_backed_up_and_restorable(

@@ -742,7 +742,7 @@ def _criterion_display(
 def _normalized_text(value: str | None) -> str:
     if value is None:
         return ""
-    return " ".join(normalize("NFKC", value).split()).casefold()
+    return "".join(normalize("NFKC", value).split()).casefold()
 
 
 def _ordered_uuids(values: tuple[UUID, ...], label: str) -> tuple[UUID, ...]:

@@ -14,6 +14,7 @@ import openpyxl
 import pytest
 from PySide6.QtCore import QDate, QPoint, QPointF, Qt, QTimer
 from PySide6.QtGui import QWheelEvent
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog
 
 import src.desktop_v2.import_wizard as import_wizard_module
@@ -26,7 +27,9 @@ from src.importing import (
     ProfileField,
     StoredHouseholdMatchingRule,
     StoredImportProfile,
+    WorkbookImportPasswordRequiredError,
     inspect_workbook,
+    parse_workbook,
 )
 
 
@@ -140,7 +143,7 @@ def test_guided_route_reaches_selection_only_after_valid_preview(
     wizard.close()
 
 
-def test_preview_error_keeps_final_review_button_disabled(
+def test_preview_error_can_be_fixed_and_rechecked_inside_the_wizard(
     app: QApplication,
     tmp_path: Path,
 ):
@@ -154,8 +157,215 @@ def test_preview_error_keeps_final_review_button_disabled(
     assert wizard.page_stack.currentIndex() == 2
     assert wizard.preview is not None and not wizard.preview.can_continue
     assert not wizard.next_button.isEnabled()
-    assert wizard.issue_list.count() == 1
-    assert "알 수 없는 식종" in wizard.issue_list.item(0).text()
+    assert not wizard.correction_launch_panel.isHidden()
+    assert wizard.correction_table.rowCount() == 1
+    assert wizard.correction_table.item(0, 3).text() == "야식"
+    wizard._open_correction_dialog()
+    app.processEvents()
+    assert wizard.correction_dialog.isVisible()
+    editor = wizard._correction_editors[(2, "C")]
+    editor.setCurrentText("조식 / 중식")
+
+    wizard.correction_apply_button.click()
+
+    assert wizard.preview is not None and wizard.preview.can_continue
+    assert wizard.next_button.isEnabled()
+    assert wizard.preview.corrected_cells == ((2, "C"),)
+    assert wizard.preview.observations[0].meals == (
+        Meal.BREAKFAST,
+        Meal.LUNCH,
+    )
+    assert wizard.correction_launch_panel.isHidden()
+    assert not wizard.correction_dialog.isVisible()
+    assert not wizard.correction_applied_panel.isHidden()
+    unchanged = openpyxl.load_workbook(path, data_only=False)
+    try:
+        assert unchanged.active["C2"].value == "야식"
+    finally:
+        unchanged.close()
+
+    wizard.correction_reset_button.click()
+
+    assert wizard.preview is not None and not wizard.preview.can_continue
+    assert wizard.preview.corrected_cells == ()
+    assert not wizard.correction_launch_panel.isHidden()
+    wizard.close()
+
+
+def test_correction_dialog_fits_a_compact_screen_without_clipping_actions(
+    app: QApplication,
+    tmp_path: Path,
+):
+    path = _combined(tmp_path / "compact-invalid.xlsx", meal="야식")
+    wizard = RosterImportWizard()
+    wizard.resize(800, 540)
+    wizard.show()
+    wizard.path_edit.setText(str(path))
+
+    assert wizard._inspect_source()
+    wizard._go_next()
+    wizard._go_next()
+    app.processEvents()
+
+    assert wizard.navigation_rail.isHidden()
+    assert wizard.correction_dialog.isVisible()
+    screen = wizard.correction_dialog.screen()
+    assert screen is not None
+    available = screen.availableGeometry()
+    assert wizard.correction_dialog.width() <= available.width()
+    assert wizard.correction_dialog.height() <= available.height()
+    assert wizard.correction_table.horizontalScrollBar().maximum() == 0
+    assert wizard.correction_apply_button.isVisible()
+    button_top_left = wizard.correction_apply_button.mapTo(
+        wizard.correction_dialog,
+        QPoint(0, 0),
+    )
+    button_bottom_right = wizard.correction_apply_button.mapTo(
+        wizard.correction_dialog,
+        wizard.correction_apply_button.rect().bottomRight(),
+    )
+    assert wizard.correction_dialog.rect().contains(button_top_left)
+    assert wizard.correction_dialog.rect().contains(button_bottom_right)
+    wizard.close()
+
+
+def test_correction_value_column_expands_for_long_values(
+    app: QApplication,
+    tmp_path: Path,
+):
+    path = tmp_path / "long-correction-value.xlsx"
+    long_value = "잘못된생년월일값" * 8
+    workbook = openpyxl.Workbook()
+    worksheet = workbook.active
+    worksheet.append(("성명", "생년월일", "식종"))
+    worksheet.append(("긴값아동", long_value, "조식"))
+    workbook.save(path)
+    workbook.close()
+    wizard = RosterImportWizard()
+    wizard.show()
+    wizard.path_edit.setText(str(path))
+
+    assert wizard._inspect_source()
+    wizard._go_next()
+    wizard._go_next()
+    app.processEvents()
+
+    assert wizard.preview is not None and not wizard.preview.can_continue
+    assert wizard.correction_dialog.isVisible()
+    assert wizard.correction_table.columnWidth(5) > 190
+    editor = wizard._correction_editors[(2, "B")]
+    assert editor.width() > 180
+    assert editor.text() == long_value
+    wizard.close()
+
+
+def test_preview_allows_unmapped_birth_date_and_groups_missing_values(
+    app: QApplication,
+    tmp_path: Path,
+):
+    path = tmp_path / "optional-birth-date.xlsx"
+    workbook = openpyxl.Workbook()
+    worksheet = workbook.active
+    worksheet.append(("성명", "식종"))
+    worksheet.append(("생일미입력", "조식"))
+    workbook.save(path)
+    workbook.close()
+    wizard = RosterImportWizard()
+    wizard.path_edit.setText(str(path))
+
+    assert wizard._inspect_source()
+    assert wizard._mapping_combos[ProfileField.BIRTH_DATE].currentData() is None
+    wizard._go_next()
+    wizard._go_next()
+
+    assert wizard.page_stack.currentIndex() == 2
+    assert wizard.preview is not None and wizard.preview.can_continue
+    assert wizard.next_button.isEnabled()
+    messages = tuple(
+        wizard.issue_list.item(row).text()
+        for row in range(wizard.issue_list.count())
+    )
+    assert any("미입력 · 생년월일 1명" in message for message in messages)
+    assert "미입력 1건" in wizard.preview_summary.text()
+    wizard.close()
+
+
+def test_preview_explains_later_row_delivery_history_resolution(
+    app: QApplication,
+    tmp_path: Path,
+):
+    path = tmp_path / "move-history.xlsx"
+    workbook = openpyxl.Workbook()
+    worksheet = workbook.active
+    worksheet.append(("성명", "생년월일", "주소", "식종", "담당", "순서"))
+    worksheet.append(("이사아동", "20150302", "이전 주소", "조식", "기사A", "001"))
+    worksheet.append(("이사아동", "20150302", "현재 주소", "조식", "기사B", "009"))
+    workbook.save(path)
+    workbook.close()
+    profile = ImportMappingProfile(
+        UUID("83000000-0000-0000-0000-000000000099"),
+        1,
+        "이사 전후 명단",
+        "roster-combined-xlsx",
+        {
+            ProfileField.NAME: "A",
+            ProfileField.BIRTH_DATE: "B",
+            ProfileField.ROAD_ADDRESS: "C",
+        },
+        combined_meals_column="D",
+        driver_column="E",
+        sequence_column="F",
+    )
+    preview = parse_workbook(path, profile)
+    wizard = RosterImportWizard()
+
+    wizard._render_preview(preview)
+
+    items = tuple(
+        wizard.issue_list.item(row)
+        for row in range(wizard.issue_list.count())
+    )
+    automatic = next(item for item in items if item.text().startswith("자동 정리"))
+    assert "이사아동" in automatic.text()
+    assert "3행을 현재값으로 사용" in automatic.text()
+    assert "도로명주소" in automatic.toolTip()
+    assert "조식 배송 담당" in automatic.toolTip()
+    assert "조식 배송 순서" in automatic.toolTip()
+    assert "적용일은 미상" in automatic.toolTip()
+    wizard.close()
+
+
+def test_excluded_blank_name_can_be_filled_without_opening_excel(
+    app: QApplication,
+    tmp_path: Path,
+):
+    path = tmp_path / "blank-name.xlsx"
+    workbook = openpyxl.Workbook()
+    worksheet = workbook.active
+    worksheet.append(("성명", "생년월일", "식종"))
+    worksheet.append((None, "20150302", "조식"))
+    worksheet.append(("정상대상자", "20160403", "중식"))
+    workbook.save(path)
+    workbook.close()
+    wizard = RosterImportWizard()
+    wizard.path_edit.setText(str(path))
+
+    assert wizard._inspect_source()
+    wizard._go_next()
+    wizard._go_next()
+
+    assert wizard.preview is not None and wizard.preview.can_continue
+    assert wizard.person_preview_table.rowCount() == 1
+    assert "제외" in wizard.correction_table.item(0, 0).text()
+    editor = wizard._correction_editors[(2, "A")]
+    editor.setText("추가대상자")
+    wizard.correction_apply_button.click()
+
+    assert wizard.preview is not None and wizard.preview.can_continue
+    assert tuple(
+        observation.name for observation in wizard.preview.observations
+    ) == ("추가대상자", "정상대상자")
+    assert wizard.preview.corrected_cells == ((2, "A"),)
     wizard.close()
 
 
@@ -177,12 +387,152 @@ def test_government_headers_get_reviewable_defaults_and_private_columns_ignored(
     assert wizard.breakfast_combo.currentData() == "S"
     assert wizard.lunch_combo.currentData() == "V"
     assert wizard.dinner_combo.currentData() == "T"
+    assert wizard.breakfast_combo.isHidden()
+    assert wizard.lunch_combo.isHidden()
+    assert wizard.dinner_combo.isHidden()
+    assert wizard.meal_mode_combo.isHidden()
+    assert "자동 연결됨" in wizard.meal_detection_status.text()
+    assert "조식 S열" in wizard.meal_detection_status.text()
+    assert "조식: S · 연중 조식" in wizard.meal_detection_status.toolTip()
+    assert wizard._build_profile().meal_flag_columns == {
+        Meal.BREAKFAST: "S",
+        Meal.LUNCH: "V",
+        Meal.DINNER: "T",
+    }
+    wizard.meal_mapping_toggle.click()
+    assert not wizard.breakfast_combo.isHidden()
+    assert not wizard.meal_mode_combo.isHidden()
     checked = {
         item.data(256)
         for row in range(wizard.ignored_columns_list.count())
         if (item := wizard.ignored_columns_list.item(row)).checkState().value == 2
     }
     assert {"U", "AI"} <= checked
+    wizard.close()
+
+
+def test_password_entry_retries_the_protected_workbook_without_reload_click(
+    app: QApplication,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    path = _combined(tmp_path / "password-gated.xlsx")
+    calls: list[str | None] = []
+
+    def password_gate(source, *, password=None, **kwargs):
+        calls.append(password)
+        if not password:
+            raise WorkbookImportPasswordRequiredError(
+                "암호로 보호된 Excel입니다. 파일 비밀번호를 입력해주세요."
+            )
+        return inspect_workbook(source, **kwargs)
+
+    monkeypatch.setattr(import_wizard_module, "inspect_workbook", password_gate)
+    wizard = RosterImportWizard()
+    wizard.path_edit.setText(str(path))
+
+    assert not wizard._inspect_source()
+    assert wizard.inspection is None
+    assert "Enter" in wizard.file_status.text()
+    assert wizard.inspect_button.text() == "비밀번호 확인하고 불러오기"
+
+    wizard.password_edit.setText("excel-password")
+    wizard.password_edit.editingFinished.emit()
+
+    assert calls == ["", "excel-password"]
+    assert wizard.inspection is not None
+    assert wizard.inspect_button.text() == "선택한 위치 미리보기"
+    assert wizard.error_label.isHidden()
+    wizard.close()
+
+
+def test_password_enter_does_not_reopen_the_file_picker(
+    app: QApplication,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    path = _combined(tmp_path / "password-enter.xlsx")
+    picker_calls: list[bool] = []
+
+    def password_gate(source, *, password=None, **kwargs):
+        if not password:
+            raise WorkbookImportPasswordRequiredError(
+                "암호로 보호된 Excel입니다. 파일 비밀번호를 입력해주세요."
+            )
+        return inspect_workbook(source, **kwargs)
+
+    def unexpected_picker(*_args, **_kwargs):
+        picker_calls.append(True)
+        return "", ""
+
+    monkeypatch.setattr(import_wizard_module, "inspect_workbook", password_gate)
+    monkeypatch.setattr(
+        import_wizard_module.QFileDialog,
+        "getOpenFileName",
+        unexpected_picker,
+    )
+    wizard = RosterImportWizard()
+    wizard.show()
+    wizard.path_edit.setText(str(path))
+
+    assert not wizard._inspect_source()
+    assert wizard.inspection is None
+    wizard.password_edit.setText("excel-password")
+    wizard.password_edit.setFocus()
+
+    QTest.keyClick(wizard.password_edit, Qt.Key.Key_Return)
+    app.processEvents()
+
+    assert picker_calls == []
+    assert wizard.inspection is not None
+    assert wizard.page_stack.currentIndex() == 0
+    wizard.close()
+
+
+def test_back_from_preview_reuses_password_for_the_same_workbook(
+    app: QApplication,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    path = _combined(tmp_path / "password-gated-back.xlsx")
+    password = "excel-password"
+    parse_passwords: list[str | None] = []
+    original_parse = import_wizard_module.parse_workbook
+
+    def password_gate(source, *, password=None, **kwargs):
+        if password != "excel-password":
+            raise WorkbookImportPasswordRequiredError(
+                "암호로 보호된 Excel입니다. 파일 비밀번호를 입력해주세요."
+            )
+        return inspect_workbook(source, **kwargs)
+
+    def parse_gate(source, profile, *, password=None, **kwargs):
+        parse_passwords.append(password)
+        if password != "excel-password":
+            raise WorkbookImportPasswordRequiredError(
+                "암호로 보호된 Excel입니다. 파일 비밀번호를 입력해주세요."
+            )
+        return original_parse(source, profile, **kwargs)
+
+    monkeypatch.setattr(import_wizard_module, "inspect_workbook", password_gate)
+    monkeypatch.setattr(import_wizard_module, "parse_workbook", parse_gate)
+    wizard = RosterImportWizard()
+    wizard.path_edit.setText(str(path))
+    wizard.password_edit.setText(password)
+
+    assert wizard._inspect_source()
+    wizard._go_next()
+    wizard._go_next()
+    assert wizard.page_stack.currentIndex() == 2
+    assert wizard.password_edit.text() == ""
+
+    wizard._go_back()
+    assert wizard.page_stack.currentIndex() == 1
+    wizard._go_next()
+
+    assert wizard.page_stack.currentIndex() == 2
+    assert parse_passwords == [password, password]
+    assert wizard.error_label.isHidden()
     wizard.close()
 
 
@@ -268,7 +618,7 @@ def test_meal_format_choice_only_shows_fields_for_the_selected_excel_shape(
     assert not wizard.breakfast_combo.isHidden()
     assert not wizard.true_values_edit.isHidden()
     assert wizard.combined_meal_combo.isHidden()
-    with pytest.raises(ValueError, match="1/0 열"):
+    with pytest.raises(ValueError, match="자동으로 찾지 못했습니다"):
         wizard._build_profile()
 
     wizard.meal_mode_combo.setCurrentIndex(

@@ -84,6 +84,12 @@ class RosterTableModel(QAbstractTableModel):
         self._search = ""
         self._active_only = True
         self._columns = self._build_columns()
+        self._sort_column = next(
+            index
+            for index, column in enumerate(self._columns)
+            if column.key == "sequence"
+        )
+        self._sort_order = Qt.SortOrder.AscendingOrder
         self._people: tuple[Person, ...] = ()
         self._refresh_people()
 
@@ -142,6 +148,21 @@ class RosterTableModel(QAbstractTableModel):
         self._roster = roster
         self._histories = dict(histories or {})
         self._columns = self._build_columns()
+        if self._sort_column >= len(self._columns):
+            self._sort_column = 0
+        self._refresh_people()
+        self.endResetModel()
+
+    def sort(
+        self,
+        column: int,
+        order: Qt.SortOrder = Qt.SortOrder.AscendingOrder,
+    ) -> None:
+        if not 0 <= column < len(self._columns):
+            return
+        self.beginResetModel()
+        self._sort_column = column
+        self._sort_order = order
         self._refresh_people()
         self.endResetModel()
 
@@ -243,22 +264,26 @@ class RosterTableModel(QAbstractTableModel):
             if self._search and self._search not in self._search_text(person):
                 continue
             people.append(person)
+        reverse = self._sort_order == Qt.SortOrder.DescendingOrder
         self._people = tuple(
             sorted(
                 people,
-                key=lambda person: (
-                    self._sequence_key(person),
-                    person.profile.name,
-                    str(person.person_id),
-                ),
+                key=self._sort_key,
+                reverse=reverse,
             )
         )
 
-    def _sequence_key(self, person: Person) -> tuple[int, str]:
-        sequence = self._roster.resolve_assignment(person.person_id, self._meal).sequence
-        if sequence is None:
-            return (1, "")
-        return (0, sequence.zfill(12))
+    def _sort_key(self, person: Person) -> tuple[object, ...]:
+        column = self._columns[self._sort_column]
+        value = self._display_value(person, column, self.status_for(person))
+        text = "" if value is None else str(value).strip()
+        if not text:
+            normalized: tuple[int, object] = (2, "")
+        elif text.isdigit():
+            normalized = (0, int(text))
+        else:
+            normalized = (1, text.casefold())
+        return (*normalized, person.profile.name.casefold(), str(person.person_id))
 
     def _search_text(self, person: Person) -> str:
         profile = person.profile
@@ -671,6 +696,14 @@ class RosterWindow(QMainWindow):
         for index, column in enumerate(self._model.columns):
             header.resizeSection(index, column.width)
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        sequence_column = next(
+            index
+            for index, column in enumerate(self._model.columns)
+            if column.key == "sequence"
+        )
+        header.setSortIndicator(sequence_column, Qt.SortOrder.AscendingOrder)
+        header.setToolTip("열 이름을 누르면 해당 항목 순서로 정렬됩니다.")
+        self._table.setSortingEnabled(True)
         layout.addWidget(self._table)
         return frame
 

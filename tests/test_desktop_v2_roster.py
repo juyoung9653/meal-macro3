@@ -9,6 +9,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6")
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QAbstractItemView, QApplication, QDialogButtonBox
 
 from src.desktop_v2 import (
@@ -142,6 +143,29 @@ def test_model_filters_by_selected_meal_and_exposes_dynamic_columns(app):
 
     model.set_active_only(False)
     assert model.rowCount() == 2
+
+
+def test_model_sorts_blank_cells_to_one_side(app):
+    model = RosterTableModel(_roster(), _histories())
+    model.set_context(SERVICE_DAY, Meal.LUNCH)
+    model.set_active_only(False)
+    mobile_column = next(
+        index for index, column in enumerate(model.columns) if column.key == "mobile"
+    )
+
+    model.sort(mobile_column, Qt.SortOrder.DescendingOrder)
+
+    assert model.data(model.index(0, mobile_column)) == ""
+    assert model.person_at(0).person_id == SECOND_PERSON_ID
+    assert model.person_at(1).person_id == FIRST_PERSON_ID
+
+
+def test_roster_table_enables_header_sorting(app):
+    window = RosterWindow(_roster(), _histories())
+
+    assert window._table.isSortingEnabled()
+    assert "정렬" in window._table.horizontalHeader().toolTip()
+    window.close()
 
 
 def test_context_menu_has_exact_five_actions_and_emits_status_request(app):

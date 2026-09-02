@@ -97,7 +97,7 @@ class ImportMappingProfile:
             raise ValueError(
                 "제공기관은 Excel 열 연결과 직접 입력을 동시에 사용할 수 없습니다."
             )
-        for required in (ProfileField.NAME, ProfileField.BIRTH_DATE):
+        for required in (ProfileField.NAME,):
             if required not in profile_columns:
                 raise ValueError(f"import profile에 필수 열이 없습니다: {required.value}")
         combined = _optional_text(self.combined_meals_column, "합쳐진 식종 열")

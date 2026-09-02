@@ -212,6 +212,57 @@ def application_stylesheet() -> str:
         background: {ROUTE};
         border-radius: 3px;
     }}
+    QDialog#importCorrectionDialog {{ background: {CANVAS}; }}
+    QFrame#importCorrectionLaunchPanel {{
+        background: #FFF8E9;
+        border: 1px solid #E3C77B;
+        border-left: 6px solid {PAUSED};
+        border-radius: 5px;
+    }}
+    QFrame#importCorrectionPanel {{
+        background: #FFF8E9;
+        border: 1px solid #E3C77B;
+        border-left: 6px solid {PAUSED};
+        border-radius: 5px;
+    }}
+    QLabel#importCorrectionStamp {{
+        color: #FFFFFF;
+        background: {PAUSED};
+        border-radius: 3px;
+        padding: 7px 9px;
+        font-family: "Bahnschrift SemiCondensed", "Malgun Gothic";
+        font-size: 13px;
+        font-weight: 800;
+    }}
+    QLabel#importCorrectionTitle {{
+        color: #6F531E;
+        font-size: 14px;
+        font-weight: 900;
+    }}
+    QLabel#importCorrectionHelp {{ color: #7B673A; font-size: 11px; }}
+    QTableWidget#importCorrectionTable {{
+        background: #FFFFFF;
+        alternate-background-color: #FFFCF4;
+        border: 1px solid #DEC98D;
+        gridline-color: #E9DDBB;
+    }}
+    QLineEdit#importCorrectionEditor,
+    QComboBox#importCorrectionEditor {{
+        background: #FFFFFF;
+        border: 2px solid #D2A84E;
+        min-height: 23px;
+        font-weight: 700;
+    }}
+    QFrame#importCorrectionApplied {{
+        background: #EAF5F2;
+        border: 1px solid #A9D1C4;
+        border-left: 6px solid {DELIVERY};
+        border-radius: 5px;
+    }}
+    QLabel#importCorrectionAppliedText {{
+        color: #245D4B;
+        font-weight: 800;
+    }}
     QFrame#mealFormatGuide {{
         background: #F6FAFB;
         border: 1px solid #C7D9DD;
@@ -220,6 +271,12 @@ def application_stylesheet() -> str:
     }}
     QLabel#mealFormatGuideTitle {{ color: {INK}; font-weight: 800; }}
     QLabel#mealFormatGuideExample {{ color: {MUTED}; font-size: 11px; }}
+    QFrame#mealDetectionPanel {{
+        background: #EAF5F2;
+        border: 1px solid #A9D1C4;
+        border-radius: 5px;
+    }}
+    QLabel#mealDetectionStatus {{ color: #245D4B; font-weight: 800; }}
     QCheckBox {{ color: #49646E; spacing: 7px; }}
     QCheckBox::indicator {{ width: 16px; height: 16px; }}
     QFrame#dateSpine {{ background: {INK}; border: none; }}

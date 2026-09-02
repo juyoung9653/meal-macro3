@@ -144,6 +144,37 @@ def build_import_revision(
     decision_manifest = {
         **dict(result.decision_manifest),
         "observation_sources": observation_sources,
+        "source_notices": [
+            {
+                "row": issue.row_number,
+                "column": issue.column,
+                "message": issue.message,
+            }
+            for issue in preview.notices
+        ],
+        "source_corrections": [
+            {
+                "row": row_number,
+                "column": column,
+            }
+            for row_number, column in preview.corrected_cells
+        ],
+        "imported_delivery_history": [
+            {
+                **dict(resolution.manifest()),
+                "person_id": (
+                    None
+                    if resolution.observation_id
+                    not in result.person_ids_by_observation
+                    else str(
+                        result.person_ids_by_observation[
+                            resolution.observation_id
+                        ]
+                    )
+                ),
+            }
+            for resolution in preview.automatic_source_resolutions
+        ],
     }
     parent_revision_id = (
         None if current_roster is None else current_roster.revision_id

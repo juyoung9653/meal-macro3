@@ -49,6 +49,7 @@ from .reconciliation import (
 )
 from .revision import PreparedImportRevision, build_import_revision
 from .workbook import (
+    AutomaticSourceResolution,
     ImportIssue,
     SourceColumn,
     WorkbookImportError,
@@ -79,6 +80,7 @@ from .school_calendar import (
 )
 
 __all__ = [
+    "AutomaticSourceResolution",
     "DateNormalization",
     "ExistingHouseholdProposal",
     "IdentityResolution",

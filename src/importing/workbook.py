@@ -48,9 +48,55 @@ _MAX_DATA_ROWS = 50_000
 _BLANK_ROW_STOP = 100
 _OBSERVATION_NAMESPACE = UUID("bd5ecf05-6f24-47d8-b84d-a5de9b08d094")
 _COLUMN_PATTERN = re.compile(r"^[A-Za-z]{1,3}$")
+_RRN_DASHED_PATTERN = re.compile(
+    r"^(?P<birth>\d{6})-(?P<discriminator>\d)[\d*xX●•]{0,6}$"
+)
+_RRN_COMPACT_PATTERN = re.compile(
+    r"^(?P<birth>\d{6})(?P<discriminator>\d)[\d*xX●•]{6}$"
+)
+_RRN_MASKED_DISCRIMINATOR_PATTERN = re.compile(
+    r"^\d{6}-[*xX●•][\d*xX●•]{0,6}$"
+)
+_RRN_CENTURY_BY_DISCRIMINATOR = {
+    "0": 1800,
+    "9": 1800,
+    "1": 1900,
+    "2": 1900,
+    "5": 1900,
+    "6": 1900,
+    "3": 2000,
+    "4": 2000,
+    "7": 2000,
+    "8": 2000,
+}
 _DATE_SEPARATORS = re.compile(r"[./년월\-]+")
-_MEAL_SEPARATORS = re.compile(r"[,/+·\s]+")
 _INVALID = object()
+_PROFILE_FIELD_LABELS = {
+    ProfileField.NAME: "성명",
+    ProfileField.BIRTH_DATE: "생년월일",
+    ProfileField.SCHOOL_TYPE: "학교 유형",
+    ProfileField.SCHOOL_NAME: "학교명",
+    ProfileField.GRADE: "학년",
+    ProfileField.CLASS_NAME: "반",
+    ProfileField.HOUSEHOLD_HEAD_NAME: "세대주 성명",
+    ProfileField.RELATIONSHIP_TO_CHILD: "아동과의 관계",
+    ProfileField.JURISDICTION: "관할동",
+    ProfileField.PROVIDER: "제공기관",
+    ProfileField.ROAD_ADDRESS: "도로명주소",
+    ProfileField.DETAIL_ADDRESS: "상세주소",
+    ProfileField.TELEPHONE: "전화번호",
+    ProfileField.MOBILE_PHONE: "핸드폰",
+    ProfileField.NOTE: "비고",
+}
+_SCHOOL_FIELDS = (
+    ProfileField.SCHOOL_TYPE,
+    ProfileField.SCHOOL_NAME,
+    ProfileField.GRADE,
+)
+_ADDRESS_FIELDS = (
+    ProfileField.ROAD_ADDRESS,
+    ProfileField.DETAIL_ADDRESS,
+)
 
 
 class WorkbookImportError(ValueError):
@@ -110,6 +156,17 @@ class ImportIssue:
     row_number: int | None
     column: str | None
     message: str
+    blocking: bool = True
+    current_value: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.blocking, bool):
+            raise TypeError("blocking은 bool이어야 합니다.")
+        if self.current_value is not None and not isinstance(
+            self.current_value,
+            str,
+        ):
+            raise TypeError("current_value는 문자열 또는 None이어야 합니다.")
 
     @property
     def location(self) -> str:
@@ -119,6 +176,96 @@ class ImportIssue:
         if self.column is not None:
             parts.append(f"{self.column}열")
         return " ".join(parts) or "파일"
+
+
+@dataclass(frozen=True, slots=True)
+class AutomaticSourceResolution:
+    """One conflicting source field resolved without inventing an effective date."""
+
+    observation_id: UUID
+    field: str
+    field_label: str
+    row_values: tuple[tuple[int, str], ...]
+    selected_row: int
+    selected_value: str
+    selection_rule: str
+    meal: Meal | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.observation_id, UUID):
+            raise TypeError("observation_id는 UUID여야 합니다.")
+        if not isinstance(self.field, str) or not self.field.strip():
+            raise ValueError("field는 비어 있지 않은 문자열이어야 합니다.")
+        if not isinstance(self.field_label, str) or not self.field_label.strip():
+            raise ValueError("field_label은 비어 있지 않은 문자열이어야 합니다.")
+        row_values = tuple(self.row_values)
+        if len(row_values) < 2:
+            raise ValueError("자동 정리 기록에는 둘 이상의 원본 행 값이 필요합니다.")
+        if any(
+            isinstance(row, bool)
+            or not isinstance(row, int)
+            or row < 1
+            or not isinstance(value, str)
+            or not value
+            for row, value in row_values
+        ):
+            raise ValueError("자동 정리 원본 행과 값이 올바르지 않습니다.")
+        rows = tuple(row for row, _value in row_values)
+        if rows != tuple(sorted(rows)) or len(set(rows)) != len(rows):
+            raise ValueError("자동 정리 원본 행은 중복 없이 오름차순이어야 합니다.")
+        if (self.selected_row, self.selected_value) not in row_values:
+            raise ValueError("선택한 현재값은 원본 행 값에 포함되어야 합니다.")
+        if self.selection_rule not in {
+            "later_excel_row",
+            "more_complete_address",
+        }:
+            raise ValueError("알 수 없는 자동 정리 기준입니다.")
+        if self.meal is not None and not isinstance(self.meal, Meal):
+            raise TypeError("meal은 Meal 또는 None이어야 합니다.")
+        object.__setattr__(self, "field", self.field.strip())
+        object.__setattr__(self, "field_label", self.field_label.strip())
+        object.__setattr__(self, "row_values", row_values)
+
+    @property
+    def superseded_row_values(self) -> tuple[tuple[int, str], ...]:
+        return tuple(
+            item for item in self.row_values if item[0] != self.selected_row
+        )
+
+    @property
+    def previous_row_values(self) -> tuple[tuple[int, str], ...]:
+        if self.selection_rule != "later_excel_row":
+            return ()
+        return self.superseded_row_values
+
+    def manifest(self) -> Mapping[str, object]:
+        return {
+            "observation_id": str(self.observation_id),
+            "kind": (
+                "delivery_assignment"
+                if self.field in {"driver", "sequence"}
+                else "address"
+            ),
+            "field": self.field,
+            "label": self.field_label,
+            "meal": None if self.meal is None else self.meal.value,
+            "source_rows": [row for row, _value in self.row_values],
+            "selection_rule": self.selection_rule,
+            "effective_on": None,
+            "effective_on_status": "unknown_from_source",
+            "superseded_source_values": [
+                {"row": row, "value": value}
+                for row, value in self.superseded_row_values
+            ],
+            "previous": [
+                {"row": row, "value": value}
+                for row, value in self.previous_row_values
+            ],
+            "current": {
+                "row": self.selected_row,
+                "value": self.selected_value,
+            },
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,6 +279,8 @@ class WorkbookImportPreview:
     observations: tuple[PersonObservation, ...]
     issues: tuple[ImportIssue, ...]
     sample_rows: tuple[WorkbookPreviewRow, ...]
+    corrected_cells: tuple[tuple[int, str], ...] = ()
+    automatic_source_resolutions: tuple[AutomaticSourceResolution, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.profile, ImportMappingProfile):
@@ -139,10 +288,27 @@ class WorkbookImportPreview:
         object.__setattr__(self, "observations", tuple(self.observations))
         object.__setattr__(self, "issues", tuple(self.issues))
         object.__setattr__(self, "sample_rows", tuple(self.sample_rows))
+        object.__setattr__(self, "corrected_cells", tuple(self.corrected_cells))
+        automatic = tuple(self.automatic_source_resolutions)
+        if any(not isinstance(item, AutomaticSourceResolution) for item in automatic):
+            raise TypeError(
+                "automatic_source_resolutions에는 AutomaticSourceResolution만 허용됩니다."
+            )
+        object.__setattr__(self, "automatic_source_resolutions", automatic)
 
     @property
     def can_continue(self) -> bool:
-        return bool(self.observations) and not self.issues
+        return bool(self.observations) and not any(
+            issue.blocking for issue in self.issues
+        )
+
+    @property
+    def blocking_issues(self) -> tuple[ImportIssue, ...]:
+        return tuple(issue for issue in self.issues if issue.blocking)
+
+    @property
+    def notices(self) -> tuple[ImportIssue, ...]:
+        return tuple(issue for issue in self.issues if not issue.blocking)
 
 
 @dataclass(slots=True)
@@ -152,6 +318,13 @@ class _RawObservation:
     meals: tuple[Meal, ...]
     assignments: tuple[ObservedDeliveryAssignment, ...]
     external_reference: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class _CellInput:
+    value: object
+    data_type: str | None
+    number_format: str
 
 
 def inspect_workbook(
@@ -202,14 +375,17 @@ def parse_workbook(
     sheet_name: str | None = None,
     password: str | None = None,
     sample_limit: int = 8,
+    cell_overrides: Mapping[tuple[int, str], object] | None = None,
 ) -> WorkbookImportPreview:
-    """Parse mapped cells, blocking unknown flags and ambiguous row content."""
+    """Parse mapped cells with optional in-memory corrections."""
 
     if not isinstance(profile, ImportMappingProfile):
         raise TypeError("profile은 ImportMappingProfile이어야 합니다.")
+    overrides = _normalize_cell_overrides(cell_overrides)
     source_path = _source_path(path)
     digest, byte_size = _file_identity(source_path)
     issues: list[ImportIssue] = []
+    automatic_source_resolutions: list[AutomaticSourceResolution] = []
     with _open_workbook(source_path, password or "") as workbook:
         worksheet = _select_sheet(workbook, sheet_name)
         columns = _read_columns(worksheet, profile.header_row)
@@ -220,6 +396,7 @@ def parse_workbook(
             profile.data_start_row,
             len(columns),
             sample_limit,
+            overrides,
         )
         raw = _read_observations(
             worksheet,
@@ -228,13 +405,17 @@ def parse_workbook(
             profile,
             column_indexes,
             issues,
+            overrides,
         )
     observations = _merge_observations(
         raw,
         source_path.name,
         worksheet.title,
         digest,
+        profile,
+        column_indexes,
         issues,
+        automatic_source_resolutions,
     )
     if not observations and not issues:
         issues.append(ImportIssue(None, None, "가져올 데이터 행이 없습니다."))
@@ -248,6 +429,8 @@ def parse_workbook(
         observations=observations,
         issues=tuple(issues),
         sample_rows=sample_rows,
+        corrected_cells=tuple(sorted(overrides)),
+        automatic_source_resolutions=tuple(automatic_source_resolutions),
     )
 
 
@@ -421,21 +604,78 @@ def _preview_rows(
     start_row: int,
     column_count: int,
     limit: int,
+    overrides: Mapping[tuple[int, str], object] | None = None,
 ) -> tuple[WorkbookPreviewRow, ...]:
     result: list[WorkbookPreviewRow] = []
     max_row = min(worksheet.max_row or start_row, start_row + max(limit * 5, 20))
-    for row in worksheet.iter_rows(
+    rows = worksheet.iter_rows(
         min_row=start_row,
         max_row=max_row,
         min_col=1,
         max_col=column_count,
-    ):
-        values = tuple(_display_value(cell.value) for cell in row)
+    )
+    for row_number, row in enumerate(rows, start=start_row):
+        inputs = _cell_inputs(row, row_number, overrides or {})
+        values = tuple(_display_value(cell.value) for cell in inputs)
         if not any(values):
             continue
-        result.append(WorkbookPreviewRow(row[0].row, values))
+        # Read-only worksheets return EmptyCell for blank leading cells. EmptyCell
+        # intentionally has no ``row`` attribute, so the iterator position is the
+        # reliable source row number.
+        result.append(WorkbookPreviewRow(row_number, values))
         if len(result) == limit:
             break
+    return tuple(result)
+
+
+def _normalize_cell_overrides(
+    overrides: Mapping[tuple[int, str], object] | None,
+) -> Mapping[tuple[int, str], object]:
+    if overrides is None:
+        return MappingProxyType({})
+    if not isinstance(overrides, Mapping):
+        raise TypeError("cell_overrides는 행·열 위치와 수정값의 mapping이어야 합니다.")
+    normalized: dict[tuple[int, str], object] = {}
+    for location, value in overrides.items():
+        if not isinstance(location, tuple) or len(location) != 2:
+            raise TypeError("수정할 셀 위치는 (행 번호, 열 문자)여야 합니다.")
+        row_number, column = location
+        if (
+            isinstance(row_number, bool)
+            or not isinstance(row_number, int)
+            or row_number < 1
+        ):
+            raise ValueError("수정할 셀의 행 번호는 1 이상의 정수여야 합니다.")
+        if not isinstance(column, str) or not _COLUMN_PATTERN.fullmatch(column):
+            raise ValueError("수정할 셀의 열은 A, B 같은 Excel 열 문자여야 합니다.")
+        normalized[(row_number, column.upper())] = value
+    return MappingProxyType(normalized)
+
+
+def _cell_inputs(
+    cells: Sequence[Cell],
+    row_number: int,
+    overrides: Mapping[tuple[int, str], object],
+) -> tuple[_CellInput, ...]:
+    result: list[_CellInput] = []
+    for column_index, cell in enumerate(cells, start=1):
+        key = (row_number, get_column_letter(column_index))
+        if key in overrides:
+            value = overrides[key]
+            data_type = (
+                "f"
+                if isinstance(value, str) and value.lstrip().startswith("=")
+                else "s"
+            )
+            result.append(_CellInput(value, data_type, "General"))
+        else:
+            result.append(
+                _CellInput(
+                    cell.value,
+                    cell.data_type,
+                    cell.number_format or "General",
+                )
+            )
     return tuple(result)
 
 
@@ -489,6 +729,7 @@ def _read_observations(
     profile: ImportMappingProfile,
     indexes: Mapping[str, int],
     issues: list[ImportIssue],
+    overrides: Mapping[tuple[int, str], object],
 ) -> list[_RawObservation]:
     mapped_indexes = tuple(sorted(set(indexes.values())))
     max_column = max(mapped_indexes)
@@ -498,13 +739,14 @@ def _read_observations(
     result: list[_RawObservation] = []
     blank_run = 0
     saw_data = False
-    for cells in worksheet.iter_rows(
+    rows = worksheet.iter_rows(
         min_row=first_row,
         max_row=last_row,
         min_col=1,
         max_col=max_column,
-    ):
-        row_number = cells[0].row
+    )
+    for row_number, source_cells in enumerate(rows, start=first_row):
+        cells = _cell_inputs(source_cells, row_number, overrides)
         if all(_is_blank(cells[index - 1].value) for index in mapped_indexes):
             blank_run += 1
             if saw_data and blank_run >= _BLANK_ROW_STOP:
@@ -514,6 +756,7 @@ def _read_observations(
         blank_run = 0
         before_issue_count = len(issues)
         raw = _parse_row(
+            row_number,
             cells,
             workbook,
             source_filename,
@@ -535,18 +778,43 @@ def _read_observations(
 
 
 def _parse_row(
-    cells: Sequence[Cell],
+    row_number: int,
+    cells: Sequence[_CellInput],
     workbook: Workbook,
     _source_filename: str,
     profile: ImportMappingProfile,
     indexes: Mapping[str, int],
     issues: list[ImportIssue],
 ) -> _RawObservation | None:
-    row_number = cells[0].row
-    values: dict[ProfileField, str | date | None] = {}
+    name_token = profile.profile_columns[ProfileField.NAME]
+    raw_name, name_source_column = _candidate_value(
+        cells,
+        (name_token, *profile.fallback_profile_columns.get(ProfileField.NAME, ())),
+        indexes,
+        row_number,
+        issues,
+    )
+    if raw_name is _INVALID:
+        return None
+    name = _profile_value(raw_name, ProfileField.NAME, profile, workbook)
+    if not isinstance(name, str) or not name:
+        issues.append(
+            ImportIssue(
+                row_number,
+                name_source_column,
+                "성명이 없어 이 행은 가져오지 않습니다.",
+                blocking=False,
+                current_value="",
+            )
+        )
+        return None
+
+    values: dict[ProfileField, str | date | None] = {ProfileField.NAME: name}
     if profile.provider_value is not None:
         values[ProfileField.PROVIDER] = profile.provider_value
     for field, token in profile.profile_columns.items():
+        if field is ProfileField.NAME:
+            continue
         candidate_tokens = (token, *profile.fallback_profile_columns.get(field, ()))
         raw, source_column = _candidate_value(
             cells,
@@ -560,11 +828,14 @@ def _parse_row(
         try:
             values[field] = _profile_value(raw, field, profile, workbook)
         except ValueError as error:
-            issues.append(ImportIssue(row_number, source_column, str(error)))
-
-    name = values.get(ProfileField.NAME)
-    if not isinstance(name, str) or not name:
-        issues.append(ImportIssue(row_number, profile.profile_columns[ProfileField.NAME], "성명이 비어 있습니다."))
+            issues.append(
+                ImportIssue(
+                    row_number,
+                    source_column,
+                    str(error),
+                    current_value=_display_value(raw),
+                )
+            )
 
     meals = _row_meals(cells, profile, indexes, row_number, issues)
     assignment = _row_assignment(cells, profile, indexes, meals, row_number, issues)
@@ -587,7 +858,7 @@ def _parse_row(
 
 
 def _candidate_value(
-    cells: Sequence[Cell],
+    cells: Sequence[_CellInput],
     tokens: tuple[str, ...],
     indexes: Mapping[str, int],
     row_number: int,
@@ -595,17 +866,18 @@ def _candidate_value(
 ) -> tuple[object, str]:
     primary = tokens[0]
     for token in tokens:
+        column = get_column_letter(indexes[token])
         cell = cells[indexes[token] - 1]
-        value = _safe_cell_value(cell, row_number, token, issues)
+        value = _safe_cell_value(cell, row_number, column, issues)
         if value is _INVALID:
-            return _INVALID, token
+            return _INVALID, column
         if not _is_blank(value):
-            return value, token
-    return None, primary
+            return value, column
+    return None, get_column_letter(indexes[primary])
 
 
 def _safe_cell_value(
-    cell: Cell,
+    cell: _CellInput,
     row_number: int,
     column: str,
     issues: list[ImportIssue],
@@ -616,6 +888,7 @@ def _safe_cell_value(
                 row_number,
                 column,
                 "수식 셀은 명단 값으로 가져올 수 없습니다. 값으로 붙여넣어 주세요.",
+                current_value=_display_value(cell.value),
             )
         )
         return _INVALID
@@ -634,6 +907,8 @@ def _profile_value(
     if text is None:
         return None
     if field in (ProfileField.TELEPHONE, ProfileField.MOBILE_PHONE):
+        if "str" in text.casefold():
+            return None
         return _phone_value(text, profile.phone_normalization)
     return text
 
@@ -651,7 +926,28 @@ def _date_value(
         return value
     text = _optional_text(value)
     assert text is not None
+    rrn_birth_date = _rrn_birth_date(value, text)
+    if rrn_birth_date is not None:
+        return rrn_birth_date
     digits = "".join(character for character in text if character.isdigit())
+    integer_number = (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and (not isinstance(value, float) or value.is_integer())
+    )
+    short_digits = (
+        digits.zfill(6) if integer_number and len(digits) == 5 else digits
+    )
+    if len(short_digits) == 6:
+        try:
+            return _six_digit_birth_date(short_digits)
+        except ValueError as error:
+            # A five-digit numeric value can still be an unformatted Excel date
+            # serial. Six explicit digits, however, are an invalid YYMMDD value.
+            if not (integer_number and len(digits) == 5 and mode is DateNormalization.AUTO):
+                raise ValueError(
+                    "6자리 생년월일의 날짜가 올바르지 않습니다."
+                ) from error
     if len(digits) == 8:
         try:
             return date(int(digits[:4]), int(digits[4:6]), int(digits[6:]))
@@ -669,7 +965,54 @@ def _date_value(
             return date.fromisoformat(normalized)
         except ValueError:
             pass
-    raise ValueError(f"생년월일은 YYYYMMDD 또는 날짜 셀이어야 합니다: {text}")
+    raise ValueError(
+        "생년월일은 YYMMDD, YYYYMMDD, 날짜 셀 또는 주민등록번호 형식이어야 합니다."
+    )
+
+
+def _six_digit_birth_date(digits: str) -> date:
+    current_year = date.today().year
+    current_century = current_year - current_year % 100
+    year = current_century + int(digits[:2])
+    if year > current_year:
+        year -= 100
+    return date(year, int(digits[2:4]), int(digits[4:]))
+
+
+def _rrn_birth_date(value: object, text: str) -> date | None:
+    compact = "".join(text.split())
+    if (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and (not isinstance(value, float) or value.is_integer())
+        and len(compact) == 12
+        and compact.isdigit()
+    ):
+        # Excel 숫자 셀은 2000~2009년생 주민번호의 첫 0을 버릴 수 있다.
+        compact = "0" + compact
+
+    match = _RRN_DASHED_PATTERN.fullmatch(compact)
+    if match is None:
+        match = _RRN_COMPACT_PATTERN.fullmatch(compact)
+    if match is None:
+        if _RRN_MASKED_DISCRIMINATOR_PATTERN.fullmatch(compact):
+            raise ValueError(
+                "주민등록번호 뒷자리 첫 숫자가 가려져 있어 출생연도를 알 수 없습니다."
+            )
+        return None
+
+    birth_digits = match.group("birth")
+    century = _RRN_CENTURY_BY_DISCRIMINATOR[match.group("discriminator")]
+    try:
+        return date(
+            century + int(birth_digits[:2]),
+            int(birth_digits[2:4]),
+            int(birth_digits[4:]),
+        )
+    except ValueError as error:
+        raise ValueError(
+            "주민등록번호 앞 6자리의 날짜가 올바르지 않습니다."
+        ) from error
 
 
 def _phone_value(value: str, mode: PhoneNormalization) -> str:
@@ -692,7 +1035,7 @@ def _phone_value(value: str, mode: PhoneNormalization) -> str:
 
 
 def _row_meals(
-    cells: Sequence[Cell],
+    cells: Sequence[_CellInput],
     profile: ImportMappingProfile,
     indexes: Mapping[str, int],
     row_number: int,
@@ -700,15 +1043,27 @@ def _row_meals(
 ) -> tuple[Meal, ...]:
     if profile.combined_meals_column is not None:
         token = profile.combined_meals_column
-        value = _safe_cell_value(cells[indexes[token] - 1], row_number, token, issues)
+        column = get_column_letter(indexes[token])
+        value = _safe_cell_value(
+            cells[indexes[token] - 1],
+            row_number,
+            column,
+            issues,
+        )
         if value is _INVALID:
             return ()
-        return _combined_meals(value, row_number, token, issues)
+        return _combined_meals(value, row_number, column, issues)
     selected: set[Meal] = set()
     true_keys = {_text_key(value) for value in profile.meal_true_values}
     false_keys = {_text_key(value) for value in profile.meal_false_values}
     for meal, token in profile.meal_flag_columns.items():
-        value = _safe_cell_value(cells[indexes[token] - 1], row_number, token, issues)
+        column = get_column_letter(indexes[token])
+        value = _safe_cell_value(
+            cells[indexes[token] - 1],
+            row_number,
+            column,
+            issues,
+        )
         if value is _INVALID:
             continue
         key = _text_key(_display_value(value))
@@ -718,8 +1073,9 @@ def _row_meals(
             issues.append(
                 ImportIssue(
                     row_number,
-                    token,
+                    column,
                     f"식종 값 '{_display_value(value)}'은 급식을 받는 값이나 받지 않는 값 설정에 없습니다.",
+                    current_value=_display_value(value),
                 )
             )
     return tuple(meal for meal in Meal if meal in selected)
@@ -734,7 +1090,6 @@ def _combined_meals(
     text = _display_value(value)
     if not text:
         return ()
-    tokens = tuple(token for token in _MEAL_SEPARATORS.split(text) if token)
     aliases = {
         "조식": Meal.BREAKFAST,
         "아침": Meal.BREAKFAST,
@@ -743,27 +1098,26 @@ def _combined_meals(
         "석식": Meal.DINNER,
         "저녁": Meal.DINNER,
     }
-    selected: set[Meal] = set()
-    unknown: list[str] = []
-    for token in tokens:
-        meal = aliases.get(_text_key(token))
-        if meal is None:
-            unknown.append(token)
-        else:
-            selected.add(meal)
-    if unknown:
+    text_key = _text_key(text)
+    selected = {
+        meal
+        for alias, meal in aliases.items()
+        if _text_key(alias) in text_key
+    }
+    if not selected:
         issues.append(
             ImportIssue(
                 row_number,
                 column,
-                "알 수 없는 식종 값입니다: " + ", ".join(unknown),
+                "알 수 없는 식종 값입니다. 셀 안에 조식, 중식 또는 석식이 포함되어야 합니다.",
+                current_value=text,
             )
         )
     return tuple(meal for meal in Meal if meal in selected)
 
 
 def _row_assignment(
-    cells: Sequence[Cell],
+    cells: Sequence[_CellInput],
     profile: ImportMappingProfile,
     indexes: Mapping[str, int],
     meals: tuple[Meal, ...],
@@ -795,7 +1149,7 @@ def _row_assignment(
 
 
 def _optional_cell_text(
-    cells: Sequence[Cell],
+    cells: Sequence[_CellInput],
     token: str | None,
     indexes: Mapping[str, int],
     row_number: int,
@@ -806,14 +1160,15 @@ def _optional_cell_text(
     if token is None:
         return None
     cell = cells[indexes[token] - 1]
-    value = _safe_cell_value(cell, row_number, token, issues)
+    column = get_column_letter(indexes[token])
+    value = _safe_cell_value(cell, row_number, column, issues)
     if value is _INVALID:
         return None
     text = _literal_cell_text(cell) if literal else _optional_text(value)
     return text or None
 
 
-def _literal_cell_text(cell: Cell) -> str:
+def _literal_cell_text(cell: _CellInput) -> str:
     value = cell.value
     if isinstance(value, int) and re.fullmatch(r"0+", cell.number_format or ""):
         return str(value).zfill(len(cell.number_format))
@@ -825,14 +1180,17 @@ def _merge_observations(
     source_filename: str,
     sheet_name: str,
     file_sha256: str,
+    profile: ImportMappingProfile,
+    indexes: Mapping[str, int],
     issues: list[ImportIssue],
+    automatic_source_resolutions: list[AutomaticSourceResolution],
 ) -> tuple[PersonObservation, ...]:
     groups: dict[tuple[object, ...], list[_RawObservation]] = {}
     for row in rows:
         name = str(row.profile_values[ProfileField.NAME])
         birth = row.profile_values.get(ProfileField.BIRTH_DATE)
         key = (
-            (_text_key(name), birth)
+            (_comparison_key(name), birth)
             if isinstance(birth, date)
             else ("row", row.row_number)
         )
@@ -841,8 +1199,24 @@ def _merge_observations(
     observations: list[PersonObservation] = []
     for grouped_rows in groups.values():
         row_numbers = tuple(item.row_number for item in grouped_rows)
+        observation_id = uuid5(
+            _OBSERVATION_NAMESPACE,
+            f"{file_sha256}/{sheet_name}/"
+            + ",".join(str(number) for number in row_numbers),
+        )
+        group_resolutions: list[AutomaticSourceResolution] = []
         merged_values: dict[ProfileField, str | date | None] = {}
         conflicting = False
+        school_values_differ = any(
+            len(
+                _unique_nonblank_values(
+                    tuple(item.profile_values.get(field) for item in grouped_rows)
+                )
+            )
+            > 1
+            for field in _SCHOOL_FIELDS
+        )
+        preferred_school_row = _preferred_school_row(grouped_rows)
         fields = tuple(
             dict.fromkeys(
                 field
@@ -851,53 +1225,141 @@ def _merge_observations(
             )
         )
         for field in fields:
-            nonblank = tuple(
-                dict.fromkeys(
-                    item.profile_values.get(field)
-                    for item in grouped_rows
-                    if item.profile_values.get(field) is not None
-                )
+            nonblank = _unique_nonblank_values(
+                tuple(item.profile_values.get(field) for item in grouped_rows)
             )
+            if field is ProfileField.NOTE:
+                merged_values[field] = (
+                    " / ".join(_display_value(value) for value in nonblank)
+                    or None
+                )
+                continue
+            if field in _SCHOOL_FIELDS and school_values_differ:
+                merged_values[field] = preferred_school_row.profile_values.get(field)
+                continue
+            if field in _ADDRESS_FIELDS and len(nonblank) > 1:
+                row_values = tuple(
+                    (item.row_number, value)
+                    for item in grouped_rows
+                    if (value := item.profile_values.get(field)) is not None
+                )
+                preferred_address = _preferred_containing_address(nonblank)
+                if preferred_address is not None:
+                    selected_row = max(
+                        row_number
+                        for row_number, value in row_values
+                        if _comparison_key(value)
+                        == _comparison_key(preferred_address)
+                    )
+                    selected_value = preferred_address
+                    selection_rule = "more_complete_address"
+                else:
+                    selected_row, selected_value = max(
+                        row_values,
+                        key=lambda item: item[0],
+                    )
+                    selection_rule = "later_excel_row"
+                merged_values[field] = selected_value
+                group_resolutions.append(
+                    _automatic_source_resolution(
+                        observation_id,
+                        field=field.value,
+                        field_label=_PROFILE_FIELD_LABELS[field],
+                        row_values=row_values,
+                        selected_row=selected_row,
+                        selected_value=selected_value,
+                        selection_rule=selection_rule,
+                    )
+                )
+                continue
             if len(nonblank) > 1:
                 conflicting = True
-                issues.append(
-                    ImportIssue(
-                        row_numbers[0],
-                        None,
-                        f"같은 성명·생년월일 행의 {field.value} 값이 서로 다릅니다: "
-                        + ", ".join(str(number) for number in row_numbers),
-                    )
+                token = profile.profile_columns.get(field)
+                column = (
+                    None if token is None else get_column_letter(indexes[token])
                 )
+                label = _PROFILE_FIELD_LABELS[field]
+                message = (
+                    f"같은 사람으로 묶일 행의 {label} 값이 서로 다릅니다. "
+                    "현재 사용할 값 하나로 맞춰주세요. "
+                    f"함께 확인할 행: {', '.join(map(str, row_numbers))}"
+                )
+                for item in grouped_rows:
+                    value = item.profile_values.get(field)
+                    if value is not None:
+                        issues.append(
+                            ImportIssue(
+                                item.row_number,
+                                column,
+                                message,
+                                current_value=_display_value(value),
+                            )
+                        )
             merged_values[field] = nonblank[0] if nonblank else None
+
         assignments: dict[Meal | None, ObservedDeliveryAssignment] = {}
+        assignment_rows: dict[
+            Meal | None,
+            list[tuple[_RawObservation, ObservedDeliveryAssignment]],
+        ] = {}
         for item in grouped_rows:
             for assignment in item.assignments:
-                existing = assignments.get(assignment.meal)
-                if existing is not None and existing != assignment:
-                    conflicting = True
-                    issues.append(
-                        ImportIssue(
-                            item.row_number,
-                            None,
-                            "같은 사람·식종의 배송담당 또는 순서가 서로 다릅니다.",
-                        )
+                assignment_rows.setdefault(assignment.meal, []).append(
+                    (item, assignment)
+                )
+        for meal, observed in assignment_rows.items():
+            driver_values = _unique_nonblank_values(
+                tuple(assignment.driver for _item, assignment in observed)
+            )
+            sequence_values = _unique_nonblank_values(
+                tuple(assignment.sequence for _item, assignment in observed)
+            )
+            selected_assignment_values: dict[str, str | None] = {}
+            for attribute, label, values in (
+                ("driver", "배송 담당", driver_values),
+                ("sequence", "배송 순서", sequence_values),
+            ):
+                if len(values) <= 1:
+                    selected_assignment_values[attribute] = (
+                        None if not values else str(values[0])
                     )
-                assignments[assignment.meal] = assignment
+                    continue
+                meal_label = "공통" if meal is None else meal.value
+                row_values = tuple(
+                    (item.row_number, str(value))
+                    for item, assignment in observed
+                    if (value := getattr(assignment, attribute)) is not None
+                )
+                selected_row, selected_value = max(
+                    row_values,
+                    key=lambda item: item[0],
+                )
+                selected_assignment_values[attribute] = selected_value
+                group_resolutions.append(
+                    _automatic_source_resolution(
+                        observation_id,
+                        field=attribute,
+                        field_label=f"{meal_label} {label}",
+                        row_values=row_values,
+                        selected_row=selected_row,
+                        selected_value=selected_value,
+                        selection_rule="later_excel_row",
+                        meal=meal,
+                    )
+                )
+            assignments[meal] = ObservedDeliveryAssignment(
+                meal,
+                selected_assignment_values["driver"],
+                selected_assignment_values["sequence"],
+            )
         if conflicting:
             continue
         meal_set = {meal for item in grouped_rows for meal in item.meals}
-        external_values = tuple(
-            dict.fromkeys(
-                item.external_reference
-                for item in grouped_rows
-                if item.external_reference is not None
-            )
+        external_values = _unique_nonblank_values(
+            tuple(item.external_reference for item in grouped_rows)
         )
-        external_reference = " / ".join(external_values) or None
-        observation_id = uuid5(
-            _OBSERVATION_NAMESPACE,
-            f"{file_sha256}/{sheet_name}/"
-            + ",".join(str(number) for number in row_numbers),
+        external_reference = (
+            " / ".join(str(value) for value in external_values) or None
         )
         observations.append(
             PersonObservation(
@@ -917,7 +1379,144 @@ def _merge_observations(
                 ),
             )
         )
+        automatic_source_resolutions.extend(group_resolutions)
     return tuple(observations)
+
+
+def _automatic_source_resolution(
+    observation_id: UUID,
+    *,
+    field: str,
+    field_label: str,
+    row_values: Sequence[tuple[int, str | date]],
+    selected_row: int,
+    selected_value: str | date,
+    selection_rule: str,
+    meal: Meal | None = None,
+) -> AutomaticSourceResolution:
+    rendered_values = tuple(
+        sorted(
+            (
+                (row_number, _display_value(value))
+                for row_number, value in row_values
+            ),
+            key=lambda item: item[0],
+        )
+    )
+    return AutomaticSourceResolution(
+        observation_id=observation_id,
+        field=field,
+        field_label=field_label,
+        row_values=rendered_values,
+        selected_row=selected_row,
+        selected_value=_display_value(selected_value),
+        selection_rule=selection_rule,
+        meal=meal,
+    )
+
+
+def _unique_nonblank_values(
+    values: Sequence[str | date | None],
+) -> tuple[str | date, ...]:
+    result: list[str | date] = []
+    seen: set[tuple[object, ...]] = set()
+    for value in values:
+        if value is None:
+            continue
+        key = _comparison_key(value)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(value)
+    return tuple(result)
+
+
+def _comparison_key(value: str | date) -> tuple[object, ...]:
+    if isinstance(value, str):
+        return ("text", _compact_comparison_text(value))
+    return (type(value).__name__, value)
+
+
+def _compact_comparison_text(value: str) -> str:
+    return "".join(value.split()).casefold()
+
+
+def _preferred_containing_address(
+    values: Sequence[str | date],
+) -> str | None:
+    if any(not isinstance(value, str) for value in values):
+        return None
+    addresses = tuple(value for value in values if isinstance(value, str))
+    candidate = max(addresses, key=lambda value: len(_compact_comparison_text(value)))
+    candidate_key = _compact_comparison_text(candidate)
+    if all(
+        _address_contains(candidate_key, _compact_comparison_text(value))
+        for value in addresses
+    ):
+        return candidate
+    return None
+
+
+def _address_contains(full: str, fragment: str) -> bool:
+    start = full.find(fragment)
+    while start >= 0:
+        end = start + len(fragment)
+        starts_inside_number = (
+            start > 0 and full[start - 1].isdigit() and fragment[0].isdigit()
+        )
+        ends_inside_number = (
+            end < len(full) and full[end].isdigit() and fragment[-1].isdigit()
+        )
+        if not starts_inside_number and not ends_inside_number:
+            return True
+        start = full.find(fragment, start + 1)
+    return False
+
+
+def _preferred_school_row(rows: Sequence[_RawObservation]) -> _RawObservation:
+    return max(rows, key=_school_row_rank)
+
+
+def _school_row_rank(row: _RawObservation) -> tuple[int, int, int]:
+    school_text = " ".join(
+        str(row.profile_values.get(field) or "")
+        for field in (ProfileField.SCHOOL_TYPE, ProfileField.SCHOOL_NAME)
+    )
+    compact = "".join(school_text.split()).casefold()
+    stage = -1
+    for keyword, value in (
+        ("대학", 5),
+        ("고등", 4),
+        ("중학", 3),
+        ("중등", 3),
+        ("초등", 2),
+        ("유치", 1),
+        ("어린이", 1),
+        ("미취학", 0),
+    ):
+        if keyword in compact:
+            stage = value
+            break
+    grade = _grade_rank(row.profile_values.get(ProfileField.GRADE))
+    return stage, grade, row.row_number
+
+
+def _grade_rank(value: str | date | None) -> int:
+    if not isinstance(value, str):
+        return -1
+    compact = "".join(value.split()).casefold()
+    match = re.search(r"\d+", compact)
+    if match is not None:
+        return int(match.group())
+    korean_numbers = {
+        "일학년": 1,
+        "이학년": 2,
+        "삼학년": 3,
+        "사학년": 4,
+        "오학년": 5,
+        "육학년": 6,
+    }
+    return korean_numbers.get(compact, -1)
 
 
 def _file_identity(path: Path) -> tuple[str, int]:
@@ -952,7 +1551,7 @@ def _optional_text(value: object) -> str | None:
 
 
 def _text_key(value: str) -> str:
-    return " ".join(value.split()).casefold()
+    return "".join(value.split()).casefold()
 
 
 def _is_blank(value: object) -> bool:
