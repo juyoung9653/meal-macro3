@@ -61,7 +61,7 @@ class ExportPasswordDialog(_DatabaseAccessDialog):
             ),
             rail_title="내보내는 파일을 한 번 더 잠급니다",
             rail_copy=(
-                "운영 DB와 별개로, 외부에 전달하는 Excel 파일을 현재 센터의 공통 "
+                "운영 데이터와 별개로, 외부에 전달하는 Excel 파일을 현재 센터의 공통 "
                 "비밀번호로 보호합니다."
             ),
             route_stops=(
@@ -372,7 +372,7 @@ class ExportPasswordController:
             self._message_box.warning(
                 parent,
                 "비밀번호는 저장됐지만 자동 백업에 실패했습니다",
-                "Excel 비밀번호와 이력은 DB에 정상 저장되었습니다. 백업 폴더 연결을 확인한 뒤 백업을 다시 실행해주세요.\n\n"
+                "Excel 비밀번호와 이력은 운영 데이터에 정상 저장되었습니다. 백업 폴더 연결을 확인한 뒤 백업을 다시 실행해주세요.\n\n"
                 + str(backup_result.error),
             )
         return ExportPasswordChangeOutcome(

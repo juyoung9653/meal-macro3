@@ -45,6 +45,7 @@ from src.domain import (
     RevisionSummary,
     RevisionSource,
 )
+from src.domain.revisions import format_revision_timestamp
 from src.importing import (
     HouseholdMatchingRule,
     IdentityResolution,
@@ -769,6 +770,12 @@ def test_startup_builds_roster_window_only_after_guided_import_completes(
                     callback,
                 )
             )
+            self.person_add_requested = SimpleNamespace(
+                connect=lambda callback: setattr(self, "_person_add_callback", callback)
+            )
+            self.person_delete_requested = SimpleNamespace(
+                connect=lambda callback: setattr(self, "_person_delete_callback", callback)
+            )
             self.status_action_requested = SimpleNamespace(
                 connect=lambda callback: setattr(
                     self,
@@ -819,6 +826,9 @@ def test_startup_builds_roster_window_only_after_guided_import_completes(
                 )
             )
 
+        def set_meal_change_history_provider(self, provider):
+            self.meal_history_provider = provider
+
         def replace_roster(self, roster, histories, *, revision_display_code):
             self.roster = roster
             self.histories = histories
@@ -851,6 +861,23 @@ def test_startup_builds_roster_window_only_after_guided_import_completes(
                 completed=True,
                 roster=session.database.current_roster(),
             )
+
+    row_actions = []
+
+    class RowEdit:
+        def __init__(self, opened_session):
+            assert opened_session is session
+
+        def add(self, meal, parent, *, service_day):
+            assert parent is outcome.window
+            assert service_day == parent.table_model.service_day
+            row_actions.append(("add", meal))
+            return SimpleNamespace(completed=True, roster=session.database.current_roster())
+
+        def delete(self, person_id, parent):
+            assert parent is outcome.window
+            row_actions.append(("delete", person_id))
+            return SimpleNamespace(completed=True, roster=session.database.current_roster())
 
     class MealStatusEdit:
         def __init__(self, opened_session):
@@ -1044,6 +1071,7 @@ def test_startup_builds_roster_window_only_after_guided_import_completes(
         guided_controller_type=Guided,
         followup_controller_type=Followup,
         profile_edit_controller_type=ProfileEdit,
+        roster_row_controller_type=RowEdit,
         meal_status_controller_type=MealStatusEdit,
         service_adjustment_controller_type=ServiceAdjustmentEdit,
         unit_price_controller_type=UnitPriceEdit,
@@ -1065,25 +1093,30 @@ def test_startup_builds_roster_window_only_after_guided_import_completes(
     assert outcome.ready
     assert outcome.window.roster.person(PERSON_ID).profile.name == "홍길동"
     assert len(outcome.window.histories) == 3
-    assert outcome.window.revision_display_code == session.database.revision_display_code(
-        outcome.window.roster.revision_id
+    assert outcome.window.meal_history_provider(outcome.window.roster.person(PERSON_ID))
+    assert outcome.window.revision_display_code == format_revision_timestamp(
+        session.database.revision(outcome.window.roster.revision_id).metadata.recorded_at
     )
     outcome.window._import_callback()
     assert outcome.window.replaced
     outcome.window._person_edit_callback(PERSON_ID)
     assert outcome.window.replace_count == 2
+    outcome.window._person_add_callback(Meal.LUNCH)
+    outcome.window._person_delete_callback(PERSON_ID)
+    assert row_actions == [("add", Meal.LUNCH), ("delete", PERSON_ID)]
+    assert outcome.window.replace_count == 4
     outcome.window._status_callback(
         PERSON_ID,
         Meal.LUNCH,
         MealStatus.PAUSED,
     )
-    assert outcome.window.replace_count == 3
+    assert outcome.window.replace_count == 5
     outcome.window._unit_price_callback()
-    assert outcome.window.replace_count == 4
+    assert outcome.window.replace_count == 6
     outcome.window._service_adjustment_callback()
-    assert outcome.window.replace_count == 5
+    assert outcome.window.replace_count == 7
     outcome.window._settings_callback()
-    assert outcome.window.replace_count == 5
+    assert outcome.window.replace_count == 7
     outcome.window._documents_callback()
     selection = outcome.window.document_output_selection
     assert selection.document.period.action is DocumentAction.INVOICE
@@ -1118,7 +1151,7 @@ def test_startup_builds_roster_window_only_after_guided_import_completes(
     )
     outcome.window._document_generated_callback(generated)
     assert completion_results == [generated]
-    assert outcome.window.replace_count == 5
+    assert outcome.window.replace_count == 7
     outcome.close()
 
 
@@ -1258,9 +1291,11 @@ def test_school_calendar_editor_can_route_to_excel_import():
 
     class Database:
         @staticmethod
-        def revision_display_code(revision_id):
+        def revision(revision_id):
             assert revision_id == roster.revision_id
-            return "20260831-001"
+            return SimpleNamespace(metadata=SimpleNamespace(
+                recorded_at=datetime(2026, 8, 31, 1, 2, 3, tzinfo=UTC)
+            ))
 
         @staticmethod
         def status_history(*_args):
@@ -1303,5 +1338,5 @@ def test_school_calendar_editor_can_route_to_excel_import():
     assert calls == [
         ("stored", window),
         ("excel", window),
-        ("replace", roster, {}, "20260831-001"),
+        ("replace", roster, {}, "20260831-100203"),
     ]

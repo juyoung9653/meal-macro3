@@ -117,7 +117,7 @@ $spikePython = Join-Path $spikeEnv 'Scripts\python.exe'
 ## 운영 구현에 남은 제약
 
 - 스모크의 고정 키는 제품 코드에서 사용하지 않는다. 제품은 random DB key와
-  평소 비밀번호·기관 복구 비밀번호 기반 key wrapping을 사용한다. 현재 제품
+  단일 비밀번호 기반 key wrapping을 사용하며 기존 기관 복구 slot도 읽는다. 현재 제품
   requirements는 이 용도의 `cryptography==49.0.0`을 직접 고정했으며 CPython
   3.14 Windows 환경의 전체 테스트와 PyInstaller one-file 빌드는 통과했다.
 - cipher 선택과 키 설정은 첫 SQL 문보다 먼저 수행해야 한다.

@@ -10,9 +10,12 @@ from math import isfinite
 from pathlib import PurePosixPath, PureWindowsPath
 from types import MappingProxyType
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 type JsonScalar = str | int | float | bool | None
 type JsonValue = JsonScalar | tuple[JsonValue, ...] | Mapping[str, JsonValue]
+
+_KOREA_TIME_ZONE = ZoneInfo("Asia/Seoul")
 
 
 class RevisionSource(StrEnum):
@@ -330,6 +333,16 @@ def _validate_uuid(value: object, label: str) -> None:
 def _validate_date(value: object, label: str) -> None:
     if isinstance(value, datetime) or not isinstance(value, date):
         raise TypeError(f"{label}은 date여야 합니다.")
+
+
+def format_revision_timestamp(recorded_at: datetime) -> str:
+    """Format one revision's recorded instant as a Korean save timestamp."""
+
+    if not isinstance(recorded_at, datetime):
+        raise TypeError("recorded_at must be a datetime")
+    if recorded_at.tzinfo is None or recorded_at.utcoffset() is None:
+        raise ValueError("recorded_at must include a time zone")
+    return recorded_at.astimezone(_KOREA_TIME_ZONE).strftime("%Y%m%d-%H%M%S")
 
 
 def validate_revision_display_code(value: object) -> str:

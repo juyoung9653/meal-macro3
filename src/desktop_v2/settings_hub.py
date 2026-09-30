@@ -25,9 +25,9 @@ from .theme import application_stylesheet, register_application_fonts
 class SettingsAction(StrEnum):
     """The settings jobs recognizable to center staff."""
 
+    PROVIDER = "provider"
     EXPORT_PASSWORD = "export_password"
     DOCUMENT_TEMPLATE = "document_template"
-    BREAKFAST_DELIVERY_POLICY = "breakfast_delivery_policy"
     DOCUMENT_DIRECTORY = "document_directory"
 
     @property
@@ -44,10 +44,15 @@ class SettingsAction(StrEnum):
 
 
 _SETTINGS_COPY = {
+    SettingsAction.PROVIDER: (
+        "공통 제공기관",
+        "모든 대상자와 생성 문서에 사용할 제공기관을 한 번만 설정합니다.",
+        "변경 이력에 기록",
+    ),
     SettingsAction.EXPORT_PASSWORD: (
         "생성 Excel 비밀번호",
         "청구서·확인서 등 외부로 보내는 Excel의 공통 비밀번호를 관리합니다.",
-        "운영 DB에 기록",
+        "변경 이력에 기록",
     ),
     SettingsAction.DOCUMENT_DIRECTORY: (
         "문서 저장 폴더",
@@ -56,13 +61,8 @@ _SETTINGS_COPY = {
     ),
     SettingsAction.DOCUMENT_TEMPLATE: (
         "청구서·확인서 양식",
-        "이 업체 DB에서 사용할 급식 또는 행복도시락 Excel 양식을 선택합니다.",
-        "운영 DB에 기록",
-    ),
-    SettingsAction.BREAKFAST_DELIVERY_POLICY: (
-        "조식 배송 규칙",
-        "금요일 휴무 주의 토·일분 조식을 목요일에 배송할지 미배송할지 적용일부터 정합니다.",
-        "운영 DB에 기록",
+        "문서를 만들 때 사용할 급식 또는 행복도시락 Excel 양식을 선택합니다.",
+        "변경 이력에 기록",
     ),
 }
 
@@ -125,8 +125,8 @@ class SettingsHubDialog(QDialog):
         self.setObjectName("settingsHubDialog")
         self.setWindowTitle("설정")
         self.setModal(True)
-        self.resize(900, 650)
-        self.setMinimumSize(800, 590)
+        self.resize(900, 760)
+        self.setMinimumSize(800, 700)
         self.setStyleSheet(application_stylesheet())
         self._build_ui()
 
@@ -145,9 +145,9 @@ class SettingsHubDialog(QDialog):
         cards = QGridLayout()
         cards.setSpacing(12)
         for index, (action, stamp) in enumerate((
+            (SettingsAction.PROVIDER, "기관"),
             (SettingsAction.EXPORT_PASSWORD, "잠금"),
             (SettingsAction.DOCUMENT_TEMPLATE, "양식"),
-            (SettingsAction.BREAKFAST_DELIVERY_POLICY, "조식"),
             (SettingsAction.DOCUMENT_DIRECTORY, "폴더"),
         )):
             card = _SettingsActionCard(action, stamp=stamp)
@@ -161,7 +161,7 @@ class SettingsHubDialog(QDialog):
         root.addLayout(cards, 1)
 
         note = QLabel(
-            "비밀번호·문서 양식·조식 배송 규칙은 운영 DB 이력에 남습니다. 저장 폴더만 이 컴퓨터에 기억하며 변경번호를 늘리지 않습니다."
+            "제공기관·비밀번호·문서 양식은 변경 이력에 남습니다. 문서 저장 폴더는 이 컴퓨터에만 저장합니다."
         )
         note.setObjectName("settingsHubNote")
         note.setWordWrap(True)
@@ -186,7 +186,7 @@ class SettingsHubDialog(QDialog):
         layout = QVBoxLayout(frame)
         layout.setContentsMargins(18, 15, 18, 16)
         layout.setSpacing(4)
-        eyebrow = QLabel("CENTER SETTINGS · 보관과 잠금")
+        eyebrow = QLabel("공통 설정 · 보관과 잠금")
         eyebrow.setObjectName("editEyebrow")
         title = QLabel("설정")
         title.setObjectName("workspaceTitle")

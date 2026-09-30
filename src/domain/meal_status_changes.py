@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from uuid import UUID
 
+from .intake import IntakeChannel
 from .projections import roster_audit_changes, status_event_audit_change
 from .revisions import RevisionActor, RevisionMetadata, RevisionRecord, RevisionSource
 from .roster import InclusiveDateRange, Meal, MealEnrollment, RosterSnapshot
 from .status import MealStatus, StatusEvent
-
 
 MEAL_STATUS_CHANGE_POLICY_VERSION = 1
 
@@ -36,6 +36,7 @@ def build_meal_status_revision(
     revision_id: UUID,
     event_ids: Mapping[Meal, UUID],
     reason: str = "배송 상태 변경",
+    intake_channel: IntakeChannel | None = None,
 ) -> PreparedMealStatusRevision:
     """Apply one status/period to many meals, auto-enrolling delivery gaps."""
 
@@ -47,6 +48,8 @@ def build_meal_status_revision(
     selected_meals = _canonical_meals(meals)
     if not isinstance(status, MealStatus):
         raise TypeError("status는 MealStatus여야 합니다.")
+    if intake_channel is not None and not isinstance(intake_channel, IntakeChannel):
+        raise TypeError("접수 경로는 IntakeChannel이어야 합니다.")
     if not isinstance(period, InclusiveDateRange):
         raise TypeError("period는 InclusiveDateRange여야 합니다.")
     if period.starts_on is None:
@@ -72,17 +75,12 @@ def build_meal_status_revision(
     if len(set(ids_by_meal.values())) != len(ids_by_meal):
         raise ValueError("상태 사건 ID는 중복될 수 없습니다.")
 
-    active_meals = set(
-        current_roster.meals_for(person_id, on=period.starts_on)
-    )
-    not_enrolled = tuple(
-        meal for meal in selected_meals if meal not in active_meals
-    )
+    active_meals = set(current_roster.meals_for(person_id, on=period.starts_on))
+    not_enrolled = tuple(meal for meal in selected_meals if meal not in active_meals)
     if status is not MealStatus.DELIVERY and not_enrolled:
         labels = " · ".join(meal.value for meal in not_enrolled)
         raise ValueError(
-            f"시작일에 미가입인 식종에는 {status.value}을 적용할 수 없습니다: "
-            f"{labels}"
+            f"시작일에 미가입인 식종에는 {status.value}을 적용할 수 없습니다: {labels}"
         )
 
     enrollments = current_roster.enrollments
@@ -132,12 +130,12 @@ def build_meal_status_revision(
             "meals": [meal.value for meal in selected_meals],
             "status": status.value,
             "starts_on": period.starts_on.isoformat(),
-            "ends_on": (
-                None if period.ends_on is None else period.ends_on.isoformat()
-            ),
+            "ends_on": (None if period.ends_on is None else period.ends_on.isoformat()),
             "auto_enrolled_meals": [meal.value for meal in auto_enrolled],
         }
     }
+    if intake_channel is not None:
+        decisions["meal_status_change"]["intake_channel"] = intake_channel.value
     metadata = RevisionMetadata(
         revision_id=revision_id,
         parent_revision_id=current_roster.revision_id,
@@ -156,6 +154,100 @@ def build_meal_status_revision(
         events,
         RevisionRecord(metadata, changes),
         tuple(auto_enrolled),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedBatchMealStatusRevision:
+    snapshot: RosterSnapshot
+    events: tuple[StatusEvent, ...]
+    record: RevisionRecord
+    auto_enrolled_targets: tuple[tuple[UUID, Meal], ...]
+
+
+def build_batch_meal_status_revision(
+    current_roster: RosterSnapshot,
+    targets: tuple[tuple[UUID, Meal], ...],
+    status: MealStatus,
+    period: InclusiveDateRange,
+    *,
+    actor: RevisionActor,
+    recorded_at: datetime,
+    revision_id: UUID,
+    event_ids: Mapping[tuple[UUID, Meal], UUID],
+    intake_channel: IntakeChannel | None = None,
+) -> PreparedBatchMealStatusRevision:
+    """Validate every target and prepare one atomic revision for the whole batch."""
+    if not targets:
+        raise ValueError("적용할 사람과 식종을 한 개 이상 선택해주세요.")
+    if len(set(targets)) != len(targets):
+        raise ValueError("같은 사람의 식종이 중복 선택되었습니다.")
+    if set(event_ids) != set(targets):
+        raise ValueError("적용할 항목마다 변경 기록 번호가 필요합니다.")
+    if len(set(event_ids.values())) != len(event_ids):
+        raise ValueError("변경 기록 번호는 중복될 수 없습니다.")
+    if intake_channel is not None and not isinstance(intake_channel, IntakeChannel):
+        raise TypeError("접수 경로는 IntakeChannel이어야 합니다.")
+    grouped: dict[UUID, list[Meal]] = {}
+    for person_id, meal in targets:
+        current_roster.person(person_id)
+        if not isinstance(meal, Meal):
+            raise TypeError("적용할 식종을 확인해주세요.")
+        grouped.setdefault(person_id, []).append(meal)
+    working = current_roster
+    events: list[StatusEvent] = []
+    enrolled: list[tuple[UUID, Meal]] = []
+    for person_id, meals in grouped.items():
+        prepared = build_meal_status_revision(
+            replace(working, revision_id=current_roster.revision_id),
+            person_id,
+            tuple(meals),
+            status,
+            period,
+            actor=actor,
+            recorded_at=recorded_at,
+            revision_id=revision_id,
+            event_ids={meal: event_ids[(person_id, meal)] for meal in meals},
+            intake_channel=intake_channel,
+        )
+        working = prepared.snapshot
+        events.extend(prepared.events)
+        enrolled.extend((person_id, meal) for meal in prepared.auto_enrolled_meals)
+    changes = (
+        *roster_audit_changes(current_roster, working),
+        *(status_event_audit_change(event) for event in events),
+    )
+    decisions = {
+        "batch_meal_status_change": {
+            "targets": [
+                {"person_id": str(pid), "meal": meal.value} for pid, meal in targets
+            ],
+            "status": status.value,
+            "starts_on": period.starts_on.isoformat(),
+            "ends_on": period.ends_on.isoformat() if period.ends_on else None,
+            "auto_enrolled_targets": [
+                {"person_id": str(pid), "meal": meal.value}
+                for pid, meal in enrolled
+            ],
+        }
+    }
+    if intake_channel is not None:
+        decisions["batch_meal_status_change"]["intake_channel"] = intake_channel.value
+    metadata = RevisionMetadata(
+        revision_id=revision_id,
+        parent_revision_id=current_roster.revision_id,
+        recorded_at=recorded_at,
+        effective_on=period.starts_on,
+        actor=actor,
+        reason=f"배송 상태 일괄 변경 · {len(grouped)}명 {len(targets)}개",
+        source=RevisionSource.UI,
+        decisions=decisions,
+        rule_versions={
+            "meal_status_change_policy_version": MEAL_STATUS_CHANGE_POLICY_VERSION
+        },
+    )
+    return PreparedBatchMealStatusRevision(
+        working, tuple(events), RevisionRecord(metadata, changes), tuple(enrolled)
     )
 
 
@@ -245,19 +337,11 @@ def _period_covers(
     existing: InclusiveDateRange,
     requested: InclusiveDateRange,
 ) -> bool:
-    starts_early_enough = (
-        existing.starts_on is None
-        or (
-            requested.starts_on is not None
-            and existing.starts_on <= requested.starts_on
-        )
+    starts_early_enough = existing.starts_on is None or (
+        requested.starts_on is not None and existing.starts_on <= requested.starts_on
     )
-    ends_late_enough = (
-        existing.ends_on is None
-        or (
-            requested.ends_on is not None
-            and existing.ends_on >= requested.ends_on
-        )
+    ends_late_enough = existing.ends_on is None or (
+        requested.ends_on is not None and existing.ends_on >= requested.ends_on
     )
     return starts_early_enough and ends_late_enough
 

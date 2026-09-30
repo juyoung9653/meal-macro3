@@ -20,6 +20,36 @@ from src.storage.database_credentials import (
 KEY = bytes.fromhex("5a" * 32)
 
 
+def test_single_password_credentials_have_no_recovery_slot(tmp_path: Path):
+    path = tmp_path / "single.sqlite3"
+    credentials, key = DatabaseCredentials.create(path, "only-password", database_key=KEY)
+    assert key == KEY
+    assert credentials.recovery_slot is None
+    assert json.loads(credentials.to_bytes())["version"] == 2
+    assert set(json.loads(credentials.to_bytes())["slots"]) == {"user"}
+    loaded = DatabaseCredentials.load(path)
+    assert loaded.unlock_user("only-password") == KEY
+    with pytest.raises(CredentialUnlockError):
+        loaded.unlock_user("wrong-password")
+    with pytest.raises(CredentialUnlockError):
+        loaded.unlock_recovery("only-password")
+
+    changed = loaded.change_user_password("only-password", "new-password")
+    assert changed.recovery_slot is None
+    with pytest.raises(CredentialUnlockError):
+        changed.unlock_user("only-password")
+    assert DatabaseCredentials.load(path).unlock_user("new-password") == KEY
+
+
+def test_legacy_missing_recovery_slot_is_malformed(tmp_path: Path):
+    path = tmp_path / "legacy.sqlite3"
+    credentials, _ = DatabaseCredentials.create(path, "user", "recovery", database_key=KEY)
+    document = json.loads(credentials.to_bytes())
+    del document["slots"]["recovery"]
+    with pytest.raises(CredentialFormatError):
+        DatabaseCredentials.from_bytes(json.dumps(document).encode())
+
+
 def test_user_and_institution_passwords_unlock_same_random_key(tmp_path: Path):
     database_path = tmp_path / "operations.sqlite3"
 

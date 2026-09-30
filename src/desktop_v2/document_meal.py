@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from src.domain.revisions import format_revision_timestamp
 from src.domain.roster import Meal
 
 from .document_hub import DocumentAction
@@ -191,7 +192,7 @@ class DocumentMealDialog(QDialog):
         layout = QVBoxLayout(frame)
         layout.setContentsMargins(18, 15, 18, 16)
         layout.setSpacing(4)
-        eyebrow = QLabel("MEAL LANES · 누락 방지 기본값")
+        eyebrow = QLabel("식종 선택 · 생성할 문서")
         eyebrow.setObjectName("editEyebrow")
         title = QLabel(f"{self._period.action.label} 식종 선택")
         title.setObjectName("workspaceTitle")
@@ -221,7 +222,7 @@ class DocumentMealDialog(QDialog):
         title = QLabel(f"{self._period.action.label} · {_period_text(self._period)}")
         title.setObjectName("sectionLabel")
         detail = QLabel(
-            f"변경번호 {self._period.source.display_code}  ·  "
+            f"변경번호 {format_revision_timestamp(self._period.source.recorded_at)}  ·  "
             f"화면 식종 {self._period.anchor_meal.value}"
         )
         detail.setObjectName("documentMealContextDetail")

@@ -81,7 +81,7 @@ class DatabaseSession:
         cls,
         database_path: str | Path,
         user_password: str,
-        recovery_password: str,
+        recovery_password: str | None = None,
         *,
         backup_directory: str | Path | None = None,
     ) -> DatabaseSession:

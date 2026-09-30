@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -34,12 +33,12 @@ def test_settings_hub_has_db_and_computer_local_jobs(app):
 
     assert tuple(dialog._cards) == tuple(SettingsAction)
     assert [action.label for action in dialog._cards] == [
+        "공통 제공기관",
         "생성 Excel 비밀번호",
         "청구서·확인서 양식",
-        "조식 배송 규칙",
         "문서 저장 폴더",
     ]
-    assert "운영 DB" in SettingsAction.BREAKFAST_DELIVERY_POLICY.scope_label
+    assert not any("조식 배송 규칙" in action.label for action in SettingsAction)
     assert "이 컴퓨터" in SettingsAction.DOCUMENT_DIRECTORY.scope_label
     with pytest.raises(RuntimeError, match="아직 선택"):
         _ = dialog.selected_action
@@ -133,45 +132,3 @@ def test_settings_folder_job_saves_path_without_running_password_controller(
     controller._run_settings_hub(SimpleNamespace(), window)
 
     assert settings.saved == chosen
-
-
-def test_settings_breakfast_policy_job_uses_the_screen_date():
-    service_day = date(2026, 9, 3)
-    roster = SimpleNamespace(revision_id="same-revision")
-    window = SimpleNamespace(
-        table_model=SimpleNamespace(service_day=service_day),
-        roster=roster,
-    )
-    calls = []
-
-    class Hub:
-        selected_action = SettingsAction.BREAKFAST_DELIVERY_POLICY
-
-        def __init__(self, parent=None):
-            assert parent is window
-
-        @staticmethod
-        def exec():
-            return QDialog.DialogCode.Accepted
-
-    class PolicyController:
-        def __init__(self, session):
-            calls.append(("init", session))
-
-        def run(self, anchor_day, parent=None):
-            calls.append(("run", anchor_day, parent))
-            return SimpleNamespace(completed=True, roster=roster)
-
-    session = SimpleNamespace()
-    controller = DesktopStartupController(
-        settings=SimpleNamespace(document_output_directory=None),
-        settings_hub_dialog_type=Hub,
-        breakfast_delivery_policy_controller_type=PolicyController,
-    )
-
-    controller._run_settings_hub(session, window)
-
-    assert calls == [
-        ("init", session),
-        ("run", service_day, window),
-    ]

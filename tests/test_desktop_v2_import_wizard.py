@@ -141,7 +141,7 @@ def test_guided_route_reaches_selection_only_after_valid_preview(
 
     wizard._go_next()
     assert wizard.page_stack.currentIndex() == 1
-    wizard.provider_edit.setText("분당구 급식센터")
+    assert not hasattr(wizard, "provider_edit")
     wizard.password_edit.setText("temporary-only")
     wizard._go_next()
 
@@ -156,10 +156,10 @@ def test_guided_route_reaches_selection_only_after_valid_preview(
     selection = wizard.selection()
     assert selection.effective_on == date(2026, 8, 17)
     assert selection.preview.observations[0].meals == (Meal.BREAKFAST, Meal.LUNCH)
-    assert selection.preview.profile.provider_value == "분당구 급식센터"
+    assert selection.preview.profile.provider_value is None
     assert (
-        selection.preview.observations[0].profile_values[ProfileField.PROVIDER]
-        == "분당구 급식센터"
+        selection.preview.observations[0].profile_values.get(ProfileField.PROVIDER)
+        is None
     )
     assert "E" in selection.preview.profile.ignored_columns
     assert selection.household_rule.criteria == (

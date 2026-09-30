@@ -21,6 +21,7 @@ from .entitlements import (
     plan_breakfast_shipments,
 )
 from .documents import DocumentKind, DocumentRun
+from .intake import IntakeChannel
 from .delivery_policies import (
     BREAKFAST_DELIVERY_POLICY_ID,
     BREAKFAST_DELIVERY_POLICY_KIND,
@@ -238,6 +239,7 @@ __all__ = [
     "HouseholdMembership",
     "InclusiveDateRange",
     "ImportBatch",
+    "IntakeChannel",
     "LunchDayRule",
     "MEMBERSHIP_KIND",
     "MEAL_STATUS_CHANGE_POLICY_VERSION",

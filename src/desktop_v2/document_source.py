@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import timedelta, timezone
 from uuid import UUID
 
 from PySide6.QtCore import Qt
@@ -20,12 +19,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from src.domain.revisions import RevisionSource, RevisionSummary
+from src.domain.revisions import RevisionSource, RevisionSummary, format_revision_timestamp
 
 from .theme import application_stylesheet, register_application_fonts
 
 
-_KOREA_TIME_ZONE = timezone(timedelta(hours=9), name="Asia/Seoul")
 _SOURCE_LABELS = {
     RevisionSource.UI: "직접 변경",
     RevisionSource.IMPORT: "Excel 가져오기",
@@ -48,7 +46,7 @@ class DocumentSourceDialog(QDialog):
         if any(not isinstance(item, RevisionSummary) for item in values):
             raise TypeError("summaries에는 RevisionSummary만 허용됩니다.")
         if len({item.revision_id for item in values}) != len(values):
-            raise ValueError("변경 이력에 같은 revision ID가 중복되었습니다.")
+            raise ValueError("같은 변경 기록이 중복되었습니다.")
         self._summaries = tuple(
             sorted(values, key=lambda item: item.sequence, reverse=True)
         )
@@ -59,8 +57,8 @@ class DocumentSourceDialog(QDialog):
         self.setObjectName("documentSourceDialog")
         self.setWindowTitle("문서에 사용할 변경번호")
         self.setModal(True)
-        self.resize(680, 470)
-        self.setMinimumSize(600, 440)
+        self.resize(1000, 560)
+        self.setMinimumSize(900, 500)
         self.setStyleSheet(application_stylesheet())
         self._build_ui()
         self._render_selection()
@@ -82,20 +80,11 @@ class DocumentSourceDialog(QDialog):
         layout.setContentsMargins(22, 22, 22, 20)
         layout.setSpacing(14)
         layout.addWidget(self._build_header())
-        layout.addWidget(self._build_source_ticket())
-
-        self._archive_button = QPushButton("이전 변경번호로 만들기")
-        self._archive_button.setObjectName("archiveAction")
-        self._archive_button.setCheckable(True)
-        self._archive_button.setEnabled(len(self._summaries) > 1)
-        if len(self._summaries) == 1:
-            self._archive_button.setText("이전 변경번호 없음")
-        self._archive_button.toggled.connect(self._toggle_archive)
-        layout.addWidget(self._archive_button)
-
-        self._archive_frame = self._build_archive()
-        self._archive_frame.setVisible(False)
-        layout.addWidget(self._archive_frame, 1)
+        content = QHBoxLayout()
+        content.setSpacing(16)
+        selected = QVBoxLayout()
+        selected.setSpacing(14)
+        selected.addWidget(self._build_source_ticket())
 
         self._selection_note = QLabel()
         self._selection_note.setObjectName("documentSourceNote")
@@ -104,7 +93,12 @@ class DocumentSourceDialog(QDialog):
             QSizePolicy.Policy.Preferred,
             QSizePolicy.Policy.Maximum,
         )
-        layout.addWidget(self._selection_note)
+        selected.addWidget(self._selection_note)
+        selected.addStretch(1)
+        content.addLayout(selected, 1)
+        self._archive_frame = self._build_archive()
+        content.addWidget(self._archive_frame, 1)
+        layout.addLayout(content, 1)
 
         self._buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok
@@ -127,7 +121,7 @@ class DocumentSourceDialog(QDialog):
         layout = QVBoxLayout(frame)
         layout.setContentsMargins(18, 15, 18, 16)
         layout.setSpacing(4)
-        eyebrow = QLabel("DOCUMENT BASIS")
+        eyebrow = QLabel("문서에 사용할 명단")
         eyebrow.setObjectName("editEyebrow")
         title = QLabel("문서에 사용할 명단")
         title.setObjectName("workspaceTitle")
@@ -176,7 +170,7 @@ class DocumentSourceDialog(QDialog):
         layout.setContentsMargins(14, 12, 14, 14)
         layout.setSpacing(8)
         heading = QHBoxLayout()
-        title = QLabel("이전 변경번호")
+        title = QLabel("변경번호 목록")
         title.setObjectName("sectionLabel")
         heading.addWidget(title)
         heading.addStretch(1)
@@ -189,28 +183,25 @@ class DocumentSourceDialog(QDialog):
 
         helper = QLabel("변경 사유와 적용일을 확인한 뒤 하나를 선택하세요.")
         helper.setObjectName("muted")
+        helper.setWordWrap(True)
         layout.addWidget(helper)
         self._archive_list = QListWidget()
         self._archive_list.setObjectName("revisionArchiveList")
         self._archive_list.setAlternatingRowColors(True)
+        self._archive_list.setWordWrap(True)
+        self._archive_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        for index, summary in enumerate(self._summaries):
+            prefix = "최신 · " if index == 0 else ""
+            item = QListWidgetItem(prefix + _archive_item_text(summary))
+            item.setData(Qt.ItemDataRole.UserRole, summary)
+            item.setToolTip(_archive_item_tooltip(summary))
+            self._archive_list.addItem(item)
+        self._archive_list.setCurrentRow(0)
         self._archive_list.itemSelectionChanged.connect(
             self._select_archive_item
         )
-        for summary in self._summaries[1:]:
-            item = QListWidgetItem(_archive_item_text(summary))
-            item.setData(Qt.ItemDataRole.UserRole, summary)
-            item.setToolTip(_archive_item_tooltip(summary))
-            item.setSizeHint(item.sizeHint().expandedTo(item.sizeHint()))
-            self._archive_list.addItem(item)
         layout.addWidget(self._archive_list, 1)
         return frame
-
-    def _toggle_archive(self, visible: bool) -> None:
-        self._archive_frame.setVisible(visible)
-        self._archive_button.setText(
-            "이전 변경번호 닫기" if visible else "이전 변경번호로 만들기"
-        )
-        self.resize(max(self.width(), 680), 600 if visible else 470)
 
     def _select_archive_item(self) -> None:
         items = self._archive_list.selectedItems()
@@ -223,7 +214,7 @@ class DocumentSourceDialog(QDialog):
         self._render_selection()
 
     def _select_latest(self) -> None:
-        self._archive_list.clearSelection()
+        self._archive_list.setCurrentRow(0)
         self._selected = self._latest
         self._render_selection()
 
@@ -232,7 +223,7 @@ class DocumentSourceDialog(QDialog):
         self._ticket.setProperty("historical", historical)
         self._source_stamp.setProperty("historical", historical)
         self._source_stamp.setText("이전 변경번호" if historical else "최신 · 기본")
-        self._source_code.setText(self._selected.display_code)
+        self._source_code.setText(format_revision_timestamp(self._selected.recorded_at))
         self._source_reason.setText(self._selected.reason)
         self._source_detail.setText(_summary_detail(self._selected))
         self._selection_note.setProperty("historical", historical)
@@ -248,21 +239,19 @@ class DocumentSourceDialog(QDialog):
 
 
 def _summary_detail(summary: RevisionSummary) -> str:
-    recorded = summary.recorded_at.astimezone(_KOREA_TIME_ZONE)
     effective = (
         "적용일 없음"
         if summary.effective_on is None
         else f"적용일 {summary.effective_on:%Y.%m.%d}"
     )
     return (
-        f"{recorded:%Y.%m.%d %H:%M} 저장 · {effective} · "
+        f"{effective} · "
         f"{_SOURCE_LABELS[summary.source]}"
     )
 
 
 def _archive_item_text(summary: RevisionSummary) -> str:
-    recorded = summary.recorded_at.astimezone(_KOREA_TIME_ZONE)
-    return f"{summary.display_code}   {summary.reason}\n{recorded:%Y.%m.%d %H:%M} 저장"
+    return f"{format_revision_timestamp(summary.recorded_at)}\n{summary.reason}\n{_summary_detail(summary)}"
 
 
 def _archive_item_tooltip(summary: RevisionSummary) -> str:

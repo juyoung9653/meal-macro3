@@ -88,19 +88,19 @@ class ImportReviewDialog(QDialog):
             raise TypeError("plan은 ReconciliationPlan이어야 합니다.")
         roster_revision_id = None if roster is None else roster.revision_id
         if roster_revision_id != plan.roster_revision_id:
-            raise ValueError("검토 plan과 roster revision이 다릅니다.")
+            raise ValueError("확인 중인 명단이 변경되었습니다. 검토 화면을 다시 열어주세요.")
         if household_plan is not None:
             if not isinstance(household_plan, HouseholdGroupingPlan):
                 raise TypeError(
                     "household_plan은 HouseholdGroupingPlan 또는 None이어야 합니다."
                 )
             if household_plan.effective_on != plan.effective_on:
-                raise ValueError("가구 plan과 사람 matching plan의 적용일이 다릅니다.")
+                raise ValueError("가구 묶기와 대상자 확인의 적용일이 다릅니다.")
             observation_ids = {
                 item.observation.observation_id for item in plan.staged_people
             }
             if set(household_plan.observation_ids) != observation_ids:
-                raise ValueError("가구 plan과 사람 matching plan의 행이 다릅니다.")
+                raise ValueError("가구 묶기와 대상자 확인의 명단이 다릅니다.")
         self._roster = roster
         self._plan = plan
         self._household_plan = household_plan

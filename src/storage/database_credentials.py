@@ -1,8 +1,7 @@
 """Password envelopes for the random encrypted-database key.
 
 The credential sidecar contains no plaintext password and no plaintext database
-key.  The same random database key is wrapped independently for the everyday
-user password and the institution recovery password.
+key. New files have one password slot; older files may also have a recovery slot.
 """
 
 from __future__ import annotations
@@ -24,6 +23,7 @@ from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
 _FORMAT = "meal-delivery-v2-credentials"
 _VERSION = 1
+_SINGLE_PASSWORD_VERSION = 2
 _DATABASE_KEY_BYTES = 32
 _DERIVED_KEY_BYTES = 32
 _SALT_BYTES = 16
@@ -76,7 +76,7 @@ class DatabaseCredentials:
     database_id: UUID
     created_at: datetime
     user_slot: _WrappedKeySlot
-    recovery_slot: _WrappedKeySlot
+    recovery_slot: _WrappedKeySlot | None
     path: Path | None = None
 
     @classmethod
@@ -84,18 +84,19 @@ class DatabaseCredentials:
         cls,
         database_path: str | Path,
         user_password: str,
-        recovery_password: str,
+        recovery_password: str | None = None,
         *,
         database_key: bytes | None = None,
     ) -> tuple[DatabaseCredentials, bytes]:
         """Create a new sidecar and return it with its random DB key."""
 
-        if user_password == recovery_password:
+        if recovery_password is not None and user_password == recovery_password:
             raise PasswordPolicyError(
                 "기관 복구 비밀번호는 평소 사용하는 비밀번호와 다르게 정해주세요."
             )
         _password_bytes(user_password)
-        _password_bytes(recovery_password)
+        if recovery_password is not None:
+            _password_bytes(recovery_password)
         key = secrets.token_bytes(_DATABASE_KEY_BYTES) if database_key is None else database_key
         _validate_database_key(key)
         database_id = uuid4()
@@ -103,11 +104,9 @@ class DatabaseCredentials:
             database_id=database_id,
             created_at=datetime.now(UTC),
             user_slot=_wrap_key(key, user_password, database_id, _USER_SLOT),
-            recovery_slot=_wrap_key(
-                key,
-                recovery_password,
-                database_id,
-                _RECOVERY_SLOT,
+            recovery_slot=(
+                None if recovery_password is None else
+                _wrap_key(key, recovery_password, database_id, _RECOVERY_SLOT)
             ),
             path=credential_path_for(database_path),
         )
@@ -142,7 +141,10 @@ class DatabaseCredentials:
             document = json.loads(payload.decode("utf-8"))
             if not isinstance(document, dict):
                 raise TypeError
-            if document.get("format") != _FORMAT or document.get("version") != _VERSION:
+            version = document.get("version")
+            if document.get("format") != _FORMAT or type(version) is not int or version not in (
+                _VERSION, _SINGLE_PASSWORD_VERSION
+            ):
                 raise ValueError("format")
             database_id = UUID(_required_text(document, "database_id"))
             created_at = datetime.fromisoformat(_required_text(document, "created_at"))
@@ -152,7 +154,14 @@ class DatabaseCredentials:
             if not isinstance(slots, dict):
                 raise TypeError
             user_slot = _parse_slot(slots.get(_USER_SLOT))
-            recovery_slot = _parse_slot(slots.get(_RECOVERY_SLOT))
+            if set(slots) - {_USER_SLOT, _RECOVERY_SLOT}:
+                raise ValueError("slots")
+            if version == _VERSION:
+                recovery_slot = _parse_slot(slots[_RECOVERY_SLOT])
+            else:
+                if _RECOVERY_SLOT in slots:
+                    raise ValueError("slots")
+                recovery_slot = None
         except (KeyError, TypeError, ValueError, UnicodeError, json.JSONDecodeError) as error:
             raise CredentialFormatError("DB 비밀번호 정보 형식이 올바르지 않습니다.") from error
         return cls(
@@ -167,6 +176,8 @@ class DatabaseCredentials:
         return _unwrap_key(self.user_slot, password, self.database_id, _USER_SLOT)
 
     def unlock_recovery(self, recovery_password: str) -> bytes:
+        if self.recovery_slot is None:
+            raise CredentialUnlockError("이 데이터 파일에는 기관 복구 비밀번호가 없습니다.")
         return _unwrap_key(
             self.recovery_slot,
             recovery_password,
@@ -203,6 +214,8 @@ class DatabaseCredentials:
         current_user_password: str,
         new_recovery_password: str,
     ) -> DatabaseCredentials:
+        if self.recovery_slot is None:
+            raise CredentialUnlockError("이 데이터 파일에는 기관 복구 비밀번호가 없습니다.")
         if current_user_password == new_recovery_password:
             raise PasswordPolicyError(
                 "기관 복구 비밀번호는 평소 사용하는 비밀번호와 다르게 정해주세요."
@@ -242,14 +255,15 @@ class DatabaseCredentials:
     def to_bytes(self) -> bytes:
         document = {
             "format": _FORMAT,
-            "version": _VERSION,
+            "version": _VERSION if self.recovery_slot is not None else _SINGLE_PASSWORD_VERSION,
             "database_id": str(self.database_id),
             "created_at": self.created_at.astimezone(UTC).isoformat(),
             "slots": {
                 _USER_SLOT: _slot_document(self.user_slot),
-                _RECOVERY_SLOT: _slot_document(self.recovery_slot),
             },
         }
+        if self.recovery_slot is not None:
+            document["slots"][_RECOVERY_SLOT] = _slot_document(self.recovery_slot)
         return (
             json.dumps(
                 document,

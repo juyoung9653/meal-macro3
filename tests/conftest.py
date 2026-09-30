@@ -52,3 +52,21 @@ def _reset_settings_singleton():
     SettingsManager._instance = None
     yield
     SettingsManager._instance = None
+
+
+@pytest.fixture(autouse=True)
+def _isolate_roster_column_settings(monkeypatch, tmp_path):
+    """Keep window tests from reading or changing the operator's column layout."""
+    import sys
+
+    layout_module = sys.modules.get('src.desktop_v2.column_layout')
+    if layout_module is None:
+        return
+    settings_type = layout_module.QSettings
+    monkeypatch.setattr(
+        layout_module,
+        'QSettings',
+        lambda *args, **kwargs: settings_type(
+            str(tmp_path / 'roster-columns.ini'), settings_type.Format.IniFormat
+        ),
+    )

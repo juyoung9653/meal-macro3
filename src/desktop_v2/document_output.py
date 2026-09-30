@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from src.domain.revisions import format_revision_timestamp
 from src.domain.roster import Meal
 
 from .document_hub import DocumentAction
@@ -120,7 +121,7 @@ def suggest_document_filename(
         or document.meals != tuple(Meal)
     ):
         parts.append("-".join(meal.value for meal in document.meals))
-    parts.append(period.source.display_code)
+    parts.append(format_revision_timestamp(period.source.recorded_at))
     if reissue_number > 1:
         parts.append(f"재발행{reissue_number:02d}")
     return "_".join(parts) + ".xlsx"
@@ -274,7 +275,7 @@ class DocumentOutputDialog(QDialog):
         layout = QVBoxLayout(frame)
         layout.setContentsMargins(18, 15, 18, 16)
         layout.setSpacing(4)
-        eyebrow = QLabel("OUTPUT SHELF · 문서 보관함")
+        eyebrow = QLabel("문서 저장 · 문서 보관함")
         eyebrow.setObjectName("editEyebrow")
         title = QLabel("저장 위치와 파일명 확인")
         title.setObjectName("workspaceTitle")
@@ -306,7 +307,9 @@ class DocumentOutputDialog(QDialog):
         title.setObjectName("sectionLabel")
         meals = " · ".join(meal.value for meal in self._document.meals)
         detail = QLabel(
-            f"포함 식종 {meals}  ·  변경번호 {period.source.display_code}"
+            "포함 식종 "
+            f"{meals}  ·  변경번호 "
+            f"{format_revision_timestamp(period.source.recorded_at)}"
         )
         detail.setObjectName("documentOutputContextDetail")
         copy.addWidget(title)
@@ -349,7 +352,7 @@ class DocumentOutputDialog(QDialog):
         layout = QHBoxLayout(frame)
         layout.setContentsMargins(14, 11, 14, 11)
         layout.setSpacing(12)
-        stamp = QLabel("FILE")
+        stamp = QLabel("파일")
         stamp.setObjectName("documentOutputFilenameStamp")
         stamp.setAlignment(Qt.AlignmentFlag.AlignCenter)
         stamp.setFixedSize(58, 48)
@@ -564,7 +567,7 @@ class DefaultDocumentDirectoryDialog(QDialog):
         header_layout = QVBoxLayout(header)
         header_layout.setContentsMargins(18, 15, 18, 16)
         header_layout.setSpacing(4)
-        eyebrow = QLabel("OUTPUT SHELF · 이 컴퓨터의 기본값")
+        eyebrow = QLabel("문서 저장 · 이 컴퓨터의 기본 폴더")
         eyebrow.setObjectName("editEyebrow")
         title = QLabel("문서 저장 폴더")
         title.setObjectName("workspaceTitle")

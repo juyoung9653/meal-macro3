@@ -15,6 +15,7 @@ from src.domain import (
     Meal,
     MealEnrollment,
     MealStatus,
+    IntakeChannel,
     Person,
     PersonProfile,
     RosterSnapshot,
@@ -66,7 +67,7 @@ def test_delivery_allows_unenrolled_meal_and_summary_marks_auto_add(
     assert dialog.selected_meals() == (Meal.LUNCH,)
     assert dialog.selected_status() is MealStatus.DELIVERY
     assert dialog.selected_period() == InclusiveDateRange(ANCHOR_DAY, None)
-    assert "미가입 → 식종 추가 · 배송" in dialog._summary_text.text()
+    assert "- → 식종 추가 · 배송" in dialog._summary_text.text()
     assert dialog._save_button.isEnabled()
 
     dialog._meal_checks[Meal.BREAKFAST].setChecked(True)
@@ -93,7 +94,7 @@ def test_pause_blocks_unenrolled_meal_then_accepts_multiple_enrolled_meals(
     dialog._status_buttons[MealStatus.PAUSED].click()
     app.processEvents()
     assert not dialog._save_button.isEnabled()
-    assert "미가입" in dialog._error.text()
+    assert "이용 중인 식종이 아닙니다" in dialog._error.text()
     assert not dialog._continue.isEnabled()
     assert dialog.selected_period() == InclusiveDateRange(ANCHOR_DAY, ANCHOR_DAY)
 
@@ -123,5 +124,24 @@ def test_open_ended_stop_keeps_selected_meal_set(app: QApplication):
 
     assert dialog.selected_meals() == (Meal.BREAKFAST, Meal.DINNER)
     assert dialog.selected_period() == InclusiveDateRange(ANCHOR_DAY, None)
-    assert "중지" in dialog._summary_text.text()
+    assert "미배송" in dialog._summary_text.text()
     dialog.close()
+
+
+def test_intake_channel_is_optional_and_returns_selected_channel(app: QApplication):
+    roster = _roster()
+    dialog = MealStatusChangeDialog(
+        roster.person(PERSON_ID),
+        roster,
+        _histories(),
+        ANCHOR_DAY,
+        Meal.BREAKFAST,
+        MealStatus.DELIVERY,
+    )
+    try:
+        assert dialog._intake_channel.currentText() == "미선택"
+        assert dialog.selected_intake_channel() is None
+        dialog._intake_channel.setCurrentText("기타")
+        assert dialog.selected_intake_channel() is IntakeChannel.OTHER
+    finally:
+        dialog.close()

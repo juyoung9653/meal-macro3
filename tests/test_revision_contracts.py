@@ -14,6 +14,7 @@ from src.domain.revisions import (
     RevisionMetadata,
     RevisionRecord,
     RevisionSource,
+    format_revision_timestamp,
 )
 
 
@@ -60,6 +61,15 @@ def test_revision_display_code_is_optional_until_database_assignment():
 
     assert metadata.display_code is None
     assert stored.display_code == "20260825-001"
+
+
+def test_format_revision_timestamp_uses_korean_save_time_to_the_second():
+    assert format_revision_timestamp(datetime(2026, 8, 24, 15, 0, 7, tzinfo=UTC)) == "20260825-000007"
+
+
+def test_format_revision_timestamp_rejects_naive_datetime():
+    with pytest.raises(ValueError, match="time zone"):
+        format_revision_timestamp(datetime(2026, 8, 25, 0, 0, 7))
 
 
 @pytest.mark.parametrize(

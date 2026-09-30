@@ -1,4 +1,4 @@
-"""Plain-language first-run, login, recovery, and backup-restore dialogs."""
+"""Plain-language first-run, login, and backup-restore dialogs."""
 
 from __future__ import annotations
 
@@ -144,7 +144,7 @@ class _DatabaseAccessDialog(QDialog):
         rail.setFixedWidth(218)
         layout = QVBoxLayout(rail)
         layout.setContentsMargins(24, 25, 22, 25)
-        product = QLabel("MEAL ROUTE · LOCAL")
+        product = QLabel("급식 배송 관리")
         product.setObjectName("startupProduct")
         layout.addWidget(product)
         layout.addSpacing(15)
@@ -180,7 +180,7 @@ class _DatabaseAccessDialog(QDialog):
                 line_row.addStretch(1)
                 layout.addLayout(line_row)
         layout.addStretch(1)
-        footer = QLabel("DB · 자동 백업 · 복구")
+        footer = QLabel("데이터 · 자동 백업 · 복구")
         footer.setObjectName("startupRailCopy")
         layout.addWidget(footer)
         return rail
@@ -285,15 +285,15 @@ class CreateDatabaseDialog(_DatabaseAccessDialog):
                 "이 설정은 처음 한 번만 하며, 완료하면 기존 Excel 명단을 옮깁니다."
             ),
             rail_title="세 지점만 확인하면 끝납니다",
-            rail_copy="배송 경로를 정하듯 저장 위치부터 복구 수단까지 순서대로 준비합니다.",
+            rail_copy="저장 위치와 비밀번호를 정하면 자동 백업을 시작합니다.",
             route_stops=(
-                "운영 DB 저장 위치",
-                "평소 사용할 비밀번호",
-                "자동 백업과 기관 복구",
+                "운영 데이터 저장 위치",
+                "사용할 비밀번호",
+                "자동 백업 위치",
             ),
             parent=parent,
         )
-        self.resize(790, 720)
+        self.resize(790, 600)
         self._settings = settings
         self.database_path_edit = QLineEdit()
         self.database_path_edit.setObjectName("databasePathEdit")
@@ -301,17 +301,9 @@ class CreateDatabaseDialog(_DatabaseAccessDialog):
         self.backup_directory_edit.setObjectName("backupDirectoryEdit")
         self.user_password_edit = QLineEdit()
         self.user_password_edit.setObjectName("userPasswordEdit")
-        self.user_password_confirmation_edit = QLineEdit()
-        self.user_password_confirmation_edit.setObjectName("userPasswordConfirmationEdit")
-        self.recovery_password_edit = QLineEdit()
-        self.recovery_password_edit.setObjectName("recoveryPasswordEdit")
-        self.recovery_password_confirmation_edit = QLineEdit()
-        self.recovery_password_confirmation_edit.setObjectName(
-            "recoveryPasswordConfirmationEdit"
-        )
 
         self._add_path_field(
-            "운영 DB 파일",
+            "운영 데이터 파일",
             self.database_path_edit,
             "위치 선택",
             self._browse_database,
@@ -328,39 +320,11 @@ class CreateDatabaseDialog(_DatabaseAccessDialog):
             ),
         )
         self._add_password_field(
-            "평소 사용할 비밀번호",
+            "비밀번호",
             self.user_password_edit,
             placeholder="프로그램을 열 때 입력",
         )
-        self._add_password_field(
-            "평소 비밀번호 다시 입력",
-            self.user_password_confirmation_edit,
-        )
-        self._add_password_field(
-            "기관 복구 비밀번호",
-            self.recovery_password_edit,
-            placeholder="평소에는 사용하지 않음",
-        )
-        self._add_password_field(
-            "기관 복구 비밀번호 다시 입력",
-            self.recovery_password_confirmation_edit,
-        )
-        notice = QLabel(
-            "기관 복구 비밀번호는 평소 비밀번호와 다르게 정하고 종이에 적어 "
-            "사무실에 보관하세요. 별도 복구 파일은 필요하지 않습니다."
-        )
-        notice.setObjectName("recoveryNotice")
-        notice.setWordWrap(True)
-        notice.setMinimumHeight(52)
-        self._content.addWidget(notice)
-        self._add_show_passwords(
-            (
-                self.user_password_edit,
-                self.user_password_confirmation_edit,
-                self.recovery_password_edit,
-                self.recovery_password_confirmation_edit,
-            )
-        )
+        self._add_show_passwords((self.user_password_edit,))
         self.submit_button = self._add_actions(
             "설정 완료하고 명단 옮기기",
             self._submit,
@@ -370,9 +334,9 @@ class CreateDatabaseDialog(_DatabaseAccessDialog):
         start = self.database_path_edit.text().strip()
         filename, _filter = QFileDialog.getSaveFileName(
             self,
-            "운영 DB 파일 위치",
+            "운영 데이터 파일 위치",
             start,
-            "급식 운영 DB (*.sqlite3)",
+            "급식 운영 데이터 (*.sqlite3)",
         )
         if filename:
             path = Path(filename)
@@ -394,7 +358,7 @@ class CreateDatabaseDialog(_DatabaseAccessDialog):
         database_text = self.database_path_edit.text().strip()
         backup_text = self.backup_directory_edit.text().strip()
         if not database_text:
-            self._show_error("운영 DB 파일 위치를 선택해주세요.")
+            self._show_error("운영 데이터 파일 위치를 선택해주세요.")
             return
         if not backup_text:
             self._show_error("자동 백업 폴더를 선택해주세요.")
@@ -402,24 +366,16 @@ class CreateDatabaseDialog(_DatabaseAccessDialog):
         database_path = Path(database_text).resolve()
         backup_directory = Path(backup_text).resolve()
         if not database_path.parent.is_dir():
-            self._show_error("운영 DB를 저장할 폴더가 없습니다.")
+            self._show_error("운영 데이터를 저장할 폴더가 없습니다.")
             return
         if not backup_directory.is_dir():
             self._show_error("선택한 자동 백업 폴더가 없습니다.")
             return
         user_password = self.user_password_edit.text()
-        recovery_password = self.recovery_password_edit.text()
-        if user_password != self.user_password_confirmation_edit.text():
-            self._show_error("평소 비밀번호 두 번의 입력이 서로 다릅니다.")
-            return
-        if recovery_password != self.recovery_password_confirmation_edit.text():
-            self._show_error("기관 복구 비밀번호 두 번의 입력이 서로 다릅니다.")
-            return
         try:
             session = DatabaseSession.create(
                 database_path,
                 user_password,
-                recovery_password,
                 backup_directory=backup_directory,
             )
         except Exception as error:
@@ -447,13 +403,13 @@ class LoginDialog(_DatabaseAccessDialog):
         super().__init__(
             window_title="급식 배송 운영 열기",
             title="운영 파일 열기",
-            subtitle=f"{self._database_path.name}의 평소 비밀번호를 입력해주세요.",
+            subtitle=f"{self._database_path.name}의 비밀번호를 입력해주세요.",
             rail_title="오늘의 운영을 이어갑니다",
-            rail_copy="명단과 배송 이력은 이 컴퓨터의 암호화 DB에서 불러옵니다.",
+            rail_copy="명단과 배송 이력은 이 컴퓨터의 암호화된 데이터 파일에서 불러옵니다.",
             route_stops=(
                 f"운영 파일 · {self._database_path.name}",
                 "저장할 때 자동 백업",
-                "잊으면 기관 비밀번호로 복구",
+                "비밀번호로 파일 열기",
             ),
             parent=parent,
         )
@@ -463,13 +419,9 @@ class LoginDialog(_DatabaseAccessDialog):
         self._add_password_field(
             "비밀번호",
             self.password_edit,
-            placeholder="평소 사용하는 비밀번호",
+            placeholder="비밀번호 입력",
         )
         self._add_show_passwords((self.password_edit,))
-        recovery = QPushButton("비밀번호를 잊었어요")
-        recovery.setObjectName("linkAction")
-        recovery.clicked.connect(self._open_recovery)
-        self._content.addWidget(recovery)
         self.submit_button = self._add_actions("운영 파일 열기", self._submit)
 
     def _submit(self) -> None:
@@ -487,93 +439,6 @@ class LoginDialog(_DatabaseAccessDialog):
             return
         self.accept()
 
-    def _open_recovery(self) -> None:
-        dialog = RecoveryPasswordDialog(
-            self._database_path,
-            backup_directory=self._backup_directory,
-            parent=self,
-        )
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            self._session = dialog.session
-            self.backup_result = dialog.backup_result
-            self.accept()
-
-
-class RecoveryPasswordDialog(_DatabaseAccessDialog):
-    def __init__(
-        self,
-        database_path: str | Path,
-        *,
-        backup_directory: str | Path | None = None,
-        parent: QWidget | None = None,
-    ) -> None:
-        self._database_path = Path(database_path).resolve()
-        self._backup_directory = (
-            None if backup_directory is None else Path(backup_directory).resolve()
-        )
-        super().__init__(
-            window_title="비밀번호 복구",
-            title="새 평소 비밀번호 만들기",
-            subtitle="기관 복구 비밀번호를 확인한 뒤 평소 비밀번호만 새로 바꿉니다.",
-            rail_title="DB 내용은 그대로 유지됩니다",
-            rail_copy="명단이나 이력은 다시 만들지 않습니다. 여는 비밀번호만 바뀝니다.",
-            route_stops=(
-                "기관 복구 비밀번호 확인",
-                "새 평소 비밀번호 설정",
-                "새 자동 백업 생성",
-            ),
-            parent=parent,
-        )
-        self.resize(740, 535)
-        self.recovery_password_edit = QLineEdit()
-        self.recovery_password_edit.setObjectName("recoveryPasswordEdit")
-        self.new_password_edit = QLineEdit()
-        self.new_password_edit.setObjectName("newUserPasswordEdit")
-        self.new_password_confirmation_edit = QLineEdit()
-        self.new_password_confirmation_edit.setObjectName(
-            "newUserPasswordConfirmationEdit"
-        )
-        self._add_password_field(
-            "기관 복구 비밀번호",
-            self.recovery_password_edit,
-        )
-        self._add_password_field("새 평소 비밀번호", self.new_password_edit)
-        self._add_password_field(
-            "새 평소 비밀번호 다시 입력",
-            self.new_password_confirmation_edit,
-        )
-        self._add_show_passwords(
-            (
-                self.recovery_password_edit,
-                self.new_password_edit,
-                self.new_password_confirmation_edit,
-            )
-        )
-        self.submit_button = self._add_actions(
-            "비밀번호 바꾸고 열기",
-            self._submit,
-        )
-
-    def _submit(self) -> None:
-        self._clear_error()
-        if self.new_password_edit.text() != self.new_password_confirmation_edit.text():
-            self._show_error("새 평소 비밀번호 두 번의 입력이 서로 다릅니다.")
-            return
-        try:
-            session = DatabaseSession.recover_and_open(
-                self._database_path,
-                self.recovery_password_edit.text(),
-                self.new_password_edit.text(),
-                backup_directory=self._backup_directory,
-            )
-        except Exception as error:
-            self._show_error(_friendly_error(error))
-            return
-        self._session = session
-        self.backup_result = session.try_backup_now()
-        self.accept()
-
-
 class RestoreBackupDialog(_DatabaseAccessDialog):
     def __init__(
         self,
@@ -590,13 +455,13 @@ class RestoreBackupDialog(_DatabaseAccessDialog):
         super().__init__(
             window_title="자동 백업 복원",
             title="자동 백업에서 복원하기",
-            subtitle="백업 파일 하나를 선택하면 명단과 전체 변경 이력을 새 DB로 복원합니다.",
+            subtitle="백업 파일 하나를 선택하면 명단과 전체 변경 이력을 새 데이터 파일로 복원합니다.",
             rail_title="청구서를 다시 입력하지 않아도 됩니다",
-            rail_copy="자동 백업에는 암호화 DB와 복구에 필요한 비밀번호 정보가 함께 들어 있습니다.",
+            rail_copy="자동 백업에는 암호화된 데이터 파일과 복구에 필요한 비밀번호 정보가 함께 들어 있습니다.",
             route_stops=(
                 "자동 백업 파일 선택",
                 "비밀번호 확인",
-                "새 운영 DB로 검증 복원",
+                "새 운영 데이터로 검증 복원",
             ),
             parent=parent,
         )
@@ -609,12 +474,6 @@ class RestoreBackupDialog(_DatabaseAccessDialog):
         self.destination_path_edit.setObjectName("restoreDestinationPathEdit")
         self.password_edit = QLineEdit()
         self.password_edit.setObjectName("restorePasswordEdit")
-        self.new_password_edit = QLineEdit()
-        self.new_password_edit.setObjectName("restoreNewPasswordEdit")
-        self.new_password_confirmation_edit = QLineEdit()
-        self.new_password_confirmation_edit.setObjectName(
-            "restoreNewPasswordConfirmationEdit"
-        )
 
         self._add_path_field(
             "자동 백업 파일",
@@ -623,39 +482,14 @@ class RestoreBackupDialog(_DatabaseAccessDialog):
             self._browse_backup,
         )
         self._add_path_field(
-            "복원할 운영 DB 파일",
+            "복원할 운영 데이터 파일",
             self.destination_path_edit,
             "위치 선택",
             self._browse_destination,
             help_text="기존 파일을 덮어쓰지 않고 새 파일로만 복원합니다.",
         )
-        self.password_label = _field_label("평소 비밀번호")
-        self._content.addWidget(self.password_label)
-        self.password_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self._content.addWidget(self.password_edit)
-        self.forgotten_checkbox = QCheckBox("평소 비밀번호도 잊었습니다")
-        self.forgotten_checkbox.toggled.connect(self._toggle_recovery_mode)
-        self._content.addWidget(self.forgotten_checkbox)
-
-        self.new_password_container = QWidget()
-        new_layout = QVBoxLayout(self.new_password_container)
-        new_layout.setContentsMargins(0, 0, 0, 0)
-        new_layout.setSpacing(8)
-        new_layout.addWidget(_field_label("새 평소 비밀번호"))
-        self.new_password_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        new_layout.addWidget(self.new_password_edit)
-        new_layout.addWidget(_field_label("새 평소 비밀번호 다시 입력"))
-        self.new_password_confirmation_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        new_layout.addWidget(self.new_password_confirmation_edit)
-        self.new_password_container.hide()
-        self._content.addWidget(self.new_password_container)
-        self._add_show_passwords(
-            (
-                self.password_edit,
-                self.new_password_edit,
-                self.new_password_confirmation_edit,
-            )
-        )
+        self._add_password_field("비밀번호", self.password_edit)
+        self._add_show_passwords((self.password_edit,))
         self.submit_button = self._add_actions(
             "백업 복원하고 열기",
             self._submit,
@@ -671,7 +505,7 @@ class RestoreBackupDialog(_DatabaseAccessDialog):
             self,
             "자동 백업 파일 선택",
             start,
-            "급식 DB 자동 백업 (*.mealbackup)",
+            "급식 데이터 자동 백업 (*.mealbackup)",
         )
         if filename:
             self.backup_path_edit.setText(filename)
@@ -679,22 +513,15 @@ class RestoreBackupDialog(_DatabaseAccessDialog):
     def _browse_destination(self) -> None:
         filename, _filter = QFileDialog.getSaveFileName(
             self,
-            "복원할 운영 DB 파일",
+            "복원할 운영 데이터 파일",
             self.destination_path_edit.text().strip(),
-            "급식 운영 DB (*.sqlite3)",
+            "급식 운영 데이터 (*.sqlite3)",
         )
         if filename:
             path = Path(filename)
             if path.suffix.casefold() != ".sqlite3":
                 path = path.with_suffix(".sqlite3")
             self.destination_path_edit.setText(str(path))
-
-    def _toggle_recovery_mode(self, enabled: bool) -> None:
-        self.password_label.setText(
-            "기관 복구 비밀번호" if enabled else "평소 비밀번호"
-        )
-        self.new_password_container.setVisible(enabled)
-        self.adjustSize()
 
     def _submit(self) -> None:
         self._clear_error()
@@ -704,31 +531,18 @@ class RestoreBackupDialog(_DatabaseAccessDialog):
             self._show_error("자동 백업 파일을 선택해주세요.")
             return
         if not destination_text:
-            self._show_error("복원할 운영 DB 파일 위치를 선택해주세요.")
+            self._show_error("복원할 운영 데이터 파일 위치를 선택해주세요.")
             return
         backup_path = Path(backup_text).resolve()
         destination = Path(destination_text).resolve()
         backup_directory = self._configured_backup_directory or backup_path.parent
-        if self.forgotten_checkbox.isChecked():
-            if self.new_password_edit.text() != self.new_password_confirmation_edit.text():
-                self._show_error("새 평소 비밀번호 두 번의 입력이 서로 다릅니다.")
-                return
-            action = lambda: DatabaseSession.restore_and_open_with_recovery_password(
-                backup_path,
-                destination,
-                self.password_edit.text(),
-                self.new_password_edit.text(),
-                backup_directory=backup_directory,
-            )
-        else:
-            action = lambda: DatabaseSession.restore_and_open_with_user_password(
-                backup_path,
-                destination,
-                self.password_edit.text(),
-                backup_directory=backup_directory,
-            )
         try:
-            self._session = action()
+            self._session = DatabaseSession.restore_and_open_with_user_password(
+                backup_path,
+                destination,
+                self.password_edit.text(),
+                backup_directory=backup_directory,
+            )
         except Exception as error:
             self._show_error(_friendly_error(error))
             return
@@ -758,7 +572,7 @@ def _optional_path(value: object) -> Path | None:
 
 def _friendly_error(error: Exception) -> str:
     if isinstance(error, (CredentialUnlockError, DatabaseUnlockError)):
-        return "비밀번호가 맞지 않거나 운영 DB가 손상되었습니다. 입력을 확인해주세요."
+        return "비밀번호가 맞지 않거나 운영 데이터가 손상되었습니다. 입력을 확인해주세요."
     if isinstance(error, PasswordPolicyError):
         return str(error)
     if isinstance(error, (BackupFormatError, BackupIntegrityError)):

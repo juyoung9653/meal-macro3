@@ -20,8 +20,12 @@ from src.core.invoice_data import (
 )
 from src.core.models import FULL_ADDRESS_FIELD, combine_address
 from src.domain.billing import EntitlementBilling, price_entitlements
+from src.domain.delivery_routing import (
+    PersonDeliveryView,
+    RoutingState,
+    routing_state_from_snapshot,
+)
 from src.domain.entitlements import (
-    EntitlementExclusion,
     MealEntitlement,
     decide_entitlement,
 )
@@ -29,6 +33,7 @@ from src.domain.projections import (
     roster_from_historical_snapshot,
     status_events_from_historical_snapshot,
 )
+from src.domain.provider_settings import provider_from_snapshot
 from src.domain.revisions import (
     HistoricalSnapshot,
     JsonValue,
@@ -52,7 +57,6 @@ from src.domain.unit_pricing import (
     global_unit_price_note,
     unit_price_schedule_from_snapshot,
 )
-
 
 RECURRING_MEAL_SERVICE_POLICY_VERSION = 1
 
@@ -105,6 +109,7 @@ def prepare_monthly_document_data(
     selected_meals = _canonical_meals(meals)
 
     roster = roster_from_historical_snapshot(snapshot)
+    provider = provider_from_snapshot(snapshot)
     school_calendar = school_lunch_calendar_from_snapshot(snapshot)
     adjustments = service_adjustment_schedule_from_snapshot(snapshot)
     price_schedule = unit_price_schedule_from_snapshot(snapshot)
@@ -160,6 +165,8 @@ def prepare_monthly_document_data(
         price_schedule,
         period_start,
         period_end,
+        provider,
+        routing=routing_state_from_snapshot(snapshot),
     )
     global_note = global_unit_price_note(
         price_schedule,
@@ -175,7 +182,12 @@ def prepare_monthly_document_data(
     )
     calculation_manifest = freeze_json_object(
         {
-            "calculation_contract_version": 1,
+            "calculation_contract_version": 2,
+            "document_presentation": {
+                "policy_version": 1,
+                "effective_on": period_end.isoformat(),
+                "routing_basis": "document_period_end",
+            },
             "source_revision_id": str(snapshot.revision_id),
             "selected_meals": tuple(meal.value for meal in selected_meals),
             "recurring_service_policy": {
@@ -231,6 +243,9 @@ def _monthly_batch(
     price_schedule: UnitPriceSchedule,
     period_start: date,
     period_end: date,
+    provider: str = "",
+    *,
+    routing: RoutingState,
 ) -> MonthlyDeliveryBatch:
     by_person: defaultdict[UUID, list[MealEntitlement]] = defaultdict(list)
     for entitlement in entitlements:
@@ -251,12 +266,13 @@ def _monthly_batch(
             roster.resolve_assignment(person.person_id, meal)
             for meal in active_meals
         )
+        delivery_view = routing.resolve(roster, person.person_id, period_end)
         service_dates = tuple(item.service_on for item in person_entitlements)
         deliveries.append(
             MonthlyDelivery(
-                roster=_roster_entry(person, roster, position),
+                roster=_roster_entry(person, roster, position, provider, delivery_view=delivery_view),
                 note=person.profile.note or "",
-                delivery_staff=_join_unique(item.driver for item in assignments),
+                delivery_staff=_join_unique(delivery_view.drivers[meal] for meal in active_meals),
                 delivery_sequence=_join_unique(item.sequence for item in assignments),
                 breakfast_count=summary.count_for(Meal.BREAKFAST),
                 lunch_count=summary.count_for(Meal.LUNCH),
@@ -286,7 +302,14 @@ def _monthly_batch(
     )
 
 
-def _roster_entry(person: Person, roster: RosterSnapshot, position: int) -> RosterEntry:
+def _roster_entry(
+    person: Person,
+    roster: RosterSnapshot,
+    position: int,
+    provider: str = "",
+    *,
+    delivery_view: PersonDeliveryView | None = None,
+) -> RosterEntry:
     profile = person.profile
     birth_date = profile.birth_date
     extra: dict[str, object] = {
@@ -313,7 +336,7 @@ def _roster_entry(person: Person, roster: RosterSnapshot, position: int) -> Rost
         ),
         "전화번호": profile.telephone or "",
         "핸드폰": profile.mobile_phone or "",
-        "제공기관": profile.provider or "",
+        "제공기관": provider,
         "비고": profile.note or "",
     }
     definitions = {item.definition_id: item for item in roster.custom_fields}
@@ -321,6 +344,17 @@ def _roster_entry(person: Person, roster: RosterSnapshot, position: int) -> Rost
         definition = definitions.get(definition_id)
         if definition is not None:
             extra[definition.name] = value
+    # Dated presentation fields take precedence over legacy custom columns.
+    if delivery_view is not None:
+        road, detail = delivery_view.road_address, delivery_view.detail_address
+        extra.update({
+            "도로명주소": road or "",
+            "상세주소": detail or "",
+            "주소": combine_address(road, detail),
+            FULL_ADDRESS_FIELD: combine_address(road, detail),
+        })
+    # A legacy custom field must not override the database-wide provider.
+    extra["제공기관"] = provider
     return RosterEntry(position, extra)
 
 

@@ -9,6 +9,7 @@ from enum import StrEnum
 from uuid import UUID, uuid4
 
 from PySide6.QtWidgets import (
+    QCheckBox,
     QDialog,
     QFrame,
     QGridLayout,
@@ -30,11 +31,12 @@ from src.domain import (
     RosterSnapshot,
     build_person_profile_revision,
 )
+from src.domain.profile_edits import profile_household_members
+from src.domain.roster import CustomFieldDefinition, CustomFieldType
 from src.storage import AutomaticBackupResult, DatabaseSession
 
 from .import_controller import current_windows_actor
 from .theme import application_stylesheet, register_application_fonts
-
 
 _FIELD_LABELS = {
     "name": "성명",
@@ -45,7 +47,6 @@ _FIELD_LABELS = {
     "household_head_name": "세대주 성명",
     "relationship_to_child": "아동과의 관계",
     "jurisdiction": "관할동",
-    "provider": "제공기관",
     "road_address": "도로명주소",
     "detail_address": "상세주소",
     "telephone": "전화번호",
@@ -63,7 +64,6 @@ _SECTIONS = (
             "household_head_name",
             "relationship_to_child",
             "jurisdiction",
-            "provider",
         ),
     ),
     (
@@ -89,6 +89,8 @@ class PersonProfileEditDialog(QDialog):
         parent: QWidget | None = None,
         *,
         message_box=QMessageBox,
+        custom_fields: tuple[CustomFieldDefinition, ...] = (),
+        household_members: tuple[Person, ...] = (),
     ) -> None:
         if not isinstance(person, Person):
             raise TypeError("person은 Person이어야 합니다.")
@@ -96,6 +98,8 @@ class PersonProfileEditDialog(QDialog):
         self._person = person
         self._original = person.profile
         self._message_box = message_box
+        self._custom_fields = custom_fields
+        self._household_members = household_members or (person,)
         self._accepted_profile: PersonProfile | None = None
         self._editors: dict[str, QLineEdit | QPlainTextEdit] = {}
         register_application_fonts()
@@ -115,13 +119,20 @@ class PersonProfileEditDialog(QDialog):
         return self._accepted_profile
 
     def cleared_fields(self) -> tuple[str, ...]:
-        return tuple(
+        canonical = tuple(
             key
             for key in _FIELD_LABELS
             if key != "name"
             and getattr(self._original, key) is not None
             and not self._editor_text(key).strip()
         )
+        custom = tuple(
+            definition.name
+            for definition in self._custom_fields
+            if definition.definition_id in self._original.custom_values
+            and not self._editor_text(f"custom:{definition.definition_id}").strip()
+        )
+        return (*canonical, *custom)
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -158,9 +169,20 @@ class PersonProfileEditDialog(QDialog):
         for title_text, field_keys in _SECTIONS:
             scroll_layout.addWidget(self._build_section(title_text, field_keys))
         scroll_layout.addWidget(self._build_note_section())
+        if self._custom_fields:
+            scroll_layout.addWidget(self._build_custom_fields_section())
         scroll_layout.addStretch(1)
         scroll.setWidget(scroll_body)
         root.addWidget(scroll, 1)
+
+        self.household_mobile = QCheckBox("핸드폰을 가구 전체에 적용")
+        self.household_mobile.setEnabled(len(self._household_members) > 1)
+        self.household_mobile.toggled.connect(self._refresh_form_state)
+        root.addWidget(self.household_mobile)
+        targets = QLabel("가구 전체 대상: " + ", ".join(member.profile.name for member in self._household_members)
+                         + "\n체크하면 기본 핸드폰 번호만 함께 변경됩니다. 나머지 정보는 선택한 사람에게만 적용됩니다.")
+        targets.setWordWrap(True)
+        root.addWidget(targets)
 
         self._clear_notice = QLabel()
         self._clear_notice.setObjectName("clearNotice")
@@ -228,10 +250,33 @@ class PersonProfileEditDialog(QDialog):
         layout.addWidget(editor)
         return frame
 
+    def _build_custom_fields_section(self) -> QFrame:
+        frame = QFrame()
+        frame.setObjectName("editSection")
+        layout = QGridLayout(frame)
+        layout.setContentsMargins(14, 12, 14, 14)
+        layout.addWidget(QLabel("추가 항목"), 0, 0, 1, 2)
+        for row, definition in enumerate(self._custom_fields, 1):
+            key = f"custom:{definition.definition_id}"
+            layout.addWidget(QLabel(definition.name), row, 0)
+            editor = QLineEdit()
+            editor.setObjectName(f"profileField_{key}")
+            self._editors[key] = editor
+            layout.addWidget(editor, row, 1)
+        return frame
+
     def _populate(self) -> None:
         for key, editor in self._editors.items():
-            value = getattr(self._original, key)
-            text = value.isoformat() if isinstance(value, date) else (value or "")
+            value = (
+                self._original.custom_values.get(UUID(key[7:]))
+                if key.startswith("custom:")
+                else getattr(self._original, key)
+            )
+            text = (
+                value.isoformat()
+                if isinstance(value, date)
+                else ("" if value is None else str(value))
+            )
             if isinstance(editor, QPlainTextEdit):
                 editor.setPlainText(text)
             else:
@@ -243,9 +288,21 @@ class PersonProfileEditDialog(QDialog):
 
     def _editor_text(self, key: str) -> str:
         editor = self._editors[key]
-        return editor.toPlainText() if isinstance(editor, QPlainTextEdit) else editor.text()
+        return (
+            editor.toPlainText()
+            if isinstance(editor, QPlainTextEdit)
+            else editor.text()
+        )
 
     def _candidate_profile(self) -> PersonProfile:
+        custom_values = dict(self._original.custom_values)
+        for definition in self._custom_fields:
+            text = self._editor_text(f"custom:{definition.definition_id}").strip()
+            value = _custom_value(definition, text)
+            if value is None:
+                custom_values.pop(definition.definition_id, None)
+            else:
+                custom_values[definition.definition_id] = value
         return PersonProfile(
             name=self._editor_text("name"),
             birth_date=_parse_optional_date(self._editor_text("birth_date")),
@@ -261,19 +318,19 @@ class PersonProfileEditDialog(QDialog):
                 self._editor_text("relationship_to_child")
             ),
             jurisdiction=_optional_text(self._editor_text("jurisdiction")),
-            provider=_optional_text(self._editor_text("provider")),
+            provider=self._original.provider,
             road_address=_optional_text(self._editor_text("road_address")),
             detail_address=_optional_text(self._editor_text("detail_address")),
             telephone=_optional_text(self._editor_text("telephone")),
             mobile_phone=_optional_text(self._editor_text("mobile_phone")),
             note=_optional_text(self._editor_text("note")),
-            custom_values=self._original.custom_values,
+            custom_values=custom_values,
         )
 
     def _refresh_form_state(self, *_args) -> None:
         cleared = self.cleared_fields()
         if cleared:
-            labels = " · ".join(_FIELD_LABELS[key] for key in cleared)
+            labels = " · ".join(_FIELD_LABELS.get(key, key) for key in cleared)
             self._clear_notice.setText(f"삭제 예정  {labels}")
             self._clear_notice.show()
         else:
@@ -287,7 +344,15 @@ class PersonProfileEditDialog(QDialog):
             self._save_button.setEnabled(False)
             return
         self._form_error.hide()
-        self._save_button.setEnabled(candidate != self._original)
+        self._save_button.setEnabled(candidate != self._original or self._household_phone_changed(candidate))
+
+    def apply_mobile_to_household(self) -> bool:
+        return self.household_mobile.isChecked()
+
+    def _household_phone_changed(self, candidate: PersonProfile) -> bool:
+        return self.apply_mobile_to_household() and any(
+            member.profile.mobile_phone != candidate.mobile_phone for member in self._household_members
+        )
 
     def _save(self) -> None:
         try:
@@ -296,19 +361,32 @@ class PersonProfileEditDialog(QDialog):
             self._form_error.setText(str(error))
             self._form_error.show()
             return
-        if candidate == self._original:
+        if candidate == self._original and not self._household_phone_changed(candidate):
             self._form_error.setText("변경된 내용이 없습니다.")
             self._form_error.show()
             return
         cleared = self.cleared_fields()
         if cleared:
-            field_lines = "\n".join(f"• {_FIELD_LABELS[key]}" for key in cleared)
+            field_lines = "\n".join(
+                f"• {_FIELD_LABELS.get(key, key)}" for key in cleared
+            )
             answer = self._message_box.question(
                 self,
                 "기존 값을 비울까요?",
                 "다음 기존 값이 저장된 명단에서 삭제됩니다.\n\n"
                 f"{field_lines}\n\n"
                 "계속하려면 '예'를 누르세요.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        if self._household_phone_changed(candidate):
+            answer = self._message_box.question(
+                self, "가구 전체 핸드폰 변경",
+                "다음 가구원의 기본 핸드폰을 같은 값으로 변경합니다.\n\n"
+                + ", ".join(member.profile.name for member in self._household_members)
+                + "\n\n새 핸드폰: " + (candidate.mobile_phone or "(빈칸으로 삭제)"),
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
             )
@@ -381,11 +459,17 @@ class PersonProfileEditController:
                 str(error),
             )
             return PersonProfileEditOutcome(PersonProfileEditStatus.FAILED)
-        dialog = self._dialog_type(
-            person,
-            parent,
-            message_box=self._message_box,
-        )
+        effective_on = self._effective_date_provider()
+        if self._dialog_type is PersonProfileEditDialog:
+            dialog = self._dialog_type(
+                person,
+                parent,
+                message_box=self._message_box,
+                custom_fields=roster.custom_fields,
+                household_members=profile_household_members(roster, person_id, effective_on),
+            )
+        else:
+            dialog = self._dialog_type(person, parent, message_box=self._message_box)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return PersonProfileEditOutcome(PersonProfileEditStatus.CANCELLED)
         try:
@@ -395,7 +479,8 @@ class PersonProfileEditController:
                 dialog.profile(),
                 actor=self._actor_provider(),
                 recorded_at=self._recorded_at_provider(),
-                effective_on=self._effective_date_provider(),
+                effective_on=effective_on,
+                household_mobile_phone=getattr(dialog, "apply_mobile_to_household", lambda: False)(),
                 revision_id=self._revision_id_factory(),
             )
             backup_result = self._session.append_revision(prepared.record)
@@ -403,7 +488,7 @@ class PersonProfileEditController:
             self._message_box.critical(
                 parent,
                 "사람 정보를 저장하지 못했습니다",
-                "DB에는 반영하지 않았습니다. 내용을 확인한 뒤 다시 시도해주세요.\n\n"
+                "운영 데이터에는 반영하지 않았습니다. 내용을 확인한 뒤 다시 시도해주세요.\n\n"
                 + str(error),
             )
             return PersonProfileEditOutcome(PersonProfileEditStatus.FAILED)
@@ -411,7 +496,7 @@ class PersonProfileEditController:
             self._message_box.warning(
                 parent,
                 "사람 정보는 저장됐지만 자동 백업에 실패했습니다",
-                "변경 내용과 이력은 DB에 정상 저장되었습니다. "
+                "변경 내용과 이력은 운영 데이터에 정상 저장되었습니다. "
                 "백업 폴더 연결을 확인한 뒤 백업을 다시 실행해주세요.\n\n"
                 + str(backup_result.error),
             )
@@ -438,6 +523,28 @@ def _parse_optional_date(text: str) -> date | None:
 
 def _optional_text(text: str) -> str | None:
     return text if text.strip() else None
+
+
+def _custom_value(definition: CustomFieldDefinition, text: str):
+    if not text:
+        return None
+    if definition.field_type is CustomFieldType.TEXT:
+        return text
+    if definition.field_type is CustomFieldType.NUMBER:
+        try:
+            return float(text) if "." in text else int(text)
+        except ValueError as error:
+            raise ValueError(f"{definition.name} 값은 숫자여야 합니다.") from error
+    if definition.field_type is CustomFieldType.DATE:
+        try:
+            return date.fromisoformat(text)
+        except ValueError as error:
+            raise ValueError(
+                f"{definition.name} 값은 YYYY-MM-DD 형식의 날짜여야 합니다."
+            ) from error
+    if text not in definition.choices:
+        raise ValueError(f"{definition.name} 값이 선택 목록에 없습니다.")
+    return text
 
 
 def _utc_now() -> datetime:

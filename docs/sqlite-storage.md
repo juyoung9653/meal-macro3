@@ -29,21 +29,20 @@
 best-effort로 지운다. Python과 SQLite wrapper 내부의 모든 복사본까지 지우는
 메모리 zeroization을 보장하는 Interface는 아니다.
 
-## 평소 비밀번호와 기관 복구 비밀번호
+## 운영 파일 비밀번호
 
+새 운영 파일은 비밀번호 하나로 만들고 로그인·백업 복원에 같은 비밀번호를 사용한다.
 [DatabaseCredentials](../src/storage/database_credentials.py)는 DB마다 생성한
-32-byte random key를 두 번 독립적으로 wrap한다.
+32-byte random key를 비밀번호로 wrap한다.
 
-- `user` slot은 프로그램을 평소 열 때 입력하는 비밀번호를 사용한다.
-- `recovery` slot은 비밀번호를 잊었을 때만 입력하는 기관 복구 비밀번호를
-  사용한다.
-- 두 slot은 각자 random 16-byte salt와 scrypt KDF를 사용하고, random 12-byte
-  nonce의 AES-256-GCM으로 같은 DB key를 인증 암호화한다.
+- 새 파일의 `user` slot은 프로그램을 열 때 입력하는 비밀번호를 사용한다.
+- 기존 파일의 `recovery` slot은 저장 형식 호환을 위해 보존한다. 앱에서는 기관
+  복구 입력·비밀번호 재설정 경로를 제공하지 않으며 일반 비밀번호로 연다.
+- 각 slot은 random 16-byte salt와 scrypt KDF를 사용하고, random 12-byte
+  nonce의 AES-256-GCM으로 DB key를 인증 암호화한다.
 - credential JSON에는 비밀번호와 DB key의 평문이 저장되지 않는다.
-- 기관 복구 비밀번호로 DB key를 확인한 뒤 `user` slot만 새 비밀번호로
-  교체하므로 명단·이력·DB 본문을 다시 암호화하지 않는다.
-- 처음 설정할 때 두 비밀번호는 서로 달라야 하며 빈 비밀번호를 허용하지 않는다.
-  복잡도 조합 규칙은 강제하지 않는다.
+- 비밀번호 변경은 key wrapping을 교체하며 명단·이력·DB 본문을 다시 암호화하지 않는다.
+- 빈 비밀번호는 허용하지 않으며 복잡도 조합 규칙은 강제하지 않는다.
 
 credential JSON은 DB 옆의 앱 관리 sidecar다. 사용자가 별도 복구 파일로 복사하거나
 짝을 맞출 필요는 없으며 자동 백업에 DB와 함께 들어간다. 일반 QSettings에는 DB와
@@ -58,7 +57,7 @@ backup을 적용해 일관된 암호화 snapshot을 만든다. 백업 하나는 
 | 항목 | 내용 |
 |---|---|
 | `database.sqlite3` | 원본과 같은 random key로 암호화한 SQLite snapshot |
-| `credentials.json` | 평소·기관 복구 비밀번호로 wrap한 key 정보 |
+| `credentials.json` | 비밀번호로 wrap한 key 정보(기존 파일은 복구 slot 포함) |
 | `manifest.json` | 생성 시각, schema/revision, 파일 크기와 SHA-256 |
 
 생성한 청구서·확인서 Excel bytes는 `.mealbackup`에 넣지 않는다. DB 안의
@@ -69,12 +68,11 @@ backup을 적용해 일관된 암호화 snapshot을 만든다. 백업 하나는 
 `DatabaseSession.append_revision()`은 DB commit을 먼저 확정하고 그 직후 자동
 백업을 만든다. 백업 드라이브가 빠진 경우에도 확정된 DB 변경을 되돌리거나 실패한
 것처럼 취급하지 않고, `AutomaticBackupResult`로 “저장 성공, 백업 실패”를 따로
-보고한다. 시작 설정과 비밀번호 복구도 즉시 백업을 한 번 생성해 경로를 확인한다.
+보고한다. 시작 설정도 즉시 백업을 한 번 생성해 경로를 확인한다.
 
 복원은 archive 구성과 SHA-256을 확인하고, 실제 비밀번호로 DB를 연 뒤 SQLite,
-revision ledger, typed projection 무결성 검사를 모두 통과해야 완료된다. 평소
-비밀번호를 아는 복원과 기관 복구 비밀번호를 사용해 새 평소 비밀번호까지 만드는
-복원을 모두 지원한다. 기존 DB나 credential 파일은 덮어쓰지 않는다.
+revision ledger, typed projection 무결성 검사를 모두 통과해야 완료된다. 운영 파일
+비밀번호로 복원하며, 앱에서는 기관 복구 비밀번호를 사용하는 복원 경로를 제공하지 않는다. 기존 DB나 credential 파일은 덮어쓰지 않는다.
 
 자동 백업은 `database_id`별 최신 100개를 보관한다. 새 백업의 archive·hash·DB
 무결성 검증이 모두 끝난 뒤에만 100개를 초과한 가장 오래된 정상 백업을 삭제한다.

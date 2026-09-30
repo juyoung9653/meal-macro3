@@ -330,6 +330,14 @@ def application_stylesheet() -> str:
         background: {SURFACE};
         border: 1px solid {LINE};
     }}
+    QFrame#datePanelRail, QFrame#inspectorPanelRail {{
+        background: {LINE};
+        border: none;
+    }}
+    QToolButton#panelEdgeToggle {{
+        background: transparent;
+        border: none;
+    }}
     QFrame#editHeader {{
         background: #E8F3F5;
         border: 1px solid #BDD9DE;

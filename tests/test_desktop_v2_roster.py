@@ -1,7 +1,7 @@
 """Offscreen checks for the PySide6 date-spine roster shell."""
 
 import os
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from uuid import UUID
 
 import pytest
@@ -10,7 +10,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6")
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QAbstractItemView, QApplication, QDialogButtonBox
+from PySide6.QtWidgets import QAbstractItemView, QApplication, QDialogButtonBox, QLabel
 
 from src.desktop_v2 import (
     ImportReviewDialog,
@@ -33,6 +33,13 @@ from src.domain import (
     RosterSnapshot,
     StatusEvent,
     resolve_status_history,
+)
+from src.domain.delivery_routing import Driver, RoutingEvent, RoutingState
+from src.domain.entitlements import LunchDayRule, SchoolLunchMark
+from src.domain.school_calendar import (
+    SchoolLunchCalendar,
+    SchoolLunchDay,
+    SchoolLunchSchoolSchedule,
 )
 from src.importing import (
     HouseholdMatchCriterion,
@@ -129,12 +136,30 @@ def _histories():
     }
 
 
+def _calendar() -> SchoolLunchCalendar:
+    coverage = InclusiveDateRange(SERVICE_DAY, SERVICE_DAY + timedelta(days=1))
+    return SchoolLunchCalendar((
+        SchoolLunchSchoolSchedule(
+            "샘플초",
+            (coverage,),
+            tuple(
+                SchoolLunchDay(day, LunchDayRule(SchoolLunchMark.VENDOR_REQUIRED))
+                for day in (SERVICE_DAY, SERVICE_DAY + timedelta(days=1))
+            ),
+        ),
+    ))
+
+
 def test_model_filters_by_selected_meal_and_exposes_dynamic_columns(app):
-    model = RosterTableModel(_roster(), _histories())
+    model = RosterTableModel(_roster(), _histories(), school_calendar=_calendar())
     model.set_context(SERVICE_DAY, Meal.LUNCH)
 
-    assert model.rowCount() == 1
-    assert model.data(model.index(0, 0)) == "일시중지"
+    assert model.rowCount() == 2
+    lunch_column = next(
+        index for index, column in enumerate(model.columns) if column.key == "status:lunch"
+    )
+    assert model.data(model.index(0, lunch_column)) == "기사A\n일시중지"
+    assert model.data(model.index(0, lunch_column), model.StatusRole) == "일시중지"
     custom_column = next(
         index
         for index, column in enumerate(model.columns)
@@ -142,8 +167,94 @@ def test_model_filters_by_selected_meal_and_exposes_dynamic_columns(app):
     )
     assert model.data(model.index(0, custom_column)) == "A구역"
 
+    model.set_active_only(True)
+    assert model.rowCount() == 1
+
+
+def test_lunch_without_a_reviewed_school_schedule_displays_dash_with_driver(app):
+    model = RosterTableModel(_roster(), _histories())
+    model.set_context(SERVICE_DAY, Meal.LUNCH)
+    lunch_column = next(
+        index for index, column in enumerate(model.columns) if column.key == "status:lunch"
+    )
+
+    assert model.data(model.index(0, lunch_column)) == "기사A\n-"
+    assert model.data(model.index(0, lunch_column), model.StatusRole) == "-"
+    model.set_school_calendar(_calendar())
+    assert model.data(model.index(0, lunch_column)) == "기사A\n일시중지"
+
+
+def test_meal_columns_cache_independent_statuses_drivers_and_replacements(app):
+    from dataclasses import replace
+    from datetime import timedelta
+
+    roster = _roster()
+    breakfast_event = StatusEvent(
+        UUID("80000000-0000-0000-0000-000000000021"),
+        REVISION_ID,
+        FIRST_PERSON_ID,
+        Meal.BREAKFAST,
+        MealStatus.STOPPED,
+        InclusiveDateRange(SERVICE_DAY, SERVICE_DAY),
+        datetime(2026, 8, 24, 16, 0, tzinfo=UTC),
+        "조식 중지",
+    )
+    dinner_event = StatusEvent(
+        UUID("80000000-0000-0000-0000-000000000022"),
+        REVISION_ID,
+        FIRST_PERSON_ID,
+        Meal.DINNER,
+        MealStatus.PAUSED,
+        InclusiveDateRange(SERVICE_DAY, SERVICE_DAY),
+        datetime(2026, 8, 24, 16, 0, tzinfo=UTC),
+        "석식 일시중지",
+    )
+    three_meal_roster = replace(
+        roster,
+        enrollments=(
+            *roster.enrollments,
+            MealEnrollment(FIRST_PERSON_ID, Meal.BREAKFAST),
+            MealEnrollment(FIRST_PERSON_ID, Meal.DINNER),
+        ),
+        assignments=(
+            *roster.assignments,
+            DeliveryAssignment(FIRST_PERSON_ID, Meal.BREAKFAST, "기사B", "010"),
+            DeliveryAssignment(FIRST_PERSON_ID, Meal.DINNER, "기사C", "020"),
+        ),
+    )
+    histories = {
+        **_histories(),
+        (FIRST_PERSON_ID, Meal.BREAKFAST): resolve_status_history(
+            FIRST_PERSON_ID, Meal.BREAKFAST, (breakfast_event,)
+        ),
+        (FIRST_PERSON_ID, Meal.DINNER): resolve_status_history(
+            FIRST_PERSON_ID, Meal.DINNER, (dinner_event,)
+        ),
+    }
+    model = RosterTableModel(three_meal_roster, histories, school_calendar=_calendar())
+    model.set_context(SERVICE_DAY, Meal.LUNCH)
     model.set_active_only(False)
-    assert model.rowCount() == 2
+    columns = {column.key: index for index, column in enumerate(model.columns)}
+
+    assert tuple(columns)[:5] == (
+        "name", "birth_date", "status:dinner", "status:breakfast", "status:lunch"
+    )
+    assert model.data(model.index(0, columns["status:breakfast"])) == "기사B\n미배송"
+    assert model.data(model.index(0, columns["status:lunch"])) == "기사A\n일시중지"
+    assert model.data(model.index(0, columns["status:dinner"])) == "기사C\n일시중지"
+    assert model.data(model.index(0, columns["status:breakfast"]), model.StatusRole) == "중지"
+    assert model.data(model.index(1, columns["status:lunch"])) == "미지정\n-"
+
+    model.set_context(SERVICE_DAY + timedelta(days=1), Meal.LUNCH)
+    assert model.data(model.index(0, columns["status:breakfast"])) == "기사B\n배송"
+    model.sort(columns["status:dinner"])
+    model.replace_roster(three_meal_roster, {})
+    assert model.columns[model._sort_column].key == "status:dinner"
+    first_row = next(
+        row for row in range(model.rowCount())
+        if model.person_at(row).person_id == FIRST_PERSON_ID
+    )
+    assert model.data(model.index(first_row, columns["status:dinner"]), model.StatusRole) == "배송"
 
 
 def test_numbered_contact_columns_are_adjacent_searchable_and_inspected(app):
@@ -217,8 +328,8 @@ def test_numbered_contact_columns_are_adjacent_searchable_and_inspected(app):
     window.show()
     window._table.selectRow(0)
     app.processEvents()
-    assert "010-1234-5678 / 010-9876-5432" in window._inspector_detail.text()
-    assert "031-123-4567 / 031-987-6543" in window._inspector_detail.text()
+    assert "핸드폰 010-1234-5678\n핸드폰 010-9876-5432" in window._inspector_detail.text()
+    assert "전화 031-123-4567\n전화 031-987-6543" in window._inspector_detail.text()
     window.close()
 
 
@@ -245,63 +356,144 @@ def test_roster_table_enables_header_sorting(app):
     window.close()
 
 
-def test_context_menu_has_exact_five_actions_and_emits_status_request(app):
+def test_meal_context_menu_emits_status_and_assignment_requests(app):
     window = RosterWindow(_roster(), _histories())
     window._set_day(SERVICE_DAY)
     window._set_meal(Meal.LUNCH)
     person = window.table_model.person_at(0)
     requested = []
+    assignments = []
     window.status_action_requested.connect(lambda *args: requested.append(args))
+    window.driver_assignment_requested.connect(lambda *args: assignments.append(args))
 
-    menu = window._create_context_menu(person)
+    menu = window._create_context_menu(person, Meal.LUNCH)
 
     assert [action.text() for action in menu.actions()] == [
-        "배송",
-        "일시중지",
-        "중지",
+        "중식 배송",
+        "중식 일시중지",
+        "중식 미배송",
+        "배송담당 변경",
         "이력보기",
         "민원",
+        "",
+        "명단 행 삭제…",
     ]
     menu.actions()[1].trigger()
     assert requested == [(FIRST_PERSON_ID, Meal.LUNCH, MealStatus.PAUSED)]
+    menu.actions()[3].trigger()
+    assert assignments == [(FIRST_PERSON_ID, Meal.LUNCH)]
     window.close()
 
 
-def test_unit_price_button_emits_global_management_request(app):
-    window = RosterWindow(_roster(), _histories())
+def test_routing_state_updates_effective_delivery_view_and_driver_filter(app):
+    from dataclasses import replace
+
+    driver_id = UUID("80000000-0000-0000-0000-000000000031")
+    state = RoutingState(
+        drivers=(Driver(driver_id, "기사변경", "010-9999-0000"),),
+        events=(
+            RoutingEvent(
+                UUID("80000000-0000-0000-0000-000000000032"),
+                FIRST_PERSON_ID,
+                SERVICE_DAY,
+                1,
+                {Meal.LUNCH: driver_id},
+                "새 주소로 2",
+                "101호",
+            ),
+        ),
+    )
+    roster = replace(
+        _roster(),
+        assignments=(
+            *_roster().assignments,
+            DeliveryAssignment(SECOND_PERSON_ID, Meal.LUNCH, "기사변경", "099"),
+        ),
+    )
+    model = RosterTableModel(
+        roster, _histories(), routing_state=state, school_calendar=_calendar()
+    )
+    lunch_column = next(
+        index for index, column in enumerate(model.columns) if column.key == "status:lunch"
+    )
+    address_column = next(
+        index for index, column in enumerate(model.columns) if column.key == "address"
+    )
+
+    model.set_context(date.fromordinal(SERVICE_DAY.toordinal() - 1), Meal.LUNCH)
+    assert model.data(model.index(0, lunch_column)) == "기사A\n-"
+    assert model.data(model.index(0, address_column)) == "성남대로 1"
+    model.set_context(SERVICE_DAY, Meal.LUNCH)
+
+    assert model.data(model.index(0, lunch_column)) == "기사변경\n일시중지"
+    assert model.data(model.index(0, address_column)) == "새 주소로 2 101호"
+    model.set_active_only(False)
+    model.set_driver_filter(driver_id)
+    assert model.rowCount() == 2
+    model.set_driver_filter(UUID("80000000-0000-0000-0000-000000000033"))
+    assert model.rowCount() == 0
+
+    window = RosterWindow(
+        roster, _histories(), routing_state=state, school_calendar=_calendar()
+    )
+    window._set_day(SERVICE_DAY)
+    window._set_meal(Meal.LUNCH)
+    window.show()
+    window._table.selectRow(0)
+    app.processEvents()
+    assert "기사변경" not in window._inspector_detail.text()
+    assert "새 주소로 2 101호" in window._inspector_detail.text()
+    relocation_requests = []
+    window.relocation_requested.connect(relocation_requests.append)
+    person = window.table_model.person_at(0)
+    ordinary = window._create_context_menu(person, column_key="name")
+    assert [action.text() for action in ordinary.actions()] == ["정보 수정", "이력보기", "민원", "", "명단 행 삭제…"]
+    address = window._create_context_menu(person, column_key="address")
+    assert [action.text() for action in address.actions()] == ["정보 수정", "이사 등록", "이력보기", "민원", "", "명단 행 삭제…"]
+    address.actions()[1].trigger()
+    assert relocation_requests == [FIRST_PERSON_ID]
+    driver_index = window._driver_filter.findData(driver_id)
+    assert driver_index > 0
+    assert window._driver_filter.itemData(driver_index) == driver_id
+    assert isinstance(window._driver_filter.itemData(driver_index), UUID)
+    window.close()
+
+
+def test_unit_price_action_emits_global_management_request(app):
+    window = RosterWindow(_roster(), _histories(), school_calendar=_calendar())
     requested = []
     window.unit_price_requested.connect(lambda: requested.append(True))
 
-    window._unit_price_button.click()
+    window._unit_price_action.trigger()
     app.processEvents()
 
     assert requested == [True]
     window.close()
 
 
-def test_service_adjustment_button_emits_vendor_schedule_request(app):
-    window = RosterWindow(_roster(), _histories())
+def test_service_adjustment_action_emits_vendor_schedule_request(app):
+    window = RosterWindow(_roster(), _histories(), school_calendar=_calendar())
     requested = []
     window.service_adjustment_requested.connect(lambda: requested.append(True))
 
-    window._service_adjustment_button.click()
+    window._service_adjustment_action.trigger()
     app.processEvents()
 
     assert requested == [True]
-    assert "청구 제외" in window._service_adjustment_button.toolTip()
+    assert "청구 제외" in window._service_adjustment_action.toolTip()
     window.close()
 
 
-def test_settings_button_emits_excel_password_request(app):
+def test_settings_action_emits_excel_password_request(app):
     window = RosterWindow(_roster(), _histories())
     requested = []
     window.settings_requested.connect(lambda: requested.append(True))
 
-    window._settings_button.click()
+    window._settings_action.trigger()
     app.processEvents()
 
     assert requested == [True]
-    assert "Excel" in window._settings_button.toolTip()
+    assert "Excel" in window._settings_action.toolTip()
     window.close()
 
 
@@ -319,22 +511,23 @@ def test_single_document_button_emits_output_hub_request(app):
     window.close()
 
 
-def test_minimum_width_header_keeps_search_above_complete_action_row(app):
+def test_minimum_width_header_keeps_actions_and_filters_on_separate_rows(app):
     window = RosterWindow(_roster(), _histories())
     window.resize(1080, 680)
     window.show()
     app.processEvents()
 
-    assert window._documents_button.geometry().top() > window._search.geometry().top()
     assert (
         window._documents_button.geometry().right()
         < window._documents_button.parentWidget().width()
     )
+    assert window._column_search_header.buttons["name"].isVisible()
+    assert window._driver_filter.geometry().right() < window._driver_households_button.geometry().left()
     window.close()
 
 
 def test_row_selection_populates_household_inspector(app):
-    window = RosterWindow(_roster(), _histories())
+    window = RosterWindow(_roster(), _histories(), school_calendar=_calendar())
     window._set_day(SERVICE_DAY)
     window._set_meal(Meal.LUNCH)
     edit_requests = []
@@ -345,16 +538,74 @@ def test_row_selection_populates_household_inspector(app):
     app.processEvents()
 
     assert window._inspector_name.text() == "홍길동"
-    assert window._inspector_status.text() == "일시중지"
+    assert window.findChild(QLabel, "statusBadge") is None
+    assert window._inspector_detail.text() == (
+        "[연락처]\n핸드폰 010-1234-5678\n[주소]\n성남대로 1"
+    )
     assert window._household_list.count() == 2
     assert "김아침" in window._household_list.item(1).text()
+    assert window._meal_history_list.count() == 1
+    assert window._meal_history_list.item(0).text() == (
+        "2026-08-25 01:00  중식 · 17일 일시중지"
+    )
     assert (
         window._table.selectionBehavior()
-        is QAbstractItemView.SelectionBehavior.SelectRows
+        is QAbstractItemView.SelectionBehavior.SelectItems
+    )
+    assert (
+        window._table.selectionMode()
+        is QAbstractItemView.SelectionMode.ExtendedSelection
     )
     assert window._edit_person_button.isEnabled()
     window._edit_person_button.click()
     assert edit_requests == [FIRST_PERSON_ID]
+    window.close()
+
+
+def test_inspector_uses_meal_history_provider_in_a_scrollable_list(app):
+    calls = []
+
+    def provider(person):
+        calls.append(person.person_id)
+        return tuple(
+            (
+                f"{person.profile.name}의 아주 긴 식종 변경 이력 {index}",
+                f"전체 이력 {index}",
+            )
+            for index in range(6, 0, -1)
+        )
+
+    window = RosterWindow(_roster(), _histories(), school_calendar=_calendar())
+    window._set_day(SERVICE_DAY)
+    window._set_meal(Meal.LUNCH)
+    window._set_active_only(False)
+    window.show()
+    window._table.selectRow(0)
+    app.processEvents()
+    window.set_meal_change_history_provider(provider)
+    app.processEvents()
+
+    assert window._meal_history_list.count() == 6
+    assert window._meal_history_list.item(0).text() == "홍길동의 아주 긴 식종 변경 이력 6"
+    assert window._meal_history_list.item(0).toolTip() == "전체 이력 6"
+    assert window._meal_history_list.textElideMode() is Qt.TextElideMode.ElideRight
+    assert (
+        window._meal_history_list.visualItemRect(
+            window._meal_history_list.item(4),
+        ).bottom()
+        <= window._meal_history_list.viewport().rect().bottom()
+    )
+    assert (
+        window._meal_history_list.visualItemRect(
+            window._meal_history_list.item(5),
+        ).bottom()
+        > window._meal_history_list.viewport().rect().bottom()
+    )
+    assert window._meal_history_list.verticalScrollBar().maximum() > 0
+    window._table.selectRow(1)
+    app.processEvents()
+    assert window._meal_history_list.item(0).text() == "김아침의 아주 긴 식종 변경 이력 6"
+    assert calls == [FIRST_PERSON_ID, SECOND_PERSON_ID]
     window.close()
 
 
@@ -397,13 +648,13 @@ def test_roster_window_refreshes_after_later_import(app):
         revision_display_code="20260826-002",
     )
 
-    assert window.table_model.rowCount() == 2
+    assert window.table_model.rowCount() == 3
     assert window._revision_label.text() == "변경번호\n20260826-002"
     names = {
         window.table_model.person_at(row).profile.name
         for row in range(window.table_model.rowCount())
     }
-    assert names == {"홍길동", "나중에 추가된 아동"}
+    assert names == {"홍길동", "김아침", "나중에 추가된 아동"}
     window.close()
 
 
@@ -664,3 +915,220 @@ def test_status_period_dialog_supports_closed_pause_and_open_stop(app):
         stopped.selected_period()
     pause.close()
     stopped.close()
+
+
+def test_scrolling_uses_projection_without_requerying_roster(app, monkeypatch):
+    from PySide6.QtWidgets import QTableView
+
+    model = RosterTableModel(_roster(), _histories(), school_calendar=_calendar())
+    model.set_context(SERVICE_DAY, Meal.LUNCH)
+    model.set_active_only(False)
+    expected = [
+        [model.data(model.index(row, col)) for col in range(model.columnCount())]
+        for row in range(model.rowCount())
+    ]
+
+    def unexpected_query(*args, **kwargs):
+        raise AssertionError('Painting must not query roster or resolve history')
+
+    monkeypatch.setattr(RosterSnapshot, 'meals_for', unexpected_query)
+    monkeypatch.setattr(RosterSnapshot, 'resolve_assignment', unexpected_query)
+    history_type = type(next(iter(_histories().values())))
+    monkeypatch.setattr(history_type, 'status_on', unexpected_query)
+    roles = (
+        Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.ToolTipRole,
+        Qt.ItemDataRole.ForegroundRole, Qt.ItemDataRole.FontRole,
+        Qt.ItemDataRole.TextAlignmentRole, Qt.ItemDataRole.BackgroundRole,
+        Qt.ItemDataRole.DecorationRole, model.PersonIdRole, model.StatusRole,
+    )
+    for row in range(model.rowCount()):
+        for col in range(model.columnCount()):
+            for role in roles:
+                model.data(model.index(row, col), role)
+            assert model.data(model.index(row, col)) == expected[row][col]
+    view = QTableView()
+    view.setModel(model)
+    view.resize(320, 100)
+    try:
+        view.show()
+        app.processEvents()
+        view.verticalScrollBar().setValue(view.verticalScrollBar().maximum())
+        view.horizontalScrollBar().setValue(view.horizontalScrollBar().maximum())
+        app.processEvents()
+        assert sum(model.status_counts().values()) == 2
+    finally:
+        view.close()
+
+
+def test_projection_updates_after_context_and_roster_changes(app):
+    from dataclasses import replace
+    from datetime import timedelta
+
+    roster = _roster()
+    model = RosterTableModel(roster, _histories(), school_calendar=_calendar())
+    model.set_context(SERVICE_DAY, Meal.LUNCH)
+    lunch_column = next(
+        index for index, column in enumerate(model.columns) if column.key == "status:lunch"
+    )
+    name_column = next(
+        index for index, column in enumerate(model.columns) if column.key == "name"
+    )
+    assert model.data(model.index(0, lunch_column)) == "기사A\n일시중지"
+    model.set_context(SERVICE_DAY + timedelta(days=1), Meal.LUNCH)
+    assert model.data(model.index(0, lunch_column)) == "기사A\n배송"
+    model.set_context(SERVICE_DAY, Meal.BREAKFAST)
+    assert model.person_at(0).person_id == FIRST_PERSON_ID
+    model.set_context(SERVICE_DAY, Meal.LUNCH)
+    changed = replace(roster.persons[0], profile=replace(roster.persons[0].profile, name='수정된 이름'))
+    model.replace_roster(replace(roster, persons=(changed, roster.persons[1])), {})
+    assert model.data(model.index(0, lunch_column)) == "기사A\n배송"
+    assert model.data(model.index(0, name_column)) == '수정된 이름'
+    model.set_search('수정된')
+    assert model.rowCount() == 1
+    model.set_search('홍길동')
+    assert model.rowCount() == 0
+
+
+def test_every_column_context_menu_targets_clicked_person(app, monkeypatch):
+    window = RosterWindow(_roster(), _histories())
+    window._set_meal(Meal.DINNER)
+    window.show()
+    app.processEvents()
+    histories, complaints, opened = [], [], []
+    monkeypatch.setattr(window, "_show_history", lambda person, meal: histories.append((person.person_id, meal)))
+    window.complaint_requested.connect(lambda *args: complaints.append(args))
+
+    def choose_actions(menu, position):
+        actions = {action.text(): action for action in menu.actions()}
+        opened.append(actions)
+        actions["이력보기"].trigger()
+        actions["민원"].trigger()
+
+    original_create = window._create_context_menu
+
+    def create_menu(*args):
+        menu = original_create(*args)
+        menu.exec = lambda position: choose_actions(menu, position)
+        return menu
+
+    monkeypatch.setattr(window, "_create_context_menu", create_menu)
+    try:
+        # Exercise the real context-menu handler and indexAt mapping for every column.
+        for row in range(window.table_model.rowCount()):
+            person = window.table_model.person_at(row)
+            for col, column in enumerate(window.table_model.columns):
+                window._table.setColumnHidden(col, False)
+                index = window.table_model.index(row, col)
+                window._table.scrollTo(index)
+                app.processEvents()
+                point = window._table.visualRect(index).center()
+                assert window._table.indexAt(point) == index
+                window._open_context_menu(point)
+                expected = (person.person_id, column.meal)
+                assert histories[-1] == expected
+                assert complaints[-1] == expected
+                if column.meal is None:
+                    expected_edit = "순서 수정" if column.key == "sequence" else "정보 수정"
+                    assert expected_edit in opened[-1]
+                else:
+                    assert "배송담당 변경" in opened[-1]
+        assert len(opened) == window.table_model.rowCount() * len(window.table_model.columns)
+    finally:
+        window.close()
+
+
+def test_birth_month_combines_filters_and_updates_after_profile_edit(app):
+    from dataclasses import replace
+
+    roster = _roster()
+    model = RosterTableModel(roster)
+    model.set_birth_month(3)
+    assert model.rowCount() == 1
+    assert model.person_at(0).person_id == FIRST_PERSON_ID
+    model.set_search("김아침")
+    assert model.rowCount() == 0
+    model.set_birth_month(4)
+    assert model.rowCount() == 1
+    model.set_search("")
+    model.set_context(SERVICE_DAY, Meal.LUNCH)
+    model.set_active_only(True)
+    assert model.rowCount() == 0
+    model.set_context(SERVICE_DAY, Meal.BREAKFAST)
+    assert model.rowCount() == 1
+    model.set_active_only(False)
+    second = roster.persons[1]
+    model.replace_roster(replace(roster, persons=(roster.persons[0], replace(
+        second, profile=replace(second.profile, birth_date=None),
+    ))))
+    assert model.rowCount() == 0
+    model.set_birth_month(None)
+    assert model.rowCount() == 2
+    model.set_birth_month(2)
+    model.replace_roster(replace(roster, persons=(replace(
+        second, profile=replace(second.profile, birth_date=date(2016, 2, 29)),
+    ),), enrollments=(), assignments=(), memberships=()))
+    assert model.rowCount() == 1
+
+
+def test_birth_month_sidebar_dropdown_filters_below_meals(app):
+    window = RosterWindow(_roster(), _histories())
+    window.resize(1080, 680)
+    window.show()
+    app.processEvents()
+    dropdown = window._birth_month_filter
+    assert dropdown.currentData() is None
+    assert [dropdown.itemData(index) for index in range(dropdown.count())] == [
+        None, 0, *range(1, 13),
+    ]
+    dropdown.setCurrentIndex(dropdown.findData(3))
+    assert window._model.rowCount() == 1
+    assert window._model.person_at(0).person_id == FIRST_PERSON_ID
+    dropdown.setCurrentIndex(dropdown.findData(4))
+    assert window._model.person_at(0).person_id == SECOND_PERSON_ID
+    dropdown.setCurrentIndex(dropdown.findData(0))
+    assert window._model.rowCount() == sum(
+        person.profile.birth_date.month == date.today().month
+        for person in _roster().persons
+    )
+    dropdown.setCurrentIndex(0)
+    assert window._model.rowCount() == 2
+    assert dropdown.geometry().top() > max(
+        summary.geometry().bottom()
+        for summary in window._meal_summary_widgets.values()
+    )
+    assert dropdown.geometry().bottom() < window._count_metric.geometry().top()
+    assert window._revision_label.geometry().bottom() < window.height()
+    window.close()
+
+
+def test_numeric_and_date_custom_columns_are_centered_including_empty_cells(app):
+    from dataclasses import replace
+
+    definitions = tuple(
+        CustomFieldDefinition(UUID(int=900 + index), label, field_type, index)
+        for index, (label, field_type) in enumerate((
+            ("숫자", CustomFieldType.NUMBER),
+            ("날짜", CustomFieldType.DATE),
+            ("문자", CustomFieldType.TEXT),
+        ))
+    )
+    roster = _roster()
+    first = roster.persons[0]
+    roster = replace(roster, custom_fields=definitions, persons=(replace(
+        first, profile=replace(first.profile, custom_values={
+            definitions[0].definition_id: 0,
+            definitions[1].definition_id: date(2026, 9, 21),
+            definitions[2].definition_id: "문자값",
+        }),
+    ), roster.persons[1]))
+    model = RosterTableModel(roster)
+    for row in range(model.rowCount()):
+        for index, column in enumerate(model.columns):
+            alignment = model.data(model.index(row, index), Qt.ItemDataRole.TextAlignmentRole)
+            if column.key in {"birth_date", "grade", "sequence"} or (
+                column.custom_field is not None
+                and column.custom_field.field_type in {CustomFieldType.NUMBER, CustomFieldType.DATE}
+            ):
+                assert alignment == Qt.AlignmentFlag.AlignCenter
+            elif column.key == "name" or column.custom_field is not None:
+                assert alignment is None

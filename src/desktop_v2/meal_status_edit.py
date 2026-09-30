@@ -20,6 +20,8 @@ from PySide6.QtWidgets import (
     QLabel,
     QMessageBox,
     QPushButton,
+    QComboBox,
+    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
@@ -34,6 +36,8 @@ from src.domain import (
     StatusHistory,
     build_meal_status_revision,
 )
+from src.domain.meal_status_changes import build_batch_meal_status_revision
+from src.domain.intake import IntakeChannel
 from src.storage import AutomaticBackupResult, DatabaseSession
 
 from .import_controller import current_windows_actor
@@ -52,6 +56,9 @@ class MealStatusChangeDialog(QDialog):
         initial_meal: Meal,
         initial_status: MealStatus,
         parent: QWidget | None = None,
+        *,
+        targets: tuple[tuple[UUID, Meal], ...] | None = None,
+        all_histories: Mapping[tuple[UUID, Meal], StatusHistory] | None = None,
     ) -> None:
         if not isinstance(person, Person):
             raise TypeError("person은 Person이어야 합니다.")
@@ -75,26 +82,41 @@ class MealStatusChangeDialog(QDialog):
         self._person = person
         self._roster = roster
         self._histories = history_by_meal
+        self._seed_targets = (
+            tuple(dict.fromkeys(targets)) if targets is not None else None
+        )
+        self._all_histories = dict(all_histories or {})
+        self._all_histories.update(
+            {
+                (person.person_id, meal): history
+                for meal, history in history_by_meal.items()
+            }
+        )
         self._meal_checks: dict[Meal, QCheckBox] = {}
         self._meal_cards: dict[Meal, QFrame] = {}
         self._current_labels: dict[Meal, QLabel] = {}
         self._status_buttons: dict[MealStatus, QPushButton] = {}
         register_application_fonts()
         self.setObjectName("mealStatusChangeDialog")
-        self.setWindowTitle(f"{person.profile.name} · 배송 상태 변경")
-        self.resize(690, 650)
-        self.setMinimumSize(620, 590)
+        self.setWindowTitle(
+            "선택한 식종 일괄 변경"
+            if self._seed_targets is not None
+            else f"{person.profile.name} · 배송 상태 변경"
+        )
+        self.resize(730, 760)
+        self.setMinimumSize(640, 700)
         self.setStyleSheet(application_stylesheet())
         self._build_ui(anchor_day)
-        self._meal_checks[initial_meal].setChecked(True)
+        for meal in (
+            {m for _, m in self._seed_targets} if self._seed_targets else {initial_meal}
+        ):
+            self._meal_checks[meal].setChecked(True)
         self._status_buttons[initial_status].setChecked(True)
         self._continue.setChecked(initial_status is not MealStatus.PAUSED)
         self._refresh_state()
 
     def selected_meals(self) -> tuple[Meal, ...]:
-        return tuple(
-            meal for meal in Meal if self._meal_checks[meal].isChecked()
-        )
+        return tuple(meal for meal in Meal if self._meal_checks[meal].isChecked())
 
     def selected_status(self) -> MealStatus:
         for status in MealStatus:
@@ -110,6 +132,10 @@ class MealStatusChangeDialog(QDialog):
             raise ValueError("일시중지는 종료일이 필요합니다.")
         return period
 
+    def selected_intake_channel(self) -> IntakeChannel | None:
+        value = self._intake_channel.currentData()
+        return None if value is None else IntakeChannel(value)
+
     def _build_ui(self, anchor_day: date) -> None:
         root = QVBoxLayout(self)
         root.setContentsMargins(18, 18, 18, 16)
@@ -120,24 +146,36 @@ class MealStatusChangeDialog(QDialog):
         header_layout = QVBoxLayout(header)
         header_layout.setContentsMargins(16, 14, 16, 14)
         header_layout.setSpacing(3)
-        eyebrow = QLabel("급식 노선 · 기간 변경")
+        eyebrow = QLabel("배송 상태 · 기간 변경")
         eyebrow.setObjectName("editEyebrow")
         header_layout.addWidget(eyebrow)
-        title = QLabel(f"{self._person.profile.name} 배송 상태 변경")
+        title = QLabel(
+            "선택한 식종 일괄 변경"
+            if self._seed_targets is not None
+            else f"{self._person.profile.name} 배송 상태 변경"
+        )
         title.setObjectName("workspaceTitle")
         header_layout.addWidget(title)
-        guide = QLabel(
-            "여러 식종을 선택하면 같은 상태와 기간이 한 번에 적용됩니다."
-        )
+        guide = QLabel("여러 식종을 선택하면 같은 상태와 기간이 한 번에 적용됩니다.")
         guide.setObjectName("workspaceSubtitle")
         guide.setWordWrap(True)
         header_layout.addWidget(guide)
         root.addWidget(header)
 
-        root.addWidget(_section_label("적용할 식종"))
+        self._same_household = QCheckBox("같은 가구에도 일괄 적용 · 변경 시작일 기준")
+        self._same_household.setObjectName("sameHouseholdCheck")
+        self._same_household.toggled.connect(self._refresh_state)
+        root.addWidget(self._same_household)
+        scope_note = QLabel(
+            "일시중지·미배송 일괄 적용 시 이용하지 않는 식종은 제외합니다. 배송은 식종 이용을 함께 시작합니다."
+        )
+        scope_note.setWordWrap(True)
+        scope_note.setObjectName("muted")
+        root.addWidget(scope_note)
+        root.addWidget(_section_label("적용할 식종 · 여러 개 선택 가능"))
         meal_row = QHBoxLayout()
         meal_row.setSpacing(8)
-        for meal in Meal:
+        for meal in (Meal.DINNER, Meal.BREAKFAST, Meal.LUNCH):
             card = QFrame()
             card.setObjectName("mealChoiceCard")
             card.setProperty("selected", False)
@@ -145,6 +183,8 @@ class MealStatusChangeDialog(QDialog):
             card_layout.setContentsMargins(12, 10, 12, 10)
             check = QCheckBox(meal.value)
             check.setObjectName("mealChoiceCheck")
+            if self._seed_targets is not None:
+                check.setEnabled(any(m is meal for _, m in self._seed_targets))
             check.toggled.connect(self._refresh_state)
             current = QLabel()
             current.setObjectName("mealCurrentState")
@@ -163,11 +203,11 @@ class MealStatusChangeDialog(QDialog):
         status_group = QButtonGroup(self)
         status_group.setExclusive(True)
         for status, hint in (
-            (MealStatus.DELIVERY, "정상 배송·미가입은 자동 추가"),
+            (MealStatus.DELIVERY, "정상 배송·처음 이용하는 식종도 시작"),
             (MealStatus.PAUSED, "정해진 기간만 잠시 중단"),
             (MealStatus.STOPPED, "장기 또는 무기한 중지"),
         ):
-            button = QPushButton(f"{status.value}\n{hint}")
+            button = QPushButton(f"{_status_text(status)}\n{hint}")
             button.setObjectName("statusChoice")
             button.setCheckable(True)
             button.setProperty("statusKind", status.name.lower())
@@ -176,6 +216,16 @@ class MealStatusChangeDialog(QDialog):
             status_row.addWidget(button, 1)
             self._status_buttons[status] = button
         root.addLayout(status_row)
+
+        intake_row = QHBoxLayout()
+        intake_row.addWidget(_field_label("접수 경로"))
+        self._intake_channel = QComboBox()
+        self._intake_channel.setObjectName("intakeChannel")
+        self._intake_channel.addItem("미선택", None)
+        for channel in IntakeChannel:
+            self._intake_channel.addItem(channel.value, channel)
+        intake_row.addWidget(self._intake_channel, 1)
+        root.addLayout(intake_row)
 
         period_frame = QFrame()
         period_frame.setObjectName("editSection")
@@ -206,7 +256,12 @@ class MealStatusChangeDialog(QDialog):
         self._summary_text = QLabel()
         self._summary_text.setObjectName("summaryText")
         self._summary_text.setWordWrap(True)
-        summary_layout.addWidget(self._summary_text)
+        summary_scroll = QScrollArea()
+        summary_scroll.setWidgetResizable(True)
+        summary_scroll.setMinimumHeight(75)
+        summary_scroll.setMaximumHeight(160)
+        summary_scroll.setWidget(self._summary_text)
+        summary_layout.addWidget(summary_scroll)
         root.addWidget(summary)
 
         self._error = QLabel()
@@ -246,13 +301,21 @@ class MealStatusChangeDialog(QDialog):
 
         starts_on = _python_date(self._starts_on)
         for meal, label in self._current_labels.items():
-            label.setText(f"현재  {_current_state(self._roster, self._histories, self._person, meal, starts_on)}")
+            if self._seed_targets is not None:
+                count = sum(selected is meal for _, selected in self._seed_targets)
+                label.setText(f"명단에서 선택한 셀 {count}개")
+            else:
+                label.setText(
+                    f"현재  {_current_state(self._roster, self._histories, self._person, meal, starts_on)}"
+                )
 
         error = self._validation_error()
         self._error.setText(error or "")
         self._error.setVisible(error is not None)
         self._save_button.setEnabled(error is None)
         self._summary_text.setText(self._summary())
+        count = len(self.selected_targets())
+        self._save_button.setText(f"{count}개 변경 저장")
 
     def _checked_status(self) -> MealStatus | None:
         return next(
@@ -276,21 +339,21 @@ class MealStatusChangeDialog(QDialog):
         except ValueError as error:
             return str(error)
         if status is MealStatus.DELIVERY:
-            return None
-        not_enrolled = tuple(
-            meal
-            for meal in meals
-            if meal not in self._roster.meals_for(
-                self._person.person_id,
-                on=period.starts_on,
+            return None if self.selected_targets() else "적용할 항목을 선택해주세요."
+        targets = self.selected_targets()
+        if not targets:
+            return "적용할 항목이 없습니다. 선택한 식종과 시작일을 확인해주세요."
+        invalid = [
+            (pid, meal)
+            for pid, meal in targets
+            if meal not in self._roster.meals_for(pid, on=period.starts_on)
+        ]
+        if invalid:
+            labels = " · ".join(
+                f"{self._roster.person(pid).profile.name} {meal.value}"
+                for pid, meal in invalid
             )
-        )
-        if not_enrolled:
-            labels = " · ".join(meal.value for meal in not_enrolled)
-            return (
-                f"{labels}은 시작일에 미가입입니다. "
-                "미가입 식종은 배송으로 먼저 시작해주세요."
-            )
+            return f"{labels}은 시작일에 이용 중인 식종이 아닙니다. 먼저 해당 식종을 배송 상태로 시작해주세요."
         return None
 
     def _summary(self) -> str:
@@ -303,21 +366,68 @@ class MealStatusChangeDialog(QDialog):
         except ValueError:
             return "기간을 확인해주세요."
         period_text = _period_text(period)
-        lines: list[str] = []
-        for meal in meals:
+        targets = self.selected_targets()
+        requested = self._requested_targets()
+        lines = [
+            f"{len({pid for pid, _ in targets})}명 · 선택한 식종 {len(meals)}개 · 총 {len(targets)}개 적용"
+        ]
+        for person_id, meal in requested:
+            person = self._roster.person(person_id)
+            history = self._all_histories.get((person_id, meal))
             current = _current_state(
                 self._roster,
-                self._histories,
-                self._person,
+                {meal: history} if history else {},
+                person,
                 meal,
                 period.starts_on,
             )
-            if status is MealStatus.DELIVERY and current == "미가입":
-                after = "식종 추가 · 배송"
-            else:
-                after = status.value
-            lines.append(f"{meal.value}   {current} → {after}   ·   {period_text}")
+            if (person_id, meal) not in targets:
+                lines.append(
+                    f"{person.profile.name} · {meal.value} · 이용 중이 아니어서 제외"
+                )
+                continue
+            after = (
+                "식종 추가 · 배송"
+                if status is MealStatus.DELIVERY and current == "-"
+                else _status_text(status)
+            )
+            lines.append(
+                f"{person.profile.name} · {meal.value}   {current} → {after}   ·   {period_text}"
+            )
         return "\n".join(lines)
+
+    def _requested_targets(self) -> tuple[tuple[UUID, Meal], ...]:
+        meals = self.selected_meals()
+        seeds = (
+            tuple((pid, meal) for pid, meal in self._seed_targets if meal in meals)
+            if self._seed_targets is not None
+            else tuple((self._person.person_id, meal) for meal in meals)
+        )
+        targets = dict.fromkeys(seeds)
+        if self._same_household.isChecked():
+            on = _python_date(self._starts_on)
+            for person_id, meal in seeds:
+                household_ids = {
+                    m.household_id
+                    for m in self._roster.memberships
+                    if m.person_id == person_id and m.period.contains(on)
+                }
+                for household_id in household_ids:
+                    for member in self._roster.household_members(household_id, on=on):
+                        targets[(member.person_id, meal)] = None
+        return tuple(targets)
+
+    def selected_targets(self) -> tuple[tuple[UUID, Meal], ...]:
+        targets = self._requested_targets()
+        bulk = self._same_household.isChecked() or self._seed_targets is not None
+        if bulk and self._checked_status() in (MealStatus.PAUSED, MealStatus.STOPPED):
+            on = _python_date(self._starts_on)
+            return tuple(
+                (pid, meal)
+                for pid, meal in targets
+                if meal in self._roster.meals_for(pid, on=on)
+            )
+        return targets
 
     def _save(self) -> None:
         error = self._validation_error()
@@ -369,6 +479,17 @@ class MealStatusChangeController:
         self._revision_id_factory = revision_id_factory
         self._event_id_factory = event_id_factory
 
+    def run_batch(
+        self, targets, initial_status, anchor_day, parent=None
+    ) -> MealStatusChangeOutcome:
+        targets = tuple(dict.fromkeys(targets))
+        if not targets:
+            return MealStatusChangeOutcome(MealStatusChangeStatus.CANCELLED)
+        person_id, meal = targets[0]
+        return self.run(
+            person_id, meal, initial_status, anchor_day, parent, targets=targets
+        )
+
     def run(
         self,
         person_id: UUID,
@@ -376,6 +497,8 @@ class MealStatusChangeController:
         initial_status: MealStatus,
         anchor_day: date,
         parent: QWidget | None = None,
+        *,
+        targets: tuple[tuple[UUID, Meal], ...] | None = None,
     ) -> MealStatusChangeOutcome:
         roster = self._session.database.current_roster()
         if roster is None:
@@ -394,10 +517,22 @@ class MealStatusChangeController:
                 str(error),
             )
             return MealStatusChangeOutcome(MealStatusChangeStatus.FAILED)
-        histories = {
-            meal: self._session.database.status_history(person_id, meal)
+        seed_ids = {pid for pid, _ in targets} if targets else {person_id}
+        households = {
+            m.household_id for m in roster.memberships if m.person_id in seed_ids
+        }
+        related_ids = seed_ids | {
+            m.person_id for m in roster.memberships if m.household_id in households
+        }
+        all_histories = {
+            (pid, meal): self._session.database.status_history(pid, meal)
+            for pid in related_ids
             for meal in Meal
         }
+        histories = {meal: all_histories[(person_id, meal)] for meal in Meal}
+        kwargs = {}
+        if self._dialog_type is MealStatusChangeDialog or targets is not None:
+            kwargs = {"targets": targets, "all_histories": all_histories}
         dialog = self._dialog_type(
             person,
             roster,
@@ -406,37 +541,59 @@ class MealStatusChangeController:
             initial_meal,
             initial_status,
             parent,
+            **kwargs,
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return MealStatusChangeOutcome(MealStatusChangeStatus.CANCELLED)
         try:
             meals = dialog.selected_meals()
-            prepared = build_meal_status_revision(
-                roster,
-                person_id,
-                meals,
-                dialog.selected_status(),
-                dialog.selected_period(),
-                actor=self._actor_provider(),
-                recorded_at=self._recorded_at_provider(),
-                revision_id=self._revision_id_factory(),
-                event_ids={meal: self._event_id_factory() for meal in meals},
+            intake_getter = getattr(dialog, "selected_intake_channel", None)
+            intake_channel = intake_getter() if callable(intake_getter) else None
+            target_getter = getattr(dialog, "selected_targets", None)
+            selected = target_getter() if callable(target_getter) else ()
+            is_batch = targets is not None or any(
+                selected_person_id != person_id
+                for selected_person_id, _meal in selected
             )
+            if is_batch:
+                prepared = build_batch_meal_status_revision(
+                    roster,
+                    selected,
+                    dialog.selected_status(),
+                    dialog.selected_period(),
+                    actor=self._actor_provider(),
+                    recorded_at=self._recorded_at_provider(),
+                    revision_id=self._revision_id_factory(),
+                    event_ids={target: self._event_id_factory() for target in selected},
+                    intake_channel=intake_channel,
+                )
+            else:
+                prepared = build_meal_status_revision(
+                    roster,
+                    person_id,
+                    meals,
+                    dialog.selected_status(),
+                    dialog.selected_period(),
+                    actor=self._actor_provider(),
+                    recorded_at=self._recorded_at_provider(),
+                    revision_id=self._revision_id_factory(),
+                    event_ids={meal: self._event_id_factory() for meal in meals},
+                    intake_channel=intake_channel,
+                )
             backup_result = self._session.append_revision(prepared.record)
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - report persistence failures at the UI boundary
             self._message_box.critical(
                 parent,
                 "배송 상태를 저장하지 못했습니다",
                 "저장된 명단에는 반영하지 않았습니다. "
-                "내용을 확인한 뒤 다시 시도해주세요.\n\n"
-                + str(error),
+                "내용을 확인한 뒤 다시 시도해주세요.\n\n" + str(error),
             )
             return MealStatusChangeOutcome(MealStatusChangeStatus.FAILED)
         if backup_result.error is not None:
             self._message_box.warning(
                 parent,
                 "배송 상태는 저장됐지만 자동 백업에 실패했습니다",
-                "변경 내용과 이력은 DB에 정상 저장되었습니다. "
+                "변경 내용과 이력은 운영 데이터에 정상 저장되었습니다. "
                 "백업 폴더 연결을 확인한 뒤 백업을 다시 실행해주세요.\n\n"
                 + str(backup_result.error),
             )
@@ -447,6 +604,10 @@ class MealStatusChangeController:
         )
 
 
+def _status_text(status: MealStatus) -> str:
+    return "미배송" if status is MealStatus.STOPPED else status.value
+
+
 def _current_state(
     roster: RosterSnapshot,
     histories: Mapping[Meal, StatusHistory],
@@ -455,12 +616,12 @@ def _current_state(
     on: date,
 ) -> str:
     if meal not in roster.meals_for(person.person_id, on=on):
-        return "미가입"
+        return "-"
     history = histories.get(meal)
     return (
         MealStatus.DELIVERY.value
         if history is None
-        else history.status_on(on).value
+        else _status_text(history.status_on(on))
     )
 
 

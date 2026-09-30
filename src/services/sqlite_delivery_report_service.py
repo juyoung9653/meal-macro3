@@ -12,7 +12,6 @@ from uuid import UUID
 from src.core.diff_format import fmt_cell
 from src.domain.delivery_policies import (
     BreakfastDeliveryPolicySchedule,
-    breakfast_delivery_policy_from_snapshot,
 )
 from src.domain.entitlements import (
     BreakfastDeliveryRule,
@@ -54,7 +53,7 @@ from src.services.delivery_service import (
 )
 
 
-DELIVERY_REPORT_CALCULATION_CONTRACT_VERSION = 1
+DELIVERY_REPORT_CALCULATION_CONTRACT_VERSION = 2
 DELIVERY_REPORT_GROUPING_POLICY_VERSION = 1
 
 
@@ -127,7 +126,8 @@ def prepare_delivery_report_data(
     roster = roster_from_historical_snapshot(snapshot)
     school_calendar = school_lunch_calendar_from_snapshot(snapshot)
     adjustments = service_adjustment_schedule_from_snapshot(snapshot)
-    breakfast_policy = breakfast_delivery_policy_from_snapshot(snapshot)
+    # Retired user-configurable policy records remain in the ledger only.
+    breakfast_policy = BreakfastDeliveryPolicySchedule()
     status_events = status_events_from_historical_snapshot(snapshot)
     events_by_key: defaultdict[tuple[UUID, Meal], list[StatusEvent]] = defaultdict(list)
     for event in status_events:

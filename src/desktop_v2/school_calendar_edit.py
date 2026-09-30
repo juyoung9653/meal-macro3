@@ -162,12 +162,12 @@ class SchoolCalendarEditDialog(QDialog):
         layout.setContentsMargins(18, 14, 18, 14)
         text = QVBoxLayout()
         text.setSpacing(2)
-        eyebrow = QLabel("SAVED SCHOOL LUNCH TIMETABLE")
+        eyebrow = QLabel("저장된 학교별 중식 일정")
         eyebrow.setObjectName("editEyebrow")
         title = QLabel("저장된 학교 급식 운행표")
         title.setObjectName("workspaceTitle")
         subtitle = QLabel(
-            "Excel 파일 없이 DB의 최신 일정을 엽니다. 표에서 기간을 고쳐도 저장 전까지 원본은 바뀌지 않습니다."
+            "Excel 파일 없이 운영 데이터의 최신 일정을 엽니다. 표에서 기간을 고쳐도 저장 전까지 원본은 바뀌지 않습니다."
         )
         subtitle.setObjectName("workspaceSubtitle")
         subtitle.setWordWrap(True)
@@ -175,7 +175,7 @@ class SchoolCalendarEditDialog(QDialog):
         text.addWidget(title)
         text.addWidget(subtitle)
         layout.addLayout(text, 1)
-        stamp = QLabel("DB")
+        stamp = QLabel("저장")
         stamp.setObjectName("schoolCalendarEditStamp")
         stamp.setAlignment(Qt.AlignmentFlag.AlignCenter)
         stamp.setFixedSize(58, 58)
@@ -485,12 +485,12 @@ class SchoolCalendarEditDialog(QDialog):
         if school_count:
             self._summary.setText(
                 f"저장 대기 · {school_count}개 학교, {weekday_count}개 평일이 달라졌습니다. "
-                "아래 ‘변경 일정 저장’을 눌러야 DB와 자동 백업에 반영됩니다."
+                "아래 ‘변경 일정 저장’을 눌러야 저장 내용과 자동 백업에 반영됩니다."
             )
             self._summary.setProperty("changed", True)
         else:
             self._summary.setText(
-                f"현재 DB의 저장 일정 · {len(self._school_order)}개 학교. "
+                f"현재 저장된 데이터의 저장 일정 · {len(self._school_order)}개 학교. "
                 "학교와 구간을 선택해 시작일·종료일·O/X를 고칠 수 있습니다."
             )
             self._summary.setProperty("changed", False)
@@ -631,7 +631,7 @@ class SchoolCalendarEditController:
             self._message_box.critical(
                 parent,
                 "학교 일정을 저장하지 못했습니다",
-                "DB에는 반영하지 않았습니다. 수정 날짜와 O/X를 확인한 뒤 다시 시도해주세요.\n\n"
+                "운영 데이터에는 반영하지 않았습니다. 수정 날짜와 O/X를 확인한 뒤 다시 시도해주세요.\n\n"
                 + str(error),
             )
             return SchoolCalendarEditOutcome(SchoolCalendarEditStatus.FAILED)
@@ -646,7 +646,7 @@ class SchoolCalendarEditController:
             self._message_box.warning(
                 parent,
                 "학교 일정은 저장됐지만 자동 백업에 실패했습니다",
-                "학교 일정과 변경 이력은 DB에 정상 저장되었습니다. "
+                "학교 일정과 변경 이력은 운영 데이터에 정상 저장되었습니다. "
                 "백업 폴더 연결을 확인한 뒤 백업을 다시 실행해주세요.\n\n"
                 + str(backup_result.error),
             )

@@ -124,7 +124,7 @@ def test_monthly_dialog_opens_on_anchor_month_and_allows_another_month(
         date(2026, 8, 1),
         date(2026, 8, 31),
     )
-    assert "20260831-004" in dialog.findChild(
+    assert "20260831-140000" in dialog.findChild(
         type(dialog._summary),
         "documentPeriodAnchorDetail",
     ).text()

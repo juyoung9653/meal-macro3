@@ -153,7 +153,7 @@ class ServiceAdjustmentHubDialog(QDialog):
         header_layout = QVBoxLayout(header)
         header_layout.setContentsMargins(16, 14, 16, 14)
         header_layout.setSpacing(3)
-        eyebrow = QLabel("현재 DB · 공휴일 후보와 업체 자체 휴무")
+        eyebrow = QLabel("현재 저장된 데이터 · 공휴일 후보와 업체 자체 휴무")
         eyebrow.setObjectName("editEyebrow")
         title = QLabel("휴무·공휴일 관리")
         title.setObjectName("workspaceTitle")
@@ -191,7 +191,7 @@ class ServiceAdjustmentHubDialog(QDialog):
         candidate_layout.addLayout(tools)
 
         notice = QLabel(
-            "목록에 나타난 것만으로는 DB가 바뀌지 않습니다. "
+            "목록에 나타난 것만으로는 저장된 내용이 바뀌지 않습니다. "
             "인터넷 연결 없이 앱에 포함된 한국 공휴일 기준으로 표시합니다."
         )
         notice.setObjectName("holidayCandidateNotice")
@@ -224,7 +224,7 @@ class ServiceAdjustmentHubDialog(QDialog):
         self._candidates.setObjectName("holidayCandidateTable")
         self._candidates.setColumnCount(4)
         self._candidates.setHorizontalHeaderLabels(
-            ("선택", "날짜", "공휴일", "현재 DB 검토 상태")
+            ("선택", "날짜", "공휴일", "현재 저장된 데이터 검토 상태")
         )
         self._candidates.setEditTriggers(
             QAbstractItemView.EditTrigger.NoEditTriggers
@@ -492,7 +492,7 @@ class PublicHolidayBatchDialog(QDialog):
         header_layout = QVBoxLayout(header)
         header_layout.setContentsMargins(16, 14, 16, 14)
         header_layout.setSpacing(3)
-        eyebrow = QLabel("현재 DB · 선택한 공휴일에 같은 운영 방식 적용")
+        eyebrow = QLabel("현재 저장된 데이터 · 선택한 공휴일에 같은 운영 방식 적용")
         eyebrow.setObjectName("editEyebrow")
         title = QLabel("공휴일 일괄 검토")
         title.setObjectName("workspaceTitle")
@@ -914,7 +914,7 @@ class ServiceAdjustmentDialog(QDialog):
         title.setObjectName("workspaceTitle")
         guide = QLabel(
             (
-                "전체 식종이 기본 선택됩니다. 이 DB에서 실제로 어떻게 "
+                "전체 식종이 기본 선택됩니다. 이 운영 데이터에서 실제로 어떻게 "
                 "운영할지 하나를 확정해주세요."
                 if self._public_holiday is not None
                 else "전체 식종이 기본 선택됩니다. 미제공은 청구에서 빼고, "
@@ -1543,7 +1543,7 @@ class ServiceAdjustmentController:
             self._message_box.warning(
                 parent,
                 "일정은 저장됐지만 자동 백업에 실패했습니다",
-                "휴무·대체식 일정과 이력은 DB에 정상 저장되었습니다. "
+                "휴무·대체식 일정과 이력은 운영 데이터에 정상 저장되었습니다. "
                 "백업 폴더 연결을 확인한 뒤 백업을 다시 실행해주세요.\n\n"
                 + str(backup_result.error),
             )

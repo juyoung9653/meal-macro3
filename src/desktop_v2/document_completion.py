@@ -21,6 +21,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from src.domain.revisions import format_revision_timestamp
+
 from .document_output import DocumentOutputSelection
 from .theme import application_stylesheet, register_application_fonts
 
@@ -170,7 +172,7 @@ class DocumentCompletionDialog(QDialog):
         layout.setContentsMargins(18, 15, 18, 16)
         layout.setSpacing(4)
 
-        eyebrow = QLabel("DOCUMENT READY · 발행 완료")
+        eyebrow = QLabel("문서 생성 완료")
         eyebrow.setObjectName("editEyebrow")
         title = QLabel("문서를 정상적으로 만들었습니다")
         title.setObjectName("workspaceTitle")
@@ -230,7 +232,7 @@ class DocumentCompletionDialog(QDialog):
         meals = " / ".join(meal.value for meal in document.meals)
         context = QLabel(
             f"식종  {meals}\n"
-            f"원본 변경번호  {period.source.display_code}\n"
+            f"원본 변경번호  {format_revision_timestamp(period.source.recorded_at)}\n"
             f"생성 시각  {_generated_at_text(self._result.generated_at)}"
         )
         context.setObjectName("documentCompletionContext")

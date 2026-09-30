@@ -12,7 +12,6 @@ from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
 from src.desktop_v2 import PersonProfileEditDialog
 from src.domain import Person, PersonProfile
 
-
 PERSON_ID = UUID("86000000-0000-0000-0000-000000000001")
 CUSTOM_FIELD_ID = UUID("86000000-0000-0000-0000-000000000002")
 
@@ -108,3 +107,72 @@ def test_required_name_and_birth_date_are_validated_before_save(
     assert dialog.result() == QDialog.DialogCode.Accepted
     assert dialog.profile().name == "홍길순"
     assert _Questions.calls == []
+
+
+def test_household_phone_copy_requires_confirmation_even_without_subject_edits(app):
+    from uuid import uuid4
+
+    _Questions.reset()
+    person = _person()
+    sibling = Person(uuid4(), PersonProfile("가족", mobile_phone="010-2222-2222"))
+    dialog = PersonProfileEditDialog(person, message_box=_Questions, household_members=(person, sibling))
+    assert not dialog.household_mobile.isChecked()
+    assert not dialog._save_button.isEnabled()
+    dialog.household_mobile.setChecked(True)
+    assert dialog._save_button.isEnabled()
+    dialog._save_button.click()
+    assert dialog.result() == QDialog.DialogCode.Rejected
+    assert "가족" in _Questions.calls[-1][2]
+    _Questions.answer = QMessageBox.StandardButton.Yes
+    dialog._save_button.click()
+    assert dialog.result() == QDialog.DialogCode.Accepted
+    assert dialog.apply_mobile_to_household()
+    assert dialog.profile() == person.profile
+
+
+def test_household_phone_disabled_for_single_person(app):
+    dialog = PersonProfileEditDialog(_person())
+    assert not dialog.household_mobile.isEnabled()
+    assert not dialog.apply_mobile_to_household()
+
+
+def test_controller_saves_household_phone_changes_in_one_revision(app):
+    from dataclasses import replace
+    from types import SimpleNamespace
+    from uuid import uuid4
+
+    from src.desktop_v2.person_edit import PersonProfileEditController
+    from src.domain import Household, HouseholdMembership, RevisionActor, RosterSnapshot
+
+    person = Person(uuid4(), PersonProfile("본인", mobile_phone="010-1111-1111"))
+    sibling = Person(uuid4(), PersonProfile("가족", mobile_phone="010-2222-2222"))
+    household = Household(uuid4())
+    roster = RosterSnapshot(uuid4(), persons=(person, sibling), households=(household,),
+        memberships=tuple(HouseholdMembership(member.person_id, household.household_id)
+                          for member in (person, sibling)))
+    records = []
+    def append(record):
+        records.append(record)
+        return SimpleNamespace(error=None)
+    from unittest.mock import Mock
+
+    from src.storage import DatabaseSession
+
+    session = Mock(spec=DatabaseSession)
+    session.database = SimpleNamespace(current_roster=lambda: roster)
+    session.append_revision = append
+    class Dialog:
+        def __init__(self, *args, **kwargs):
+            pass
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+        def profile(self):
+            return replace(person.profile, mobile_phone="010-9999-9999")
+        def apply_mobile_to_household(self):
+            return True
+    outcome = PersonProfileEditController(session, dialog_type=Dialog,
+        actor_provider=lambda: RevisionActor("tester", "test")).run(person.person_id)
+    assert outcome.completed
+    assert len(records) == 1
+    assert len(records[0].changes) == 2
+    assert {member.profile.mobile_phone for member in outcome.roster.persons} == {"010-9999-9999"}

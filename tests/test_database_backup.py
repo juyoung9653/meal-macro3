@@ -33,6 +33,7 @@ from src.storage import (
     DatabaseSession,
     inspect_backup,
 )
+from src.storage.database_backup import backup_has_recovery_password
 
 
 REVISION_ID = UUID("70000000-0000-0000-0000-000000000001")
@@ -79,6 +80,31 @@ def _document_run() -> DocumentRun:
         output_sha256="c" * 64,
         output_byte_size=2048,
     )
+
+
+def test_single_password_create_change_and_restore(tmp_path: Path):
+    source = tmp_path / "single.sqlite3"
+    backups = tmp_path / "backups"
+    backups.mkdir()
+    with DatabaseSession.create(source, "only-password", backup_directory=backups) as session:
+        assert session.credentials.recovery_slot is None
+        session.change_user_password("only-password", "new-password")
+        backup = session.backup_now()
+    assert not backup_has_recovery_password(backup.path)
+    with pytest.raises(CredentialUnlockError):
+        DatabaseSession.open(source, "only-password")
+    with pytest.raises(CredentialUnlockError):
+        DatabaseSession.restore_and_open_with_user_password(
+            backup.path, tmp_path / "wrong.sqlite3", "only-password"
+        )
+    destination = tmp_path / "restored.sqlite3"
+    with DatabaseSession.restore_and_open_with_user_password(
+        backup.path, destination, "new-password"
+    ) as restored:
+        restored.database.check_integrity()
+        assert restored.credentials.recovery_slot is None
+    with pytest.raises(CredentialUnlockError):
+        DatabaseSession.open(destination, "only-password")
 
 
 def test_user_password_opens_db_and_recovery_password_resets_it(tmp_path: Path):

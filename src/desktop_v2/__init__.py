@@ -36,12 +36,6 @@ from .document_generation import (
     DocumentGenerationStatus,
 )
 from .settings_hub import SettingsAction, SettingsHubDialog
-from .breakfast_delivery_policy import (
-    BreakfastDeliveryPolicyController,
-    BreakfastDeliveryPolicyDialog,
-    BreakfastDeliveryPolicyOutcome,
-    BreakfastDeliveryPolicyStatus,
-)
 from .document_template import (
     DocumentTemplateChangeOutcome,
     DocumentTemplateChangeStatus,
@@ -98,10 +92,6 @@ from .school_calendar_edit import (
 
 _DATABASE_ACCESS_EXPORTS = {
     "CreateDatabaseDialog",
-    "BreakfastDeliveryPolicyController",
-    "BreakfastDeliveryPolicyDialog",
-    "BreakfastDeliveryPolicyOutcome",
-    "BreakfastDeliveryPolicyStatus",
     "DesktopStorageSettings",
     "LoginDialog",
     "MealStatusChangeController",
@@ -112,7 +102,6 @@ _DATABASE_ACCESS_EXPORTS = {
     "PersonProfileEditDialog",
     "PersonProfileEditOutcome",
     "PersonProfileEditStatus",
-    "RecoveryPasswordDialog",
     "RestoreBackupDialog",
 }
 _CONTROLLER_EXPORTS = {
@@ -169,7 +158,6 @@ __all__ = [
     "ImportReviewDialog",
     "ImportWizardSelection",
     "LoginDialog",
-    "RecoveryPasswordDialog",
     "RestoreBackupDialog",
     "RosterTableModel",
     "RosterImportWizard",

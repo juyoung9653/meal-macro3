@@ -85,7 +85,7 @@ class DocumentTemplateDialog(QDialog):
         for profile, button in self._buttons.items():
             if button.isChecked():
                 return profile
-        raise ValueError("이 DB에서 사용할 문서 양식을 선택해주세요.")
+        raise ValueError("이 운영 데이터에서 사용할 문서 양식을 선택해주세요.")
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -97,12 +97,12 @@ class DocumentTemplateDialog(QDialog):
         header_layout = QVBoxLayout(header)
         header_layout.setContentsMargins(18, 15, 18, 16)
         header_layout.setSpacing(4)
-        eyebrow = QLabel("DOCUMENT FORM · 업체 DB 기본값")
+        eyebrow = QLabel("문서 양식 · 공통 설정")
         eyebrow.setObjectName("editEyebrow")
         title = QLabel("청구서·확인서 양식 선택")
         title.setObjectName("workspaceTitle")
         subtitle = QLabel(
-            "이 DB는 업체 한 곳의 양식을 기억합니다. 이후 문서를 만들 때 자동으로 같은 양식을 사용합니다."
+            "이 운영 데이터는 업체 한 곳의 양식을 기억합니다. 이후 문서를 만들 때 자동으로 같은 양식을 사용합니다."
         )
         subtitle.setObjectName("workspaceSubtitle")
         subtitle.setWordWrap(True)
@@ -332,7 +332,7 @@ class DocumentTemplateController:
             self._message_box.warning(
                 parent,
                 "문서 양식은 저장됐지만 자동 백업에 실패했습니다",
-                "양식 선택은 DB에 저장되었습니다. 백업 폴더를 확인해주세요.\n\n"
+                "양식 선택은 운영 데이터에 저장되었습니다. 백업 폴더를 확인해주세요.\n\n"
                 + str(backup_result.error),
             )
         return DocumentTemplateChangeOutcome(

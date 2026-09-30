@@ -212,7 +212,7 @@ class DocumentHubDialog(QDialog):
         layout = QVBoxLayout(frame)
         layout.setContentsMargins(18, 15, 18, 16)
         layout.setSpacing(4)
-        eyebrow = QLabel("OUTPUT DESK · 현재 DB")
+        eyebrow = QLabel("문서 만들기 · 현재 명단")
         eyebrow.setObjectName("editEyebrow")
         title = QLabel("어떤 문서를 만들까요?")
         title.setObjectName("workspaceTitle")

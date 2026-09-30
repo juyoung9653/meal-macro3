@@ -149,7 +149,7 @@ class SchoolCalendarImportDialog(QDialog):
         frame.setObjectName("schoolCalendarHeader")
         layout = QVBoxLayout(frame)
         layout.setContentsMargins(18, 15, 18, 15)
-        eyebrow = QLabel("SCHOOL LUNCH TIMETABLE")
+        eyebrow = QLabel("학교별 중식 일정")
         eyebrow.setObjectName("editEyebrow")
         title = QLabel("학교 급식 운행표 가져오기")
         title.setObjectName("workspaceTitle")
@@ -511,7 +511,7 @@ class SchoolCalendarReviewDialog(QDialog):
         cancel.setObjectName("quietAction")
         cancel.clicked.connect(self.reject)
         actions.addWidget(cancel)
-        self._save = QPushButton("학교 일정 DB에 저장")
+        self._save = QPushButton("학교 일정 운영 데이터에 저장")
         self._save.setObjectName("primaryAction")
         self._save.clicked.connect(self._accept_review)
         actions.addWidget(self._save)
@@ -533,7 +533,7 @@ class SchoolCalendarReviewDialog(QDialog):
         stamp.setMinimumSize(74, 52)
         layout.addWidget(stamp)
         copy = QVBoxLayout()
-        eyebrow = QLabel("REVIEWED SERVICE FACTS")
+        eyebrow = QLabel("확인한 급식 지원 일정")
         eyebrow.setObjectName("editEyebrow")
         title = QLabel("학교별 시작일·종료일을 확인하세요")
         title.setObjectName("workspaceTitle")
@@ -908,7 +908,7 @@ class SchoolCalendarImportController:
             self._message_box.critical(
                 parent,
                 "학교 일정을 저장하지 못했습니다",
-                "DB에는 반영하지 않았습니다. 표와 비고 검토 내용을 확인한 뒤 다시 시도해주세요.\n\n"
+                "운영 데이터에는 반영하지 않았습니다. 표와 비고 검토 내용을 확인한 뒤 다시 시도해주세요.\n\n"
                 + str(error),
             )
             return SchoolCalendarImportOutcome(SchoolCalendarImportStatus.FAILED)
@@ -923,7 +923,7 @@ class SchoolCalendarImportController:
             self._message_box.warning(
                 parent,
                 "학교 일정은 저장됐지만 자동 백업에 실패했습니다",
-                "학교별 일정과 변경 이력은 DB에 정상 저장되었습니다. "
+                "학교별 일정과 변경 이력은 운영 데이터에 정상 저장되었습니다. "
                 "백업 폴더 연결을 확인한 뒤 백업을 다시 실행해주세요.\n\n"
                 + str(backup_result.error),
             )

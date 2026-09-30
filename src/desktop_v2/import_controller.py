@@ -170,7 +170,7 @@ class GuidedRosterImportController:
             self._message_box.critical(
                 parent,
                 "명단을 저장하지 못했습니다",
-                "DB에는 반영하지 않았습니다. 내용을 확인한 뒤 다시 시도해주세요.\n\n"
+                "운영 데이터에는 반영하지 않았습니다. 내용을 확인한 뒤 다시 시도해주세요.\n\n"
                 + str(error),
             )
             return GuidedImportOutcome(GuidedImportStatus.FAILED)
@@ -178,7 +178,7 @@ class GuidedRosterImportController:
             self._message_box.warning(
                 parent,
                 "명단은 저장됐지만 자동 백업에 실패했습니다",
-                "명단과 변경 이력은 DB에 정상 저장되었습니다. "
+                "명단과 변경 이력은 운영 데이터에 정상 저장되었습니다. "
                 "백업 폴더 연결을 확인한 뒤 프로그램에서 백업을 다시 실행해주세요.\n\n"
                 + str(backup_result.error),
             )
@@ -223,7 +223,7 @@ class GuidedInitialImportController(GuidedRosterImportController):
 
     def run(self, parent: QWidget | None = None) -> GuidedImportOutcome:
         if self._session.database.current_roster() is not None:
-            raise ValueError("최초 가져오기는 리비전이 없는 DB에서만 실행할 수 있습니다.")
+            raise ValueError("처음 명단 가져오기는 저장된 명단이 없을 때만 할 수 있습니다.")
         return super().run(parent)
 
 

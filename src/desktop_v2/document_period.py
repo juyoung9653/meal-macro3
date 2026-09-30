@@ -20,12 +20,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from src.domain.revisions import RevisionSummary
+from src.domain.revisions import RevisionSummary, format_revision_timestamp
 from src.domain.roster import Meal
 
 from .document_hub import DocumentAction, DocumentSetupRequest
 from .theme import application_stylesheet, register_application_fonts
-
 
 _MONTHLY_ACTIONS = frozenset(
     (DocumentAction.INVOICE, DocumentAction.CONFIRMATION)
@@ -170,7 +169,7 @@ class DocumentPeriodDialog(QDialog):
         layout = QVBoxLayout(frame)
         layout.setContentsMargins(18, 15, 18, 16)
         layout.setSpacing(4)
-        eyebrow = QLabel("PERIOD CHECK · 현재 화면 기준")
+        eyebrow = QLabel("기간 선택 · 현재 화면 기준")
         eyebrow.setObjectName("editEyebrow")
         title = QLabel(f"{self._request.action.label} 기간 확인")
         title.setObjectName("workspaceTitle")
@@ -200,7 +199,7 @@ class DocumentPeriodDialog(QDialog):
         title.setObjectName("sectionLabel")
         detail = QLabel(
             f"{self._request.anchor_day:%Y년 %m월 %d일}  ·  "
-            f"변경번호 {self._request.source.display_code}"
+            f"변경번호 {format_revision_timestamp(self._request.source.recorded_at)}"
         )
         detail.setObjectName("documentPeriodAnchorDetail")
         copy.addWidget(title)
@@ -333,7 +332,11 @@ def _python_date(editor: QDateEdit) -> date:
 
 def _period_instruction(action: DocumentAction) -> str:
     if action in _MONTHLY_ACTIONS:
-        return "화면에서 보고 있던 날짜의 월 전체를 먼저 제안했습니다. 다른 월로 바꿀 수 있습니다."
+        return (
+            "화면에서 보고 있던 날짜의 월 전체를 먼저 제안했습니다. 다른 월로 바꿀 수 있습니다. "
+            "담당 기사·주소는 선택한 원본의 해당 월 말일 기준이며, "
+            "급식 일수·금액은 월 전체의 날짜별 기록으로 계산합니다."
+        )
     if action is DocumentAction.DELIVERY_REPORT:
         return "화면에서 보고 있던 날짜 하루를 먼저 제안했습니다. 필요한 기간으로 넓힐 수 있습니다."
     return "화면에서 보고 있던 날짜를 먼저 제안했습니다. 다른 배송 날짜로 바꿀 수 있습니다."

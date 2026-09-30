@@ -8,6 +8,7 @@ import pytest
 from src.domain import (
     ENROLLMENT_KIND,
     STATUS_EVENT_KIND,
+    IntakeChannel,
     InclusiveDateRange,
     Meal,
     MealEnrollment,
@@ -85,6 +86,23 @@ def test_one_revision_applies_same_pause_period_to_multiple_enrolled_meals():
         "ends_on": "2026-09-05",
         "auto_enrolled_meals": (),
     }
+
+
+def test_single_change_records_selected_intake_channel_in_revision_metadata():
+    prepared = build_meal_status_revision(
+        _roster(MealEnrollment(PERSON_ID, Meal.BREAKFAST)),
+        PERSON_ID,
+        (Meal.BREAKFAST,),
+        MealStatus.STOPPED,
+        InclusiveDateRange(STARTS_ON, None),
+        actor=_actor(),
+        recorded_at=RECORDED_AT,
+        revision_id=NEW_REVISION_ID,
+        event_ids={Meal.BREAKFAST: BREAKFAST_EVENT_ID},
+        intake_channel=IntakeChannel.PHONE,
+    )
+
+    assert prepared.record.metadata.decisions["meal_status_change"]["intake_channel"] == "전화"
 
 
 def test_delivery_auto_enrolls_unenrolled_meal_for_requested_period():

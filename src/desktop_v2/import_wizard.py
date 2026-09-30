@@ -302,7 +302,7 @@ class RosterImportWizard(QDialog):
         rail.setFixedWidth(230)
         layout = QVBoxLayout(rail)
         layout.setContentsMargins(24, 25, 22, 25)
-        product = QLabel("MEAL ROUTE · IMPORT")
+        product = QLabel("명단 가져오기")
         product.setObjectName("startupProduct")
         layout.addWidget(product)
         layout.addSpacing(14)
@@ -310,7 +310,7 @@ class RosterImportWizard(QDialog):
         title.setObjectName("startupRailTitle")
         layout.addWidget(title)
         copy = QLabel(
-            "원본 Excel은 그대로 두고, 확인한 열의 값만 암호화 DB에 저장합니다."
+            "원본 Excel은 그대로 두고, 확인한 열의 값만 암호화된 데이터 파일에 저장합니다."
         )
         copy.setObjectName("startupRailCopy")
         copy.setWordWrap(True)
@@ -338,7 +338,7 @@ class RosterImportWizard(QDialog):
                 line_row.addStretch(1)
                 layout.addLayout(line_row)
         layout.addStretch(1)
-        footer = QLabel("원본 파일 전체는 DB에 복사하지 않습니다")
+        footer = QLabel("원본 파일 전체는 운영 데이터에 복사하지 않습니다")
         footer.setObjectName("startupRailCopy")
         footer.setWordWrap(True)
         layout.addWidget(footer)
@@ -437,7 +437,7 @@ class RosterImportWizard(QDialog):
         layout.addLayout(
             self._page_heading(
                 "2. Excel 열과 명단 항목 연결",
-                "왼쪽은 DB에 저장할 항목이고, 오른쪽은 선택한 Excel 열입니다. * 항목만 필수입니다.",
+                "왼쪽은 운영 데이터에 저장할 항목이고, 오른쪽은 선택한 Excel 열입니다. * 항목만 필수입니다.",
             )
         )
         self.lunch_mode_note = QLabel("방학 중식 명단: 유효한 모든 행을 중식 배송 대상으로 처리합니다. 식종 열은 필요하지 않습니다.")
@@ -472,15 +472,9 @@ class RosterImportWizard(QDialog):
                     self._mapping_changed
                 )
                 fields_form.addRow("주소 2순위", self.address_fallback_combo)
-        self.provider_edit = QLineEdit()
-        self.provider_edit.setObjectName("manualProviderInput")
-        self.provider_edit.setPlaceholderText("예: 분당구 급식센터")
-        self.provider_edit.setClearButtonEnabled(True)
-        self.provider_edit.setToolTip(
-            "여기에 적은 제공기관을 이번에 가져오는 모든 사람에게 동일하게 적용합니다."
-        )
-        self.provider_edit.textChanged.connect(self._mapping_changed)
-        fields_form.addRow("제공기관 직접 입력", self.provider_edit)
+        provider_note = QLabel("제공기관은 명단을 가져온 뒤 ‘설정 → 공통 제공기관’에서 설정합니다.")
+        provider_note.setWordWrap(True)
+        fields_form.addRow(provider_note)
         body_layout.addLayout(fields_form)
 
         body_layout.addWidget(self._section("가구 묶기 기준"))
@@ -614,7 +608,7 @@ class RosterImportWizard(QDialog):
         normalization_form.addRow("전화번호 정리", self.phone_normalization_combo)
         body_layout.addLayout(normalization_form)
         ignored_copy = QLabel(
-            "체크한 열은 DB에 복사하지 않습니다. 연결하지 않은 열은 기본으로 제외됩니다."
+            "체크한 열은 운영 데이터에 복사하지 않습니다. 연결하지 않은 열은 기본으로 제외됩니다."
         )
         ignored_copy.setObjectName("muted")
         ignored_copy.setWordWrap(True)
@@ -1038,7 +1032,6 @@ class RosterImportWizard(QDialog):
 
     def _apply_profile(self, profile: ImportMappingProfile) -> None:
         self.profile_name_edit.setText(profile.name)
-        self.provider_edit.setText(profile.provider_value or "")
         index = self.source_kind_combo.findData(profile.source_kind)
         if index >= 0:
             self.source_kind_combo.setCurrentIndex(index)
@@ -1186,7 +1179,7 @@ class RosterImportWizard(QDialog):
                 str(self.phone_normalization_combo.currentData())
             ),
             ignored_columns=ignored,
-            provider_value=self.provider_edit.text().strip() or None,
+            provider_value=None,
         )
         profile = ImportMappingProfile(**values)
         if self._suggested_profile is not None and profile != self._suggested_profile.profile:

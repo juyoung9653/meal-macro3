@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from uuid import UUID
 
@@ -50,21 +51,21 @@ def _summaries() -> tuple[RevisionSummary, ...]:
     return first, latest
 
 
-def test_latest_revision_is_default_and_history_stays_hidden_until_requested(app):
+def test_latest_revision_is_default_with_history_visible_on_right(app):
     dialog = DocumentSourceDialog(_summaries())
     dialog.show()
     app.processEvents()
 
     assert dialog.selected_revision_id == LATEST_ID
     assert dialog.using_latest
-    assert dialog._source_code.text() == "20260826-002"
-    assert not dialog._archive_frame.isVisible()
-    assert dialog._archive_list.count() == 1
-
-    dialog._archive_button.click()
-    app.processEvents()
-
+    assert dialog._source_code.text() == "20260826-110000"
+    assert "2026.08.26 11:00" not in dialog._source_detail.text()
+    assert "20260826-110000" in dialog._archive_list.item(0).text()
+    assert "2026.08.26 11:00" not in dialog._archive_list.item(0).text()
     assert dialog._archive_frame.isVisible()
+    assert dialog._archive_list.count() == 2
+    assert dialog._archive_list.currentRow() == 0
+    assert dialog._archive_frame.geometry().left() > dialog._ticket.geometry().right()
     assert dialog.selected_revision_id == LATEST_ID
     dialog.close()
 
@@ -72,8 +73,7 @@ def test_latest_revision_is_default_and_history_stays_hidden_until_requested(app
 def test_previous_revision_requires_explicit_row_selection_and_can_return_latest(app):
     dialog = DocumentSourceDialog(_summaries())
     dialog.show()
-    dialog._archive_button.click()
-    dialog._archive_list.setCurrentRow(0)
+    dialog._archive_list.setCurrentRow(1)
     app.processEvents()
 
     assert dialog.selected_revision_id == FIRST_ID
@@ -86,14 +86,28 @@ def test_previous_revision_requires_explicit_row_selection_and_can_return_latest
     app.processEvents()
     assert dialog.selected_revision_id == LATEST_ID
     assert dialog.using_latest
+    assert dialog._archive_list.currentRow() == 0
     dialog.close()
 
 
-def test_single_revision_disables_previous_revision_action(app):
+def test_single_revision_shows_latest_in_list(app):
     latest = _summaries()[1]
     dialog = DocumentSourceDialog((latest,))
 
-    assert not dialog._archive_button.isEnabled()
-    assert dialog._archive_button.text() == "이전 변경번호 없음"
+    assert dialog._archive_list.count() == 1
+    assert dialog._archive_list.currentRow() == 0
     assert dialog.selected_revision_id == LATEST_ID
+    dialog.close()
+
+
+def test_same_second_revisions_remain_individually_selectable(app):
+    first, latest = _summaries()
+    first = replace(first, recorded_at=latest.recorded_at)
+    dialog = DocumentSourceDialog((first, latest))
+    assert dialog.selected_revision_id == LATEST_ID
+    code = dialog._source_code.text()
+    dialog._archive_list.setCurrentRow(1)
+    assert dialog._source_code.text() == code
+    assert dialog.selected_revision_id == FIRST_ID
+    assert dialog.selected_summary.reason == first.reason
     dialog.close()

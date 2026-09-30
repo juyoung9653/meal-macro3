@@ -347,6 +347,14 @@ def inspect_backup(path: str | Path) -> BackupRecord:
     )
 
 
+def backup_has_recovery_password(path: str | Path) -> bool:
+    """Check whether a validated backup contains a legacy recovery key slot."""
+    record = inspect_backup(path)
+    with zipfile.ZipFile(record.path, mode="r") as archive:
+        payload = _read_small_member(archive, _CREDENTIAL_MEMBER, _MAX_CREDENTIAL_BYTES)
+    return DatabaseCredentials.from_bytes(payload).recovery_slot is not None
+
+
 def restore_backup_with_user_password(
     backup_path: str | Path,
     destination_database_path: str | Path,

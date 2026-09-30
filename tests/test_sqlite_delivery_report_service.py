@@ -275,7 +275,7 @@ def test_delivery_report_requires_a_driver_for_every_relevant_target():
         )
 
 
-def test_saved_closed_friday_policy_can_skip_the_weekend_breakfast_bundle():
+def test_retired_closed_friday_policy_does_not_override_default_delivery():
     thursday = date(2026, 8, 20)
     friday = date(2026, 8, 21)
     closure = ServiceAdjustmentChange(
@@ -310,15 +310,17 @@ def test_saved_closed_friday_policy_can_skip_the_weekend_breakfast_bundle():
         (Meal.BREAKFAST,),
     )
 
-    assert prepared.shipments[0].service_dates == (thursday,)
-    assert prepared.calculation_manifest["target_entitlement_count"] == 1
+    assert prepared.shipments[0].service_dates == (
+        thursday, friday + timedelta(days=1), friday + timedelta(days=2),
+    )
+    assert prepared.calculation_manifest["target_entitlement_count"] == 3
     breakfast_manifest = prepared.calculation_manifest[
         "breakfast_physical_delivery"
     ]
     assert breakfast_manifest["used_closed_friday_modes"] == (
-        ClosedFridayMode.SKIP_FRIDAY_WEEKEND.value,
+        ClosedFridayMode.THURSDAY_WEEKEND_ONLY.value,
     )
-    assert breakfast_manifest["unassigned"] == {"금요일휴무정책": 2}
+    assert breakfast_manifest["unassigned"] == {}
 
 
 def test_selected_lunch_period_remains_strict_about_missing_school_schedule():

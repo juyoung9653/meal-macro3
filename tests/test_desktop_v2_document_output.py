@@ -101,11 +101,11 @@ def test_output_selection_requires_an_existing_directory(tmp_path: Path):
     (
         (
             _document(DocumentAction.INVOICE),
-            "2026-08_청구서_20260831-005.xlsx",
+            "2026-08_청구서_20260831-150000.xlsx",
         ),
         (
             _document(DocumentAction.CONFIRMATION),
-            "2026-08_확인서_20260831-005.xlsx",
+            "2026-08_확인서_20260831-150000.xlsx",
         ),
         (
             _document(
@@ -114,14 +114,14 @@ def test_output_selection_requires_an_existing_directory(tmp_path: Path):
                 starts_on=date(2026, 8, 17),
                 ends_on=date(2026, 8, 23),
             ),
-            "2026-08-17~2026-08-23_배송리포트_조식-석식_20260831-005.xlsx",
+            "2026-08-17~2026-08-23_배송리포트_조식-석식_20260831-150000.xlsx",
         ),
         (
             _document(
                 DocumentAction.DELIVERY_SUBSTITUTE,
                 (Meal.LUNCH,),
             ),
-            "2026-08-17_배송대타_중식_20260831-005.xlsx",
+            "2026-08-17_배송대타_중식_20260831-150000.xlsx",
         ),
     ),
 )
@@ -165,7 +165,7 @@ def test_dialog_uses_the_remembered_folder_without_another_choice(
     selection = dialog.selection()
     assert selection.directory == default.resolve()
     assert selection.mode is DocumentOutputMode.SAVED_DEFAULT
-    assert selection.filename == "2026-08_청구서_20260831-005.xlsx"
+    assert selection.filename == "2026-08_청구서_20260831-150000.xlsx"
     assert selection.reissue_number == 1
     assert not selection.remembers_directory
     assert dialog._folder_stamp.text() == "기본"
