@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime
-from uuid import UUID
+from datetime import date, datetime, timedelta
+from enum import StrEnum
+from uuid import UUID, uuid4
 
-from src.domain.projections import roster_audit_changes
+from src.domain.projections import roster_audit_changes, status_event_audit_change
 from src.domain.revisions import (
     ImportBatch,
     RevisionActor,
@@ -15,7 +16,8 @@ from src.domain.revisions import (
     RevisionRecord,
     RevisionSource,
 )
-from src.domain.roster import RosterSnapshot
+from src.domain.roster import DeliveryAssignment, InclusiveDateRange, Meal, MealEnrollment, RosterSnapshot
+from src.domain.status import MealStatus, StatusEvent, resolve_status_history
 
 from .application import (
     PROFILE_UPDATE_POLICY_VERSION,
@@ -43,6 +45,11 @@ class PreparedImportRevision:
     stored_household_rule: StoredHouseholdMatchingRule | None
 
 
+class ImportPurpose(StrEnum):
+    DATABASE = "database"
+    VACATION_LUNCH = "vacation_lunch"
+
+
 def build_import_revision(
     current_roster: RosterSnapshot | None,
     preview: WorkbookImportPreview,
@@ -58,6 +65,8 @@ def build_import_revision(
     household_plan: HouseholdGroupingPlan | None = None,
     household_decisions: Mapping[UUID, HouseholdGroupingDecision] | None = None,
     existing_household_rule: StoredHouseholdMatchingRule | None = None,
+    purpose: ImportPurpose = ImportPurpose.DATABASE,
+    lunch_status_events: tuple[StatusEvent, ...] = (),
 ) -> PreparedImportRevision:
     """Apply reviewed identities, households, and rules in the same commit."""
 
@@ -77,6 +86,19 @@ def build_import_revision(
         raise ValueError("recorded_at에는 시간대가 있어야 합니다.")
     if not isinstance(revision_id, UUID) or not isinstance(batch_id, UUID):
         raise TypeError("revision ID와 batch ID는 UUID여야 합니다.")
+    if not isinstance(purpose, ImportPurpose):
+        raise TypeError("가져오기 목적이 올바르지 않습니다.")
+    if purpose is ImportPurpose.VACATION_LUNCH:
+        if current_roster is None:
+            raise ValueError("방학 중식 명단은 기존 운영 명단이 있어야 적용할 수 있습니다.")
+        if preview.notices:
+            raise ValueError("방학 중식 명단에는 제외된 원본 행이 없어야 합니다.")
+        if household_plan is not None:
+            raise ValueError("방학 중식 명단에는 가구 묶기를 적용하지 않습니다.")
+        if reason == "Excel 명단 가져오기":
+            reason = "방학 중식 명단 갱신"
+    elif lunch_status_events:
+        raise ValueError("일반 명단 가져오기에 중식 상태 이력을 전달할 수 없습니다.")
     if household_plan is None:
         if household_decisions is not None or existing_household_rule is not None:
             raise ValueError("가구 plan 없이 가구 결정이나 기존 rule을 지정할 수 없습니다.")
@@ -96,6 +118,13 @@ def build_import_revision(
         new_revision_id=revision_id,
         decisions=decisions,
     )
+    lunch_events: tuple[StatusEvent, ...] = ()
+    if purpose is ImportPurpose.VACATION_LUNCH:
+        assert current_roster is not None
+        result, lunch_events = _apply_vacation_lunch(
+            current_roster, result, preview, plan, revision_id,
+            recorded_at, tuple(lunch_status_events),
+        )
     if current_roster is None and not result.snapshot.persons:
         raise ValueError("최초 명단에서는 한 명 이상을 추가해야 합니다.")
 
@@ -127,6 +156,7 @@ def build_import_revision(
     )
     profile_change = _profile_change(existing_profile, stored_profile)
     changes = roster_audit_changes(current_roster, result.snapshot)
+    changes = (*changes, *(status_event_audit_change(event) for event in lunch_events))
     if profile_change is not None:
         changes = (*changes, profile_change)
     if household_rule_change is not None:
@@ -143,6 +173,15 @@ def build_import_revision(
     }
     decision_manifest = {
         **dict(result.decision_manifest),
+        "import_purpose": purpose.value,
+        "vacation_lunch": {
+            "present": [str(person_id) for person_id in sorted(
+                (event.person_id for event in lunch_events if event.status is MealStatus.DELIVERY), key=str
+            )],
+            "stopped": [str(person_id) for person_id in sorted(
+                (event.person_id for event in lunch_events if event.status is MealStatus.STOPPED), key=str
+            )],
+        } if purpose is ImportPurpose.VACATION_LUNCH else None,
         "observation_sources": observation_sources,
         "source_notices": [
             {
@@ -220,6 +259,99 @@ def build_import_revision(
         stored_profile,
         stored_household_rule,
     )
+
+
+def _apply_vacation_lunch(
+    current: RosterSnapshot,
+    result: ReconciliationResult,
+    preview: WorkbookImportPreview,
+    plan: ReconciliationPlan,
+    revision_id: UUID,
+    recorded_at: datetime,
+    historical_events: tuple[StatusEvent, ...],
+) -> tuple[ReconciliationResult, tuple[StatusEvent, ...]]:
+    if result.ignored_observation_ids:
+        raise ValueError("방학 중식 명단에서는 행 제외를 허용하지 않습니다.")
+    if not preview.observations:
+        raise ValueError("방학 중식 명단에는 대상자가 한 명 이상 있어야 합니다.")
+    if any(not isinstance(event, StatusEvent) or event.meal is not Meal.LUNCH for event in historical_events):
+        raise ValueError("중식 상태 이력만 전달할 수 있습니다.")
+    if any(event.period.starts_on is not None and event.period.starts_on > plan.effective_on for event in historical_events):
+        raise ValueError("적용일 뒤에 이미 예약된 중식 상태 변경이 있습니다. 날짜를 다시 확인해주세요.")
+    if any(event.recorded_at > recorded_at for event in historical_events):
+        raise ValueError("새 명단보다 나중에 기록된 중식 상태 이력이 있습니다.")
+    if len(result.person_ids_by_observation) != len(preview.observations):
+        raise ValueError("모든 원본 행의 사람 연결을 확정해야 합니다.")
+    existing_ids = {person.person_id for person in current.persons}
+    present_ids = {
+        result.person_ids_by_observation[item.observation_id]
+        for item in preview.observations
+    }
+    enrolled_ids = {
+        person.person_id for person in current.persons
+        if Meal.LUNCH in current.meals_for(person.person_id, on=plan.effective_on)
+    }
+    delivering_ids = {
+        person_id for person_id in enrolled_ids
+        if resolve_status_history(person_id, Meal.LUNCH, tuple(
+            event for event in historical_events if event.person_id == person_id
+        )).status_on(plan.effective_on) is MealStatus.DELIVERY
+    }
+    stopped_ids = delivering_ids - present_ids
+    persons = tuple(sorted((
+        *current.persons,
+        *(person for person in result.snapshot.persons if person.person_id not in existing_ids),
+    ), key=lambda person: str(person.person_id)))
+    enrollments = list(current.enrollments)
+    for person_id in sorted(present_ids, key=str):
+        matching = [item for item in enrollments if item.person_id == person_id and item.meal is Meal.LUNCH]
+        if any(item.period.contains(plan.effective_on) and item.period.ends_on is None for item in matching):
+            continue
+        for item in matching:
+            if item.period.contains(plan.effective_on):
+                enrollments.remove(item)
+                future_starts = [other.period.starts_on for other in matching if other.period.starts_on is not None and other.period.starts_on > plan.effective_on]
+                end = min(future_starts) - timedelta(days=1) if future_starts else None
+                enrollments.append(MealEnrollment(person_id, Meal.LUNCH, InclusiveDateRange(item.period.starts_on, end)))
+                break
+        else:
+            future_starts = [item.period.starts_on for item in matching if item.period.starts_on is not None and item.period.starts_on > plan.effective_on]
+            end = min(future_starts) - timedelta(days=1) if future_starts else None
+            enrollments.append(MealEnrollment(person_id, Meal.LUNCH, InclusiveDateRange(plan.effective_on, end)))
+    new_person_ids = {person.person_id for person in persons} - existing_ids
+    needed_custom_ids = {
+        definition_id
+        for person in persons if person.person_id in new_person_ids
+        for definition_id in person.profile.custom_values
+    }
+    existing_custom_ids = {definition.definition_id for definition in current.custom_fields}
+    custom_fields = (
+        *current.custom_fields,
+        *(definition for definition in result.snapshot.custom_fields
+          if definition.definition_id in needed_custom_ids and definition.definition_id not in existing_custom_ids),
+    )
+    snapshot = RosterSnapshot(
+        revision_id, persons, current.households, current.memberships,
+        tuple(sorted(enrollments, key=lambda item: (str(item.person_id), item.meal.value, item.period.starts_on or date.min))),
+        (*current.assignments, *(
+            DeliveryAssignment(person_id, Meal.LUNCH, assignment.driver, assignment.sequence)
+            for person_id in sorted(present_ids - existing_ids, key=str)
+            for assignment in (result.snapshot.resolve_assignment(person_id, Meal.LUNCH),)
+            if assignment.driver is not None or assignment.sequence is not None
+        )),
+        custom_fields,
+    )
+    events = tuple(StatusEvent(
+        uuid4(), revision_id, person_id, Meal.LUNCH, status,
+        InclusiveDateRange(plan.effective_on, None), recorded_at,
+        "방학 중식 명단 가져오기",
+    ) for status, ids in (
+        (MealStatus.DELIVERY, present_ids), (MealStatus.STOPPED, stopped_ids),
+    ) for person_id in sorted(ids, key=str))
+    return ReconciliationResult(
+        snapshot, result.person_ids_by_observation,
+        result.ignored_observation_ids, result.decision_manifest,
+    ), events
 
 
 def _profile_change(

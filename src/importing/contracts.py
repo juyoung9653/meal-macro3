@@ -56,6 +56,7 @@ class ImportMappingProfile:
     profile_columns: Mapping[ProfileField, str]
     combined_meals_column: str | None = None
     meal_flag_columns: Mapping[Meal, str] = field(default_factory=dict)
+    default_meals: tuple[Meal, ...] = ()
     driver_column: str | None = None
     sequence_column: str | None = None
     custom_field_columns: Mapping[UUID, str] = field(default_factory=dict)
@@ -105,11 +106,12 @@ class ImportMappingProfile:
             _meal(meal): _required_text(header, "조식·중식·석식 여부 열")
             for meal, header in self.meal_flag_columns.items()
         }
-        if (combined is None) == (not meal_flags):
+        default_meals = tuple(self.default_meals)
+        if len(set(default_meals)) != len(default_meals) or any(not isinstance(meal, Meal) for meal in default_meals):
+            raise ValueError("기본 식종이 올바르지 않습니다.")
+        if sum((combined is not None, bool(meal_flags), bool(default_meals))) != 1:
             raise ValueError(
-                "Excel 식종 표기 방식을 하나만 선택해주세요. ‘식종’ 열 하나를 "
-                "고르거나, 조식·중식·석식 여부 열을 각각 고를 수 있습니다. "
-                "두 방식을 함께 쓸 수는 없습니다."
+                "Excel 식종 표기 방식은 합쳐진 열, 식종별 열, 기본 식종 중 하나만 선택해주세요."
             )
         custom_columns: dict[UUID, str] = {}
         for definition_id, header in self.custom_field_columns.items():
@@ -188,6 +190,7 @@ class ImportMappingProfile:
             MappingProxyType(profile_columns),
         )
         object.__setattr__(self, "combined_meals_column", combined)
+        object.__setattr__(self, "default_meals", default_meals)
         object.__setattr__(
             self,
             "meal_flag_columns",
@@ -227,6 +230,7 @@ class ImportMappingProfile:
                 )
             },
             "combined_meals_column": self.combined_meals_column,
+            **({"default_meals": [meal.value for meal in self.default_meals]} if self.default_meals else {}),
             "meal_flag_columns": {
                 meal.value: header
                 for meal, header in sorted(
@@ -285,6 +289,7 @@ class ImportMappingProfile:
                 for key, value in profile_columns.items()
             },
             combined_meals_column=manifest.get("combined_meals_column"),
+            default_meals=tuple(Meal(str(value)) for value in _manifest_sequence(manifest.get("default_meals", ()), "default_meals")),
             meal_flag_columns={
                 Meal(str(key)): value for key, value in meal_columns.items()
             },

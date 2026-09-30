@@ -53,6 +53,7 @@ from src.importing import (
     HouseholdMatchCriterion,
     HouseholdMatchingRule,
     ImportIssue,
+    ImportPurpose,
     ImportMappingProfile,
     PhoneNormalization,
     ProfileField,
@@ -126,6 +127,7 @@ class ImportWizardSelection:
     existing_profile: StoredImportProfile | None
     household_rule: HouseholdMatchingRule
     existing_household_rule: StoredHouseholdMatchingRule | None
+    purpose: ImportPurpose = ImportPurpose.DATABASE
 
 
 class RosterImportWizard(QDialog):
@@ -137,6 +139,7 @@ class RosterImportWizard(QDialog):
         existing_profiles: tuple[StoredImportProfile, ...] = (),
         existing_household_rule: StoredHouseholdMatchingRule | None = None,
         initial_directory: str | Path | None = None,
+        allow_vacation_lunch: bool = False,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -160,6 +163,7 @@ class RosterImportWizard(QDialog):
             minimum_size=QSize(760, 520),
         )
         self._existing_profiles = tuple(existing_profiles)
+        self._allow_vacation_lunch = allow_vacation_lunch
         self._existing_household_rule = existing_household_rule
         self._initial_directory = (
             "" if initial_directory is None else str(Path(initial_directory))
@@ -190,6 +194,7 @@ class RosterImportWizard(QDialog):
         ] = {}
         self._correction_issues: dict[tuple[int, str], ImportIssue] = {}
         self._build_ui()
+        self.purpose_combo.currentIndexChanged.connect(self._meal_mode_changed)
         self._sync_navigation_rail()
         self._apply_household_rule(existing_household_rule)
         self._meal_mode_changed()
@@ -362,6 +367,11 @@ class RosterImportWizard(QDialog):
         )
         form = QFormLayout()
         form.setVerticalSpacing(10)
+        self.purpose_combo = QComboBox()
+        self.purpose_combo.addItem("운영 DB 명단 가져오기", ImportPurpose.DATABASE)
+        if self._allow_vacation_lunch:
+            self.purpose_combo.addItem("방학 중식 명단 갱신", ImportPurpose.VACATION_LUNCH)
+        form.addRow("가져오기 목적 *", self.purpose_combo)
         path_row = QHBoxLayout()
         self.path_edit = QLineEdit()
         self.path_edit.setObjectName("importPathEdit")
@@ -430,6 +440,10 @@ class RosterImportWizard(QDialog):
                 "왼쪽은 DB에 저장할 항목이고, 오른쪽은 선택한 Excel 열입니다. * 항목만 필수입니다.",
             )
         )
+        self.lunch_mode_note = QLabel("방학 중식 명단: 유효한 모든 행을 중식 배송 대상으로 처리합니다. 식종 열은 필요하지 않습니다.")
+        self.lunch_mode_note.setObjectName("sectionLabel")
+        self.lunch_mode_note.setWordWrap(True)
+        layout.addWidget(self.lunch_mode_note)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         body = QWidget()
@@ -1032,7 +1046,9 @@ class RosterImportWizard(QDialog):
             self._set_combo(combo, profile.profile_columns.get(field))
         fallbacks = profile.fallback_profile_columns.get(ProfileField.ROAD_ADDRESS, ())
         self._set_combo(self.address_fallback_combo, fallbacks[0] if fallbacks else None)
-        if profile.combined_meals_column is not None:
+        if profile.default_meals:
+            self.meal_mode_combo.setCurrentIndex(self.meal_mode_combo.findData("combined"))
+        elif profile.combined_meals_column is not None:
             self.meal_mode_combo.setCurrentIndex(
                 self.meal_mode_combo.findData("combined")
             )
@@ -1110,7 +1126,10 @@ class RosterImportWizard(QDialog):
         )
         meal_flags = {}
         combined = None
-        if self.meal_mode_combo.currentData() == "combined":
+        vacation_lunch = self.purpose_combo.currentData() == ImportPurpose.VACATION_LUNCH
+        if vacation_lunch:
+            pass
+        elif self.meal_mode_combo.currentData() == "combined":
             value = self.combined_meal_combo.currentData()
             combined = None if value is None else str(value)
             if combined is None:
@@ -1151,6 +1170,7 @@ class RosterImportWizard(QDialog):
             profile_columns=profile_columns,
             combined_meals_column=combined,
             meal_flag_columns=meal_flags,
+            default_meals=(Meal.LUNCH,) if vacation_lunch else (),
             driver_column=_combo_text(self.driver_combo),
             sequence_column=_combo_text(self.sequence_combo),
             source_reference_column=_combo_text(self.source_reference_combo),
@@ -1604,6 +1624,7 @@ class RosterImportWizard(QDialog):
             self._suggested_profile,
             self._build_household_rule(),
             self._existing_household_rule,
+            ImportPurpose(self.purpose_combo.currentData()),
         )
         self.accept()
 
@@ -1711,6 +1732,7 @@ class RosterImportWizard(QDialog):
         self._sync_meal_mapping_visibility()
 
     def _meal_mode_changed(self, *_args) -> None:
+        self.lunch_mode_note.setVisible(self.purpose_combo.currentData() == ImportPurpose.VACATION_LUNCH)
         self._sync_meal_mapping_visibility()
         self._mapping_changed()
 
@@ -1719,8 +1741,13 @@ class RosterImportWizard(QDialog):
         self._sync_meal_mapping_visibility()
 
     def _sync_meal_mapping_visibility(self) -> None:
+        vacation_lunch = self.purpose_combo.currentData() == ImportPurpose.VACATION_LUNCH
         combined = self.meal_mode_combo.currentData() == "combined"
-        if combined:
+        if vacation_lunch:
+            selected = True
+            summary = "방학 중식 명단 · 모든 유효 행을 중식 배송 대상으로 처리"
+            detail = "식종 열 없이 명단의 포함 여부로 중식 배송을 갱신합니다."
+        elif combined:
             selected_column = self.combined_meal_combo.currentData()
             selected = selected_column is not None
             summary = (
@@ -1756,7 +1783,7 @@ class RosterImportWizard(QDialog):
                 f"{meal}: {text}" for meal, _column, text in selected_meals
             )
 
-        show_details = self._meal_mapping_expanded or not selected
+        show_details = not vacation_lunch and (self._meal_mapping_expanded or not selected)
         self.meal_mode_combo.setVisible(show_details)
         mode_label = self._meal_form.labelForField(self.meal_mode_combo)
         if mode_label is not None:

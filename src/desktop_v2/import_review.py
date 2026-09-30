@@ -19,8 +19,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from src.domain.roster import RosterSnapshot
+from src.domain.roster import Meal, RosterSnapshot
 from src.importing import (
+    ImportPurpose,
     ExistingHouseholdProposal,
     HouseholdGroupingDecision,
     HouseholdGroupingPlan,
@@ -77,6 +78,8 @@ class ImportReviewDialog(QDialog):
         parent: QWidget | None = None,
         *,
         household_plan: HouseholdGroupingPlan | None = None,
+        purpose: ImportPurpose = ImportPurpose.DATABASE,
+        lunch_delivering_ids: tuple[UUID, ...] = (),
     ) -> None:
         super().__init__(parent)
         if roster is not None and not isinstance(roster, RosterSnapshot):
@@ -101,6 +104,8 @@ class ImportReviewDialog(QDialog):
         self._roster = roster
         self._plan = plan
         self._household_plan = household_plan
+        self._purpose = purpose
+        self._lunch_delivering_ids = frozenset(lunch_delivering_ids)
         self._combos: dict[UUID, QComboBox] = {}
         self._household_combos: dict[UUID, QComboBox] = {}
         self._new_person_ids: dict[UUID, UUID] = {
@@ -176,7 +181,7 @@ class ImportReviewDialog(QDialog):
         title.setObjectName("workspaceTitle")
         subtitle = QLabel(
             f"적용일 {self._plan.effective_on.isoformat()} · "
-            "사람 처리와 제안된 가구 묶음을 확인하세요."
+            + ("중식 명단의 사람 연결을 확인하세요. 기존 배송 대상자는 자동 비교합니다." if self._purpose is ImportPurpose.VACATION_LUNCH else "사람 처리와 제안된 가구 묶음을 확인하세요.")
         )
         subtitle.setObjectName("workspaceSubtitle")
         title_column.addWidget(title)
@@ -217,12 +222,13 @@ class ImportReviewDialog(QDialog):
             self._populate_row(row, staged)
         layout.addWidget(self._table, 1)
 
-        note = QLabel(
-            "가구 묶기는 사람 기록을 합치는 기능이 아닙니다. "
-            "기존 구성원 이름을 확인하고, 맞지 않으면 '이 사람만 별도 가구'를 선택하세요."
-        )
-        note.setObjectName("muted")
-        layout.addWidget(note)
+        if self._purpose is not ImportPurpose.VACATION_LUNCH:
+            note = QLabel(
+                "가구 묶기는 사람 기록을 합치는 기능이 아닙니다. "
+                "기존 구성원 이름을 확인하고, 맞지 않으면 '이 사람만 별도 가구'를 선택하세요."
+            )
+            note.setObjectName("muted")
+            layout.addWidget(note)
         self._buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Cancel
             | QDialogButtonBox.StandardButton.Ok
@@ -246,12 +252,16 @@ class ImportReviewDialog(QDialog):
             for item in staged.profile_differences
             if item.field in _FIELD_LABELS
         ) or "없음"
+        if self._purpose is ImportPurpose.VACATION_LUNCH:
+            profile_changes = "기존 정보 유지" if staged.disposition is ReconciliationDisposition.MATCHED else "신규 등록"
         meal_changes = " ".join(
             (
                 *(f"+{meal.value}" for meal in staged.meals_added),
                 *(f"−{meal.value}" for meal in staged.meals_removed),
             )
         ) or "없음"
+        if self._purpose is ImportPurpose.VACATION_LUNCH:
+            meal_changes = "중식 배송"
         identity_candidates = ", ".join(
             self._person_label(person_id)
             for person_id in staged.candidate_person_ids
@@ -308,16 +318,19 @@ class ImportReviewDialog(QDialog):
                 f"자동 연결 · {self._person_label(staged.matched_person_id)}",
                 "auto",
             )
-            combo.addItem("이 행 제외", "ignore")
+            if self._purpose is not ImportPurpose.VACATION_LUNCH:
+                combo.addItem("이 행 제외", "ignore")
         elif staged.disposition is ReconciliationDisposition.NEW:
             combo.addItem("신규 사람으로 추가", "new")
-            combo.addItem("이 행 제외", "ignore")
+            if self._purpose is not ImportPurpose.VACATION_LUNCH:
+                combo.addItem("이 행 제외", "ignore")
         else:
             combo.addItem("사람 연결 방식 선택…", _PLACEHOLDER)
             for person_id in staged.candidate_person_ids:
                 combo.addItem(f"기존 연결 · {self._person_label(person_id)}", person_id)
             combo.addItem("별도 신규 사람으로 추가", "new")
-            combo.addItem("이 행 제외", "ignore")
+            if self._purpose is not ImportPurpose.VACATION_LUNCH:
+                combo.addItem("이 행 제외", "ignore")
         combo.currentIndexChanged.connect(
             lambda _index, observation_id=staged.observation.observation_id: (
                 self._sync_household_choice(observation_id)
@@ -463,6 +476,8 @@ class ImportReviewDialog(QDialog):
             or combo.currentData() != _HOUSEHOLD_PLACEHOLDER
             for observation_id, combo in self._household_combos.items()
         )
+        if self._purpose is ImportPurpose.VACATION_LUNCH:
+            return identities_resolved and all(combo.currentData() != "ignore" for combo in self._combos.values())
         return identities_resolved and households_resolved
 
     def _refresh_accept_state(self, *_args) -> None:
@@ -497,8 +512,17 @@ class ImportReviewDialog(QDialog):
             + (f" · 기존 가구 후보 {existing_candidates}" if existing_candidates else "")
             + (f" · 미선택 {unresolved}" if unresolved else "")
         )
+        if self._purpose is ImportPurpose.VACATION_LUNCH:
+            present_ids = {
+                (staged.matched_person_id if combo.currentData() == "auto" else combo.currentData())
+                for staged in self._plan.staged_people
+                for combo in (self._combos[staged.observation.observation_id],)
+                if combo.currentData() != "new"
+            }
+            omitted_count = len(self._lunch_delivering_ids - present_ids)
+            self._summary.setText(self._summary.text() + f" · 중식 미배송 전환 {omitted_count}")
         self._buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(
-            unresolved == 0
+            unresolved == 0 and self._all_resolved()
         )
 
     def _accept_if_resolved(self) -> None:

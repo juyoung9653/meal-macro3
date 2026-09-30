@@ -21,6 +21,7 @@ import src.desktop_v2.import_wizard as import_wizard_module
 from src.domain import Meal
 from src.desktop_v2 import RosterImportWizard
 from src.importing import (
+    ImportPurpose,
     HouseholdMatchCriterion,
     HouseholdMatchingRule,
     ImportMappingProfile,
@@ -31,6 +32,30 @@ from src.importing import (
     inspect_workbook,
     parse_workbook,
 )
+
+
+def test_vacation_lunch_wizard_accepts_source_without_meal_column(app, tmp_path):
+    path = tmp_path / "lunch-only.xlsx"
+    workbook = openpyxl.Workbook()
+    workbook.active.append(("성명", "생년월일"))
+    workbook.active.append(("방학아동", "20150302"))
+    workbook.save(path)
+    workbook.close()
+
+    wizard = RosterImportWizard(allow_vacation_lunch=True)
+    wizard.purpose_combo.setCurrentIndex(
+        wizard.purpose_combo.findData(ImportPurpose.VACATION_LUNCH)
+    )
+    wizard.path_edit.setText(str(path))
+    assert wizard._inspect_source()
+    wizard._go_next()
+    wizard._go_next()
+    assert wizard.preview is not None and wizard.preview.can_continue, wizard.error_label.text()
+    assert wizard.preview.observations[0].meals == (Meal.LUNCH,)
+    assert wizard.preview.profile.default_meals == (Meal.LUNCH,)
+    wizard._go_next()
+    assert wizard.selection().purpose is ImportPurpose.VACATION_LUNCH
+    wizard.close()
 
 
 @pytest.fixture(scope="module")

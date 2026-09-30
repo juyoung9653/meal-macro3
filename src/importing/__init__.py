@@ -47,7 +47,7 @@ from .reconciliation import (
     StagedPerson,
     stage_reconciliation,
 )
-from .revision import PreparedImportRevision, build_import_revision
+from .revision import ImportPurpose, PreparedImportRevision, build_import_revision
 from .workbook import (
     AutomaticSourceResolution,
     ImportIssue,
@@ -93,6 +93,7 @@ __all__ = [
     "IMPORT_PROFILE_KIND",
     "ImportMappingProfile",
     "ImportIssue",
+    "ImportPurpose",
     "ObservedDeliveryAssignment",
     "PersonObservation",
     "PhoneNormalization",

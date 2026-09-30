@@ -1046,6 +1046,8 @@ def _row_meals(
     row_number: int,
     issues: list[ImportIssue],
 ) -> tuple[Meal, ...]:
+    if profile.default_meals:
+        return profile.default_meals
     if profile.combined_meals_column is not None:
         token = profile.combined_meals_column
         column = get_column_letter(indexes[token])
