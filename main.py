@@ -1,4 +1,5 @@
 import logging
+import os
 import sys
 
 from PyQt6.QtWidgets import QApplication
@@ -13,6 +14,8 @@ logging.basicConfig(
 
 
 def main():
+    if getattr(sys, "frozen", False):
+        os.chdir(os.path.dirname(sys.executable))
     get_settings()  # 최초 로드 보장
 
     app = QApplication(sys.argv)

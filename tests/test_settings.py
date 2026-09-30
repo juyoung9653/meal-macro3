@@ -1,8 +1,18 @@
 """Tests for src.core.settings — SettingsManager, get/set, defaults, deep_merge."""
 
+import os
+import sys
+
 from src.core.settings import DEFAULTS, SettingsManager, get_settings
 
 from .conftest import make_settings_manager
+
+
+def test_settings_path_for_frozen_executable(monkeypatch, tmp_path):
+    executable = tmp_path / "app.exe"
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(executable))
+    assert SettingsManager()._get_path() == os.path.join(tmp_path, ".settings.json")
 
 
 class TestTypedAccessors:

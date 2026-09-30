@@ -14,6 +14,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import sys
 from typing import Any
 
 # ── 기본 설정값 ──────────────────────────────────────
@@ -158,13 +159,14 @@ class SettingsManager:
 
     def _get_path(self) -> str:
         if self._path is None:
-            # settings.py → core/ → src/ → project root
-            self._path = os.path.join(
-                os.path.dirname(
+            if getattr(sys, "frozen", False):
+                root = os.path.dirname(sys.executable)
+            else:
+                # settings.py → core/ → src/ → project root
+                root = os.path.dirname(
                     os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                ),
-                ".settings.json",
-            )
+                )
+            self._path = os.path.join(root, ".settings.json")
         return self._path
 
     def _migrate_legacy(self):
