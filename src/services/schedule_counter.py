@@ -12,6 +12,7 @@ Public API:
 
 import calendar
 import logging
+import re
 from datetime import date, timedelta
 
 from ..core.date_utils import SAT, SUN
@@ -91,12 +92,12 @@ def count_weekdays_in_range(
 
 
 def to_bool(val) -> bool:
-    """식종 대상 셀은 숫자 1 또는 문자열 ``1``일 때만 참이다."""
+    """식종 대상 셀은 숫자 1 또는 그와 같은 십진 문자열일 때만 참이다."""
 
     if isinstance(val, bool):
         return False
     if isinstance(val, (int, float)):
         return val == 1
     if isinstance(val, str):
-        return val.strip() == "1"
+        return re.fullmatch(r"1(?:\.0+)?", val.strip()) is not None
     return False

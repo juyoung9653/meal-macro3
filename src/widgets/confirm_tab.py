@@ -58,7 +58,7 @@ class ConfirmTab(QWidget):
         path_layout.addWidget(self.path_label, stretch=1)
         path_layout.addWidget(self.path_btn)
 
-        # ── 배송담당 매핑 ──
+        # ── 배송담당 컬럼 ──
         delivery_group = QGroupBox("배송담당 정보")
         delivery_layout = QVBoxLayout(delivery_group)
 
@@ -67,28 +67,11 @@ class ConfirmTab(QWidget):
         self.delivery_col_combo = QComboBox()
         self.delivery_col_combo.setMinimumWidth(180)
         self.delivery_col_combo.addItem("(선택 안 함)", "")
-        self.delivery_col_combo.currentIndexChanged.connect(
-            self._on_delivery_col_changed
-        )
+        self.delivery_col_combo.currentIndexChanged.connect(self._save_settings)
         col_row.addWidget(self.delivery_col_combo)
         col_row.addStretch()
 
-        map_label = QLabel("※ 고유 배송담당자명 목록 — 연락처를 직접 입력하세요")
-        map_label.setStyleSheet("color: #555; font-size: 11px;")
-
-        self.delivery_table = QTableWidget()
-        self.delivery_table.setColumnCount(2)
-        self.delivery_table.setHorizontalHeaderLabels(["배송담당자명", "연락처"])
-        hdr = self.delivery_table.horizontalHeader()
-        hdr.setStretchLastSection(True)
-        hdr.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.delivery_table.setMinimumHeight(100)
-        self.delivery_table.setMaximumHeight(200)
-
         delivery_layout.addLayout(col_row)
-        delivery_layout.addWidget(map_label)
-        delivery_layout.addWidget(self.delivery_table)
-        self.delivery_table.cellChanged.connect(self._save_settings)
 
         # ── 버튼 ──
         btn_layout = QHBoxLayout()
@@ -121,6 +104,7 @@ class ConfirmTab(QWidget):
         hdr2 = self.confirm_table.horizontalHeader()
         hdr2.setStretchLastSection(True)
         hdr2.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        hdr2.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         self.confirm_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.confirm_table.setAlternatingRowColors(True)
 
@@ -142,9 +126,6 @@ class ConfirmTab(QWidget):
         self._settings.setValue("confirm/output_dir", self.output_dir or "")
         self._settings.setValue(
             "confirm/delivery_col", self.delivery_col_combo.currentData() or ""
-        )
-        self._settings.setValue(
-            "confirm/delivery_phone_map", self._get_delivery_phone_map()
         )
         self._settings.sync()
 
@@ -184,53 +165,12 @@ class ConfirmTab(QWidget):
             self.path_label.setText(raw)
             self.path_label.setStyleSheet("color: #000;")
 
-        # 배송담당자 컬럼/전화번호는 set_invoice_data()에서 복원 (콤보박스 채워진 후)
+        # 배송담당자 컬럼은 set_invoice_data()에서 복원 (콤보박스 채워진 후)
 
         # 캐시된 InvoiceData 미리 복원 시도
         cached = self._load_cached_invoice_data()
         if cached:
             self.set_invoice_data(cached)
-
-    def _on_delivery_col_changed(self):
-        """배송담당자 컬럼 변경 → 고유 이름 목록 테이블 갱신"""
-        self._save_settings()
-        col = self.delivery_col_combo.currentData()
-        if not col or not self._data.invoices:
-            self.delivery_table.setRowCount(0)
-            return
-
-        # 고유 이름 추출 (비어있지 않은 값, 순서 유지)
-        seen = set()
-        unique_names = []
-        for inv in self._data.invoices:
-            val = str(inv.get(col, "")).strip()
-            if val and val not in seen:
-                seen.add(val)
-                unique_names.append(val)
-
-        if not unique_names:
-            self.delivery_table.setRowCount(0)
-            return
-
-        self.delivery_table.setRowCount(len(unique_names))
-        for i, name in enumerate(unique_names):
-            name_item = QTableWidgetItem(name)
-            name_item.setFlags(name_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-            self.delivery_table.setItem(i, 0, name_item)
-            self.delivery_table.setItem(i, 1, QTableWidgetItem(""))
-
-    def _get_delivery_phone_map(self) -> dict[str, str]:
-        """테이블에서 {이름: 연락처} 매핑 반환"""
-        mapping = {}
-        for row in range(self.delivery_table.rowCount()):
-            name_item = self.delivery_table.item(row, 0)
-            phone_item = self.delivery_table.item(row, 1)
-            if name_item:
-                name = name_item.text().strip()
-                phone = phone_item.text().strip() if phone_item else ""
-                if name:
-                    mapping[name] = phone
-        return mapping
 
     def _select_output_dir(self):
         dir_path = QFileDialog.getExistingDirectory(self, "출력 폴더 선택")
@@ -251,21 +191,11 @@ class ConfirmTab(QWidget):
             )
             return
 
-        # 배송담당자 컬럼 + 연락처 매핑
+        # 첫 번째 청구서의 선택된 컬럼 값을 대표 배송담당자로 사용
         delivery_col = self.delivery_col_combo.currentData()
-        phone_map = self._get_delivery_phone_map()
-
-        # 첫 번째 고유명의 연락처를 대표값으로 사용
         delivery_person = ""
-        delivery_phone = ""
         if delivery_col and self._data.invoices:
-            # 첫 번째 인보이스에서 배송담당자명 읽기
-            delivery_person = str(self._data.invoices[0].get(delivery_col, "")).strip()
-            if delivery_person in phone_map:
-                delivery_phone = phone_map[delivery_person]
-            elif phone_map:
-                # 대표값: 맵핑의 첫 번째 전화번호
-                delivery_phone = next(iter(phone_map.values()))
+            delivery_person = self._data.invoices[0].get(delivery_col, "")
 
         try:
             self._save_settings()
@@ -287,7 +217,7 @@ class ConfirmTab(QWidget):
                 year=self._data.year,
                 month=self._data.month,
                 delivery_person=delivery_person,
-                delivery_phone=delivery_phone,
+                delivery_phone="",
                 excluded_dates=self._data.excluded_dates.copy()
                 if self._data.excluded_dates
                 else None,
@@ -345,10 +275,7 @@ class ConfirmTab(QWidget):
         self.generate_btn.setEnabled(bool(data.invoices))
 
         # ── 초기화 중 signal flood → QSettings 덮어쓰기 방지 ──
-        # 전화번호 맵은 _delivery_col_combo_update가 _save_settings로 덮어쓰기 전에 미리 확보
-        saved_phone_map = self._settings.value("confirm/delivery_phone_map", None)
         self.delivery_col_combo.blockSignals(True)
-        self.delivery_table.blockSignals(True)
 
         # 배송담당자 컬럼 콤보박스 채우기
         self._delivery_col_combo_update(data.roster_headers)
@@ -360,35 +287,6 @@ class ConfirmTab(QWidget):
             if idx >= 0:
                 self.delivery_col_combo.setCurrentIndex(idx)
 
-        # 테이블 수동 채우기 (_on_delivery_col_changed 호출 대체)
-        col = self.delivery_col_combo.currentData()
-        if col and self._data.invoices:
-            seen = set()
-            unique_names = []
-            for inv in self._data.invoices:
-                val = str(inv.get(col, "")).strip()
-                if val and val not in seen:
-                    seen.add(val)
-                    unique_names.append(val)
-            self.delivery_table.setRowCount(len(unique_names))
-            for i, name in enumerate(unique_names):
-                name_item = QTableWidgetItem(name)
-                name_item.setFlags(name_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-                self.delivery_table.setItem(i, 0, name_item)
-                self.delivery_table.setItem(i, 1, QTableWidgetItem(""))
-        else:
-            self.delivery_table.setRowCount(0)
-
-        # 미리 확보한 전화번호 맵으로 복원
-        if isinstance(saved_phone_map, dict) and saved_phone_map:
-            for row in range(self.delivery_table.rowCount()):
-                name_item = self.delivery_table.item(row, 0)
-                if name_item and name_item.text() in saved_phone_map:
-                    self.delivery_table.setItem(
-                        row, 1, QTableWidgetItem(saved_phone_map[name_item.text()])
-                    )
-
-        self.delivery_table.blockSignals(False)
         self.delivery_col_combo.blockSignals(False)
 
         # 복원된 상태를 QSettings에 확정 저장
@@ -424,7 +322,6 @@ class ConfirmTab(QWidget):
             idx = self.delivery_col_combo.findData(old)
             if idx >= 0:
                 self.delivery_col_combo.setCurrentIndex(idx)
-                self._on_delivery_col_changed()
 
     def get_confirms(self):
         return self.confirms

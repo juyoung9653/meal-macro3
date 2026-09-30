@@ -183,7 +183,7 @@ def clear_cache(template_path: str | None = None, cache_path: str | None = None)
 # ── 플레이스홀더 검증 ──────────────────────────────
 
 # 필수 글로벌 플레이스홀더 (모든 시트)
-_REQUIRED_GLOBAL = ["title", "delivery", "d_phone", "addr"]
+_REQUIRED_GLOBAL = ["title", "delivery", "dong", "addr"]
 
 # 사람별 필수 플레이스홀더 접두사
 _REQUIRED_PERSON_PREFIXES = ["num", "child", "carer", "phone"]

@@ -24,8 +24,8 @@ from .holiday_fetcher import get_kr_holidays
 from .note_parser import apply_note_to_month, expand_note_dates
 
 # ── 임포트 + 재익스포트 (하위 호환 보장) ──────────────
+from .schedule_counter import _WEEKEND as _WEEKEND
 from .schedule_counter import (
-    _WEEKEND,
     _get_schedule,
     _is_holiday,
     count_weekdays,
@@ -55,7 +55,7 @@ def count_delivery_days(
     """한 사람의 월별 배송일 수 계산.
 
     Pipeline:
-      1. 기본 배송일 수 계산 (스케줄 요일 - 공휴일 - 예외일)
+      1. 기본 배송일 수 계산 (조식은 공휴일 포함, 모든 식종은 예외일 제외)
       2. apply_note_to_month 로 비고 기반 차감 건수 계산
       3. 기본 - 차감 = 최종 배송일 수
 
@@ -67,7 +67,11 @@ def count_delivery_days(
     base = {}
     base[MealType.BREAKFAST] = (
         count_weekdays(
-            year, month, schedule[MealType.BREAKFAST], excluded_dates, _WEEKEND
+            year,
+            month,
+            schedule[MealType.BREAKFAST],
+            excluded_dates,
+            schedule[MealType.BREAKFAST],
         )
         if flag_breakfast
         else 0
@@ -163,15 +167,15 @@ def week_date_str(w_start: date, w_end: date) -> str:
 
 
 def _is_excluded_for_meal(
-    d: date, all_excluded: set[date], flags: dict, weekend: set[int]
+    d: date,
+    meal_type: str,
+    holidays: set[date],
+    excluded_dates: set[date] | None = None,
 ) -> bool:
-    """날짜가 배송 제외 대상인지 판정.
-    조식 주말(토·일)은 공휴일이어도 제외하지 않음."""
-    if d not in all_excluded:
-        return False
-    if flags.get(MealType.BREAKFAST) and d.weekday() in weekend:
-        return False
-    return True
+    """명시적 제외일은 모든 식종에, 공휴일은 석식·중식에 적용한다."""
+    return d in (excluded_dates or set()) or (
+        meal_type != MealType.BREAKFAST and d in holidays
+    )
 
 
 def calc_weekly_breakdown(
@@ -197,7 +201,6 @@ def calc_weekly_breakdown(
     schedule = _get_schedule()
     weeks = get_week_ranges(year, month)
     holidays = get_kr_holidays(year)
-    all_excluded = set(holidays) | (excluded_dates or set())
 
     # ── Step 1-2: 비고 날짜 확장 ──
     expanded = expand_note_dates(note, year, month)
@@ -214,10 +217,12 @@ def calc_weekly_breakdown(
         # ── 주차별 기본 배송일 수 (raw) ──
         week_base = {MealType.BREAKFAST: 0, MealType.DINNER: 0, MealType.LUNCH: 0}
         for d in date_range(wstart, wend):
-            if _is_excluded_for_meal(d, all_excluded, flags, _WEEKEND):
-                continue
             for mk in meal_keys:
-                if flags[mk] and d.weekday() in schedule[mk]:
+                if (
+                    flags[mk]
+                    and d.weekday() in schedule[mk]
+                    and not _is_excluded_for_meal(d, mk, holidays, excluded_dates)
+                ):
                     week_base[mk] += 1
 
         # ── 주차별 비고 차감 건수 (raw) ──
@@ -225,10 +230,12 @@ def calc_weekly_breakdown(
         for d, meals in expanded:
             if not (wstart <= d <= wend):
                 continue
-            if _is_excluded_for_meal(d, all_excluded, flags, _WEEKEND):
-                continue
             for mk in meals:
-                if flags.get(mk) and d.weekday() in schedule[mk]:
+                if (
+                    flags.get(mk)
+                    and d.weekday() in schedule[mk]
+                    and not _is_excluded_for_meal(d, mk, holidays, excluded_dates)
+                ):
                     week_reduction[mk] += 1
 
         # ── 차감 후 최종 ──

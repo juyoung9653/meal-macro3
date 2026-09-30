@@ -344,6 +344,36 @@ class TestExpandNoteDates:
 
 
 class TestApplyNoteToMonth:
+    def test_holiday_friday_reduces_breakfast_but_not_lunch(
+        self, mock_settings, monkeypatch
+    ):
+        monkeypatch.setattr(
+            "src.services.note_parser.get_kr_holidays",
+            lambda _year: {date(2026, 9, 25)},
+        )
+        result = apply_note_to_month(
+            "9/25일시중지", 2026, 9, True, True, True
+        )
+        assert result == {"breakfast": 1, "dinner": 0, "lunch": 0}
+
+    def test_explicit_weekend_exclusion_prevents_note_double_subtraction(
+        self, mock_settings, monkeypatch
+    ):
+        monkeypatch.setattr(
+            "src.services.note_parser.get_kr_holidays",
+            lambda _year: {date(2026, 9, 26)},
+        )
+        result = apply_note_to_month(
+            "9/26조식일시중지",
+            2026,
+            9,
+            True,
+            False,
+            False,
+            excluded_dates={date(2026, 9, 26)},
+        )
+        assert result["breakfast"] == 0
+
     def test_empty_note_returns_zeros(self, mock_holidays, mock_settings):
         """Empty note → no reduction regardless of flags."""
         result = apply_note_to_month("", 2025, 4, False, False, False)
@@ -414,27 +444,8 @@ class TestApplyNoteToMonth:
         )
         assert result["breakfast"] == 1
 
-    def test_holiday_is_blocked(self, mock_holidays, mock_settings):
-        """3/1조식일시중지: March 1 is 삼일절 (holiday). Blocked → 0 reduction.
-
-        Even though it's Saturday (weekday 5, in breakfast_days {4,5,6}),
-        the date is blocked by holiday. For breakfast, weekend holidays are NOT
-        blocked (SAT/SUN are exempt), but March 1 2025 is Saturday so it should be exempt...
-        Actually let me re-check apply_note_to_month logic:
-
-        ``if d in blocked:
-            if not (MealType.BREAKFAST in meals and d.weekday() in {SAT, SUN}):
-                continue``
-
-        So if the date is blocked AND it IS breakfast on weekend → still count it (don't skip).
-        If the date is blocked AND it's NOT breakfast on weekend → skip.
-
-        March 1 2025 is Saturday (weekday 5). If meals={"breakfast"} and d.weekday() in {5,6},
-        then it's NOT skipped → reduction counts.
-
-        So breakfast on a holiday weekend still counts as a reduction day. That matches
-        the breakfast logic (周末配送分不计入公休日豁免).
-        """
+    def test_breakfast_holiday_suspension_is_counted(self, mock_holidays, mock_settings):
+        """A breakfast suspension still counts on a public holiday."""
         result = apply_note_to_month(
             "3/1조식일시중지",
             2025,
@@ -443,8 +454,6 @@ class TestApplyNoteToMonth:
             flag_dinner=True,
             flag_lunch=True,
         )
-        # March 1 is Saturday (weekday 5), in breakfast_days {4,5,6}
-        # It's a holiday, but breakfast+weekend → not blocked → reduction counts
         assert result["breakfast"] == 1
 
     def test_holiday_blocks_non_breakfast(self, mock_holidays, mock_settings):

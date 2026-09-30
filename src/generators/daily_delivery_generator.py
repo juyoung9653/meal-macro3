@@ -129,9 +129,8 @@ def prepare_daily_delivery_people(
         daily_person["_dinner"] = (
             person.get(dinner_col, 0) if dinner_col else person.get("_dinner", 0)
         )
-        daily_person["_note"] = (
-            person.get(note_col, "") if note_col else person.get("_note", "")
-        )
+        note = person.get(note_col, "") if note_col else person.get("_note", "")
+        daily_person["_note"] = "" if str(note or "").lstrip().startswith("//") else note
         for stable_key, source_column in (
             (DAILY_DRIVER_KEY, driver_col),
             (DAILY_REGION_PRIMARY_KEY, region_primary_col),

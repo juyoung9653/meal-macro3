@@ -136,8 +136,20 @@ def test_prepare_people_from_roster_without_generating_invoice():
     assert "_breakfast" not in original[0]
 
 
+def test_prepare_people_ignores_comment_note_even_with_source_column():
+    people = [{"비고": "  // 5/2조식중지"},
+              {"비고": "문 앞에 놓아주세요", "_note": ""},
+              {"비고": "5/2조식중지 // 메모"}]
+    prepared = prepare_daily_delivery_people(people, note_col="비고")
+
+    assert [person["_note"] for person in prepared] == [
+        "", "문 앞에 놓아주세요", "5/2조식중지 // 메모"
+    ]
+    assert people[0]["비고"] == "  // 5/2조식중지"
+
+
 @pytest.mark.parametrize(
-    "value", ["1.0", "Y", "y", "예", "있음", "O", 2, 0.5, True]
+    "value", ["Y", "y", "예", "있음", "O", 2, 0.5, True]
 )
 def test_daily_delivery_rejects_non_one_meal_markers(value):
     sheet = _build(
@@ -152,7 +164,7 @@ def test_daily_delivery_rejects_non_one_meal_markers(value):
     )
 
 
-@pytest.mark.parametrize("value", [1, 1.0, "1", " 1 "])
+@pytest.mark.parametrize("value", [1, 1.0, "1", " 1 ", "1.0"])
 def test_daily_delivery_accepts_numeric_or_text_one(value):
     sheet = _build(
         [_person("기사 A", "1순위 구역", "", "주소", breakfast=value, dinner=0)]

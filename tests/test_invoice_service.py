@@ -6,6 +6,8 @@ Pure business logic — no PyQt imports, no UI dependencies.
 from datetime import date
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from src.generators.daily_delivery_generator import (
     DAILY_ADDRESS_KEY,
     DAILY_DRIVER_KEY,
@@ -19,6 +21,7 @@ from src.services.invoice_controller import (
     _merge_people_by_identity,
 )
 from src.services.lunch_data import LunchRoster, LunchSchoolEntry
+from src.services.roster_loader import RosterParser
 
 
 def _complete_lunch_person(**overrides) -> dict:
@@ -89,6 +92,74 @@ class TestInvoiceService:
         }
         args.update(overrides)
         return args
+
+    @pytest.mark.parametrize("note", ["// 6/2 조식중지", " \t// 6/2 조식중지\n6/3 조식중지"])
+    def test_comment_note_is_empty_for_main_roster(self, note):
+        source = {"성명": "홍길동", "학교명": "분당초", "조식": 1, "비고": note}
+        result = InvoiceService().generate(**self._minimal_args(
+            roster_data=[source], template_columns=["성명", "학교명", "비고"],
+            write_workbook=False,
+        ))
+
+        assert result.success
+        assert result.enriched[0]["비고"] == ""
+        assert result.enriched[0]["_note"] == ""
+        assert source["비고"] == note
+        assert result.enriched[0]["_bf_cnt"] > 0
+
+    @pytest.mark.parametrize("note", ["6/2 조식중지", "6/2 조식중지 // 메모"])
+    def test_normal_note_keeps_existing_main_roster_behavior(self, note):
+        result = InvoiceService().generate(**self._minimal_args(
+            roster_data=[{"성명": "홍길동", "학교명": "분당초", "조식": 1, "비고": note}],
+            template_columns=["성명", "학교명", "비고"], write_workbook=False,
+        ))
+
+        assert result.success
+        assert result.enriched[0]["비고"] == note
+        assert result.enriched[0]["_note"] == note
+
+    @patch("src.services.invoice_controller.get_kr_holidays", return_value=set())
+    @patch("src.services.vacation_calculator.get_kr_holidays", return_value=set())
+    def test_comment_note_is_empty_for_separate_lunch_roster(self, *_mocks):
+        note = "  // 6/2 중식중지"
+        source = _complete_lunch_person(비고=note)
+        result = InvoiceService().generate(**self._minimal_args(
+            roster_data=[], lunch_person_data=[source],
+            lunch_person_headers=list(source),
+            lunch_person_mapping=_complete_lunch_mapping(),
+            lunch_roster=LunchRoster(entries=[LunchSchoolEntry(
+                school_name="분당초", start_date=date(2025, 6, 2),
+                end_date=date(2025, 6, 6),
+            )]),
+            template_columns=["성명", "학교명", "비고"],
+            write_workbook=False,
+        ))
+
+        assert result.success
+        assert result.enriched[0]["비고"] == ""
+        assert result.enriched[0]["_note"] == ""
+        assert result.enriched[0]["_lh_cnt"] == 5
+        assert source["비고"] == note
+
+    def test_excel_float_meal_flags_survive_roster_parsing(self):
+        headers, roster = RosterParser().parse(
+            [["성명", "학교명", "조식", "석식"], ["홍길동", "분당초", 1.0, 1.0]]
+        )
+        assert roster[0]["조식"] == roster[0]["석식"] == "1.0"
+
+        result = InvoiceService().generate(
+            **self._minimal_args(
+                roster_data=roster,
+                roster_headers=headers,
+                write_workbook=False,
+            )
+        )
+
+        assert result.success
+        assert result.enriched[0]["_breakfast"] == 1
+        assert result.enriched[0]["_dinner"] == 1
+        assert result.enriched[0]["_bf_cnt"] > 0
+        assert result.enriched[0]["_dn_cnt"] > 0
 
     # ── Empty roster ─────────────────────────────────
 

@@ -169,11 +169,21 @@ def _canonicalize_person(
     """원본 명단 한 행에 템플릿 기준의 공통 키를 함께 저장한다."""
 
     canonical = dict(person)
+    note_column = str(mapping.get("__note", "") or "")
+    if note_column and note_column in canonical:
+        canonical[note_column] = _import_note(canonical[note_column])
+    if "비고" in canonical:
+        canonical["비고"] = _import_note(canonical["비고"])
     for template_column in template_columns:
         source_column = str(mapping.get(template_column, "") or "")
         if source_column and source_column in person:
-            canonical[template_column] = person.get(source_column, "")
+            canonical[template_column] = canonical.get(source_column, "")
     return canonical
+
+
+def _import_note(value: Any) -> str:
+    note = str(value or "")
+    return "" if note.lstrip().startswith("//") else note
 
 
 def _missing_mapping_fields(
@@ -274,7 +284,7 @@ def _is_stopped(person: dict, headers: list[str]) -> bool:
 
 def _mapped_note(person: dict, mapping: dict) -> str:
     note_column = str(mapping.get("__note", "") or "")
-    note = str(person.get(note_column, "") or "")
+    note = _import_note(person.get(note_column, "")) if note_column else ""
     return note if re.search(r"\d{1,2}[/.]\d{1,2}|매주", note) else ""
 
 

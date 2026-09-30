@@ -10,6 +10,7 @@ import pytest
 
 from src.core.settings import SettingsManager
 from src.services.delivery_calculator import (
+    calc_weekly_breakdown,
     count_delivery_days,
     count_weekdays,
     get_week_ranges,
@@ -83,15 +84,18 @@ class TestToBool:
         assert to_bool(0.5) is False
         assert to_bool(2.0) is False
 
-    def test_string_one_only(self):
+    def test_string_one_and_excel_float_one(self):
         assert to_bool("1") is True
         assert to_bool(" 1 ") is True
+        assert to_bool("1.0") is True
+        assert to_bool(" 1.000 ") is True
 
     def test_str_false_values(self):
         assert to_bool("") is False
         assert to_bool("0") is False
         assert to_bool("0.0") is False
-        assert to_bool("1.0") is False
+        assert to_bool("1.0000000000000001") is False
+        assert to_bool("2.0") is False
         assert to_bool("Y") is False
         assert to_bool("y") is False
         assert to_bool("예") is False
@@ -189,6 +193,45 @@ class TestCountWeekdays:
 
 
 class TestCountDeliveryDays:
+    @pytest.mark.parametrize(
+        ("note", "excluded_dates", "expected_breakfast"),
+        [
+            ("", None, 12),
+            ("", {date(2026, 9, 25)}, 11),
+            ("9/25조식일시중지", None, 11),
+            ("", {date(2026, 9, 26)}, 11),
+            ("9/26조식일시중지", None, 11),
+        ],
+    )
+    def test_september_holiday_breakfast_matches_weekly_breakdown(
+        self, mock_both_settings, monkeypatch, note, excluded_dates, expected_breakfast
+    ):
+        holidays = {date(2026, 9, 24), date(2026, 9, 25), date(2026, 9, 26)}
+        for module_name in (
+            "delivery_calculator", "schedule_counter", "note_parser"
+        ):
+            monkeypatch.setattr(
+                f"src.services.{module_name}.get_kr_holidays",
+                lambda _year: holidays,
+            )
+
+        monthly = count_delivery_days(
+            2026, 9, True, True, True, note, excluded_dates
+        )
+        weekly = calc_weekly_breakdown(
+            2026, 9, True, True, True, note, excluded_dates
+        )
+
+        assert monthly == {
+            "breakfast": expected_breakfast,
+            "dinner": 17,
+            "lunch": 20,
+        }
+        assert {
+            meal: sum(week[meal] for week in weekly)
+            for meal in ("breakfast", "dinner", "lunch")
+        } == monthly
+
     def test_no_flags(self, mock_both_settings, mock_both_holidays):
         """All flags False → all zeros regardless of month."""
         result = count_delivery_days(2025, 4, False, False, False)

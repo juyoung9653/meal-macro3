@@ -289,10 +289,7 @@ def make_confirm(
                 _set_ph(
                     ws, ph_map, "delivery", current_row, delivery_person, tpl_anchor_map
                 )
-            if delivery_phone:
-                _set_ph(
-                    ws, ph_map, "d_phone", current_row, delivery_phone, tpl_anchor_map
-                )
+            _set_ph(ws, ph_map, "dong", current_row, dong, tpl_anchor_map)
             _set_ph(ws, ph_map, "addr", current_row, addr, tpl_anchor_map)
 
             # ── 세대 비고(메모) 취합 ──

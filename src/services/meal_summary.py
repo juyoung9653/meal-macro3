@@ -14,7 +14,7 @@ from ..core.meal_types import MealType
 from .delivery_calculator import _is_excluded_for_meal
 from .holiday_fetcher import get_kr_holidays
 from .note_parser import expand_note_dates
-from .schedule_counter import _WEEKEND, _get_schedule, to_bool
+from .schedule_counter import _get_schedule, to_bool
 
 
 @dataclass(frozen=True)
@@ -61,7 +61,7 @@ def build_monthly_meal_summary(
     """선택 월의 모든 날짜를 식종별 식수와 함께 반환한다."""
 
     schedule = _get_schedule()
-    all_excluded = get_kr_holidays(year) | set(excluded_dates or set())
+    holidays = get_kr_holidays(year)
     last_day = calendar.monthrange(year, month)[1]
     counts = {
         date(year, month, day): {
@@ -95,9 +95,9 @@ def build_monthly_meal_summary(
                     continue
                 if _is_excluded_for_meal(
                     target,
-                    all_excluded,
-                    flags,
-                    _WEEKEND,
+                    meal,
+                    holidays,
+                    excluded_dates,
                 ):
                     continue
                 target_counts[meal] += 1
@@ -112,9 +112,9 @@ def build_monthly_meal_summary(
                 and target.weekday() in schedule[MealType.LUNCH]
                 and not _is_excluded_for_meal(
                     target,
-                    all_excluded,
-                    flags,
-                    _WEEKEND,
+                    MealType.LUNCH,
+                    holidays,
+                    excluded_dates,
                 )
             ):
                 target_counts[MealType.LUNCH] += 1

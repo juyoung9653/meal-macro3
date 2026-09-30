@@ -17,7 +17,7 @@ import logging
 import re
 from datetime import date, timedelta
 
-from ..core.date_utils import SAT, SUN, date_range
+from ..core.date_utils import date_range
 from ..core.meal_types import MealType
 from ..core.settings import get_settings
 from .holiday_fetcher import get_kr_holidays
@@ -445,23 +445,13 @@ def apply_note_to_month(
         {"breakfast": int, "dinner": int, "lunch": int}
         각 급식종류별 비고로 인한 배송 차감일 수 (raw days).
         실제 배송일 = 기본배송일 - 이 값.
-        조식: 주말(토·일)은 공휴일이어도 차감 대상에서 제외하지 않음.
+        조식은 공휴일에도 차감하고, 명시적 제외일에는 모든 식종을 차감하지 않음.
     """
     # ── Steps 1-2: expand note dates ──
     date_meals = expand_note_dates(note, ref_year, month)
 
-    # ── Step 3: remove holidays + custom excluded dates ──
+    # ── Step 3: skip non-delivery dates per meal ──
     holidays = get_kr_holidays(ref_year)
-    blocked = set(holidays) | (excluded_dates or set())
-    if blocked:
-        month_blocked = sorted(d for d in blocked if d.month == month)
-        if month_blocked:
-            log.debug(
-                "[Memo] blocked dates in %04d-%02d: %s",
-                ref_year,
-                month,
-                [str(d) for d in month_blocked],
-            )
 
     # ── Step 4: count by schedule ──
     s = get_settings()
@@ -483,13 +473,13 @@ def apply_note_to_month(
     }
 
     for d, meals in date_meals:
-        if d in blocked:
-            # 조식 + 주말(토·일)이면 공휴일이어도 차감 대상
-            if not (MealType.BREAKFAST in meals and d.weekday() in {SAT, SUN}):
-                log.debug("[Memo] skip blocked date %s", d)
-                continue
         for meal_type in meals:
             if not flags.get(meal_type):
+                continue
+            if d in (excluded_dates or set()) or (
+                meal_type != MealType.BREAKFAST and d in holidays
+            ):
+                log.debug("[Memo] skip blocked date %s for %s", d, meal_type)
                 continue
             if d.weekday() in schedule[meal_type]:
                 counts[meal_type] += 1

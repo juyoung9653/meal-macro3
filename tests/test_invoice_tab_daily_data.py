@@ -221,3 +221,53 @@ def test_saved_mapping_survives_restart_and_beats_stale_result_cache(
     for column in note_template_columns:
         assert persisted[column] == saved_mapping["__note"]
     restarted_tab.close()
+
+
+@pytest.mark.parametrize("saved_exclusions", [[], ["2026-09-25", "2026-09-26"]])
+def test_manual_exclusions_survive_restart_without_adding_holidays(
+    tmp_path, monkeypatch, qapp, saved_exclusions
+):
+    ui_settings = QSettings(str(tmp_path / "manual-exclusions.ini"), QSettings.Format.IniFormat)
+    ui_settings.setValue("invoice/year", 2026)
+    ui_settings.setValue("invoice/month", 9)
+    ui_settings.setValue("invoice/excluded_dates", saved_exclusions)
+    monkeypatch.setattr(invoice_tab_module, "QSettings", lambda *_args: ui_settings)
+    monkeypatch.setattr(invoice_tab_module, "get_settings", lambda: make_settings_manager())
+    monkeypatch.setattr(
+        "src.services.holiday_fetcher._HOLIDAY_CACHE",
+        {2026: {date(2026, 9, 24), date(2026, 9, 25), date(2026, 9, 26)}},
+    )
+    tab = invoice_tab_module.InvoiceTab()
+    try:
+        assert tab._controller.get_excluded_dates() == {
+            date.fromisoformat(value) for value in saved_exclusions
+        }
+        tab.month_spin.setValue(10)
+        tab.month_spin.setValue(9)
+        assert tab._controller.get_excluded_dates() == set()
+    finally:
+        tab.close()
+
+
+def test_exclusion_dialog_keeps_and_toggles_weekend_dates(tmp_path, monkeypatch, qapp):
+    ui_settings = QSettings(str(tmp_path / "weekend-exclusions.ini"), QSettings.Format.IniFormat)
+    monkeypatch.setattr(invoice_tab_module, "QSettings", lambda *_args: ui_settings)
+    monkeypatch.setattr(invoice_tab_module, "get_settings", lambda: make_settings_manager())
+    tab = invoice_tab_module.InvoiceTab()
+    tab.year_spin.setValue(2026)
+    tab.month_spin.setValue(9)
+    tab._controller.set_excluded_dates({date(2026, 9, 26)})
+
+    def select_sunday(dialog):
+        calendar_widget = dialog.findChild(invoice_tab_module.QCalendarWidget)
+        calendar_widget.clicked.emit(invoice_tab_module.QDate(2026, 9, 27))
+        return 0
+
+    monkeypatch.setattr(invoice_tab_module.QDialog, "exec", select_sunday)
+    try:
+        tab._open_exclude_dialog()
+        assert tab.get_excluded_dates() == {date(2026, 9, 26), date(2026, 9, 27)}
+        tab._open_exclude_dialog()
+        assert tab.get_excluded_dates() == {date(2026, 9, 26)}
+    finally:
+        tab.close()

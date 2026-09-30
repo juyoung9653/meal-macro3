@@ -29,7 +29,6 @@ from PyQt6.QtWidgets import (
 
 from ..core.invoice_data import InvoiceData
 from ..core.settings import get_settings
-from ..services.holiday_fetcher import get_kr_holidays
 from ..services.invoice_controller import (
     LUNCH_DAILY_MAPPING_FIELDS,
     LUNCH_DAILY_REQUIRED_FIELDS,
@@ -167,7 +166,7 @@ class InvoiceTab(QWidget):
         self._last_output_path: str | None = None
         self._setup_ui()
         self._restore_ui_state()
-        self._load_default_excluded_dates()
+        self._update_exclude_label()
 
     # ── UI ──
 
@@ -309,6 +308,7 @@ class InvoiceTab(QWidget):
 
         # ── 배송 제외일 ──
         exclude_group = QGroupBox("배송 제외일")
+        exclude_group.setToolTip("조식은 공휴일에도 포함하며, 선택한 제외일과 비고에 따라 차감합니다.")
         exclude_layout = QHBoxLayout(exclude_group)
         self.exclude_btn = QPushButton("📅 제외일 선택")
         self.exclude_btn.clicked.connect(self._open_exclude_dialog)
@@ -880,14 +880,6 @@ class InvoiceTab(QWidget):
                 }
             )
 
-        # 제외일
-        excluded = self._settings.value("invoice/excluded_dates", None)
-        if excluded is not None and isinstance(excluded, list):
-            self._controller.set_excluded_dates(
-                {date.fromisoformat(s) for s in excluded}
-            )
-            self._update_exclude_label()
-
         # 연월
         y = self._settings.value("invoice/year", None)
         if y is not None:
@@ -895,6 +887,14 @@ class InvoiceTab(QWidget):
         m = self._settings.value("invoice/month", None)
         if m is not None:
             self.month_spin.setValue(int(m))
+
+        # 제외일
+        excluded = self._settings.value("invoice/excluded_dates", None)
+        if excluded is not None and isinstance(excluded, list):
+            self._controller.set_excluded_dates(
+                {date.fromisoformat(s) for s in excluded}
+            )
+            self._update_exclude_label()
 
         # 단가
         bp = self._settings.value("invoice/breakfast_price", None)
@@ -1137,11 +1137,8 @@ class InvoiceTab(QWidget):
         y = self.year_spin.value()
         m = self.month_spin.value()
 
-        temp_excluded = {
-            d for d in self._controller.get_excluded_dates() if d.weekday() < 5
-        }
+        temp_excluded = set(self._controller.get_excluded_dates())
         last_day = calendar.monthrange(y, m)[1]
-        # 공휴일은 _load_default_excluded_dates() 에서 이미 추가됨 — 중복 제거
 
         cal = QCalendarWidget()
         cal.setGridVisible(True)
@@ -1166,8 +1163,6 @@ class InvoiceTab(QWidget):
 
         def _toggle_local(qd):
             d_local = date(qd.year(), qd.month(), qd.day())
-            if d_local.weekday() >= 5:
-                return
             if d_local in temp_excluded:
                 temp_excluded.discard(d_local)
             else:
@@ -1223,18 +1218,9 @@ class InvoiceTab(QWidget):
             self.exclude_label.setText("제외일: " + ", ".join(parts))
             self.exclude_label.setStyleSheet("color: #c00; font-weight: bold;")
 
-    def _load_default_excluded_dates(self):
-        y = self.year_spin.value()
-        m = self.month_spin.value()
-        for day in range(1, calendar.monthrange(y, m)[1] + 1):
-            d = date(y, m, day)
-            if d in get_kr_holidays(y) and d.weekday() < 5:
-                self._controller.add_excluded_date(d)
-        self._update_exclude_label()
-
     def _reload_excluded_dates(self):
         self._controller.clear_excluded_dates()
-        self._load_default_excluded_dates()
+        self._update_exclude_label()
 
     # ── 청구서 생성 ──
 

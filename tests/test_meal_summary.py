@@ -73,6 +73,37 @@ def test_summary_uses_schedule_notes_exclusions_and_confirmed_lunch_dates(
     assert by_date[date(2026, 6, 6)].breakfast == 2
 
 
+@pytest.mark.parametrize(
+    ("note", "excluded_dates", "expected_breakfast"),
+    [
+        ("", None, 12),
+        ("", {date(2026, 9, 25)}, 11),
+        ("9/25조식일시중지", None, 11),
+        ("", {date(2026, 9, 26)}, 11),
+    ],
+)
+def test_summary_september_holidays_and_breakfast_exceptions(
+    fixed_schedule, monkeypatch, note, excluded_dates, expected_breakfast
+):
+    holidays = {date(2026, 9, 24), date(2026, 9, 25), date(2026, 9, 26)}
+    monkeypatch.setattr(summary_module, "get_kr_holidays", lambda _year: holidays)
+    rows = build_monthly_meal_summary(
+        [{"_breakfast": 1, "_dinner": 1, "_lunch": 1, "_note": note}],
+        2026,
+        9,
+        excluded_dates=excluded_dates,
+    )
+    by_date = {row.delivery_date: row for row in rows}
+
+    assert sum(row.breakfast for row in rows) == expected_breakfast
+    assert sum(row.dinner for row in rows) == 17
+    assert sum(row.lunch for row in rows) == 20
+    assert by_date[date(2026, 9, 25)].lunch == 0
+    assert by_date[date(2026, 9, 25)].breakfast == (
+        0 if note or excluded_dates == {date(2026, 9, 25)} else 1
+    )
+
+
 def test_summary_tab_renders_every_date_and_month_total(qapp, fixed_schedule):
     tab = MealSummaryTab()
     tab.set_month(2026, 2)
