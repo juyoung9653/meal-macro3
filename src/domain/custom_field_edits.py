@@ -206,6 +206,7 @@ def _without_value(person: Person, definition_id: UUID) -> Person:
             note=person.profile.note,
             custom_values=values,
         ),
+        person.delivery_settings,
     )
 
 

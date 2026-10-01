@@ -108,6 +108,7 @@ class DesktopStartupController:
         unit_price_controller_type=UnitPriceChangeController,
         export_password_controller_type=ExportPasswordController,
         document_template_controller_type=DocumentTemplateController,
+        document_column_mapping_controller_type=None,
         document_generation_controller_type=DocumentGenerationController,
         document_hub_dialog_type=DocumentHubDialog,
         document_source_dialog_type=DocumentSourceDialog,
@@ -143,6 +144,7 @@ class DesktopStartupController:
         self._unit_price_controller_type = unit_price_controller_type
         self._export_password_controller_type = export_password_controller_type
         self._document_template_controller_type = document_template_controller_type
+        self._document_column_mapping_controller_type = document_column_mapping_controller_type
         self._document_generation_controller_type = document_generation_controller_type
         self._document_hub_dialog_type = document_hub_dialog_type
         self._document_source_dialog_type = document_source_dialog_type
@@ -248,6 +250,11 @@ class DesktopStartupController:
                     window,
                     person_id,
                 )
+            )
+        household_delivery_signal = getattr(window, "delivery_settings_requested", None)
+        if household_delivery_signal is not None and hasattr(household_delivery_signal, "connect"):
+            household_delivery_signal.connect(
+                lambda person_id: self._run_person_edit(session, window, person_id, delivery_only=True)
             )
         status_signal = getattr(window, "status_action_requested", None)
         if status_signal is not None and hasattr(status_signal, "connect"):
@@ -488,6 +495,9 @@ class DesktopStartupController:
         if hub.selected_action is SettingsAction.DOCUMENT_TEMPLATE:
             self._run_document_template_change(session, window)
             return
+        if hub.selected_action is SettingsAction.DOCUMENT_COLUMN_MAPPING:
+            self._run_document_column_mapping(session, window)
+            return
         dialog = self._document_directory_dialog_type(
             self._settings.document_output_directory,
             parent=window,
@@ -518,9 +528,12 @@ class DesktopStartupController:
         )
         self._refresh_school_calendar(session, window, roster)
 
-    def _run_person_edit(self, session: DatabaseSession, window, person_id) -> None:
+    def _run_person_edit(self, session: DatabaseSession, window, person_id, *, delivery_only: bool = False) -> None:
         controller = self._profile_edit_controller_type(session)
-        outcome = controller.run(person_id, window)
+        outcome = (
+            controller.run_delivery_settings(person_id, window, service_day=window.table_model.service_day)
+            if delivery_only else controller.run(person_id, window)
+        )
         if not outcome.completed:
             return
         roster = outcome.roster
@@ -730,6 +743,15 @@ class DesktopStartupController:
         if not outcome.completed or outcome.roster is None:
             return
         self._replace_roster_if_changed(session, window, outcome.roster)
+
+    def _run_document_column_mapping(self, session: DatabaseSession, window) -> None:
+        controller_type = self._document_column_mapping_controller_type
+        if controller_type is None:
+            from .document_column_mapping import DocumentColumnMappingController
+            controller_type = DocumentColumnMappingController
+        outcome = controller_type(session).run(window)
+        if outcome.completed and outcome.roster is not None:
+            self._replace_roster_if_changed(session, window, outcome.roster)
 
     def _ensure_document_prerequisites(
         self,

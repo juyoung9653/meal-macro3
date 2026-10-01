@@ -1,6 +1,7 @@
 """Versioned import profile and identity staging tests."""
 
 from datetime import date
+from dataclasses import replace
 from uuid import UUID
 
 import pytest
@@ -10,6 +11,7 @@ from src.domain import (
     HistoricalSnapshot,
     Household,
     HouseholdMembership,
+    HouseholdDeliverySetting,
     Meal,
     MealEnrollment,
     Person,
@@ -434,6 +436,8 @@ def test_mapped_blanks_remain_blank_for_a_new_person():
 
 def test_confirmed_exact_match_applies_profile_and_effective_meal_periods():
     roster = _roster()
+    delivery_setting = HouseholdDeliverySetting(Meal.BREAKFAST, form="개인 도시락")
+    roster = replace(roster, persons=(replace(roster.person(PERSON_ID), delivery_settings=(delivery_setting,)),))
     plan = stage_reconciliation(
         roster,
         (_observation(),),
@@ -449,6 +453,7 @@ def test_confirmed_exact_match_applies_profile_and_effective_meal_periods():
     updated = result.snapshot
     assert updated.person(PERSON_ID).profile.school_name == "새학교"
     assert updated.person(PERSON_ID).profile.provider == "분당구"
+    assert updated.person(PERSON_ID).delivery_settings == (delivery_setting,)
     assert updated.meals_for(PERSON_ID, on=date(2026, 8, 16)) == (
         Meal.BREAKFAST,
     )

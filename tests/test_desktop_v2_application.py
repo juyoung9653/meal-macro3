@@ -770,6 +770,9 @@ def test_startup_builds_roster_window_only_after_guided_import_completes(
                     callback,
                 )
             )
+            self.delivery_settings_requested = SimpleNamespace(
+                connect=lambda callback: setattr(self, "_delivery_settings_callback", callback)
+            )
             self.person_add_requested = SimpleNamespace(
                 connect=lambda callback: setattr(self, "_person_add_callback", callback)
             )
@@ -861,6 +864,13 @@ def test_startup_builds_roster_window_only_after_guided_import_completes(
                 completed=True,
                 roster=session.database.current_roster(),
             )
+
+        def run_delivery_settings(self, person_id, parent=None, *, service_day):
+            assert service_day == parent.table_model.service_day
+            household_delivery_requests.append(person_id)
+            return self.run(person_id, parent)
+
+    household_delivery_requests = []
 
     row_actions = []
 
@@ -1152,6 +1162,9 @@ def test_startup_builds_roster_window_only_after_guided_import_completes(
     outcome.window._document_generated_callback(generated)
     assert completion_results == [generated]
     assert outcome.window.replace_count == 7
+    outcome.window._delivery_settings_callback(PERSON_ID)
+    assert household_delivery_requests == [PERSON_ID]
+    assert outcome.window.replace_count == 8
     outcome.close()
 
 

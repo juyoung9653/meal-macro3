@@ -136,6 +136,71 @@ def test_profile_edit_rejects_no_change_and_unknown_person():
         )
 
 
+def test_household_delivery_settings_commit_and_reset_without_profile_change():
+    from src.domain.roster import HouseholdDeliverySetting
+
+    roster = _roster()
+    setting = HouseholdDeliverySetting(Meal.DINNER, (0, 1, 2, 3, 4), "도시락", (4, 1, 2, 3, 4, 5, 6))
+    arguments = dict(actor=RevisionActor("tester", "S-1-5-21-test"),
+                     recorded_at=RECORDED_AT, effective_on=EFFECTIVE_ON)
+    added = build_person_profile_revision(
+        roster, PERSON_ID, roster.person(PERSON_ID).profile,
+        household_delivery_settings=(setting,), revision_id=NEW_REVISION_ID, **arguments,
+    )
+    assert added.snapshot.households[0].delivery_settings == (setting,)
+    assert len(added.record.changes) == 1
+    assert added.record.changes[0].entity_kind == "roster.household"
+    assert added.record.changes[0].after["delivery_settings"][0]["form"] == "도시락"
+    assert added.record.changes[0].after["delivery_settings"][0]["delivery_weekdays"] == (4, 1, 2, 3, 4, 5, 6)
+    with pytest.raises(ValueError, match="변경된"):
+        build_person_profile_revision(
+            added.snapshot, PERSON_ID, roster.person(PERSON_ID).profile,
+            household_delivery_settings=(setting,), revision_id=UUID("85000000-0000-0000-0000-000000000006"), **arguments,
+        )
+    reset = build_person_profile_revision(
+        added.snapshot, PERSON_ID, roster.person(PERSON_ID).profile,
+        household_delivery_settings=(), revision_id=UUID("85000000-0000-0000-0000-000000000007"), **arguments,
+    )
+    assert reset.snapshot.households[0].delivery_settings == ()
+    assert reset.record.changes[0].after == {}
+
+
+def test_person_delivery_settings_isolate_siblings_and_explicit_reset():
+    from dataclasses import replace
+    from src.domain.roster import HouseholdDeliverySetting
+    from src.services.meal_service_availability import physical_delivery_on
+
+    sibling_id = UUID("85000000-0000-0000-0000-000000000090")
+    other_id = UUID("85000000-0000-0000-0000-000000000091")
+    other_household = UUID("85000000-0000-0000-0000-000000000092")
+    original = _roster()
+    inherited = HouseholdDeliverySetting(Meal.BREAKFAST, (4, 5, 6), "가구형", (0, 1, 2, 3, 4, 3, 3))
+    personal = HouseholdDeliverySetting(Meal.BREAKFAST, (4, 5, 6), "개인형", (0, 1, 2, 3, 4, 4, 4))
+    roster = replace(original,
+        persons=(*original.persons, Person(sibling_id, PersonProfile("형제")), Person(other_id, PersonProfile("다른 가구"))),
+        households=(Household(HOUSEHOLD_ID, (inherited,)), Household(other_household)),
+        memberships=(*original.memberships, HouseholdMembership(sibling_id, HOUSEHOLD_ID), HouseholdMembership(other_id, other_household)))
+    kwargs = dict(actor=RevisionActor("tester", "S-1-5-21-test"), recorded_at=RECORDED_AT,
+                  effective_on=EFFECTIVE_ON, revision_id=NEW_REVISION_ID)
+    edited = build_person_profile_revision(roster, PERSON_ID, roster.person(PERSON_ID).profile,
+                                           person_delivery_settings=(personal,), **kwargs)
+    assert edited.snapshot.delivery_settings_for(PERSON_ID, on=EFFECTIVE_ON) == (personal,)
+    assert edited.snapshot.delivery_settings_for(sibling_id, on=EFFECTIVE_ON) == (inherited,)
+    assert edited.snapshot.person(other_id) == roster.person(other_id)
+    assert physical_delivery_on(edited.snapshot, edited.snapshot.person(PERSON_ID), Meal.BREAKFAST, date(2026, 8, 29)) == date(2026, 8, 28)
+    assert physical_delivery_on(edited.snapshot, edited.snapshot.person(sibling_id), Meal.BREAKFAST, date(2026, 8, 29)) == date(2026, 8, 27)
+
+    reset = build_person_profile_revision(roster, PERSON_ID, roster.person(PERSON_ID).profile,
+        person_delivery_settings=(), delivery_settings_to_household=True,
+        **(kwargs | {"revision_id": UUID("85000000-0000-0000-0000-000000000093")}))
+    assert reset.snapshot.person(PERSON_ID).delivery_settings == ()
+    assert reset.snapshot.person(sibling_id).delivery_settings == ()
+    assert reset.snapshot.delivery_settings_for(PERSON_ID, on=EFFECTIVE_ON) == ()
+    assert reset.snapshot.households[0].delivery_settings == (inherited,)
+    assert reset.snapshot.person(other_id).delivery_settings is None
+    assert len(reset.record.changes) == 2
+
+
 def test_profile_edit_persists_a_custom_value_only_change():
     roster = _roster()
     original = roster.person(PERSON_ID).profile

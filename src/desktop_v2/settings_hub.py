@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
     QSizePolicy,
+    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
@@ -28,6 +29,7 @@ class SettingsAction(StrEnum):
     PROVIDER = "provider"
     EXPORT_PASSWORD = "export_password"
     DOCUMENT_TEMPLATE = "document_template"
+    DOCUMENT_COLUMN_MAPPING = "document_column_mapping"
     DOCUMENT_DIRECTORY = "document_directory"
 
     @property
@@ -52,6 +54,11 @@ _SETTINGS_COPY = {
     SettingsAction.EXPORT_PASSWORD: (
         "생성 Excel 비밀번호",
         "청구서·확인서 등 외부로 보내는 Excel의 공통 비밀번호를 관리합니다.",
+        "변경 이력에 기록",
+    ),
+    SettingsAction.DOCUMENT_COLUMN_MAPPING: (
+        "출력 칼럼 연결",
+        "명단 항목을 청구서·확인서의 어느 칼럼에 넣을지 양식별로 수정합니다.",
         "변경 이력에 기록",
     ),
     SettingsAction.DOCUMENT_DIRECTORY: (
@@ -126,7 +133,7 @@ class SettingsHubDialog(QDialog):
         self.setWindowTitle("설정")
         self.setModal(True)
         self.resize(900, 760)
-        self.setMinimumSize(800, 700)
+        self.setMinimumSize(800, 620)
         self.setStyleSheet(application_stylesheet())
         self._build_ui()
 
@@ -142,12 +149,18 @@ class SettingsHubDialog(QDialog):
         root.setSpacing(14)
         root.addWidget(self._build_header())
 
-        cards = QGridLayout()
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        card_container = QWidget()
+        cards = QGridLayout(card_container)
+        cards.setContentsMargins(0, 0, 0, 0)
         cards.setSpacing(12)
         for index, (action, stamp) in enumerate((
             (SettingsAction.PROVIDER, "기관"),
             (SettingsAction.EXPORT_PASSWORD, "잠금"),
             (SettingsAction.DOCUMENT_TEMPLATE, "양식"),
+            (SettingsAction.DOCUMENT_COLUMN_MAPPING, "연결"),
             (SettingsAction.DOCUMENT_DIRECTORY, "폴더"),
         )):
             card = _SettingsActionCard(action, stamp=stamp)
@@ -155,13 +168,15 @@ class SettingsHubDialog(QDialog):
                 lambda _checked=False, selected=action: self._choose(selected)
             )
             self._cards[action] = card
-            cards.addWidget(card, index // 2, index % 2)
+            cards.addWidget(card, index // 2, index % 2, 1,
+                            2 if action is SettingsAction.DOCUMENT_DIRECTORY else 1)
         cards.setColumnStretch(0, 1)
         cards.setColumnStretch(1, 1)
-        root.addLayout(cards, 1)
+        scroll.setWidget(card_container)
+        root.addWidget(scroll, 1)
 
         note = QLabel(
-            "제공기관·비밀번호·문서 양식은 변경 이력에 남습니다. 문서 저장 폴더는 이 컴퓨터에만 저장합니다."
+            "제공기관·비밀번호·문서 양식·출력 연결은 변경 이력에 남습니다. 문서 저장 폴더는 이 컴퓨터에만 저장합니다."
         )
         note.setObjectName("settingsHubNote")
         note.setWordWrap(True)

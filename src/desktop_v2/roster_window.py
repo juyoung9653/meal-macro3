@@ -23,6 +23,7 @@ from PySide6.QtGui import QAction, QColor, QFont, QGuiApplication
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
+    QCheckBox,
     QDateEdit,
     QDialog,
     QFrame,
@@ -58,10 +59,12 @@ from src.domain.school_calendar import (
 )
 from src.domain.status import MealStatus, StatusHistory
 from src.services.inactive_roster import inactive_person_ids
+from src.services.meal_service_availability import default_service_weekdays, regular_service_available
 
 from .column_layout import RosterColumnLayout
 from .column_search import ColumnSearchHeader
 from .inactive_roster import InactiveRosterSettings, InactiveThresholdDialog
+from .inspector_history import MealHistoryRow
 from .panel_handle import PanelEdgeHandle
 
 from .theme import (
@@ -226,6 +229,7 @@ class RosterTableModel(QAbstractTableModel):
         self._active_only = False
         self._driver_filter: UUID | None = None
         self._birth_month: int | None = None
+        self._special_only = False
         # None preserves the historical all-person model for standalone users.
         self._archive_mode: bool | None = None
         self._archive_ids: frozenset[UUID] = frozenset()
@@ -382,6 +386,20 @@ class RosterTableModel(QAbstractTableModel):
         self.beginResetModel()
         self._archive_ids = ids
         self._archive_mode = visible
+        self._refresh_people()
+        self.endResetModel()
+
+    def set_special_only(self, enabled: bool) -> None:
+        if enabled == self._special_only:
+            return
+        self.beginResetModel()
+        sort_key = self._columns[self._sort_column].key if self._sort_column is not None else None
+        self._special_only = enabled
+        self._columns = self._build_columns()
+        if not enabled:
+            self._column_searches.pop("delivery_settings", None)
+            self._column_values.pop("delivery_settings", None)
+        self._sort_column = next((index for index, column in enumerate(self._columns) if column.key == sort_key), None)
         self._refresh_people()
         self.endResetModel()
 
@@ -605,7 +623,9 @@ class RosterTableModel(QAbstractTableModel):
             )
         )
         return (
-            *base_before_contacts,
+            *base_before_contacts[:1],
+            *((_Column("delivery_settings", "배송 설정", 240),) if self._special_only else ()),
+            *base_before_contacts[1:],
             *contact_columns,
             *base_after_contacts,
             *custom,
@@ -619,6 +639,8 @@ class RosterTableModel(QAbstractTableModel):
                          for column in self._columns if column.key in self._column_values]
         birth_month = date.today().month if self._birth_month == 0 else self._birth_month
         for person in self._roster.persons:
+            if self._special_only and not self._delivery_setting_text(person):
+                continue
             if self._archive_mode is not None and (
                 (person.person_id in self._archive_ids) != self._archive_mode
             ):
@@ -728,6 +750,19 @@ class RosterTableModel(QAbstractTableModel):
     ) -> str:
         if meal not in meals:
             return "-"
+        has_weekday_override = any(
+            setting.meal is meal and setting.weekdays is not None
+            for setting in self._roster.delivery_settings_for(person_id, on=self._day)
+        )
+        if has_weekday_override:
+            try:
+                if not regular_service_available(
+                    self._roster, self._roster.person(person_id), meal,
+                    self._day, self._school_calendar,
+                ):
+                    return "-"
+            except SchoolLunchScheduleMissingError:
+                return "-"
         if meal is Meal.LUNCH:
             try:
                 if not self._school_calendar.vendor_service_available(
@@ -776,6 +811,8 @@ class RosterTableModel(QAbstractTableModel):
         context: _PersonContext,
     ):
         profile = person.profile
+        if column.key == "delivery_settings":
+            return self._delivery_setting_text(person)
         if column.meal is not None:
             status = self._status_for_column(column, context)
             display_status = "미배송" if status == MealStatus.STOPPED.value else status
@@ -806,6 +843,48 @@ class RosterTableModel(QAbstractTableModel):
                 return value.isoformat()
             return "" if value is None else str(value)
         return ""
+
+    def _delivery_setting_text(self, person: Person) -> str:
+        settings = self._roster.delivery_settings_for(person.person_id, on=self._day)
+        lines = []
+        for setting in sorted(settings, key=lambda item: _MEAL_ORDER.index(item.meal)):
+            parts = []
+            if setting.weekdays is not None:
+                parts.append("".join("월화수목금토일"[day] for day in setting.weekdays) + "요일")
+            if setting.delivery_weekdays is not None:
+                service_days = setting.weekdays
+                if service_days is None:
+                    service_days = default_service_weekdays(setting.meal)
+                grouped_days: dict[int, list[str]] = {}
+                for day in service_days:
+                    grouped_days.setdefault(setting.delivery_weekdays[day], []).append("월화수목금토일"[day])
+                parts.extend(
+                    f"{'·'.join(days)} → {'월화수목금토일'[delivery_day]} 배송"
+                    for delivery_day, days in grouped_days.items()
+                )
+            if setting.form is not None:
+                parts.append(setting.form)
+            lines.append(f"{setting.meal.value}: {' · '.join(parts)}")
+        return "\n".join(lines)
+
+
+class _MealHistoryList(QListWidget):
+    """Size wrapped inspector rows to the available viewport width."""
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self.update_row_heights()
+
+    def update_row_heights(self) -> None:
+        width = max(80, self.viewport().width() - 16)
+        for index in range(self.count()):
+            item = self.item(index)
+            entry = self.itemWidget(item)
+            if entry is None:
+                continue
+            labels = entry.findChildren(QLabel)
+            height = 4 + sum(label.heightForWidth(width) for label in labels) + max(0, len(labels) - 1)
+            item.setSizeHint(QSize(0, max(54, height)))
 
 
 class StatusHistoryDialog(QDialog):
@@ -906,6 +985,7 @@ class RosterWindow(QMainWindow):
     database_export_requested = Signal()
     import_review_requested = Signal()
     person_edit_requested = Signal(object)
+    delivery_settings_requested = Signal(object)
     person_add_requested = Signal(object)
     person_delete_requested = Signal(object)
     service_adjustment_requested = Signal()
@@ -940,6 +1020,7 @@ class RosterWindow(QMainWindow):
             SchoolLunchCalendar() if school_calendar is None else school_calendar
         )
         self._revision_display_code = revision_display_code
+        self._delivery_settings_width = 240
         self._model = RosterTableModel(
             roster,
             self._histories,
@@ -1197,6 +1278,10 @@ class RosterWindow(QMainWindow):
         self._driver_filter.setToolTip("전체 식종 중 선택한 기사가 담당하는 대상자를 표시합니다")
         self._driver_filter.currentIndexChanged.connect(self._on_driver_filter_changed)
         filters.addWidget(self._driver_filter)
+        self._special_only_filter = QCheckBox("별도 설정만")
+        self._special_only_filter.setToolTip("개인별 적용 배송 설정이 기본값과 다른 대상자만 표시합니다")
+        self._special_only_filter.toggled.connect(self._on_special_only_changed)
+        filters.addWidget(self._special_only_filter)
         self._refresh_driver_filter()
         self._driver_households_button = QPushButton("기사별 가구")
         self._driver_households_button.setObjectName("quietAction")
@@ -1347,7 +1432,7 @@ class RosterWindow(QMainWindow):
                  "조식·중식·석식 청구 단가와 적용일을 관리합니다"),
             )),
             ("화면·설정", (
-                ("_columns_action", "칼럼 설정…", self._show_column_menu,
+                ("_columns_action", "칼럼 설정", self._show_column_menu,
                  "칼럼 표시·숨기기, 기본 배치 복원, 사용자 항목 추가·삭제"),
                 ("_settings_action", "설정", self.settings_requested.emit,
                  "생성 Excel 비밀번호와 문서 저장 폴더를 관리합니다"),
@@ -1364,7 +1449,7 @@ class RosterWindow(QMainWindow):
                 self._archive_action = menu.addAction("장기 미배송 보관함")
                 self._archive_action.setCheckable(True)
                 self._archive_action.toggled.connect(self._refresh_archive)
-                self._archive_threshold_action = menu.addAction("보관 기준 설정…")
+                self._archive_threshold_action = menu.addAction("보관 기준 설정")
                 self._archive_threshold_action.triggered.connect(self._show_archive_threshold)
         return menu
 
@@ -1446,7 +1531,7 @@ class RosterWindow(QMainWindow):
     def _show_column_menu(self, position=None) -> None:
         menu = self._column_layout.create_menu(self)
         menu.addSeparator()
-        manage = menu.addAction("사용자 항목 추가·삭제…")
+        manage = menu.addAction("사용자 항목 추가·삭제")
         manage.triggered.connect(self.custom_fields_requested.emit)
         if position is None or isinstance(position, bool):
             position = self._more_button.mapToGlobal(self._more_button.rect().bottomLeft())
@@ -1458,8 +1543,8 @@ class RosterWindow(QMainWindow):
         frame.setMinimumWidth(280)
         frame.setMaximumWidth(390)
         layout = QVBoxLayout(frame)
-        layout.setContentsMargins(18, 18, 18, 18)
-        layout.setSpacing(9)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(7)
         heading = QHBoxLayout()
         label = QLabel("선택 정보")
         label.setObjectName("sectionLabel")
@@ -1471,6 +1556,12 @@ class RosterWindow(QMainWindow):
         self._edit_person_button.setToolTip("선택한 사람의 인적사항을 직접 수정합니다")
         self._edit_person_button.clicked.connect(self._request_selected_person_edit)
         heading.addWidget(self._edit_person_button)
+        self._delivery_settings_button = QToolButton()
+        self._delivery_settings_button.setText("배송 설정")
+        self._delivery_settings_button.setToolTip("선택한 사람의 배송 설정 · 필요하면 같은 가구 전체에 적용")
+        self._delivery_settings_button.setEnabled(False)
+        self._delivery_settings_button.clicked.connect(self._request_delivery_settings)
+        heading.addWidget(self._delivery_settings_button)
         layout.addLayout(heading)
         self._inspector_name = QLabel("명단에서 한 사람을 선택하세요")
         self._inspector_name.setObjectName("personName")
@@ -1486,22 +1577,34 @@ class RosterWindow(QMainWindow):
         layout.addWidget(household_label)
         self._household_list = QListWidget()
         self._household_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        layout.addWidget(self._household_list, 1)
+        self._household_list.setMaximumHeight(72)
+        layout.addWidget(self._household_list)
+        history_heading = QHBoxLayout()
         history_label = QLabel("식종 변경 이력")
         history_label.setObjectName("sectionLabel")
-        layout.addWidget(history_label)
-        self._meal_history_list = QListWidget()
+        history_heading.addWidget(history_label)
+        history_heading.addStretch(1)
+        self._meal_history_all_button = QToolButton()
+        self._meal_history_all_button.setText("전체 보기")
+        self._meal_history_all_button.setToolTip("선택한 사람의 전체 이력 보기")
+        self._meal_history_all_button.setEnabled(False)
+        self._meal_history_all_button.clicked.connect(self._show_selected_person_history)
+        history_heading.addWidget(self._meal_history_all_button)
+        layout.addLayout(history_heading)
+        self._meal_history_list = _MealHistoryList()
         self._meal_history_list.setObjectName("mealHistory")
         self._meal_history_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._meal_history_list.setUniformItemSizes(True)
-        self._meal_history_list.setSpacing(4)
-        self._meal_history_list.setTextElideMode(Qt.TextElideMode.ElideRight)
-        self._meal_history_list.setStyleSheet("QListWidget::item { height: 20px; }")
-        self._meal_history_list.setFixedHeight(102)
-        layout.addWidget(self._meal_history_list)
-        guide = QLabel("모든 셀 우클릭: 이력보기·민원\n식종 셀 우클릭: 배송 상태 변경\nCtrl·Shift로 여러 식종 셀 선택 후 우클릭하면 일괄 변경할 수 있습니다.")
+        self._meal_history_list.setUniformItemSizes(False)
+        self._meal_history_list.setSpacing(2)
+        self._meal_history_list.setWordWrap(True)
+        self._meal_history_list.setTextElideMode(Qt.TextElideMode.ElideNone)
+        self._meal_history_list.setMinimumHeight(168)
+        self._meal_history_list.setMaximumHeight(220)
+        layout.addWidget(self._meal_history_list, 1)
+        guide = QLabel("우클릭: 이력보기·민원·상태 변경")
         guide.setObjectName("muted")
         guide.setWordWrap(True)
+        guide.setToolTip("모든 셀 우클릭: 이력보기·민원\n식종 셀 우클릭: 배송 상태 변경\nCtrl·Shift로 여러 식종 셀 선택 후 우클릭하면 일괄 변경할 수 있습니다.")
         layout.addWidget(guide)
         return frame
 
@@ -1576,7 +1679,7 @@ class RosterWindow(QMainWindow):
         )
         menu.addAction(complaint)
         menu.addSeparator()
-        delete = QAction("명단 행 삭제…", menu)
+        delete = QAction("명단 행 삭제", menu)
         delete.triggered.connect(lambda: self.person_delete_requested.emit(person.person_id))
         menu.addAction(delete)
 
@@ -1654,6 +1757,22 @@ class RosterWindow(QMainWindow):
 
     def _on_birth_month_changed(self) -> None:
         self._model.set_birth_month(self._birth_month_filter.currentData())
+        self._after_model_reset()
+
+    def _on_special_only_changed(self, enabled: bool) -> None:
+        if not enabled:
+            previous = next((i for i, column in enumerate(self._model.columns) if column.key == "delivery_settings"), None)
+            if previous is not None:
+                self._delivery_settings_width = self._table.horizontalHeader().sectionSize(previous)
+        self._model.set_special_only(enabled)
+        self._column_layout.replace_columns(self._model.columns)
+        self._column_search_header.replace_columns(self._model.columns)
+        if enabled:
+            delivery = next(i for i, column in enumerate(self._model.columns) if column.key == "delivery_settings")
+            header = self._table.horizontalHeader()
+            header.resizeSection(delivery, self._delivery_settings_width)
+            name = next(i for i, column in enumerate(self._model.columns) if column.key == "name")
+            header.moveSection(header.visualIndex(delivery), header.visualIndex(name) + 1)
         self._after_model_reset()
 
     def _shift_day(self, offset: int) -> None:
@@ -1757,6 +1876,7 @@ class RosterWindow(QMainWindow):
                 )
             )
             self._household_list.addItem(f"{member.profile.name}   {meals or '-'}")
+        self._delivery_settings_button.setEnabled(True)
         if not members:
             self._household_list.addItem("연결된 가구가 없습니다")
         self._populate_meal_history(person)
@@ -1768,6 +1888,18 @@ class RosterWindow(QMainWindow):
         person = self._model.person_at(index.row())
         self.person_edit_requested.emit(person.person_id)
 
+    def _request_delivery_settings(self) -> None:
+        index = self._selected_index()
+        if not index.isValid():
+            return
+        person = self._model.person_at(index.row())
+        self.delivery_settings_requested.emit(person.person_id)
+
+    def _show_selected_person_history(self) -> None:
+        index = self._selected_index()
+        if index.isValid():
+            self._show_history(self._model.person_at(index.row()), None)
+
     def _selected_index(self) -> QModelIndex:
         selection_model = self._table.selectionModel()
         current = selection_model.currentIndex()
@@ -1778,6 +1910,8 @@ class RosterWindow(QMainWindow):
 
     def _clear_inspector(self) -> None:
         self._edit_person_button.setEnabled(False)
+        self._delivery_settings_button.setEnabled(False)
+        self._meal_history_all_button.setEnabled(False)
         self._inspector_name.setText("명단에서 한 사람을 선택하세요")
         self._inspector_detail.setText("연락처와 주소, 변경 이력이 여기에 표시됩니다.")
         self._household_list.clear()
@@ -1785,28 +1919,49 @@ class RosterWindow(QMainWindow):
 
     def _populate_meal_history(self, person: Person) -> None:
         self._meal_history_list.clear()
+        self._meal_history_all_button.setEnabled(True)
         rows = (
             self._meal_change_history_provider(person)
             if self._meal_change_history_provider is not None
             else self._fallback_meal_history_rows(person)
         )
-        for text, tooltip in rows:
-            item = QListWidgetItem(text)
-            item.setSizeHint(QSize(0, 20))
+        for row in rows:
+            if isinstance(row, MealHistoryRow):
+                title, tooltip = row.text, row.tooltip
+                applied = f"적용 {row.applied}"
+                recorded = f"기록 {row.recorded[:16]}" if row.recorded else ""
+                detail = " · ".join(part for part in (applied, recorded) if part)
+            else:
+                title, tooltip = row
+                detail = ""
+            item = QListWidgetItem(title if not detail else "")
+            item.setSizeHint(QSize(0, 58 if detail else 34))
             item.setToolTip(tooltip)
             self._meal_history_list.addItem(item)
+            if detail:
+                entry = QWidget()
+                entry_layout = QVBoxLayout(entry)
+                entry_layout.setContentsMargins(5, 2, 5, 2)
+                entry_layout.setSpacing(1)
+                title_label = QLabel(title)
+                title_label.setWordWrap(True)
+                title_label.setStyleSheet("font-weight: 700;")
+                entry_layout.addWidget(title_label)
+                for line in (applied, recorded):
+                    if not line:
+                        continue
+                    detail_label = QLabel(line)
+                    detail_label.setWordWrap(True)
+                    detail_label.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+                    entry_layout.addWidget(detail_label)
+                entry.setToolTip(tooltip)
+                entry.setAccessibleName(f"{title}, {detail}")
+                self._meal_history_list.setItemWidget(item, entry)
         if not rows:
             item = QListWidgetItem("기록된 식종 변경 이력이 없습니다")
-            item.setSizeHint(QSize(0, 20))
+            item.setSizeHint(QSize(0, 34))
             self._meal_history_list.addItem(item)
-        self._meal_history_list.doItemsLayout()
-        last_visible_row = min(4, self._meal_history_list.count() - 1)
-        visible_rect = self._meal_history_list.visualItemRect(
-            self._meal_history_list.item(last_visible_row),
-        )
-        self._meal_history_list.setFixedHeight(
-            visible_rect.bottom() + 1 + 2 * self._meal_history_list.frameWidth(),
-        )
+        self._meal_history_list.update_row_heights()
 
     def _fallback_meal_history_rows(self, person: Person) -> tuple[tuple[str, str], ...]:
         history_events = [

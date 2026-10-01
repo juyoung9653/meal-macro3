@@ -779,6 +779,20 @@ MIGRATIONS = (
             """,
         ),
     ),
+    Migration(
+        version=6,
+        name="household_delivery_settings",
+        statements=(
+            "ALTER TABLE household_projection ADD COLUMN delivery_settings_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(delivery_settings_json) AND json_type(delivery_settings_json) = 'array')",
+        ),
+    ),
+    Migration(
+        version=7,
+        name="person_delivery_settings",
+        statements=(
+            "ALTER TABLE person_projection ADD COLUMN delivery_settings_json TEXT CHECK(delivery_settings_json IS NULL OR (json_valid(delivery_settings_json) AND json_type(delivery_settings_json) = 'array'))",
+        ),
+    ),
 )
 
 CURRENT_SCHEMA_VERSION = MIGRATIONS[-1].version

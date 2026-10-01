@@ -325,7 +325,7 @@ class ImportReviewDialog(QDialog):
             if self._purpose is not ImportPurpose.VACATION_LUNCH:
                 combo.addItem("이 행 제외", "ignore")
         else:
-            combo.addItem("사람 연결 방식 선택…", _PLACEHOLDER)
+            combo.addItem("사람 연결 방식 선택", _PLACEHOLDER)
             for person_id in staged.candidate_person_ids:
                 combo.addItem(f"기존 연결 · {self._person_label(person_id)}", person_id)
             combo.addItem("별도 신규 사람으로 추가", "new")
@@ -349,7 +349,7 @@ class ImportReviewDialog(QDialog):
         existing = self._household_plan.existing_proposal_for(observation_id)
         if existing is not None:
             if len(existing.candidate_household_ids) > 1:
-                combo.addItem("기존 가구 선택 필요…", _HOUSEHOLD_PLACEHOLDER)
+                combo.addItem("기존 가구 선택 필요", _HOUSEHOLD_PLACEHOLDER)
             for household_id in existing.candidate_household_ids:
                 combo.addItem(
                     f"기존 가구에 포함 · {self._household_label(household_id)}",

@@ -58,6 +58,11 @@ from src.domain.school_calendar import (
 from src.storage import DatabaseSession
 from src.templates.config import read_template_columns
 from src.templates.template_scanner import scan_placeholders
+from src.services.document_column_mappings import (
+    build_mapping_revision,
+    load_mapping_overrides,
+    mapping_editor_spec,
+)
 
 
 REVISION_ID = UUID("6d000000-0000-0000-0000-000000000001")
@@ -385,6 +390,118 @@ def test_publishes_encrypted_monthly_document_records_run_and_backup(
         assert len(restored_runs) == 1
         assert restored_runs[0].output_filename == selection.filename
         restored.database.check_integrity()
+
+
+def test_latest_saved_mapping_changes_old_source_invoice_and_survives_backup(tmp_path: Path):
+    backups = tmp_path / "backups-mapping"
+    outputs = tmp_path / "outputs-mapping"
+    backups.mkdir()
+    outputs.mkdir()
+    database_path = tmp_path / "mapping.sqlite3"
+    with DatabaseSession.create(database_path, "everyday-password", backup_directory=backups) as session:
+        session.append_revision(_initial_revision())
+        source = session.database.revision_summaries()[0]
+        snapshot = session.database.snapshot(REVISION_ID)
+        spec = mapping_editor_spec("급식", "invoice")
+        assert "학교명" in spec.targets
+        desired = {"학교명": "학년"}
+        mapping_revision_id = UUID("6d000000-0000-0000-0000-000000000090")
+        prepared = build_mapping_revision(
+            REVISION_ID, snapshot, "급식", "invoice", desired,
+            actor=RevisionActor("tester", "S-1-5-21-test"),
+            recorded_at=datetime(2026, 6, 30, 1, 30, tzinfo=UTC),
+            revision_id=mapping_revision_id,
+        )
+        assert prepared is not None
+        mapping_backup = session.append_revision(prepared.record)
+        latest = session.database.snapshot(mapping_revision_id)
+        assert load_mapping_overrides(latest, "급식", "invoice") == desired
+        assert load_mapping_overrides(latest, "행복도시락", "invoice") == {}
+        assert load_mapping_overrides(latest, "급식", "confirmation") == {}
+        assert build_mapping_revision(
+            mapping_revision_id, latest, "급식", "invoice", desired,
+            actor=RevisionActor("tester", "S-1-5-21-test"),
+            recorded_at=datetime(2026, 6, 30, 1, 40, tzinfo=UTC),
+            revision_id=UUID("6d000000-0000-0000-0000-000000000091"),
+        ) is None
+        period = DocumentPeriodSelection(
+            DocumentAction.INVOICE, source, date(2026, 6, 17), Meal.LUNCH,
+            date(2026, 6, 1), date(2026, 6, 30),
+        )
+        selection = next_available_document_output(
+            DocumentMealSelection(period, (Meal.LUNCH,)), outputs,
+            DocumentOutputMode.SAVED_DEFAULT,
+        )
+        outcome = DocumentGenerationController(session, message_box=_Messages).run(selection)
+        assert outcome.completed
+        run = session.database.document_runs(kind=DocumentKind.INVOICE)[0]
+        assert run.source_revision_id == REVISION_ID
+        assert run.template_manifest["column_mapping"]["학교명"] == "학년"
+        assert run.template_manifest["column_mapping_setting"]["setting_revision_id"] == str(mapping_revision_id)
+        with selection.output_path.open("rb") as source_file:
+            office_file = msoffcrypto.OfficeFile(source_file)
+            office_file.load_key(password="xlsx-secret")
+            plaintext = BytesIO()
+            office_file.decrypt(plaintext)
+        plaintext.seek(0)
+        workbook = openpyxl.load_workbook(plaintext)
+        try:
+            column = read_template_columns("assets/급식_청구서템플릿.xlsx", sheet_name="청구서").index("학교명") + 1
+            assert workbook["청구서"].cell(4, column).value == "6학년"
+        finally:
+            workbook.close()
+            plaintext.close()
+        assert mapping_backup.record is not None
+        backup_path = mapping_backup.record.path
+    restored_path = tmp_path / "mapping-restored.sqlite3"
+    with DatabaseSession.restore_and_open_with_user_password(
+        backup_path, restored_path, "everyday-password",
+    ) as restored:
+        assert load_mapping_overrides(restored.database.snapshot(mapping_revision_id), "급식", "invoice") == desired
+
+
+@pytest.mark.parametrize(("source_field", "expected"), (("학교명", "푸른초"), ("", None)))
+def test_confirmation_saved_name_mapping_changes_actual_workbook(
+    tmp_path: Path, source_field: str, expected: str | None,
+):
+    backups = tmp_path / "backups"
+    outputs = tmp_path / "outputs"
+    backups.mkdir()
+    outputs.mkdir()
+    with DatabaseSession.create(tmp_path / "confirmation.sqlite3", "everyday-password", backup_directory=backups) as session:
+        session.append_revision(_initial_revision())
+        source = session.database.revision_summaries()[0]
+        revision_id = UUID("6d000000-0000-0000-0000-000000000099")
+        prepared = build_mapping_revision(
+            REVISION_ID, session.database.snapshot(REVISION_ID), "급식", "confirmation",
+            {"성명": source_field}, actor=RevisionActor("tester", "S-1-5-21-test"),
+            recorded_at=datetime(2026, 6, 30, 1, 30, tzinfo=UTC), revision_id=revision_id,
+        )
+        assert prepared is not None
+        session.append_revision(prepared.record)
+        period = DocumentPeriodSelection(
+            DocumentAction.CONFIRMATION, source, date(2026, 6, 17), Meal.LUNCH,
+            date(2026, 6, 1), date(2026, 6, 30),
+        )
+        selection = next_available_document_output(
+            DocumentMealSelection(period, (Meal.LUNCH,)), outputs, DocumentOutputMode.SAVED_DEFAULT,
+        )
+        outcome = DocumentGenerationController(session, message_box=_Messages).run(selection)
+        assert outcome.completed
+        with selection.output_path.open("rb") as source_file:
+            office_file = msoffcrypto.OfficeFile(source_file)
+            office_file.load_key(password="xlsx-secret")
+            plaintext = BytesIO()
+            office_file.decrypt(plaintext)
+        plaintext.seek(0)
+        workbook = openpyxl.load_workbook(plaintext)
+        try:
+            placeholders = scan_placeholders("assets/급식_확인서템플릿.xlsx", ["1명"])["1명"]
+            row, column = placeholders["child1"][0]
+            assert workbook["정자동"].cell(row, column).value == expected
+        finally:
+            workbook.close()
+            plaintext.close()
 
 
 def test_publishes_encrypted_delivery_report_records_run_and_backup(

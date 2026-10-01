@@ -111,8 +111,10 @@ def _mark_as_schema_four(path: Path) -> None:
         connection.pragma("cipher", "chacha20")
         connection.pragma("hexkey", KEY.hex())
         connection.execute("BEGIN IMMEDIATE")
+        connection.execute("ALTER TABLE household_projection DROP COLUMN delivery_settings_json")
+        connection.execute("ALTER TABLE person_projection DROP COLUMN delivery_settings_json")
         connection.execute("DROP TRIGGER schema_migration_no_delete")
-        connection.execute("DELETE FROM schema_migration WHERE version = 5")
+        connection.execute("DELETE FROM schema_migration WHERE version >= 5")
         connection.execute(
             """
             CREATE TRIGGER schema_migration_no_delete
@@ -180,7 +182,7 @@ def test_schema_five_migration_preserves_existing_document_runs(tmp_path: Path):
     _mark_as_schema_four(path)
 
     with EncryptedDatabase.open(path, KEY) as migrated:
-        assert migrated.schema_version == 5
+        assert migrated.schema_version == 7
         assert migrated.document_runs() == (_run(),)
         migrated.check_integrity()
 

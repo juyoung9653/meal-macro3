@@ -169,6 +169,8 @@ def _downgrade_to_schema_two_for_migration_test(path: Path) -> None:
         ):
             connection.execute(f"DROP TRIGGER {trigger}")
         connection.execute("DROP TABLE revision_display_code")
+        connection.execute("ALTER TABLE household_projection DROP COLUMN delivery_settings_json")
+        connection.execute("ALTER TABLE person_projection DROP COLUMN delivery_settings_json")
         connection.execute("DROP TRIGGER schema_migration_no_delete")
         connection.execute("DELETE FROM schema_migration WHERE version >= 3")
         connection.execute(
@@ -192,7 +194,7 @@ def _downgrade_to_schema_two_for_migration_test(path: Path) -> None:
 def test_create_append_reopen_and_read_revision(tmp_path: Path):
     path = tmp_path / "operations.sqlite3"
     with EncryptedDatabase.create(path, KEY) as database:
-        assert database.schema_version == 5
+        assert database.schema_version == 7
         assert database.latest_revision() is None
         database.append_revision(_record())
         database.check_integrity()
@@ -212,6 +214,42 @@ def test_create_append_reopen_and_read_revision(tmp_path: Path):
         assert stored.import_batch is not None
         assert stored.import_batch.source_filename == "survey.xlsx"
         assert stored.import_batch.mapping_manifest["U"] is None
+
+
+def test_household_delivery_settings_survive_encrypted_reopen(tmp_path: Path):
+    from src.domain.roster import HouseholdDeliverySetting
+
+    path = tmp_path / "household-settings.sqlite3"
+    first = _roster_snapshot(REVISION_ID)
+    setting = HouseholdDeliverySetting(Meal.DINNER, (0, 1, 2, 3, 4), "보냉 도시락", (4, 1, 2, 3, 4, 5, 6))
+    second = replace(first, revision_id=SECOND_REVISION_ID,
+                     households=(Household(HOUSEHOLD_ID, (setting,)),))
+    with EncryptedDatabase.create(path, KEY) as database:
+        database.append_revision(_roster_record(first))
+        database.append_revision(_roster_record(second, before=first))
+        assert database.current_roster().households[0].delivery_settings == (setting,)
+    with EncryptedDatabase.open(path, KEY) as database:
+        assert database.current_roster().households[0].delivery_settings == (setting,)
+        assert database.roster_snapshot(REVISION_ID).households[0].delivery_settings == ()
+
+
+def test_person_delivery_settings_survive_reopen_and_historical_snapshot(tmp_path: Path):
+    from src.domain.roster import HouseholdDeliverySetting
+
+    path = tmp_path / "person-settings.sqlite3"
+    first = _roster_snapshot(REVISION_ID)
+    person = first.persons[0]
+    setting = HouseholdDeliverySetting(Meal.DINNER, (0, 1, 2, 3, 4), "개인 도시락")
+    second = replace(first, revision_id=SECOND_REVISION_ID,
+                     persons=(replace(person, delivery_settings=(setting,)),))
+    with EncryptedDatabase.create(path, KEY) as database:
+        database.append_revision(_roster_record(first))
+        database.append_revision(_roster_record(second, before=first))
+        assert database.current_roster().person(person.person_id).delivery_settings == (setting,)
+    with EncryptedDatabase.open(path, KEY) as database:
+        assert database.current_roster().person(person.person_id).delivery_settings == (setting,)
+        assert database.roster_snapshot(REVISION_ID).person(person.person_id).delivery_settings is None
+        database.check_integrity()
 
 
 def test_plain_sqlite_and_wrong_key_cannot_read_database(tmp_path: Path):
@@ -297,9 +335,36 @@ def test_open_migrates_schema_two_and_backfills_stable_display_codes(tmp_path: P
     _downgrade_to_schema_two_for_migration_test(path)
 
     with EncryptedDatabase.open(path, KEY) as migrated:
-        assert migrated.schema_version == 5
+        assert migrated.schema_version == 7
         assert migrated.revision_display_code(REVISION_ID) == "20260825-001"
         assert migrated.revision_display_code(SECOND_REVISION_ID) == "20260825-002"
+        migrated.check_integrity()
+
+
+def test_open_migrates_schema_five_and_preserves_default_household(tmp_path: Path):
+    path = tmp_path / "schema-five.sqlite3"
+    first = _roster_snapshot(REVISION_ID)
+    with EncryptedDatabase.create(path, KEY) as database:
+        database.append_revision(_roster_record(first))
+    connection = apsw.Connection(str(path))
+    try:
+        connection.pragma("cipher", "chacha20")
+        connection.pragma("hexkey", KEY.hex())
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute("ALTER TABLE household_projection DROP COLUMN delivery_settings_json")
+        connection.execute("ALTER TABLE person_projection DROP COLUMN delivery_settings_json")
+        connection.execute("DROP TRIGGER schema_migration_no_delete")
+        connection.execute("DELETE FROM schema_migration WHERE version >= 6")
+        connection.execute("""CREATE TRIGGER schema_migration_no_delete
+            BEFORE DELETE ON schema_migration BEGIN
+            SELECT RAISE(ABORT, 'schema migration rows are immutable'); END""")
+        connection.pragma("user_version", 5)
+        connection.execute("COMMIT")
+    finally:
+        connection.close()
+    with EncryptedDatabase.open(path, KEY) as migrated:
+        assert migrated.schema_version == 7
+        assert migrated.current_roster().households == first.households
         migrated.check_integrity()
 
 

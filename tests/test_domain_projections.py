@@ -120,6 +120,23 @@ def test_roster_changes_rehydrate_all_typed_entities():
     }
 
 
+def test_household_delivery_settings_survive_historical_projection():
+    from dataclasses import replace
+    from src.domain.roster import HouseholdDeliverySetting
+
+    source = _snapshot(FIRST_REVISION_ID)
+    settings = (
+        HouseholdDeliverySetting(Meal.DINNER, (0, 1, 2, 3, 4), "식재료 박스"),
+        HouseholdDeliverySetting(Meal.BREAKFAST, (0, 1, 2, 3, 4, 5, 6), delivery_weekdays=(0, 1, 2, 3, 4, 3, 3)),
+    )
+    source = replace(source, households=(Household(HOUSEHOLD_ID, settings),))
+    entities = {EntityRef(change.entity_kind, change.entity_id): change.after
+                for change in roster_audit_changes(None, source)}
+    restored = roster_from_historical_snapshot(HistoricalSnapshot(FIRST_REVISION_ID, entities))
+    assert restored.households == source.households
+    assert tuple(item.meal for item in restored.households[0].delivery_settings) == (Meal.BREAKFAST, Meal.DINNER)
+
+
 def test_optional_meal_and_assignment_entities_update_instead_of_reusing_ids():
     before = _snapshot(FIRST_REVISION_ID)
     after = _snapshot(

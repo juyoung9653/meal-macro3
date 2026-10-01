@@ -13,7 +13,7 @@ from .revisions import (
     RevisionRecord,
     RevisionSource,
 )
-from .roster import Person, PersonProfile, RosterSnapshot
+from .roster import HouseholdDeliverySetting, Person, PersonProfile, RosterSnapshot
 
 PERSON_PROFILE_EDIT_POLICY_VERSION = 1
 PERSON_PROFILE_FIELD_KEYS = (
@@ -54,6 +54,14 @@ def profile_household_members(roster: RosterSnapshot, person_id: UUID, on: date)
     return (person,)
 
 
+def profile_household_id(roster: RosterSnapshot, person_id: UUID, on: date) -> UUID | None:
+    roster.person(person_id)
+    for membership in roster.memberships:
+        if membership.person_id == person_id and membership.period.contains(on):
+            return membership.household_id
+    return None
+
+
 def build_person_profile_revision(
     current_roster: RosterSnapshot,
     person_id: UUID,
@@ -65,6 +73,9 @@ def build_person_profile_revision(
     revision_id: UUID,
     reason: str = "사람 정보 수정",
     household_mobile_phone: bool = False,
+    household_delivery_settings: tuple[HouseholdDeliverySetting, ...] | None = None,
+    person_delivery_settings: tuple[HouseholdDeliverySetting, ...] | None = None,
+    delivery_settings_to_household: bool = False,
 ) -> PreparedPersonProfileRevision:
     """Edit a profile and optionally share its mobile phone with its household."""
 
@@ -117,20 +128,39 @@ def build_person_profile_revision(
         and UUID(definition_id) not in updated_profile.custom_values
     )
 
+    household_id = profile_household_id(current_roster, person_id, effective_on)
+    if delivery_settings_to_household and (person_delivery_settings is None or household_id is None):
+        raise ValueError("가구 구성원에게 적용하려면 배송 설정과 가구 소속이 필요합니다.")
+    delivery_members = (
+        profile_household_members(current_roster, person_id, effective_on)
+        if delivery_settings_to_household else (current_person,)
+    )
+    delivery_member_ids = {member.person_id for member in delivery_members}
     members = profile_household_members(current_roster, person_id, effective_on) if household_mobile_phone else (current_person,)
     member_ids = {member.person_id for member in members}
     persons = tuple(
-        Person(person.person_id, updated_profile)
+        replace(person, profile=updated_profile,
+                delivery_settings=person_delivery_settings if person_delivery_settings is not None and person.person_id in delivery_member_ids else person.delivery_settings)
         if person.person_id == person_id
-        else replace(person, profile=replace(person.profile, mobile_phone=updated_profile.mobile_phone))
-        if household_mobile_phone and person.person_id in member_ids
+        else replace(person,
+                     profile=replace(person.profile, mobile_phone=updated_profile.mobile_phone) if household_mobile_phone and person.person_id in member_ids else person.profile,
+                     delivery_settings=person_delivery_settings if person_delivery_settings is not None and person.person_id in delivery_member_ids else person.delivery_settings)
+        if (household_mobile_phone and person.person_id in member_ids) or (person_delivery_settings is not None and person.person_id in delivery_member_ids)
         else person
         for person in current_roster.persons
+    )
+    if household_delivery_settings is not None and household_id is None:
+        raise ValueError("배송 설정을 저장할 가구가 연결되지 않았습니다.")
+    households = tuple(
+        replace(household, delivery_settings=household_delivery_settings)
+        if household_delivery_settings is not None and household.household_id == household_id
+        else household
+        for household in current_roster.households
     )
     snapshot = RosterSnapshot(
         revision_id,
         persons=persons,
-        households=current_roster.households,
+        households=households,
         memberships=current_roster.memberships,
         enrollments=current_roster.enrollments,
         assignments=current_roster.assignments,
@@ -153,6 +183,16 @@ def build_person_profile_revision(
         decisions["person_profile_edit"]["household_mobile_phone"] = {
             "person_ids": [str(member.person_id) for member in members],
             "field": "mobile_phone",
+        }
+    if household_delivery_settings is not None:
+        decisions["person_profile_edit"]["household_delivery_settings"] = {
+            "household_id": str(household_id),
+            "meals": [setting.meal.value for setting in household_delivery_settings],
+        }
+    if person_delivery_settings is not None:
+        decisions["person_profile_edit"]["person_delivery_settings"] = {
+            "person_ids": [str(member.person_id) for member in delivery_members],
+            "meals": [setting.meal.value for setting in person_delivery_settings],
         }
     metadata = RevisionMetadata(
         revision_id=revision_id,

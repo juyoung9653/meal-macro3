@@ -12,7 +12,6 @@ from uuid import UUID, uuid4
 
 from PySide6.QtWidgets import QMessageBox, QWidget
 
-from src.core.models import FULL_ADDRESS_FIELD
 from src.core.settings import SettingsManager, get_settings
 from src.domain import (
     DocumentKind,
@@ -30,13 +29,15 @@ from src.generators.report_generator import make_report_publication
 from src.services.sqlite_delivery_report_service import (
     prepare_delivery_report_data,
 )
+from src.services.document_column_mappings import (
+    confirmation_default_mapping,
+    effective_mapping,
+    invoice_default_mapping,
+    load_mapping_overrides,
+    mapping_setting_from_snapshot,
+)
 from src.services.sqlite_document_service import prepare_monthly_document_data
 from src.storage import AutomaticBackupResult, DatabaseSession
-from src.templates.config import (
-    auto_detect_semantic_columns,
-    get_template_sheet_name,
-    read_template_columns,
-)
 
 from .document_completion import GeneratedDocumentResult
 from .document_hub import DocumentAction
@@ -201,6 +202,12 @@ class DocumentGenerationController:
                     profile_key,
                     prepared.batch.is_vacation_month,
                 )
+                mapping_setting = mapping_setting_from_snapshot(current_snapshot, profile_key, "invoice")
+                column_mapping = effective_mapping(
+                    column_mapping,
+                    load_mapping_overrides(current_snapshot, profile_key, "invoice"),
+                )
+                _validate_custom_mapping_sources(column_mapping, current_roster)
                 _count, _batch, publication = self._invoice_writer(
                     prepared.batch,
                     column_mapping,
@@ -224,6 +231,12 @@ class DocumentGenerationController:
                 assert template_setting is not None
                 profile_key = template_setting.profile.value
                 column_mapping = _confirmation_column_mapping()
+                mapping_setting = mapping_setting_from_snapshot(current_snapshot, profile_key, "confirmation")
+                column_mapping = effective_mapping(
+                    column_mapping,
+                    load_mapping_overrides(current_snapshot, profile_key, "confirmation"),
+                )
+                _validate_custom_mapping_sources(column_mapping, current_roster)
                 _created, publication = self._confirmation_writer(
                     prepared.batch,
                     column_mapping,
@@ -238,6 +251,7 @@ class DocumentGenerationController:
                 writer_name = "confirm_generator.make_confirm_publication"
             else:
                 column_mapping = {}
+                mapping_setting = None
                 publication = self._report_writer(
                     prepared.reports,
                     refreshed.output_path,
@@ -264,6 +278,9 @@ class DocumentGenerationController:
                 template_manifest[
                     "template_setting"
                 ] = template_setting.public_manifest()
+                template_manifest["column_mapping_setting"] = (
+                    mapping_setting.public_manifest() if mapping_setting is not None else None
+                )
             run = DocumentRun(
                 run_id=self._run_id_factory(),
                 kind=kind,
@@ -344,54 +361,18 @@ def _invoice_column_mapping(
     profile_key: str,
     is_vacation_month: bool,
 ) -> dict[str, str]:
-    sheet_name = get_template_sheet_name(is_vacation_month, profile_key)
-    columns = read_template_columns(str(template_path), sheet_name=sheet_name)
-    mapping = auto_detect_semantic_columns(columns)
-    aliases = {
-        "취학유형": "취학유형",
-        "구분": "구분",
-        "학교명": "학교명",
-        "학년": "학년",
-        "반": "반",
-        "성명": "성명",
-        "이름": "성명",
-        "생년월일": "생년월일",
-        "세대주성명": "세대주 성명",
-        "아동과의관계": "아동과의 관계",
-        "관할동": "관할동",
-        "동": "관할동",
-        "도로명주소": FULL_ADDRESS_FIELD,
-        "주소": FULL_ADDRESS_FIELD,
-        "전화번호": "전화번호",
-        "핸드폰": "핸드폰",
-        "제공기관": "제공기관",
-        "비고": "비고",
-        "평일중식중지=>초1-2,고3": "비고",
-    }
-    for column in columns:
-        normalized = "".join(column.split()).replace("(급식수)", "").replace("(원)", "")
-        source = aliases.get(normalized)
-        if source is None and normalized.startswith("취학유형"):
-            source = "취학유형"
-        if source is not None:
-            mapping[column] = source
-    return mapping
+    return invoice_default_mapping(template_path, profile_key, is_vacation_month)
 
 
 def _confirmation_column_mapping() -> dict[str, str]:
-    return {
-        "도로명주소": "도로명주소",
-        "상세주소": "상세주소",
-        "성명": "성명",
-        "이름": "성명",
-        "세대주 성명": "세대주 성명",
-        "세대주\n성명": "세대주 성명",
-        "세대주성명": "세대주 성명",
-        "핸드폰": "핸드폰",
-        "전화번호": "전화번호",
-        "관할동": "관할동",
-        "동": "관할동",
-    }
+    return confirmation_default_mapping()
+
+
+def _validate_custom_mapping_sources(column_mapping: Mapping[str, str], roster: RosterSnapshot) -> None:
+    known = {f"custom:{definition.definition_id}" for definition in roster.custom_fields}
+    for target, source in column_mapping.items():
+        if source.startswith("custom:") and source not in known:
+            raise ValueError(f"{target} 칼럼에 연결된 사용자 정의 항목이 현재 명단에 없습니다. 설정에서 다시 연결해주세요.")
 
 
 def _file_sha256(path: Path) -> str:

@@ -93,7 +93,9 @@ def build_history_tables(
                 for field, old, new in diffs:
                     if field in {"person_id", "revision_id", "recorded_at", "meal"}:
                         continue
-                    meals.append((stamp, applied, code, str(target), name, _text(meal), f"{category}: {_label(field)}", _text(old), _text(new), intake, metadata.reason, metadata.actor.username))
+                    old_text = _meal_text(field, old) if field == "기록" or field in before else ""
+                    new_text = _meal_text(field, new) if field == "기록" or field in after else ""
+                    meals.append((stamp, applied, code, str(target), name, _text(meal), f"{category}: {_label(field)}", old_text, new_text, intake, metadata.reason, metadata.actor.username))
 
     complaints = _complaint_rows(roster, snapshot, revisions, person_id, historical_names)
     return {
@@ -147,6 +149,38 @@ def _text(value: object) -> str:
     if isinstance(value, (tuple, list)):
         return "; ".join(_text(item) for item in value)
     return str(value)
+
+
+def _meal_text(field: str, value: object) -> str:
+    """Present projected meal state without leaking its serialized field syntax."""
+    if field == "ends_on" and value is None:
+        return "종료일 미지정"
+    if field == "starts_on" and value is None:
+        return "시작일 미지정"
+    if field == "periods" and isinstance(value, (tuple, list)):
+        return " · ".join(_period_text(item) for item in value)
+    if isinstance(value, Mapping):
+        return " · ".join(
+            f"{_label(str(key))}: {('미지정' if item is None else _meal_text(str(key), item)) or '미지정'}"
+            for key, item in value.items()
+            if key not in {"person_id", "revision_id", "recorded_at", "meal"}
+        )
+    if isinstance(value, (tuple, list)):
+        return " · ".join(_meal_text(field, item) for item in value)
+    return _text(value)
+
+
+def _period_text(value: object) -> str:
+    if not isinstance(value, Mapping) or not {"starts_on", "ends_on"} <= value.keys():
+        return _meal_text("", value)
+    start, end = value["starts_on"], value["ends_on"]
+    if start and end:
+        return f"{start} ~ {end}"
+    if start:
+        return f"{start}부터 · 종료일 미지정"
+    if end:
+        return f"시작일 미지정 · {end}까지"
+    return "시작일·종료일 미지정"
 
 
 def _driver_text(value: object, names: Mapping[str, str]) -> str:

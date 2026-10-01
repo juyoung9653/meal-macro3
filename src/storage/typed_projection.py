@@ -307,8 +307,8 @@ def _apply_person(
                 school_name, grade, class_name, household_head_name,
                 relationship_to_child, jurisdiction, provider, road_address,
                 detail_address, telephone, mobile_phone, note,
-                custom_values_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                custom_values_json, delivery_settings_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             values,
         )
@@ -320,7 +320,7 @@ def _apply_person(
             school_name = ?, grade = ?, class_name = ?,
             household_head_name = ?, relationship_to_child = ?,
             jurisdiction = ?, provider = ?, road_address = ?, detail_address = ?,
-            telephone = ?, mobile_phone = ?, note = ?, custom_values_json = ?
+            telephone = ?, mobile_phone = ?, note = ?, custom_values_json = ?, delivery_settings_json = ?
         WHERE person_id = ?
         """,
         (*values[1:], values[0]),
@@ -343,23 +343,28 @@ def _apply_household(
         )
         return
     assert state is not None
-    household_from_state(change.entity_id, state)
+    household = household_from_state(change.entity_id, state)
+    settings_json = json.dumps([
+        {"meal": item.meal.value, "weekdays": None if item.weekdays is None else list(item.weekdays), "form": item.form,
+         **({"delivery_weekdays": list(item.delivery_weekdays)} if item.delivery_weekdays is not None else {})}
+        for item in household.delivery_settings
+    ], ensure_ascii=False)
     if change.operation is ChangeOperation.INSERT:
         connection.execute(
             """
-            INSERT INTO household_projection(household_id, last_revision_id)
-            VALUES (?, ?)
+            INSERT INTO household_projection(household_id, last_revision_id, delivery_settings_json)
+            VALUES (?, ?, ?)
             """,
-            (str(change.entity_id), str(revision_id)),
+            (str(household.household_id), str(revision_id), settings_json),
         )
         return
     connection.execute(
         """
         UPDATE household_projection
-        SET last_revision_id = ?
+        SET last_revision_id = ?, delivery_settings_json = ?
         WHERE household_id = ?
         """,
-        (str(revision_id), str(change.entity_id)),
+        (str(revision_id), settings_json, str(change.entity_id)),
     )
     _require_one_changed(connection, HOUSEHOLD_KIND, change.entity_id)
 
@@ -521,7 +526,7 @@ def _load_persons(connection: apsw.Connection) -> Iterable[Person]:
         SELECT person_id, name, birth_date, school_type, school_name, grade,
                class_name, household_head_name, relationship_to_child,
                jurisdiction, provider, road_address, detail_address, telephone,
-               mobile_phone, note, custom_values_json
+               mobile_phone, note, custom_values_json, delivery_settings_json
         FROM person_projection
         ORDER BY person_id
         """
@@ -543,6 +548,7 @@ def _load_persons(connection: apsw.Connection) -> Iterable[Person]:
             "mobile_phone": row[14],
             "note": row[15],
             "custom_values": json.loads(str(row[16])),
+            **({"delivery_settings": json.loads(str(row[17]))} if row[17] is not None else {}),
         }
         yield person_from_state(UUID(str(row[0])), state)
 
@@ -570,9 +576,10 @@ def _load_custom_fields(
 
 def _load_households(connection: apsw.Connection) -> Iterable[Household]:
     for row in connection.execute(
-        "SELECT household_id FROM household_projection ORDER BY household_id"
+        "SELECT household_id, delivery_settings_json FROM household_projection ORDER BY household_id"
     ):
-        yield household_from_state(UUID(str(row[0])), {})
+        settings = json.loads(str(row[1]))
+        yield household_from_state(UUID(str(row[0])), {"delivery_settings": settings} if settings else {})
 
 
 def _load_memberships(connection: apsw.Connection) -> Iterable[HouseholdMembership]:
@@ -670,6 +677,13 @@ def _person_values(person: Person, revision_id: UUID) -> tuple:
             sort_keys=True,
             separators=(",", ":"),
         ),
+        None if person.delivery_settings is None else json.dumps([
+            {"meal": item.meal.value,
+             "weekdays": None if item.weekdays is None else list(item.weekdays),
+             "form": item.form,
+             **({"delivery_weekdays": list(item.delivery_weekdays)} if item.delivery_weekdays is not None else {})}
+            for item in person.delivery_settings
+        ], ensure_ascii=False),
     )
 
 

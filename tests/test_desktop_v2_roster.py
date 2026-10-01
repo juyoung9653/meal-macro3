@@ -376,7 +376,7 @@ def test_meal_context_menu_emits_status_and_assignment_requests(app):
         "이력보기",
         "민원",
         "",
-        "명단 행 삭제…",
+        "명단 행 삭제",
     ]
     menu.actions()[1].trigger()
     assert requested == [(FIRST_PERSON_ID, Meal.LUNCH, MealStatus.PAUSED)]
@@ -447,9 +447,9 @@ def test_routing_state_updates_effective_delivery_view_and_driver_filter(app):
     window.relocation_requested.connect(relocation_requests.append)
     person = window.table_model.person_at(0)
     ordinary = window._create_context_menu(person, column_key="name")
-    assert [action.text() for action in ordinary.actions()] == ["정보 수정", "이력보기", "민원", "", "명단 행 삭제…"]
+    assert [action.text() for action in ordinary.actions()] == ["정보 수정", "이력보기", "민원", "", "명단 행 삭제"]
     address = window._create_context_menu(person, column_key="address")
-    assert [action.text() for action in address.actions()] == ["정보 수정", "이사 등록", "이력보기", "민원", "", "명단 행 삭제…"]
+    assert [action.text() for action in address.actions()] == ["정보 수정", "이사 등록", "이력보기", "민원", "", "명단 행 삭제"]
     address.actions()[1].trigger()
     assert relocation_requests == [FIRST_PERSON_ID]
     driver_index = window._driver_filter.findData(driver_id)
@@ -526,13 +526,68 @@ def test_minimum_width_header_keeps_actions_and_filters_on_separate_rows(app):
     window.close()
 
 
+def test_special_household_filter_shows_details_only_while_checked(app):
+    from dataclasses import replace
+    from src.domain.roster import HouseholdDeliverySetting
+
+    roster = _roster()
+    roster = replace(roster, households=(Household(HOUSEHOLD_ID, (
+        HouseholdDeliverySetting(Meal.DINNER, (0, 1, 2, 3, 4), "도시락"),
+        HouseholdDeliverySetting(Meal.BREAKFAST, (0, 1, 2, 3, 4, 5, 6), "보냉 상자"),
+        HouseholdDeliverySetting(Meal.LUNCH, form="식재료 박스"),
+    )),))
+    window = RosterWindow(roster, _histories())
+    window._set_day(SERVICE_DAY)
+    assert "delivery_settings" not in {column.key for column in window.table_model.columns}
+    window._special_only_filter.setChecked(True)
+    assert window.table_model.rowCount() == 2
+    column = next(i for i, item in enumerate(window.table_model.columns) if item.key == "delivery_settings")
+    detail = window.table_model.index(0, column).data()
+    assert detail.splitlines()[0].startswith("석식:")
+    assert detail.splitlines()[1].startswith("조식:")
+    assert detail.splitlines()[2].startswith("중식:")
+    assert "도시락" in detail
+    window.replace_roster(replace(roster, households=(Household(HOUSEHOLD_ID),)), _histories())
+    assert window.table_model.rowCount() == 0
+    window._special_only_filter.setChecked(False)
+    assert window.table_model.rowCount() == 2
+    assert "delivery_settings" not in {column.key for column in window.table_model.columns}
+    window.close()
+
+
+def test_roster_status_respects_explicit_weekdays_without_changing_default(app):
+    from dataclasses import replace
+    from src.domain.roster import HouseholdDeliverySetting
+
+    roster = _roster()
+    roster = replace(roster, enrollments=(*roster.enrollments, MealEnrollment(FIRST_PERSON_ID, Meal.DINNER)))
+    model = RosterTableModel(roster)
+    saturday = date(2026, 8, 22)
+    model.set_context(saturday, Meal.DINNER)
+    status_column = next(i for i, column in enumerate(model.columns) if column.key == "status:dinner")
+    assert model.index(0, status_column).data(model.StatusRole) == MealStatus.DELIVERY.value
+    weekdays_only = replace(roster, households=(Household(HOUSEHOLD_ID, (
+        HouseholdDeliverySetting(Meal.DINNER, (0, 1, 2, 3, 4)),
+    )),))
+    model.replace_roster(weekdays_only)
+    assert model.index(0, status_column).data(model.StatusRole) == "-"
+    saturday_service = replace(roster, households=(Household(HOUSEHOLD_ID, (
+        HouseholdDeliverySetting(Meal.DINNER, (5,)),
+    )),))
+    model.replace_roster(saturday_service)
+    assert model.index(0, status_column).data(model.StatusRole) == MealStatus.DELIVERY.value
+
+
 def test_row_selection_populates_household_inspector(app):
     window = RosterWindow(_roster(), _histories(), school_calendar=_calendar())
     window._set_day(SERVICE_DAY)
     window._set_meal(Meal.LUNCH)
     edit_requests = []
+    delivery_requests = []
     window.person_edit_requested.connect(edit_requests.append)
+    window.delivery_settings_requested.connect(delivery_requests.append)
     assert not window._edit_person_button.isEnabled()
+    assert not window._delivery_settings_button.isEnabled()
     window.show()
     window._table.selectRow(0)
     app.processEvents()
@@ -559,6 +614,11 @@ def test_row_selection_populates_household_inspector(app):
     assert window._edit_person_button.isEnabled()
     window._edit_person_button.click()
     assert edit_requests == [FIRST_PERSON_ID]
+    assert window._delivery_settings_button.isEnabled()
+    window._delivery_settings_button.click()
+    assert delivery_requests == [FIRST_PERSON_ID]
+    window._clear_inspector()
+    assert not window._delivery_settings_button.isEnabled()
     window.close()
 
 
@@ -588,13 +648,10 @@ def test_inspector_uses_meal_history_provider_in_a_scrollable_list(app):
     assert window._meal_history_list.count() == 6
     assert window._meal_history_list.item(0).text() == "홍길동의 아주 긴 식종 변경 이력 6"
     assert window._meal_history_list.item(0).toolTip() == "전체 이력 6"
-    assert window._meal_history_list.textElideMode() is Qt.TextElideMode.ElideRight
-    assert (
-        window._meal_history_list.visualItemRect(
-            window._meal_history_list.item(4),
-        ).bottom()
-        <= window._meal_history_list.viewport().rect().bottom()
-    )
+    assert window._meal_history_list.textElideMode() is Qt.TextElideMode.ElideNone
+    assert window._meal_history_list.wordWrap()
+    assert window._meal_history_all_button.isEnabled()
+    assert window._household_list.height() <= 92
     assert (
         window._meal_history_list.visualItemRect(
             window._meal_history_list.item(5),
@@ -606,6 +663,38 @@ def test_inspector_uses_meal_history_provider_in_a_scrollable_list(app):
     app.processEvents()
     assert window._meal_history_list.item(0).text() == "김아침의 아주 긴 식종 변경 이력 6"
     assert calls == [FIRST_PERSON_ID, SECOND_PERSON_ID]
+    opened = []
+    window.set_history_provider(lambda person, meal, parent: opened.append((person.person_id, meal)) or None)
+    window._meal_history_all_button.click()
+    assert opened == [(SECOND_PERSON_ID, None)]
+    window.close()
+
+
+def test_inspector_long_history_wraps_and_separates_dates(app):
+    from src.desktop_v2.inspector_history import MealHistoryRow
+
+    window = RosterWindow(_roster(), _histories(), school_calendar=_calendar())
+    window.resize(1080, 680)
+    window.show()
+    window._table.selectRow(0)
+    app.processEvents()
+    row = MealHistoryRow(
+        "중식 · 상태: 이전 배송 상태에서 일시중지로 변경된 긴 이력 항목",
+        "전체 변경 상세",
+        "2026-09-24",
+        "2026-09-22 10:25:43",
+    )
+    window.set_meal_change_history_provider(lambda person: (row,) * 6)
+    app.processEvents()
+    item = window._meal_history_list.item(0)
+    entry = window._meal_history_list.itemWidget(item)
+    labels = entry.findChildren(QLabel)
+    assert len(labels) == 3
+    assert labels[0].wordWrap() and labels[1].wordWrap() and labels[2].wordWrap()
+    assert labels[1].text() == "적용 2026-09-24"
+    assert labels[2].text() == "기록 2026-09-22 10:25"
+    assert item.sizeHint().height() >= sum(label.heightForWidth(window._meal_history_list.viewport().width() - 16) for label in labels)
+    assert window._meal_history_list.verticalScrollBar().maximum() > 0
     window.close()
 
 
@@ -892,7 +981,7 @@ def test_import_review_requires_choice_when_two_existing_households_match(app):
     ok_button = dialog._buttons.button(QDialogButtonBox.StandardButton.Ok)
     combo = dialog._household_combos[THIRD_OBSERVATION_ID]
 
-    assert combo.currentText() == "기존 가구 선택 필요…"
+    assert combo.currentText() == "기존 가구 선택 필요"
     assert not ok_button.isEnabled()
     combo.setCurrentIndex(combo.findData(HOUSEHOLD_ID))
     app.processEvents()
@@ -1132,3 +1221,59 @@ def test_numeric_and_date_custom_columns_are_centered_including_empty_cells(app)
                 assert alignment == Qt.AlignmentFlag.AlignCenter
             elif column.key == "name" or column.custom_field is not None:
                 assert alignment is None
+
+
+def test_delivery_weekday_only_override_is_visible_in_special_household_summary(app):
+    from dataclasses import replace
+    from src.domain.roster import HouseholdDeliverySetting
+
+    roster = _roster()
+    setting = HouseholdDeliverySetting(
+        Meal.BREAKFAST, delivery_weekdays=(0, 1, 2, 3, 3, 3, 3),
+    )
+    roster = replace(roster, households=(Household(HOUSEHOLD_ID, (setting,)),))
+    window = RosterWindow(roster, _histories())
+    window._set_day(SERVICE_DAY)
+    window._special_only_filter.setChecked(True)
+    assert window.table_model.rowCount() == 2
+    column = next(i for i, item in enumerate(window.table_model.columns) if item.key == "delivery_settings")
+    assert window.table_model.index(0, column).data() == "조식: 금·토·일 → 목 배송"
+    window.close()
+
+
+def test_individual_delivery_settings_filter_only_changed_household_member(app):
+    from dataclasses import replace
+    from src.domain.roster import HouseholdDeliverySetting
+
+    roster = _roster()
+    personal = (HouseholdDeliverySetting(Meal.BREAKFAST, form="개인 도시락"),)
+    roster = replace(roster, persons=tuple(
+        replace(person, delivery_settings=personal) if person.person_id == FIRST_PERSON_ID else person
+        for person in roster.persons
+    ))
+    window = RosterWindow(roster, _histories())
+    window._set_day(SERVICE_DAY)
+    window._special_only_filter.setChecked(True)
+    assert window.table_model.rowCount() == 1
+    assert window.table_model.person_at(0).person_id == FIRST_PERSON_ID
+    column = next(i for i, item in enumerate(window.table_model.columns) if item.key == "delivery_settings")
+    assert "개인 도시락" in window.table_model.index(0, column).data()
+    window.close()
+
+
+def test_delivery_settings_can_open_without_linked_household(app):
+    from dataclasses import replace
+
+    roster = replace(_roster(), memberships=(), households=())
+    window = RosterWindow(roster, _histories())
+    window._set_day(SERVICE_DAY)
+    window._set_meal(Meal.LUNCH)
+    requested = []
+    window.delivery_settings_requested.connect(requested.append)
+    window.show()
+    window._table.selectRow(0)
+    app.processEvents()
+    assert window._delivery_settings_button.isEnabled()
+    window._delivery_settings_button.click()
+    assert requested == [FIRST_PERSON_ID]
+    window.close()

@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QObject
+from PySide6.QtCore import QEvent, QObject, Qt
 from PySide6.QtGui import QFontDatabase
-from PySide6.QtWidgets import QApplication, QComboBox
+from PySide6.QtWidgets import (
+    QApplication, QAbstractItemView, QComboBox, QProxyStyle, QStyle,
+    QStyleOptionComboBox, QStyleOptionFrame, QStyleOptionHeader, QTabBar, QLineEdit, QLabel,
+)
 
 
 INK = "#17313D"
@@ -24,6 +27,52 @@ NOT_ENROLLED = "#82949A"
 FOCUS = "#55B7C6"
 _FONTS_REGISTERED = False
 _COMBO_WHEEL_GUARD: QObject | None = None
+_TEXT_CLIPPING_GUARD: QObject | None = None
+_TEXT_CLIPPING_STYLE: QProxyStyle | None = None
+
+
+class _TextClippingStyle(QProxyStyle):
+    """Draw full combo/header labels inside their native text rectangles."""
+
+    def drawControl(self, element, option, painter, widget=None) -> None:
+        if element == QStyle.ControlElement.CE_ComboBoxLabel and isinstance(option, QStyleOptionComboBox):
+            if option.editable:
+                super().drawControl(element, option, painter, widget)
+                return
+            empty = QStyleOptionComboBox(option)
+            empty.currentText = ""
+            super().drawControl(element, empty, painter, widget)
+            rect = self.subControlRect(
+                QStyle.ComplexControl.CC_ComboBox, option,
+                QStyle.SubControl.SC_ComboBoxEditField, widget,
+            )
+            if not option.currentIcon.isNull():
+                offset = option.iconSize.width() + 4
+                rect = rect.adjusted(offset, 0, 0, 0) if option.direction == Qt.LayoutDirection.LeftToRight else rect.adjusted(0, 0, -offset, 0)
+            painter.save()
+            painter.setClipRect(rect)
+            color_group = option.palette.ColorGroup.Normal if option.state & QStyle.StateFlag.State_Enabled else option.palette.ColorGroup.Disabled
+            painter.setPen(option.palette.color(color_group, option.palette.ColorRole.Text))
+            alignment = Qt.AlignmentFlag.AlignLeft if option.direction == Qt.LayoutDirection.LeftToRight else Qt.AlignmentFlag.AlignRight
+            painter.drawText(rect, alignment | Qt.AlignmentFlag.AlignVCenter, option.currentText)
+            painter.restore()
+            return
+        if element == QStyle.ControlElement.CE_HeaderLabel and isinstance(option, QStyleOptionHeader):
+            empty = QStyleOptionHeader(option)
+            empty.text = ""
+            super().drawControl(element, empty, painter, widget)
+            rect = option.rect.adjusted(4, 0, -4, 0)
+            if not option.icon.isNull():
+                offset = self.pixelMetric(QStyle.PixelMetric.PM_SmallIconSize, option, widget) + 4
+                rect = rect.adjusted(offset, 0, 0, 0) if option.direction == Qt.LayoutDirection.LeftToRight else rect.adjusted(0, 0, -offset, 0)
+            painter.save()
+            painter.setClipRect(rect)
+            color_group = option.palette.ColorGroup.Normal if option.state & QStyle.StateFlag.State_Enabled else option.palette.ColorGroup.Disabled
+            painter.setPen(option.palette.color(color_group, option.palette.ColorRole.ButtonText))
+            painter.drawText(rect, option.textAlignment, option.text)
+            painter.restore()
+            return
+        super().drawControl(element, option, painter, widget)
 
 
 class _ComboWheelGuard(QObject):
@@ -40,14 +89,69 @@ class _ComboWheelGuard(QObject):
         return super().eventFilter(watched, event)
 
 
+class _TextClippingGuard(QObject):
+    """Keep complete model text while clipping it at the visible widget edge."""
+
+    def eventFilter(self, watched, event) -> bool:
+        if isinstance(watched, QLineEdit):
+            if event.type() == QEvent.Type.Polish:
+                self._install_placeholder(watched)
+            elif event.type() in (QEvent.Type.Paint, QEvent.Type.Resize, QEvent.Type.Show):
+                self._sync_placeholder(watched)
+        if event.type() == QEvent.Type.Polish:
+            if isinstance(watched, QAbstractItemView):
+                watched.setTextElideMode(Qt.TextElideMode.ElideNone)
+            elif isinstance(watched, QComboBox):
+                watched.view().setTextElideMode(Qt.TextElideMode.ElideNone)
+            elif isinstance(watched, QTabBar):
+                watched.setElideMode(Qt.TextElideMode.ElideNone)
+        return super().eventFilter(watched, event)
+
+    @staticmethod
+    def _install_placeholder(line: QLineEdit) -> None:
+        if line.findChild(QLabel, "fullPlaceholderText") is not None:
+            return
+        color = QApplication.palette().color(line.palette().ColorRole.PlaceholderText)
+        palette = line.palette()
+        palette.setColor(palette.ColorRole.PlaceholderText, Qt.GlobalColor.transparent)
+        line.setPalette(palette)
+        label = QLabel(line)
+        label.setObjectName("fullPlaceholderText")
+        label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        label.setStyleSheet(
+            f"color: rgba({color.red()}, {color.green()}, {color.blue()}, {color.alpha()}); "
+            "background: transparent; border: none; padding: 0;"
+        )
+        line.textChanged.connect(lambda _text, target=line: _TextClippingGuard._sync_placeholder(target))
+        _TextClippingGuard._sync_placeholder(line)
+
+    @staticmethod
+    def _sync_placeholder(line: QLineEdit) -> None:
+        label = line.findChild(QLabel, "fullPlaceholderText")
+        if label is None:
+            return
+        label.setText(line.placeholderText())
+        option = QStyleOptionFrame()
+        option.initFrom(line)
+        label.setGeometry(line.style().subElementRect(QStyle.SubElement.SE_LineEditContents, option, line))
+        label.setVisible(bool(line.placeholderText()) and not line.text() and line.isVisible())
+
+
 def register_application_fonts() -> None:
     """Register supported Windows fonts when Qt misses the system catalog."""
 
-    global _COMBO_WHEEL_GUARD, _FONTS_REGISTERED
+    global _COMBO_WHEEL_GUARD, _TEXT_CLIPPING_GUARD, _TEXT_CLIPPING_STYLE, _FONTS_REGISTERED
     application = QApplication.instance()
     if application is not None and _COMBO_WHEEL_GUARD is None:
         _COMBO_WHEEL_GUARD = _ComboWheelGuard(application)
         application.installEventFilter(_COMBO_WHEEL_GUARD)
+    if application is not None and _TEXT_CLIPPING_GUARD is None:
+        _TEXT_CLIPPING_GUARD = _TextClippingGuard(application)
+        application.installEventFilter(_TEXT_CLIPPING_GUARD)
+    if application is not None and _TEXT_CLIPPING_STYLE is None:
+        _TEXT_CLIPPING_STYLE = _TextClippingStyle(application.style())
+        application.setStyle(_TEXT_CLIPPING_STYLE)
     if _FONTS_REGISTERED:
         return
     for font_path in (
@@ -1078,6 +1182,7 @@ def application_stylesheet() -> str:
         padding: 7px 9px;
         border-radius: 4px;
     }}
+    QLineEdit {{ placeholder-text-color: transparent; }}
     QLineEdit:focus, QComboBox:focus, QDateEdit:focus, QPlainTextEdit:focus, QSpinBox:focus {{
         border: 2px solid {FOCUS};
     }}

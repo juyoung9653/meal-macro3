@@ -13,6 +13,7 @@ from src.domain.projections import (
 from src.domain.revisions import EntityRef, HistoricalSnapshot
 from src.domain.roster import (
     Household,
+    HouseholdDeliverySetting,
     HouseholdMembership,
     InclusiveDateRange,
     Meal,
@@ -53,7 +54,7 @@ def _month_days(year: int, month: int):
         current += timedelta(days=1)
 
 
-def _source_snapshot(*, include_school: bool = True) -> HistoricalSnapshot:
+def _source_snapshot(*, include_school: bool = True, delivery_settings: tuple[HouseholdDeliverySetting, ...] = ()) -> HistoricalSnapshot:
     revision_id = uuid4()
     person_id = uuid4()
     household_id = uuid4()
@@ -78,7 +79,7 @@ def _source_snapshot(*, include_school: bool = True) -> HistoricalSnapshot:
                 ),
             ),
         ),
-        households=(Household(household_id),),
+        households=(Household(household_id, delivery_settings),),
         memberships=(
             HouseholdMembership(
                 person_id,
@@ -179,10 +180,10 @@ def test_calculates_shared_invoice_and_confirmation_facts_from_source_revision()
         delivery.breakfast_count,
         delivery.lunch_count,
         delivery.dinner_count,
-    ) == (30, 1, 18)
-    assert delivery.billing_amount == 506_000
-    assert delivery.amount(prepared.batch.prices) == 506_000
-    assert sum(item.breakfast_count for item in delivery.weekly) == 30
+    ) == (13, 1, 18)
+    assert delivery.billing_amount == 327_000
+    assert delivery.amount(prepared.batch.prices) == 327_000
+    assert sum(item.breakfast_count for item in delivery.weekly) == 13
     assert sum(item.lunch_count for item in delivery.weekly) == 1
     assert sum(item.dinner_count for item in delivery.weekly) == 18
     assert prepared.global_note == (
@@ -193,7 +194,9 @@ def test_calculates_shared_invoice_and_confirmation_facts_from_source_revision()
         "중식",
         "석식",
     )
-    assert prepared.calculation_manifest["billing"]["total_amount"] == 506_000
+    assert prepared.calculation_manifest["billing"]["total_amount"] == 327_000
+    assert prepared.calculation_manifest["calculation_contract_version"] == 3
+    assert prepared.calculation_manifest["recurring_service_policy"]["version"] == 3
 
 
 def test_blocks_enrolled_lunch_when_reviewed_school_period_is_missing():
@@ -204,3 +207,63 @@ def test_blocks_enrolled_lunch_when_reviewed_school_period_is_missing():
             date(2026, 8, 31),
             (Meal.LUNCH,),
         )
+
+
+def test_physical_delivery_mapping_does_not_change_breakfast_billing_days():
+    default = prepare_monthly_document_data(
+        _source_snapshot(), date(2026, 8, 1), date(2026, 8, 31), (Meal.BREAKFAST,)
+    )
+    mapped = prepare_monthly_document_data(
+        _source_snapshot(delivery_settings=(
+            HouseholdDeliverySetting(Meal.BREAKFAST, delivery_weekdays=(0, 1, 2, 3, 4, 3, 4)),
+        )), date(2026, 8, 1), date(2026, 8, 31), (Meal.BREAKFAST,)
+    )
+    assert default.batch.deliveries[0].breakfast_count == 13
+    assert mapped.batch.deliveries[0].breakfast_count == 13
+    assert mapped.batch.deliveries[0].billing_amount == default.batch.deliveries[0].billing_amount
+    assert tuple(item.service_on for item in mapped.entitlements) == tuple(item.service_on for item in default.entitlements)
+
+
+def test_household_weekdays_change_billing_but_custom_form_does_not():
+    weekdays = HouseholdDeliverySetting(Meal.DINNER, (0, 1, 2, 3, 4), "식재료 박스")
+    default = prepare_monthly_document_data(
+        _source_snapshot(), date(2026, 8, 1), date(2026, 8, 31), (Meal.DINNER,)
+    )
+    custom = prepare_monthly_document_data(
+        _source_snapshot(delivery_settings=(weekdays,)),
+        date(2026, 8, 1), date(2026, 8, 31), (Meal.DINNER,)
+    )
+    assert len(default.entitlements) == len(custom.entitlements) == 18
+    assert default.billing.total_amount == custom.billing.total_amount
+
+    mondays = prepare_monthly_document_data(
+        _source_snapshot(delivery_settings=(
+            HouseholdDeliverySetting(Meal.DINNER, (0,), "식재료 박스"),
+        )),
+        date(2026, 8, 1), date(2026, 8, 31), (Meal.DINNER,)
+    )
+    assert tuple(item.service_on for item in mondays.entitlements) == (
+        date(2026, 8, 3), date(2026, 8, 17), date(2026, 8, 24), date(2026, 8, 31)
+    )
+    assert mondays.billing.total_amount == 40_000
+
+
+def test_custom_lunch_weekday_skips_unneeded_school_schedule_dates():
+    snapshot = _source_snapshot(delivery_settings=(
+        HouseholdDeliverySetting(Meal.LUNCH, (0,)),
+    ))
+    states = dict(snapshot.entities)
+    school_ref = next(ref for ref in states if ref.entity_kind == SCHOOL_LUNCH_SCHEDULE_KIND)
+    monday = date(2026, 8, 3)
+    schedule = SchoolLunchSchoolSchedule(
+        "푸른초", (InclusiveDateRange(monday, monday),),
+        (SchoolLunchDay(monday, LunchDayRule(SchoolLunchMark.VENDOR_REQUIRED)),),
+    )
+    states[school_ref] = school_lunch_school_schedule_state(schedule)
+
+    prepared = prepare_monthly_document_data(
+        HistoricalSnapshot(snapshot.revision_id, states),
+        date(2026, 8, 1), date(2026, 8, 7), (Meal.LUNCH,),
+    )
+
+    assert tuple(item.service_on for item in prepared.entitlements) == (monday,)

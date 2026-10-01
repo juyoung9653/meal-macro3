@@ -32,9 +32,8 @@ from src.domain.revisions import (
     freeze_json_object,
     plain_json,
 )
-from src.domain.roster import Meal, Person, RosterSnapshot
+from src.domain.roster import Meal, RosterSnapshot
 from src.domain.school_calendar import (
-    SchoolLunchCalendar,
     SchoolLunchCalendarError,
     school_lunch_calendar_from_snapshot,
 )
@@ -51,10 +50,17 @@ from src.services.delivery_service import (
     DeliveryReportRow,
     DeliveryReportTotals,
 )
+from src.services.meal_service_availability import (
+    RECURRING_MEAL_SERVICE_POLICY_VERSION,
+    default_delivery_weekdays,
+    has_custom_delivery_weekdays,
+    physical_delivery_on,
+    regular_service_available,
+)
 
 
-DELIVERY_REPORT_CALCULATION_CONTRACT_VERSION = 2
-DELIVERY_REPORT_GROUPING_POLICY_VERSION = 1
+DELIVERY_REPORT_CALCULATION_CONTRACT_VERSION = 3
+DELIVERY_REPORT_GROUPING_POLICY_VERSION = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,12 +94,15 @@ class _ShipmentPresence:
     driver: str
     sequence: str
     jurisdiction: str
+    form: str | None
+    entitlement_count: int
 
 
 @dataclass(frozen=True, slots=True)
 class _DeliveryAggregate:
     buckets_by_staff: Mapping[str, tuple[int, int, int, int, int]]
     areas_by_staff: Mapping[str, frozenset[str]]
+    forms_by_staff: Mapping[str, Mapping[str | None, tuple[int, int]]]
 
 
 _EMPTY_BUCKETS = (0, 0, 0, 0, 0)
@@ -134,7 +143,7 @@ def prepare_delivery_report_data(
         events_by_key[(event.person_id, event.meal)].append(event)
 
     comparison_start = date(period_start.year, 1, 1)
-    normal_evaluation_end = period_end + timedelta(days=3)
+    normal_evaluation_end = period_end + timedelta(days=6)
     service_days = set(_days(comparison_start, normal_evaluation_end))
     service_days.update(
         _replacement_service_days(
@@ -170,10 +179,13 @@ def prepare_delivery_report_data(
                     provision.delivery_on,
                     service_on,
                 )
+                if provision.treatment is ServiceTreatment.NORMAL:
+                    candidate_delivery = physical_delivery_on(roster, person, meal, service_on)
                 try:
-                    available = _regular_service_available(
-                        meal,
+                    available = regular_service_available(
+                        roster,
                         person,
+                        meal,
                         service_on,
                         school_calendar,
                     )
@@ -212,14 +224,22 @@ def prepare_delivery_report_data(
                             (service_on,),
                         )
                     )
-                elif meal is Meal.BREAKFAST:
+                elif meal is Meal.BREAKFAST and (
+                    not has_custom_delivery_weekdays(roster, person, meal, service_on)
+                    or physical_delivery_on(roster, person, meal, service_on)
+                    == service_on - timedelta(days=(service_on.weekday() - default_delivery_weekdays(meal)[service_on.weekday()]) % 7)
+                ):
                     normal_breakfast.append(entitlement)
                 else:
+                    delivery_on = physical_delivery_on(roster, person, meal, service_on)
+                    if adjustments.provision_for(meal, delivery_on).treatment is not ServiceTreatment.NORMAL:
+                        exclusions["delivery_day_closed"] += 1
+                        continue
                     shipments.append(
                         PhysicalShipment(
                             person.person_id,
                             meal,
-                            service_on,
+                            delivery_on,
                             (service_on,),
                         )
                     )
@@ -305,10 +325,12 @@ def prepare_delivery_report_data(
                 "starts_on": comparison_start.isoformat(),
             },
             "recurring_service_policy": {
-                "version": 1,
-                "breakfast": "every_calendar_day",
+                "version": RECURRING_MEAL_SERVICE_POLICY_VERSION,
+                "breakfast": "friday_saturday_sunday",
                 "lunch": "reviewed_school_weekdays",
                 "dinner": "weekdays",
+                "household_weekday_override": "replaces_regular_days; lunch_requires_school_service",
+                "household_delivery_weekday": "latest_configured_weekday_on_or_before_service_day",
             },
             "breakfast_physical_delivery": {
                 "policy": breakfast_policy.public_manifest(),
@@ -344,6 +366,7 @@ def prepare_delivery_report_data(
                 "policy_version": DELIVERY_REPORT_GROUPING_POLICY_VERSION,
                 "key": "stable_household_id",
                 "max_supported_size": 5,
+                "form_breakdown": "staff_memo_households_and_entitlements",
             },
             "staff_order": {
                 meal.value: normalized_staff_sort.get(meal, ())
@@ -527,6 +550,17 @@ def _shipment_presences(
                 driver,
                 "" if assignment.sequence is None else assignment.sequence.strip(),
                 person.profile.jurisdiction or "",
+                next(
+                    (
+                        setting.form
+                        for setting in roster.delivery_settings_for(
+                            shipment.person_id, on=shipment.service_dates[0]
+                        )
+                        if setting.meal is shipment.meal
+                    ),
+                    None,
+                ),
+                shipment.entitlement_count,
             )
         )
     return MappingProxyType(
@@ -559,6 +593,11 @@ def _aggregate_presences(
         if item.jurisdiction.strip():
             areas[item.driver].add(item.jurisdiction.strip())
     buckets: defaultdict[str, list[int]] = defaultdict(lambda: [0] * 5)
+    form_households: defaultdict[tuple[str, str | None], set[UUID]] = defaultdict(set)
+    form_meals: Counter[tuple[str, str | None]] = Counter()
+    for item in presences:
+        form_households[(item.driver, item.form)].add(item.household_id)
+        form_meals[(item.driver, item.form)] += item.entitlement_count
     for (driver, household_id), person_ids in locations.items():
         household_size = len(person_ids)
         if household_size > 5:
@@ -582,6 +621,14 @@ def _aggregate_presences(
         MappingProxyType(
             {driver: frozenset(values) for driver, values in areas.items()}
         ),
+        MappingProxyType({
+            driver: MappingProxyType({
+                form: (len(households), form_meals[(driver, form)])
+                for (staff, form), households in form_households.items()
+                if staff == driver
+            })
+            for driver in {staff for staff, _form in form_households}
+        }),
     )
 
 
@@ -626,7 +673,7 @@ def _build_report(
                     for index in range(5)
                 ),
                 people,
-                "",
+                _form_memo(current.forms_by_staff.get(staff, {})),
                 "\n".join(
                     ", ".join(ordered_areas[index : index + 2])
                     for index in range(0, len(ordered_areas), 2)
@@ -645,20 +692,16 @@ def _build_report(
 
 
 def _empty_aggregate() -> _DeliveryAggregate:
-    return _DeliveryAggregate(MappingProxyType({}), MappingProxyType({}))
+    return _DeliveryAggregate(MappingProxyType({}), MappingProxyType({}), MappingProxyType({}))
 
 
-def _regular_service_available(
-    meal: Meal,
-    person: Person,
-    service_on: date,
-    school_calendar: SchoolLunchCalendar,
-) -> bool:
-    if meal is Meal.BREAKFAST:
-        return True
-    if meal is Meal.DINNER:
-        return service_on.weekday() < 5
-    return school_calendar.vendor_service_available(person.profile, service_on)
+def _form_memo(forms: Mapping[str | None, tuple[int, int]]) -> str:
+    if not any(form is not None for form in forms):
+        return ""
+    return "\n".join(
+        f"{form or '기본'} {counts[0]}가구·{counts[1]}식"
+        for form, counts in sorted(forms.items(), key=lambda item: (item[0] is not None, item[0] or ""))
+    )
 
 
 def _relevant_adjustment_ids(

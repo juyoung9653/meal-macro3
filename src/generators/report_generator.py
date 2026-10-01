@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from math import ceil
 from collections.abc import Sequence
 from copy import copy
 from datetime import date
@@ -194,7 +195,9 @@ def _stretch_rows_to_page(ws, last_row: int) -> None:
             arr[j] = (arr[j][0], arr[j][1] + add_each)
 
     for r, h in arr:
-        ws.row_dimensions[r].height = h
+        # Excel's row-height limit is 409.5 pt. A form breakdown can already
+        # need several wrapped lines; page filling must not make it invalid.
+        ws.row_dimensions[r].height = min(h, 409.5) if ws.cell(r, 8).value else h
 
 
 def _apply_page_setup(ws) -> None:
@@ -264,20 +267,24 @@ def _fill_data(ws, report: DeliveryReport) -> None:
         if raw:
             # 컬럼 폭 대비 텍스트 길이에 맞춰 폰트 크기 자동 조절
             col_w = ws.column_dimensions["H"].width or 23
-            col_px = int(col_w * 8) - 12  # 184px - 여유 12px
+            col_px = max(1, int(col_w * 8) - 12)  # 184px - 여유 12px
             lines = raw.split("\n")
 
             # 줄별 필요한 폰트 크기 계산
             font_sizes: list[int] = []
+            visual_line_count = 0
             for line in lines:
                 cnt_k = sum(1 for c in line if ord(c) > 127)
                 cnt_a = sum(1 for c in line if ord(c) <= 127)
                 coeff = cnt_k * 1.33 + cnt_a * 0.67
                 if coeff > 0:
                     ideal = col_px / coeff
-                    font_sizes.append(max(6, min(11, int(ideal))))
+                    font_size = max(6, min(11, int(ideal)))
+                    font_sizes.append(font_size)
+                    visual_line_count += max(1, ceil(coeff * font_size / col_px))
                 else:
                     font_sizes.append(_FONT_SIZE)
+                    visual_line_count += 1
 
             c_h.value = _make_memo_rich_text(raw, font_sizes)
 
@@ -289,8 +296,7 @@ def _fill_data(ws, report: DeliveryReport) -> None:
             align.wrap_text = True
             c_h.alignment = align
 
-            line_count = len(lines)
-            est_height = max(17, line_count * 17)
+            est_height = max(17, visual_line_count * 17)
             if est_height > (ws.row_dimensions[gr].height or 0):
                 ws.row_dimensions[gr].height = est_height
         else:

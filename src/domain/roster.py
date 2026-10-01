@@ -182,19 +182,69 @@ class PersonProfile:
 class Person:
     person_id: UUID
     profile: PersonProfile
+    delivery_settings: tuple[HouseholdDeliverySetting, ...] | None = None
 
     def __post_init__(self) -> None:
         _validate_uuid(self.person_id, "사람 ID")
         if not isinstance(self.profile, PersonProfile):
             raise TypeError("profile은 PersonProfile이어야 합니다.")
+        if self.delivery_settings is not None:
+            settings = tuple(self.delivery_settings)
+            if any(not isinstance(item, HouseholdDeliverySetting) for item in settings):
+                raise TypeError("배송 설정은 HouseholdDeliverySetting이어야 합니다.")
+            if len({item.meal for item in settings}) != len(settings):
+                raise ValueError("사람 배송 설정의 식종은 중복될 수 없습니다.")
+            object.__setattr__(self, "delivery_settings", tuple(sorted(settings, key=lambda item: _MEAL_ORDER.index(item.meal))))
 
 
 @dataclass(frozen=True, slots=True)
 class Household:
     household_id: UUID
+    delivery_settings: tuple[HouseholdDeliverySetting, ...] = ()
 
     def __post_init__(self) -> None:
         _validate_uuid(self.household_id, "가구 ID")
+        settings = tuple(self.delivery_settings)
+        if any(not isinstance(item, HouseholdDeliverySetting) for item in settings):
+            raise TypeError("배송 설정은 HouseholdDeliverySetting이어야 합니다.")
+        if len({item.meal for item in settings}) != len(settings):
+            raise ValueError("가구 배송 설정의 식종은 중복될 수 없습니다.")
+        object.__setattr__(self, "delivery_settings", tuple(sorted(settings, key=lambda item: _MEAL_ORDER.index(item.meal))))
+
+
+@dataclass(frozen=True, slots=True)
+class HouseholdDeliverySetting:
+    """Explicit household/meal overrides; None inherits the operating default."""
+
+    meal: Meal
+    weekdays: tuple[int, ...] | None = None
+    form: str | None = None
+    delivery_weekdays: tuple[int, ...] | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.meal, Meal):
+            raise TypeError("meal은 Meal이어야 합니다.")
+        if self.weekdays is not None:
+            days = tuple(self.weekdays)
+            if not days or any(type(day) is not int or not 0 <= day <= 6 for day in days):
+                raise ValueError("제공 요일은 월요일부터 일요일 중 하나 이상이어야 합니다.")
+            if len(set(days)) != len(days) or days != tuple(sorted(days)):
+                raise ValueError("제공 요일은 중복 없이 순서대로 지정해야 합니다.")
+            object.__setattr__(self, "weekdays", days)
+        if self.form is not None:
+            if not isinstance(self.form, str):
+                raise TypeError("배송 형태는 문자열이어야 합니다.")
+            form = " ".join(self.form.split())
+            if not form:
+                raise ValueError("별도 배송 형태를 입력해주세요.")
+            object.__setattr__(self, "form", form)
+        if self.delivery_weekdays is not None:
+            delivery_days = tuple(self.delivery_weekdays)
+            if len(delivery_days) != 7 or any(type(day) is not int or not 0 <= day <= 6 for day in delivery_days):
+                raise ValueError("실제 배송 요일은 월요일부터 일요일까지 각각 지정해야 합니다.")
+            object.__setattr__(self, "delivery_weekdays", delivery_days)
+        if self.weekdays is None and self.form is None and self.delivery_weekdays is None:
+            raise ValueError("별도 배송 설정에는 요일이나 형태가 필요합니다.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -368,6 +418,22 @@ class RosterSnapshot:
             return self._persons_by_id[person_id]
         except KeyError as error:
             raise KeyError(f"snapshot에 없는 사람 ID입니다: {person_id}") from error
+
+    def household_for(self, person_id: UUID, *, on: date) -> Household | None:
+        self.person(person_id)
+        _validate_date(on, "조회일")
+        for membership in self.memberships:
+            if membership.person_id == person_id and membership.period.contains(on):
+                return self._households_by_id[membership.household_id]
+        return None
+
+    def delivery_settings_for(self, person_id: UUID, *, on: date) -> tuple[HouseholdDeliverySetting, ...]:
+        person = self.person(person_id)
+        _validate_date(on, "조회일")
+        if person.delivery_settings is not None:
+            return person.delivery_settings
+        household = self.household_for(person_id, on=on)
+        return () if household is None else household.delivery_settings
 
     def household_members(
         self,

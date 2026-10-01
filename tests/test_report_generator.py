@@ -146,6 +146,34 @@ def test_make_report_publication_returns_verified_file_facts(tmp_path: Path):
     assert publication.output_byte_size == output.stat().st_size
 
 
+def test_export_keeps_long_multiple_form_counts_readable(tmp_path: Path):
+    template = tmp_path / "report_template.xlsx"
+    output = tmp_path / "forms.xlsx"
+    _write_minimal_template(template)
+    form_name = "긴 배송 형태 이름 " * 12
+    memo = "기본 1가구·2식\n식재료 박스 2가구·4식\n도시락 1가구·1식\n" + form_name + " 1가구·1식"
+    report = DeliveryReport(
+        date(2026, 8, 21), "조식",
+        (DeliveryReportRow("기사A", ("5", "0", "0", "0", "0"), 5, memo, ""),),
+        DeliveryReportTotals((5, 0, 0, 0, 0), 5),
+    )
+
+    report_generator.make_report_publication((report,), output, template)
+
+    workbook = openpyxl.load_workbook(output, rich_text=True)
+    try:
+        sheet = workbook.active
+        assert sheet is not None
+        assert str(sheet["H4"].value) == memo
+        assert sheet["H4"].alignment.wrap_text is True
+        assert sheet.row_dimensions[4].height >= 7 * 17
+        assert sheet.row_dimensions[4].height <= 409.5
+        assert sheet["G4"].value == 5
+        assert sheet["B5"].value == 5
+    finally:
+        workbook.close()
+
+
 def test_export_multi_rejects_empty_results(tmp_path: Path):
     output = tmp_path / "requested.xlsx"
 

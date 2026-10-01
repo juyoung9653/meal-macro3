@@ -1,0 +1,60 @@
+"""Recurring meal availability shared by monthly billing and delivery reports."""
+
+from __future__ import annotations
+
+from datetime import date, timedelta
+
+from src.domain.roster import Meal, Person, RosterSnapshot
+from src.domain.school_calendar import SchoolLunchCalendar
+
+
+RECURRING_MEAL_SERVICE_POLICY_VERSION = 3
+
+
+def default_service_weekdays(meal: Meal) -> tuple[int, ...]:
+    return (4, 5, 6) if meal is Meal.BREAKFAST else (0, 1, 2, 3, 4)
+
+
+def default_delivery_weekdays(meal: Meal) -> tuple[int, ...]:
+    return (0, 1, 2, 3, 4, 4, 4) if meal is Meal.BREAKFAST else tuple(range(7))
+
+
+def physical_delivery_on(roster: RosterSnapshot, person: Person, meal: Meal, service_on: date) -> date:
+    """Choose the latest configured weekday at or before the meal's service date."""
+    setting = next((item for item in roster.delivery_settings_for(person.person_id, on=service_on) if item.meal is meal), None)
+    mapping = setting.delivery_weekdays if setting and setting.delivery_weekdays is not None else default_delivery_weekdays(meal)
+    delivery_weekday = mapping[service_on.weekday()]
+    return service_on - timedelta(days=(service_on.weekday() - delivery_weekday) % 7)
+
+
+def has_custom_delivery_weekdays(roster: RosterSnapshot, person: Person, meal: Meal, service_on: date) -> bool:
+    return any(item.meal is meal and item.delivery_weekdays is not None for item in roster.delivery_settings_for(person.person_id, on=service_on))
+
+
+def regular_service_available(
+    roster: RosterSnapshot,
+    person: Person,
+    meal: Meal,
+    service_on: date,
+    school_calendar: SchoolLunchCalendar,
+) -> bool:
+    """Apply a household's service weekdays before the school schedule."""
+
+    setting = next(
+        (
+            item
+            for item in roster.delivery_settings_for(person.person_id, on=service_on)
+            if item.meal is meal
+        ),
+        None,
+    )
+    if setting is not None and setting.weekdays is not None:
+        if service_on.weekday() not in setting.weekdays:
+            return False
+        if meal is not Meal.LUNCH:
+            return True
+    if meal is Meal.BREAKFAST:
+        return service_on.weekday() in default_service_weekdays(meal)
+    if meal is Meal.DINNER:
+        return service_on.weekday() < 5
+    return school_calendar.vendor_service_available(person.profile, service_on)

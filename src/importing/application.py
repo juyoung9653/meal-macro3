@@ -206,7 +206,10 @@ def apply_reconciliation(
                 additional_mobile_phone_field_ordinal,
             )
         )
-        persons_by_id[person_id] = Person(person_id, merged_profile)
+        persons_by_id[person_id] = Person(
+            person_id, merged_profile,
+            None if person_id not in persons_by_id else persons_by_id[person_id].delivery_settings,
+        )
         enrollments = _replace_active_meals(
             enrollments,
             person_id,

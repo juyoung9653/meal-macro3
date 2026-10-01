@@ -10,6 +10,7 @@ from uuid import UUID, uuid4
 
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QDialog,
     QFrame,
     QGridLayout,
@@ -32,8 +33,9 @@ from src.domain import (
     build_person_profile_revision,
 )
 from src.domain.profile_edits import profile_household_members
-from src.domain.roster import CustomFieldDefinition, CustomFieldType
+from src.domain.roster import CustomFieldDefinition, CustomFieldType, HouseholdDeliverySetting, Meal
 from src.storage import AutomaticBackupResult, DatabaseSession
+from src.services.meal_service_availability import default_delivery_weekdays, default_service_weekdays
 
 from .import_controller import current_windows_actor
 from .theme import application_stylesheet, register_application_fonts
@@ -91,6 +93,10 @@ class PersonProfileEditDialog(QDialog):
         message_box=QMessageBox,
         custom_fields: tuple[CustomFieldDefinition, ...] = (),
         household_members: tuple[Person, ...] = (),
+        household_delivery_settings: tuple[HouseholdDeliverySetting, ...] | None = None,
+        effective_delivery_settings: tuple[HouseholdDeliverySetting, ...] | None = None,
+        member_delivery_settings: dict[UUID, tuple[HouseholdDeliverySetting, ...]] | None = None,
+        delivery_only: bool = False,
     ) -> None:
         if not isinstance(person, Person):
             raise TypeError("person은 Person이어야 합니다.")
@@ -100,13 +106,27 @@ class PersonProfileEditDialog(QDialog):
         self._message_box = message_box
         self._custom_fields = custom_fields
         self._household_members = household_members or (person,)
+        self._original_delivery_settings = person.delivery_settings
+        self._effective_delivery_settings = (
+            effective_delivery_settings if effective_delivery_settings is not None
+            else household_delivery_settings if household_delivery_settings is not None
+            else person.delivery_settings or ()
+        )
+        self._member_delivery_settings = member_delivery_settings or {}
+        self._delivery_only = delivery_only
+        self._delivery_days: dict[Meal, tuple[QCheckBox, ...]] = {}
+        self._physical_delivery_days: dict[Meal, tuple[QComboBox, ...]] = {}
+        self._delivery_forms: dict[Meal, QLineEdit] = {}
+        self._delivery_status: dict[Meal, QLabel] = {}
+        self._initial_delivery_values: dict[Meal, tuple[tuple[int, ...], tuple[int, ...], str]] = {}
+        self._force_reset_meals: set[Meal] = set()
         self._accepted_profile: PersonProfile | None = None
         self._editors: dict[str, QLineEdit | QPlainTextEdit] = {}
         register_application_fonts()
         self.setObjectName("personProfileEditDialog")
-        self.setWindowTitle(f"{person.profile.name} · 사람 정보 수정")
-        self.resize(760, 760)
-        self.setMinimumSize(650, 620)
+        self.setWindowTitle(f"{person.profile.name} 배송 설정" if delivery_only else f"{person.profile.name} · 사람 정보 수정")
+        self.resize(760, 680 if delivery_only else 760)
+        self.setMinimumSize(650, 560 if delivery_only else 620)
         self.setStyleSheet(application_stylesheet())
         self._build_ui()
         self._populate()
@@ -118,7 +138,12 @@ class PersonProfileEditDialog(QDialog):
             raise RuntimeError("저장 확정 전에는 수정 profile을 가져올 수 없습니다.")
         return self._accepted_profile
 
+    def delivery_settings(self) -> tuple[HouseholdDeliverySetting, ...] | None:
+        return self._candidate_delivery_settings()
+
     def cleared_fields(self) -> tuple[str, ...]:
+        if self._delivery_only:
+            return ()
         canonical = tuple(
             key
             for key in _FIELD_LABELS
@@ -135,6 +160,9 @@ class PersonProfileEditDialog(QDialog):
         return (*canonical, *custom)
 
     def _build_ui(self) -> None:
+        if self._delivery_only:
+            self._build_delivery_only_ui()
+            return
         root = QVBoxLayout(self)
         root.setContentsMargins(18, 18, 18, 16)
         root.setSpacing(12)
@@ -169,6 +197,7 @@ class PersonProfileEditDialog(QDialog):
         for title_text, field_keys in _SECTIONS:
             scroll_layout.addWidget(self._build_section(title_text, field_keys))
         scroll_layout.addWidget(self._build_note_section())
+        scroll_layout.addWidget(self._build_delivery_section())
         if self._custom_fields:
             scroll_layout.addWidget(self._build_custom_fields_section())
         scroll_layout.addStretch(1)
@@ -179,8 +208,8 @@ class PersonProfileEditDialog(QDialog):
         self.household_mobile.setEnabled(len(self._household_members) > 1)
         self.household_mobile.toggled.connect(self._refresh_form_state)
         root.addWidget(self.household_mobile)
-        targets = QLabel("가구 전체 대상: " + ", ".join(member.profile.name for member in self._household_members)
-                         + "\n체크하면 기본 핸드폰 번호만 함께 변경됩니다. 나머지 정보는 선택한 사람에게만 적용됩니다.")
+        targets = QLabel("같은 가구: " + ", ".join(member.profile.name for member in self._household_members)
+                         + "\n핸드폰 공유는 위 체크로, 배송 설정 공유는 배송 설정 안의 체크로 각각 선택합니다.")
         targets.setWordWrap(True)
         root.addWidget(targets)
 
@@ -194,6 +223,36 @@ class PersonProfileEditDialog(QDialog):
         self._form_error.setWordWrap(True)
         root.addWidget(self._form_error)
 
+        actions = QHBoxLayout()
+        actions.addStretch(1)
+        cancel = QPushButton("취소")
+        cancel.setObjectName("quietAction")
+        cancel.clicked.connect(self.reject)
+        actions.addWidget(cancel)
+        self._save_button = QPushButton("변경 저장")
+        self._save_button.setObjectName("primaryAction")
+        self._save_button.clicked.connect(self._save)
+        actions.addWidget(self._save_button)
+        root.addLayout(actions)
+
+    def _build_delivery_only_ui(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(18, 18, 18, 16)
+        root.setSpacing(12)
+        title = QLabel(f"{self._original.name} 배송 설정")
+        title.setObjectName("workspaceTitle")
+        root.addWidget(title)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidget(self._build_delivery_section())
+        root.addWidget(scroll, 1)
+        self._clear_notice = QLabel()
+        self._clear_notice.hide()
+        self._form_error = QLabel()
+        self._form_error.setObjectName("errorMessage")
+        self._form_error.setWordWrap(True)
+        root.addWidget(self._form_error)
         actions = QHBoxLayout()
         actions.addStretch(1)
         cancel = QPushButton("취소")
@@ -250,6 +309,202 @@ class PersonProfileEditDialog(QDialog):
         layout.addWidget(editor)
         return frame
 
+    def _build_delivery_section(self) -> QFrame:
+        frame = QFrame()
+        frame.setObjectName("editSection")
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(14, 12, 14, 14)
+        if not self._delivery_only:
+            self._delivery_toggle = QPushButton("배송 설정 — 기본값 (+)")
+            self._delivery_toggle.setObjectName("quietAction")
+            self._delivery_toggle.setCheckable(True)
+            layout.addWidget(self._delivery_toggle)
+        self._delivery_body = QWidget()
+        body = QVBoxLayout(self._delivery_body)
+        body.setContentsMargins(0, 8, 0, 0)
+        body.setSpacing(10)
+        existing = {item.meal: item for item in self._effective_delivery_settings}
+        self.household_delivery = QCheckBox("같은 가구 전체에 배송 설정 적용")
+        self.household_delivery.setEnabled(len(self._household_members) > 1)
+        self.household_delivery.toggled.connect(self._refresh_delivery_scope)
+        body.addWidget(self.household_delivery)
+        self._delivery_scope = QLabel()
+        self._delivery_scope.setObjectName("workspaceSubtitle")
+        self._delivery_scope.setWordWrap(True)
+        body.addWidget(self._delivery_scope)
+        self._refresh_delivery_scope()
+        guidance = QLabel("제공 요일은 식사를 제공하는 날, 배송 요일은 실제로 받는 날입니다. 조식 기본값은 금·토·일 제공분을 금요일에 함께 배송합니다. 기본적으로 선택한 사람에게만 적용됩니다.")
+        guidance.setWordWrap(True)
+        body.addWidget(guidance)
+        for meal in (Meal.DINNER, Meal.BREAKFAST, Meal.LUNCH):
+            setting = existing.get(meal)
+            meal_frame = QFrame()
+            meal_frame.setObjectName("editSection")
+            meal_layout = QVBoxLayout(meal_frame)
+            meal_layout.setContentsMargins(10, 8, 10, 8)
+            heading = QHBoxLayout()
+            meal_name = QLabel(meal.value)
+            meal_name.setObjectName("sectionLabel")
+            heading.addWidget(meal_name)
+            status = QLabel()
+            status.setObjectName("workspaceSubtitle")
+            heading.addWidget(status)
+            heading.addStretch(1)
+            reset = QPushButton("초기화")
+            reset.setObjectName("quietAction")
+            reset.clicked.connect(lambda _checked=False, current=meal: self._reset_delivery_meal(current))
+            heading.addWidget(reset)
+            meal_layout.addLayout(heading)
+            weekday_grid = QGridLayout()
+            weekday_grid.addWidget(QLabel("제공 요일"), 0, 0)
+            weekday_grid.addWidget(QLabel("배송 요일"), 1, 0)
+            weekday_grid.setHorizontalSpacing(6)
+            days = []
+            for index, label in enumerate(("월", "화", "수", "목", "금", "토", "일")):
+                day = QCheckBox(label)
+                default_days = default_service_weekdays(meal)
+                day.setChecked(index in (setting.weekdays if setting and setting.weekdays is not None else default_days))
+                day.toggled.connect(self._refresh_form_state)
+                weekday_grid.addWidget(day, 0, index + 1)
+                days.append(day)
+            delivery_days = []
+            mapping = setting.delivery_weekdays if setting and setting.delivery_weekdays is not None else default_delivery_weekdays(meal)
+            for index, day in enumerate(days):
+                delivery_day = QComboBox()
+                delivery_day.setAccessibleName(f"{meal.value} {day.text()} 제공분 실제 배송 요일")
+                delivery_day.addItems(("월", "화", "수", "목", "금", "토", "일"))
+                delivery_day.setCurrentIndex(mapping[index])
+                delivery_day.setEnabled(day.isChecked())
+                day.toggled.connect(delivery_day.setEnabled)
+                delivery_day.currentIndexChanged.connect(self._refresh_form_state)
+                weekday_grid.addWidget(delivery_day, 1, index + 1)
+                delivery_days.append(delivery_day)
+            meal_layout.addLayout(weekday_grid)
+            form_row = QHBoxLayout()
+            form_edit = QLineEdit()
+            form_edit.setPlaceholderText("비워두면 기본 형태 · 예: 도시락, 식재료 박스")
+            form_edit.setText(setting.form if setting and setting.form is not None else "")
+            form_edit.textChanged.connect(self._refresh_form_state)
+            form_row.addWidget(QLabel("배송 형태"))
+            form_row.addWidget(form_edit, 1)
+            meal_layout.addLayout(form_row)
+            body.addWidget(meal_frame)
+            self._delivery_days[meal] = tuple(days)
+            self._physical_delivery_days[meal] = tuple(delivery_days)
+            self._delivery_forms[meal] = form_edit
+            self._delivery_status[meal] = status
+            self._initial_delivery_values[meal] = self._delivery_values(meal)
+        reset = QPushButton("전체 초기화")
+        reset.setObjectName("quietAction")
+        reset.clicked.connect(self._reset_delivery_settings)
+        body.addWidget(reset)
+        if not self._delivery_only:
+            self._delivery_body.hide()
+        layout.addWidget(self._delivery_body)
+        if not self._delivery_only:
+            self._delivery_toggle.toggled.connect(self._toggle_delivery_section)
+        self._update_delivery_heading()
+        return frame
+
+    def _toggle_delivery_section(self, expanded: bool) -> None:
+        self._delivery_body.setVisible(expanded)
+        self._update_delivery_heading()
+
+    def _reset_delivery_settings(self) -> None:
+        for meal in self._delivery_days:
+            self._reset_delivery_meal(meal)
+        self._refresh_form_state()
+
+    def _reset_delivery_meal(self, meal: Meal) -> None:
+        self._force_reset_meals.add(meal)
+        self._show_inherited_weekdays(meal)
+        self._show_inherited_delivery_weekdays(meal)
+        self._delivery_forms[meal].clear()
+        self._refresh_form_state()
+
+    def _show_inherited_weekdays(self, meal: Meal) -> None:
+        for index, day in enumerate(self._delivery_days[meal]):
+            day.setChecked(index in default_service_weekdays(meal))
+
+    def _show_inherited_delivery_weekdays(self, meal: Meal) -> None:
+        for index, day in enumerate(self._physical_delivery_days[meal]):
+            day.setCurrentIndex(default_delivery_weekdays(meal)[index])
+
+    def _update_delivery_heading(self) -> None:
+        for meal, label in self._delivery_status.items():
+            values = self._delivery_values(meal)
+            baseline = (
+                default_service_weekdays(meal), default_delivery_weekdays(meal), ""
+            )
+            summary = "별도 설정" if values != baseline else "기본값"
+            if meal in self._force_reset_meals or values != self._initial_delivery_values[meal]:
+                original = next((item for item in self._effective_delivery_settings if item.meal is meal), None)
+                if self._setting_from_values(meal, values) != original:
+                    summary += " · 저장할 변경"
+            label.setText(summary)
+        if not self._delivery_only:
+            special = any("별도 설정" in label.text() for label in self._delivery_status.values())
+            summary = "별도 설정" if special else "기본값"
+            self._delivery_toggle.setText(f"배송 설정 — {summary} {'(-)' if self._delivery_toggle.isChecked() else '(+)'}")
+
+    def _delivery_values(self, meal: Meal) -> tuple[tuple[int, ...], tuple[int, ...], str]:
+        return (
+            tuple(index for index, day in enumerate(self._delivery_days[meal]) if day.isChecked()),
+            tuple(day.currentIndex() for day in self._physical_delivery_days[meal]),
+            " ".join(self._delivery_forms[meal].text().split()),
+        )
+
+    def _setting_from_values(self, meal: Meal, values: tuple[tuple[int, ...], tuple[int, ...], str]) -> HouseholdDeliverySetting | None:
+        days, mapping, form = values
+        if not days:
+            raise ValueError(f"{meal.value} 제공 요일을 하나 이상 선택해주세요.")
+        weekdays = None if days == default_service_weekdays(meal) else days
+        delivery_weekdays = None if mapping == default_delivery_weekdays(meal) else mapping
+        if weekdays is None and delivery_weekdays is None and not form:
+            return None
+        return HouseholdDeliverySetting(meal, weekdays, form or None, delivery_weekdays)
+
+    def _candidate_delivery_settings(self) -> tuple[HouseholdDeliverySetting, ...] | None:
+        if not self._force_reset_meals and all(
+            self._delivery_values(meal) == self._initial_delivery_values[meal]
+            for meal in self._delivery_days
+        ):
+            return self._original_delivery_settings
+        settings = []
+        for meal in (Meal.BREAKFAST, Meal.LUNCH, Meal.DINNER):
+            values = self._delivery_values(meal)
+            baseline = (default_service_weekdays(meal), default_delivery_weekdays(meal), "")
+            preserve_original = values == self._initial_delivery_values[meal] and (
+                meal not in self._force_reset_meals or values != baseline
+            )
+            if preserve_original:
+                setting = next((item for item in self._effective_delivery_settings if item.meal is meal), None)
+            else:
+                setting = self._setting_from_values(meal, values)
+            if setting is not None:
+                settings.append(setting)
+        return tuple(settings)
+
+    def _refresh_delivery_scope(self, *_args) -> None:
+        members = self._household_members if self.household_delivery.isChecked() else (self._person,)
+        names = ", ".join(member.profile.name for member in members)
+        self._delivery_scope.setText(f"적용 대상 {len(members)}명: {names}")
+        if hasattr(self, "_save_button"):
+            self._refresh_form_state()
+
+    def apply_delivery_to_household(self) -> bool:
+        return self.household_delivery.isEnabled() and self.household_delivery.isChecked()
+
+    def _delivery_copy_changed(self, candidate: tuple[HouseholdDeliverySetting, ...] | None) -> bool:
+        if not self.apply_delivery_to_household():
+            return False
+        effective = self._effective_delivery_settings if candidate is None else candidate
+        return any(
+            self._member_delivery_settings.get(member.person_id, effective) != effective
+            for member in self._household_members
+            if member.person_id != self._person.person_id
+        )
+
     def _build_custom_fields_section(self) -> QFrame:
         frame = QFrame()
         frame.setObjectName("editSection")
@@ -295,6 +550,8 @@ class PersonProfileEditDialog(QDialog):
         )
 
     def _candidate_profile(self) -> PersonProfile:
+        if self._delivery_only:
+            return self._original
         custom_values = dict(self._original.custom_values)
         for definition in self._custom_fields:
             text = self._editor_text(f"custom:{definition.definition_id}").strip()
@@ -338,16 +595,23 @@ class PersonProfileEditDialog(QDialog):
 
         try:
             candidate = self._candidate_profile()
+            delivery_settings = self._candidate_delivery_settings()
         except (TypeError, ValueError) as error:
             self._form_error.setText(str(error))
             self._form_error.show()
             self._save_button.setEnabled(False)
             return
         self._form_error.hide()
-        self._save_button.setEnabled(candidate != self._original or self._household_phone_changed(candidate))
+        self._update_delivery_heading()
+        self._save_button.setEnabled(
+            candidate != self._original
+            or self._household_phone_changed(candidate)
+            or delivery_settings != self._original_delivery_settings
+            or self._delivery_copy_changed(delivery_settings)
+        )
 
     def apply_mobile_to_household(self) -> bool:
-        return self.household_mobile.isChecked()
+        return not self._delivery_only and self.household_mobile.isChecked()
 
     def _household_phone_changed(self, candidate: PersonProfile) -> bool:
         return self.apply_mobile_to_household() and any(
@@ -357,11 +621,14 @@ class PersonProfileEditDialog(QDialog):
     def _save(self) -> None:
         try:
             candidate = self._candidate_profile()
+            delivery_settings = self._candidate_delivery_settings()
         except (TypeError, ValueError) as error:
             self._form_error.setText(str(error))
             self._form_error.show()
             return
-        if candidate == self._original and not self._household_phone_changed(candidate):
+        if (candidate == self._original and not self._household_phone_changed(candidate)
+                and delivery_settings == self._original_delivery_settings
+                and not self._delivery_copy_changed(delivery_settings)):
             self._form_error.setText("변경된 내용이 없습니다.")
             self._form_error.show()
             return
@@ -442,6 +709,25 @@ class PersonProfileEditController:
         person_id: UUID,
         parent: QWidget | None = None,
     ) -> PersonProfileEditOutcome:
+        return self._run(person_id, parent, delivery_only=False)
+
+    def run_delivery_settings(
+        self,
+        person_id: UUID,
+        parent: QWidget | None = None,
+        *,
+        service_day: date | None = None,
+    ) -> PersonProfileEditOutcome:
+        return self._run(person_id, parent, delivery_only=True, service_day=service_day)
+
+    def _run(
+        self,
+        person_id: UUID,
+        parent: QWidget | None,
+        *,
+        delivery_only: bool,
+        service_day: date | None = None,
+    ) -> PersonProfileEditOutcome:
         roster = self._session.database.current_roster()
         if roster is None:
             self._message_box.critical(
@@ -459,28 +745,50 @@ class PersonProfileEditController:
                 str(error),
             )
             return PersonProfileEditOutcome(PersonProfileEditStatus.FAILED)
-        effective_on = self._effective_date_provider()
+        effective_on = service_day if delivery_only and service_day is not None else self._effective_date_provider()
+        household_members = profile_household_members(roster, person_id, effective_on)
+        effective_delivery_settings = roster.delivery_settings_for(person_id, on=effective_on)
         if self._dialog_type is PersonProfileEditDialog:
             dialog = self._dialog_type(
                 person,
                 parent,
                 message_box=self._message_box,
                 custom_fields=roster.custom_fields,
-                household_members=profile_household_members(roster, person_id, effective_on),
+                household_members=household_members,
+                effective_delivery_settings=effective_delivery_settings,
+                member_delivery_settings={
+                    member.person_id: roster.delivery_settings_for(member.person_id, on=effective_on)
+                    for member in household_members
+                },
+                delivery_only=delivery_only,
             )
         else:
             dialog = self._dialog_type(person, parent, message_box=self._message_box)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return PersonProfileEditOutcome(PersonProfileEditStatus.CANCELLED)
         try:
+            updated_profile = dialog.profile()
+            updated_delivery_settings = getattr(dialog, "delivery_settings", lambda: None)()
+            copy_delivery = getattr(dialog, "apply_delivery_to_household", lambda: False)()
+            if copy_delivery and updated_delivery_settings is None:
+                updated_delivery_settings = effective_delivery_settings
+            if (
+                updated_profile == person.profile
+                and not getattr(dialog, "apply_mobile_to_household", lambda: False)()
+                and updated_delivery_settings == person.delivery_settings
+                and not copy_delivery
+            ):
+                return PersonProfileEditOutcome(PersonProfileEditStatus.CANCELLED)
             prepared = build_person_profile_revision(
                 roster,
                 person_id,
-                dialog.profile(),
+                updated_profile,
                 actor=self._actor_provider(),
                 recorded_at=self._recorded_at_provider(),
                 effective_on=effective_on,
                 household_mobile_phone=getattr(dialog, "apply_mobile_to_household", lambda: False)(),
+                person_delivery_settings=updated_delivery_settings,
+                delivery_settings_to_household=copy_delivery,
                 revision_id=self._revision_id_factory(),
             )
             backup_result = self._session.append_revision(prepared.record)

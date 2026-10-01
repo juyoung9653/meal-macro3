@@ -1,4 +1,5 @@
 from datetime import UTC, date, datetime, timedelta
+from dataclasses import replace
 from uuid import uuid4
 
 import pytest
@@ -12,11 +13,12 @@ from src.domain.delivery_policies import (
     breakfast_delivery_policy_state,
 )
 from src.domain.entitlements import ClosedFridayMode
-from src.domain.projections import roster_entity_states, status_event_state
+from src.domain.projections import roster_entity_states, roster_from_historical_snapshot, status_event_state
 from src.domain.revisions import EntityRef, HistoricalSnapshot
 from src.domain.roster import (
     DeliveryAssignment,
     Household,
+    HouseholdDeliverySetting,
     HouseholdMembership,
     InclusiveDateRange,
     Meal,
@@ -62,6 +64,7 @@ def _snapshot(
     status_events: tuple[StatusEvent, ...] = (),
     adjustment: ServiceAdjustmentChange | None = None,
     breakfast_policy: BreakfastDeliveryPolicySchedule | None = None,
+    delivery_settings: tuple[HouseholdDeliverySetting, ...] = (),
 ) -> tuple[HistoricalSnapshot, tuple]:
     revision_id = uuid4()
     person_ids = tuple(uuid4() for _ in range(people))
@@ -86,7 +89,7 @@ def _snapshot(
         revision_id,
         persons=persons,
         households=tuple(
-            Household(household_id)
+            Household(household_id, delivery_settings)
             for household_id in dict.fromkeys(household_ids)
         ),
         memberships=tuple(
@@ -181,9 +184,153 @@ def test_breakfast_report_uses_physical_friday_and_keeps_three_entitlements():
         date(2026, 8, 23),
     )
     assert prepared.calculation_manifest["target_entitlement_count"] == 3
+    assert prepared.calculation_manifest["calculation_contract_version"] == 3
+    assert prepared.calculation_manifest["recurring_service_policy"]["version"] == 3
+    assert prepared.calculation_manifest["household_grouping"]["policy_version"] == 2
     assert prepared.calculation_manifest["report_period"]["basis"] == (
         "physical_delivery_day"
     )
+
+
+def test_explicit_breakfast_weekdays_do_not_bundle_weekend_meals():
+    friday = date(2026, 8, 21)
+    snapshot, _ = _snapshot(delivery_settings=(
+        HouseholdDeliverySetting(Meal.BREAKFAST, (0, 1, 2, 3, 4)),
+    ))
+
+    prepared = prepare_delivery_report_data(snapshot, friday, friday, (Meal.BREAKFAST,))
+
+    assert len(prepared.shipments) == 1
+    assert prepared.shipments[0].service_dates == (friday,)
+    assert prepared.calculation_manifest["target_entitlement_count"] == 1
+
+
+def test_custom_breakfast_delivery_weekday_moves_weekend_meal_to_thursday():
+    thursday = date(2026, 8, 20)
+    snapshot, _ = _snapshot(delivery_settings=(
+        HouseholdDeliverySetting(Meal.BREAKFAST, delivery_weekdays=(0, 1, 2, 3, 4, 3, 4)),
+    ))
+
+    thursday_report = prepare_delivery_report_data(snapshot, thursday, thursday, (Meal.BREAKFAST,))
+    friday = thursday + timedelta(days=1)
+    friday_report = prepare_delivery_report_data(snapshot, friday, friday, (Meal.BREAKFAST,))
+
+    assert thursday_report.shipments[0].service_dates == (friday + timedelta(days=1),)
+    assert friday_report.shipments[0].service_dates == (friday, friday + timedelta(days=2))
+
+
+def test_custom_dinner_delivery_weekday_uses_previous_month():
+    friday = date(2026, 7, 31)
+    monday = date(2026, 8, 3)
+    snapshot, _ = _snapshot(meals=(Meal.DINNER,), delivery_settings=(
+        HouseholdDeliverySetting(Meal.DINNER, delivery_weekdays=(4, 1, 2, 3, 4, 5, 6)),
+    ))
+
+    friday_report = prepare_delivery_report_data(snapshot, friday, friday, (Meal.DINNER,))
+    monday_report = prepare_delivery_report_data(snapshot, monday, monday, (Meal.DINNER,))
+
+    assert any(item.delivery_on == friday and monday in item.service_dates for item in friday_report.shipments)
+    assert all(item.delivery_on != monday for item in monday_report.shipments)
+
+
+def test_service_replacement_takes_precedence_over_household_delivery_weekday():
+    monday = date(2026, 8, 3)
+    wednesday = monday + timedelta(days=2)
+    adjustment = ServiceAdjustmentChange(
+        uuid4(), InclusiveDateRange(monday, monday), (Meal.DINNER,),
+        ServiceTreatment.REPLACEMENT, wednesday, (), "대체 배송",
+        datetime(2026, 8, 1, tzinfo=UTC),
+    )
+    snapshot, _ = _snapshot(meals=(Meal.DINNER,), adjustment=adjustment, delivery_settings=(
+        HouseholdDeliverySetting(Meal.DINNER, delivery_weekdays=(4, 1, 2, 3, 4, 5, 6)),
+    ))
+
+    prepared = prepare_delivery_report_data(snapshot, wednesday, wednesday, (Meal.DINNER,))
+
+    assert any(item.delivery_on == wednesday and monday in item.service_dates for item in prepared.shipments)
+
+
+def test_form_memo_separates_households_and_meals_without_changing_report_totals():
+    friday = date(2026, 8, 21)
+    standard, _ = _snapshot(people=2)
+    # Rebuild one independent household source with a custom form, then merge
+    # their roster entities into a single report snapshot.
+    boxed, _ = _snapshot(people=2, delivery_settings=(
+        HouseholdDeliverySetting(Meal.BREAKFAST, form="식재료 박스"),
+    ))
+    states = dict(standard.entities)
+    states.update(boxed.entities)
+    snapshot = HistoricalSnapshot(standard.revision_id, states)
+
+    prepared = prepare_delivery_report_data(snapshot, friday, friday, (Meal.BREAKFAST,))
+
+    report = prepared.reports[0]
+    assert report.totals.household_counts == (0, 2, 0, 0, 0)
+    assert report.totals.person_total == 4
+    assert report.rows[0].memo == "기본 1가구·6식\n식재료 박스 1가구·6식"
+    assert prepared.calculation_manifest["target_entitlement_count"] == 12
+
+
+def test_same_household_members_with_different_forms_keep_one_household_total():
+    friday = date(2026, 8, 21)
+    snapshot, _ = _snapshot(people=2)
+    roster = roster_from_historical_snapshot(snapshot)
+    boxed = HouseholdDeliverySetting(Meal.BREAKFAST, form="식재료 박스")
+    changed = replace(roster, persons=(replace(roster.persons[0], delivery_settings=(boxed,)), roster.persons[1]))
+    states = dict(snapshot.entities)
+    states.update(roster_entity_states(changed))
+    prepared = prepare_delivery_report_data(HistoricalSnapshot(snapshot.revision_id, states),
+                                            friday, friday, (Meal.BREAKFAST,))
+    report = prepared.reports[0]
+    assert report.totals.household_counts == (0, 1, 0, 0, 0)
+    assert report.totals.person_total == 2
+    assert report.rows[0].memo == "기본 1가구·3식\n식재료 박스 1가구·3식"
+
+
+def test_replacement_does_not_add_meal_outside_explicit_weekdays():
+    wednesday = date(2026, 9, 9)
+    thursday = date(2026, 9, 10)
+    adjustment = ServiceAdjustmentChange(
+        uuid4(), InclusiveDateRange(thursday, thursday), (Meal.DINNER,),
+        ServiceTreatment.REPLACEMENT, wednesday, (), "대체식",
+        datetime(2026, 9, 1, tzinfo=UTC),
+    )
+    snapshot, _ = _snapshot(
+        meals=(Meal.DINNER,), adjustment=adjustment,
+        delivery_settings=(HouseholdDeliverySetting(Meal.DINNER, (2,)),),
+    )
+
+    prepared = prepare_delivery_report_data(snapshot, wednesday, wednesday, (Meal.DINNER,))
+
+    assert len(prepared.shipments) == 1
+    assert prepared.shipments[0].service_dates == (wednesday,)
+    assert prepared.calculation_manifest["target_entitlement_count"] == 1
+
+
+def test_weekday_dinner_has_five_meals_and_retains_replacement_on_delivery_day():
+    wednesday = date(2026, 9, 9)
+    thursday = date(2026, 9, 10)
+    adjustment = ServiceAdjustmentChange(
+        uuid4(), InclusiveDateRange(thursday, thursday), (Meal.DINNER,),
+        ServiceTreatment.REPLACEMENT, wednesday, (), "대체식",
+        datetime(2026, 9, 1, tzinfo=UTC),
+    )
+    snapshot, _ = _snapshot(
+        meals=(Meal.DINNER,), adjustment=adjustment,
+        delivery_settings=(HouseholdDeliverySetting(Meal.DINNER, (0, 1, 2, 3, 4)),),
+    )
+
+    prepared = prepare_delivery_report_data(
+        snapshot, date(2026, 9, 7), date(2026, 9, 13), (Meal.DINNER,),
+    )
+
+    assert prepared.calculation_manifest["target_entitlement_count"] == 5
+    assert {day for shipment in prepared.shipments for day in shipment.service_dates} == {
+        date(2026, 9, 7), date(2026, 9, 8), wednesday, thursday, date(2026, 9, 11)
+    }
+    moved = next(item for item in prepared.shipments if item.delivery_on == wednesday)
+    assert moved.service_dates == (wednesday, thursday)
+    assert all(item.delivery_on.weekday() < 5 for item in prepared.shipments)
 
 
 def test_groups_by_stable_household_and_compares_previous_physical_delivery():
@@ -311,9 +458,9 @@ def test_retired_closed_friday_policy_does_not_override_default_delivery():
     )
 
     assert prepared.shipments[0].service_dates == (
-        thursday, friday + timedelta(days=1), friday + timedelta(days=2),
+        friday + timedelta(days=1), friday + timedelta(days=2),
     )
-    assert prepared.calculation_manifest["target_entitlement_count"] == 3
+    assert prepared.calculation_manifest["target_entitlement_count"] == 2
     breakfast_manifest = prepared.calculation_manifest[
         "breakfast_physical_delivery"
     ]

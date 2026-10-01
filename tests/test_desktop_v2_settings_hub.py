@@ -36,6 +36,7 @@ def test_settings_hub_has_db_and_computer_local_jobs(app):
         "공통 제공기관",
         "생성 Excel 비밀번호",
         "청구서·확인서 양식",
+        "출력 칼럼 연결",
         "문서 저장 폴더",
     ]
     assert not any("조식 배송 규칙" in action.label for action in SettingsAction)
@@ -132,3 +133,37 @@ def test_settings_folder_job_saves_path_without_running_password_controller(
     controller._run_settings_hub(SimpleNamespace(), window)
 
     assert settings.saved == chosen
+
+
+@pytest.mark.parametrize("completed", [False, True])
+def test_output_mapping_setting_routes_without_reimport_and_refreshes_on_save(completed):
+    session = object()
+    window = object()
+    roster = object()
+    calls = []
+
+    class Hub:
+        selected_action = SettingsAction.DOCUMENT_COLUMN_MAPPING
+
+        def __init__(self, parent=None):
+            assert parent is window
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+    class MappingController:
+        def __init__(self, current_session):
+            assert current_session is session
+
+        def run(self, parent):
+            assert parent is window
+            calls.append("mapping")
+            return SimpleNamespace(completed=completed, roster=roster if completed else None)
+
+    controller = DesktopStartupController(
+        settings_hub_dialog_type=Hub,
+        document_column_mapping_controller_type=MappingController,
+    )
+    controller._replace_roster_if_changed = lambda s, w, r: calls.append((s, w, r))
+    controller._run_settings_hub(session, window)
+    assert calls == (["mapping", (session, window, roster)] if completed else ["mapping"])

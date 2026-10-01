@@ -1,4 +1,5 @@
 from datetime import UTC, date, datetime
+from dataclasses import replace
 from uuid import UUID
 
 import pytest
@@ -10,6 +11,8 @@ from src.domain.custom_field_edits import (
 from src.domain.roster import (
     CustomFieldDefinition,
     CustomFieldType,
+    HouseholdDeliverySetting,
+    Meal,
     Person,
     PersonProfile,
     RosterSnapshot,
@@ -47,6 +50,8 @@ def _arguments():
 
 def test_create_and_delete_field_scrubs_values_but_preserves_source_snapshot():
     roster = _roster()
+    delivery_setting = HouseholdDeliverySetting(Meal.BREAKFAST, form="개인 도시락")
+    roster = replace(roster, persons=(replace(roster.persons[0], delivery_settings=(delivery_setting,)),))
     field_id = roster.custom_fields[0].definition_id
 
     deleted = build_custom_field_delete_revision(roster, field_id, **_arguments())
@@ -54,6 +59,7 @@ def test_create_and_delete_field_scrubs_values_but_preserves_source_snapshot():
     assert deleted.removed_value_count == 1
     assert deleted.snapshot.custom_fields == ()
     assert deleted.snapshot.persons[0].profile.custom_values == {}
+    assert deleted.snapshot.persons[0].delivery_settings == (delivery_setting,)
     assert field_id in roster.persons[0].profile.custom_values
     assert len(deleted.record.changes) == 2
 

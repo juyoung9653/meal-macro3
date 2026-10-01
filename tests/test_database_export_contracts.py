@@ -23,6 +23,7 @@ from src.domain.projections import (
     roster_from_historical_snapshot,
 )
 from src.domain.revisions import (
+    AuditChange, ChangeOperation,
     HistoricalSnapshot,
     RevisionActor,
     RevisionMetadata,
@@ -44,6 +45,7 @@ from src.domain.roster import (
 from src.domain.status import MealStatus
 from src.services.database_export import build_database_workbook
 from src.services.person_history import build_history_tables
+from src.domain.projections import ENROLLMENT_KIND, STATUS_EVENT_KIND
 
 DAY = date(2026, 9, 21)
 STAMP = datetime(2026, 9, 21, 1, 30, tzinfo=UTC)
@@ -214,6 +216,49 @@ def test_status_history_has_intake_for_canonical_single_and_batch(base, batch, c
     assert all(row["성명"] == "첫째" for row in table)
     assert {row["접수 채널"] for row in table} == {"" if channel is None else channel.value}
     assert any(row["변경 값"] == "일시중지" for row in table)
+
+
+def test_meal_history_formats_open_periods_and_missing_end_date(base):
+    person = base.persons[0]
+    person_key = str(person.person_id)
+    changes = (
+        AuditChange(ENROLLMENT_KIND, uuid4(), ChangeOperation.UPDATE,
+                    {"person_id": person_key, "meal": "중식", "periods": [{"starts_on": "2026-09-01", "ends_on": "2026-09-05"}]},
+                    {"person_id": person_key, "meal": "중식", "periods": [
+                        {"starts_on": "2026-10-01", "ends_on": None},
+                        {"starts_on": None, "ends_on": "2026-10-05"},
+                        {"starts_on": None, "ends_on": None},
+                    ]}),
+        AuditChange(STATUS_EVENT_KIND, uuid4(), ChangeOperation.UPDATE,
+                    {"person_id": person_key, "meal": "중식", "ends_on": "2026-10-05"},
+                    {"person_id": person_key, "meal": "중식", "ends_on": None}),
+    )
+    record = RevisionRecord(RevisionMetadata(uuid4(), base.revision_id, STAMP, DAY,
+                                             ACTOR, "기간 수정", RevisionSource.UI), changes)
+    snapshot = HistoricalSnapshot(base.revision_id, {})
+    headings, values = build_history_tables(base, snapshot, (record,), person_id=person.person_id)["식종 변경"]
+    rows_by_field = {row["구분"]: row for row in (dict(zip(headings, value, strict=True)) for value in values)}
+    periods = rows_by_field["가입기간: 기간"]
+    assert periods["이전 값"] == "2026-09-01 ~ 2026-09-05"
+    assert periods["변경 값"] == (
+        "2026-10-01부터 · 종료일 미지정 · 시작일 미지정 · 2026-10-05까지 · 시작일·종료일 미지정"
+    )
+    assert rows_by_field["상태: 종료일"]["변경 값"] == "종료일 미지정"
+    assert all("ends_on" not in str(value) and "종료일=" not in str(value) for row in values for value in row)
+
+
+def test_meal_history_record_fallback_keeps_meaningful_state(base):
+    person = base.persons[0]
+    state = {"person_id": str(person.person_id), "meal": "중식",
+             "status": "일시중지", "ends_on": None}
+    change = AuditChange(STATUS_EVENT_KIND, uuid4(), ChangeOperation.UPDATE, state, state)
+    record = RevisionRecord(RevisionMetadata(uuid4(), base.revision_id, STAMP, DAY,
+                                             ACTOR, "재기록", RevisionSource.UI), (change,))
+    headings, values = build_history_tables(base, HistoricalSnapshot(base.revision_id, {}),
+                                             (record,), person_id=person.person_id)["식종 변경"]
+    row = dict(zip(headings, values[0], strict=True))
+    assert row["구분"] == "상태: 기록"
+    assert row["이전 값"] == row["변경 값"] == "상태: 일시중지 · 종료일: 미지정"
 
 
 def test_complaint_records_received_and_saved_time_and_keeps_deleted_person_name(base):

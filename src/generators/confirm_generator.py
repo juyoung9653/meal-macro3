@@ -43,9 +43,10 @@ def _mapped_source_column(
     *aliases: str,
 ) -> str:
     for key in (canonical, *aliases):
-        mapped = col_mapping.get(key, "")
-        if isinstance(mapped, str) and mapped.strip():
-            return mapped
+        if key in col_mapping:
+            mapped = col_mapping[key]
+            if isinstance(mapped, str):
+                return mapped
     return canonical
 
 

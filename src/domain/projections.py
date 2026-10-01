@@ -24,6 +24,7 @@ from .roster import (
     CustomFieldType,
     DeliveryAssignment,
     Household,
+    HouseholdDeliverySetting,
     HouseholdMembership,
     InclusiveDateRange,
     Meal,
@@ -297,7 +298,7 @@ def person_from_state(person_id: UUID, state: Mapping[str, JsonValue]) -> Person
         "note",
         "custom_values",
     }
-    _require_exact_keys(state, profile_keys, PERSON_KIND)
+    _require_exact_keys(state, profile_keys | ({"delivery_settings"} if "delivery_settings" in state else set()), PERSON_KIND)
     custom_state = state["custom_values"]
     if not isinstance(custom_state, Mapping):
         raise TypeError("custom_values는 JSON object여야 합니다.")
@@ -331,6 +332,9 @@ def person_from_state(person_id: UUID, state: Mapping[str, JsonValue]) -> Person
             note=_optional_text_value(state["note"], "비고"),
             custom_values=custom_values,
         ),
+        None if "delivery_settings" not in state else household_from_state(
+            person_id, {"delivery_settings": state["delivery_settings"]}
+        ).delivery_settings,
     )
     _require_canonical(state, _person_state(person), PERSON_KIND)
     return person
@@ -340,8 +344,33 @@ def household_from_state(
     household_id: UUID,
     state: Mapping[str, JsonValue],
 ) -> Household:
-    _require_exact_keys(state, set(), HOUSEHOLD_KIND)
-    return Household(household_id)
+    _require_exact_keys(state, {"delivery_settings"} if state else set(), HOUSEHOLD_KIND)
+    settings = state.get("delivery_settings", [])
+    if not isinstance(settings, (list, tuple)):
+        raise ValueError("가구 배송 설정은 목록이어야 합니다.")
+    parsed = []
+    for item in settings:
+        if not isinstance(item, Mapping) or set(item) not in ({"meal", "weekdays", "form"}, {"meal", "weekdays", "form", "delivery_weekdays"}):
+            raise ValueError("가구 배송 설정 항목 형식이 올바르지 않습니다.")
+        weekdays = item["weekdays"]
+        if weekdays is not None and not isinstance(weekdays, (list, tuple)):
+            raise ValueError("제공 요일은 목록이어야 합니다.")
+        if not isinstance(item["meal"], str):
+            raise ValueError("식종은 문자열이어야 합니다.")
+        if item["form"] is not None and not isinstance(item["form"], str):
+            raise ValueError("배송 형태는 문자열이어야 합니다.")
+        delivery_weekdays = item.get("delivery_weekdays")
+        if delivery_weekdays is not None and not isinstance(delivery_weekdays, (list, tuple)):
+            raise ValueError("실제 배송 요일은 목록이어야 합니다.")
+        parsed.append(HouseholdDeliverySetting(
+            meal=Meal(item["meal"]),
+            weekdays=None if weekdays is None else tuple(weekdays),
+            form=item["form"],
+            delivery_weekdays=None if delivery_weekdays is None else tuple(delivery_weekdays),
+        ))
+    household = Household(household_id, tuple(parsed))
+    _require_canonical(state, _household_state(household), HOUSEHOLD_KIND)
+    return household
 
 
 def custom_field_from_state(
@@ -490,7 +519,7 @@ def _roster_states(
         enrollments_by_key[(enrollment.person_id, enrollment.meal)].append(enrollment)
 
     for household in snapshot.households:
-        states[EntityRef(HOUSEHOLD_KIND, household.household_id)] = {}
+        states[EntityRef(HOUSEHOLD_KIND, household.household_id)] = _household_state(household)
     for definition in snapshot.custom_fields:
         states[
             EntityRef(CUSTOM_FIELD_KIND, definition.definition_id)
@@ -519,6 +548,18 @@ def _roster_states(
                 assignments_by_key.get((person_id, meal)),
             )
     return states
+
+
+def _household_state(household: Household) -> Mapping[str, JsonValue]:
+    if not household.delivery_settings:
+        return {}
+    return {"delivery_settings": [
+        {"meal": item.meal.value,
+         "weekdays": None if item.weekdays is None else list(item.weekdays),
+         "form": item.form,
+         **({"delivery_weekdays": list(item.delivery_weekdays)} if item.delivery_weekdays is not None else {})}
+        for item in household.delivery_settings
+    ]}
 
 
 def _custom_field_state(
@@ -557,6 +598,9 @@ def _person_state(person: Person) -> Mapping[str, JsonValue]:
                 key=lambda item: str(item[0]),
             )
         },
+        **({"delivery_settings": _household_state(Household(person.person_id, person.delivery_settings))["delivery_settings"]
+            if person.delivery_settings else {"delivery_settings": []}}
+           if person.delivery_settings is not None else {}),
     }
 
 

@@ -188,6 +188,37 @@ def test_backup_restores_exact_revision_with_everyday_password(tmp_path: Path):
         restored.database.check_integrity()
 
 
+def test_backup_restores_household_delivery_settings(tmp_path: Path):
+    from src.domain import Household, HouseholdMembership, Meal, Person, PersonProfile, RosterSnapshot, roster_audit_changes
+    from src.domain.roster import HouseholdDeliverySetting
+
+    source = tmp_path / "settings.sqlite3"
+    backup_directory = tmp_path / "backups"
+    backup_directory.mkdir()
+    personal_setting = HouseholdDeliverySetting(Meal.DINNER, (0, 1, 2, 3, 4), "개인 도시락")
+    person = Person(ENTITY_ID, PersonProfile("합성 대상자"), (personal_setting,))
+    household = Household(UUID("70000000-0000-0000-0000-000000000004"), (
+        HouseholdDeliverySetting(Meal.DINNER, (0, 1, 2, 3, 4), "직접 입력 형태", (4, 1, 2, 3, 4, 5, 6)),
+    ))
+    roster = RosterSnapshot(REVISION_ID, persons=(person,), households=(household,),
+                            memberships=(HouseholdMembership(person.person_id, household.household_id),))
+    revision = RevisionRecord(
+        RevisionMetadata(revision_id=REVISION_ID, parent_revision_id=None,
+                         recorded_at=datetime(2026, 8, 24, 18, 0, tzinfo=UTC),
+                         effective_on=date(2026, 8, 24), actor=RevisionActor("tester", "S-1-5-21-test"),
+                         reason="가구 배송 설정", source=RevisionSource.UI),
+        roster_audit_changes(None, roster),
+    )
+    with DatabaseSession.create(source, "password", backup_directory=backup_directory) as session:
+        backup = session.append_revision(revision).record
+    assert backup is not None
+    with DatabaseSession.restore_and_open_with_user_password(
+        backup.path, tmp_path / "restored.sqlite3", "password",
+    ) as restored:
+        assert restored.database.current_roster().households[0].delivery_settings == household.delivery_settings
+        assert restored.database.current_roster().person(person.person_id).delivery_settings == (personal_setting,)
+
+
 def test_document_run_creates_backup_and_restores_append_only_history(tmp_path: Path):
     source = tmp_path / "operations.sqlite3"
     backup_directory = tmp_path / "automatic-backups"

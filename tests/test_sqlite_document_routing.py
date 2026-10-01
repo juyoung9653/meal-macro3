@@ -133,7 +133,7 @@ def test_document_period_end_routing_changes_presentation_only(tmp_path):
     assert delivery.roster.extra["도로명주소"] == "변경 도로"
     assert delivery.roster.extra["상세주소"] == ""
     assert delivery.roster.extra["주소"] == "변경 도로"
-    assert routed.calculation_manifest["calculation_contract_version"] == 2
+    assert routed.calculation_manifest["calculation_contract_version"] == 3
     assert routed.calculation_manifest["document_presentation"] == {
         "policy_version": 1,
         "effective_on": "2026-08-20",

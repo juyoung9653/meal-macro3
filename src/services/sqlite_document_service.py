@@ -41,10 +41,7 @@ from src.domain.revisions import (
     plain_json,
 )
 from src.domain.roster import Meal, Person, RosterSnapshot
-from src.domain.school_calendar import (
-    SchoolLunchCalendar,
-    school_lunch_calendar_from_snapshot,
-)
+from src.domain.school_calendar import school_lunch_calendar_from_snapshot
 from src.domain.service_adjustments import (
     SERVICE_ADJUSTMENT_POLICY_VERSION,
     ServiceAdjustmentSchedule,
@@ -57,8 +54,12 @@ from src.domain.unit_pricing import (
     global_unit_price_note,
     unit_price_schedule_from_snapshot,
 )
+from src.services.meal_service_availability import (
+    RECURRING_MEAL_SERVICE_POLICY_VERSION,
+    regular_service_available,
+)
 
-RECURRING_MEAL_SERVICE_POLICY_VERSION = 1
+MONTHLY_DOCUMENT_CALCULATION_CONTRACT_VERSION = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,9 +130,10 @@ def prepare_monthly_document_data(
                 # Unenrolled dates do not need an unrelated school's schedule.
                 if meal not in roster.meals_for(person.person_id, on=service_on):
                     continue
-                available = _regular_service_available(
-                    meal,
+                available = regular_service_available(
+                    roster,
                     person,
+                    meal,
                     service_on,
                     school_calendar,
                 )
@@ -182,7 +184,7 @@ def prepare_monthly_document_data(
     )
     calculation_manifest = freeze_json_object(
         {
-            "calculation_contract_version": 2,
+            "calculation_contract_version": MONTHLY_DOCUMENT_CALCULATION_CONTRACT_VERSION,
             "document_presentation": {
                 "policy_version": 1,
                 "effective_on": period_end.isoformat(),
@@ -192,9 +194,11 @@ def prepare_monthly_document_data(
             "selected_meals": tuple(meal.value for meal in selected_meals),
             "recurring_service_policy": {
                 "version": RECURRING_MEAL_SERVICE_POLICY_VERSION,
-                "breakfast": "every_calendar_day",
+                "breakfast": "friday_saturday_sunday",
                 "lunch": "reviewed_school_weekdays",
                 "dinner": "weekdays",
+                "household_weekday_override": "replaces_regular_days; lunch_requires_school_service",
+                "household_delivery_weekday": "latest_configured_weekday_on_or_before_service_day",
             },
             "school_lunch_calendar": school_calendar.manifest(),
             "service_adjustments": {
@@ -221,19 +225,6 @@ def prepare_monthly_document_data(
         calculation_manifest,
         global_note,
     )
-
-
-def _regular_service_available(
-    meal: Meal,
-    person: Person,
-    service_on: date,
-    school_calendar: SchoolLunchCalendar,
-) -> bool:
-    if meal is Meal.BREAKFAST:
-        return True
-    if meal is Meal.DINNER:
-        return service_on.weekday() < 5
-    return school_calendar.vendor_service_available(person.profile, service_on)
 
 
 def _monthly_batch(
@@ -344,6 +335,7 @@ def _roster_entry(
         definition = definitions.get(definition_id)
         if definition is not None:
             extra[definition.name] = value
+            extra[f"custom:{definition_id}"] = value
     # Dated presentation fields take precedence over legacy custom columns.
     if delivery_view is not None:
         road, detail = delivery_view.road_address, delivery_view.detail_address

@@ -19,7 +19,7 @@
   실패한다.
 - 평문 `SQLite format 3` 헤더, 다른 application ID, 지원 범위 밖 schema version,
   migration checksum 불일치, 잘못된 key 또는 손상 파일을 거부한다. schema 2 DB는
-  transaction 안에서 schema 3, 4, 5를 순서대로 적용해 현재 version으로 자동 변환한다.
+  transaction 안에서 schema 3, 4, 5, 6을 순서대로 적용해 현재 version으로 자동 변환한다.
 - foreign key, trusted schema off, secure delete, memory temp store, 5초 busy
   timeout을 연결마다 설정한다.
 - 한 PC에서의 단순 복구를 우선해 현재 journal mode는 `DELETE`다.
@@ -132,6 +132,19 @@ schema version 4는 명단 revision과 분리된 문서 생성 이력을 추가�
 schema version 5는 기존 `document_run` 행과 append-only trigger를 보존하면서 허용
 문서 종류에 `delivery_report`를 추가한다. 새 DB와 schema 4에서 올라온 DB 모두 청구서·
 확인서·배송 리포트 run을 같은 무결성 계약으로 저장한다.
+
+schema version 6은 `household_projection`에 식종별 제공 요일·배송요일·자유 입력 배송 형태를
+저장하는 `delivery_settings_json`을 추가한다. 기존 가구는 빈 설정으로 시작하며
+식종 기본값을 따른다. 가구 설정 변경도 기존 household audit entity와 revision으로
+기록하므로 과거 snapshot과 암호화 자동 백업·복원에 함께 포함된다.
+`delivery_weekdays`는 월~일 제공일에 대응하는 실제 배송요일 7개(월=0~일=6)이며,
+필드가 없으면 식종 기본 배송 규칙을 상속한다. 기존 설정도 그대로 읽는다.
+
+schema version 7은 `person_projection.delivery_settings_json`으로 개인별 배송 설정을
+보존한다. 개인 설정이 없으면 기존 가구 설정을 읽어 이전 파일의 동작을 유지한다.
+개인 설정의 빈 배열은 가구의 별도 설정 대신 운영 기본값을 사용한다는 뜻이다.
+개인 설정은 사람 audit state에도 기록하며, 같은 가구 전체 적용은 조회일의 가구원
+개인 설정을 하나의 revision에서 함께 변경한다. 취소·변경 없음은 revision을 만들지 않는다.
 
 projection은 원장이 아니다. 현재 화면은 projection을 읽을 수 있지만 과거 명단과
 모든 출력은 선택한 revision의 audit state를 재생해 생성한다.
