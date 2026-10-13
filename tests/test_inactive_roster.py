@@ -87,6 +87,50 @@ def test_unbounded_enrollment_without_history_remains_active():
     assert inactive_person_ids(roster, {}, as_of=AS_OF) == frozenset()
 
 
+def test_one_day_classifies_all_unenrolled_meals_without_prior_history():
+    assert inactive_person_ids(_roster(), {}, days=1, as_of=AS_OF) == frozenset({PERSON_ID})
+    assert inactive_person_ids(_roster(), {}, days=2, as_of=AS_OF) == frozenset()
+
+
+def test_one_day_uses_display_availability_for_enrolled_meal():
+    roster = _roster(
+        (Meal.DINNER, date(2024, 1, 1), None),
+        (Meal.LUNCH, date(2024, 1, 1), None),
+    )
+    histories = _histories((Meal.DINNER, MealStatus.STOPPED, AS_OF, None))
+
+    def displayed_status(_person_id, meal, day):
+        assert day == AS_OF
+        if meal is Meal.DINNER:
+            return MealStatus.STOPPED
+        return None
+
+    assert inactive_person_ids(
+        roster, histories, days=1, as_of=AS_OF, status_on=displayed_status
+    ) == frozenset({PERSON_ID})
+    assert inactive_person_ids(roster, histories, days=1, as_of=AS_OF) == frozenset()
+    assert inactive_person_ids(
+        roster, histories, days=2, as_of=AS_OF, status_on=displayed_status
+    ) == frozenset()
+
+
+@pytest.mark.parametrize("status", [MealStatus.DELIVERY, MealStatus.PAUSED])
+def test_one_day_displayed_delivery_or_pause_stays_visible(status):
+    roster = _roster()
+    assert inactive_person_ids(
+        roster, {}, days=1, as_of=AS_OF,
+        status_on=lambda _person_id, meal, _day: status if meal is Meal.LUNCH else None,
+    ) == frozenset()
+
+
+def test_one_day_rejects_invalid_status_callback_result():
+    with pytest.raises(TypeError, match="MealStatus 또는 None"):
+        inactive_person_ids(
+            _roster(), {}, days=1, as_of=AS_OF,
+            status_on=lambda _person_id, _meal, _day: "-",
+        )
+
+
 def test_unbounded_three_meals_require_every_meal_to_be_stopped():
     roster = _roster(
         (Meal.BREAKFAST, None, None),

@@ -22,6 +22,10 @@ from src.importing import (
     stage_household_grouping,
 )
 from src.storage import DatabaseSession
+from src.desktop_v2.inspector_history import InspectorMealHistory
+from src.desktop_v2.ledger_reader import load_revision_chain
+from src.services.database_export import build_database_workbook
+from src.services.person_history import build_history_tables
 
 
 REVISION_ID = UUID("82000000-0000-0000-0000-000000000001")
@@ -348,3 +352,39 @@ def test_committed_initial_import_is_automatically_backed_up_and_restorable(
         assert household_matching_rules_from_snapshot(
             restored.database.snapshot(REVISION_ID)
         )[0].rule_id == HOUSEHOLD_RULE_ID
+
+
+def test_persisted_excel_import_is_absent_from_display_history(tmp_path: Path):
+    prepared = _prepared(_source(tmp_path / "existing.xlsx"))
+    database_path = tmp_path / "history.sqlite3"
+    backup_directory = tmp_path / "backups"
+    backup_directory.mkdir()
+    with DatabaseSession.create(
+        database_path, "user-password", "institution-recovery",
+        backup_directory=backup_directory,
+    ) as session:
+        assert session.append_revision(prepared.record).succeeded
+
+    with DatabaseSession.open(database_path, "user-password") as session:
+        roster = session.database.current_roster()
+        assert roster.person(PERSON_ID).profile.name == "홍길동"
+        records = load_revision_chain(session.database, roster.revision_id)
+        assert len(records) == 1 and records[0].import_batch is not None
+        snapshot = session.database.snapshot(roster.revision_id)
+        tables = build_history_tables(roster, snapshot, records, person_id=PERSON_ID)
+        assert not tables["정보 변경"][1]
+        assert not tables["식종 변경"][1]
+        assert InspectorMealHistory(session.database).rows_for(roster, PERSON_ID) == ()
+        from PySide6.QtWidgets import QApplication, QTableView
+        from src.desktop_v2.person_history import create_person_history_dialog
+
+        app = QApplication.instance() or QApplication([])
+        dialog = create_person_history_dialog(session, roster.person(PERSON_ID), None)
+        app.processEvents()
+        assert dialog.findChild(QTableView, "history_정보 변경").model().rowCount() == 0
+        assert dialog.findChild(QTableView, "history_식종 변경").model().rowCount() == 0
+        dialog.close()
+        book = build_database_workbook(roster, snapshot, records, day=EFFECTIVE_ON, sections=("history",))
+        for name in ("정보 변경 이력", "식종 변경 이력", "변경 이력"):
+            assert "Excel 명단 가져오기" not in str(list(book[name].values))
+        book.close()

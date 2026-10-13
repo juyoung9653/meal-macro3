@@ -60,8 +60,8 @@ class DatabaseExportDialog(QDialog):
             self.sections[key] = checkbox
             layout.addWidget(checkbox)
         note = QLabel(
-            "한 명이라도 가입 식종별 배송담당이 다르면 명단 전체를 식종별 행으로 나눕니다. "
-            "모두 같으면 한 사람 한 행에 식종 3개 열을 사용합니다. "
+            "가입 식종별 배송담당이 다른 사람이 있으면 식종별 명단과 한 사람 한 행의 명단(통합)을 함께 출력합니다. "
+            "모두 같으면 한 사람 한 행의 명단만 출력합니다. "
             "이력은 기록 전체를 별도 시트로 내보내며, 설정된 Excel 공통 비밀번호를 적용합니다."
         )
         note.setWordWrap(True)

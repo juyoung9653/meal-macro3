@@ -36,7 +36,7 @@ from src.domain.school_calendar import (
     SchoolLunchScheduleMissingError,
     school_lunch_calendar_from_snapshot,
 )
-from src.services.person_history import build_history_tables
+from src.services.person_history import build_history_tables, is_roster_import_history
 
 _KST = ZoneInfo("Asia/Seoul")
 _MEALS = (Meal.BREAKFAST, Meal.LUNCH, Meal.DINNER)
@@ -46,6 +46,14 @@ _PROFILE_COLUMNS = (
     ("관할동", "jurisdiction"), ("제공기관", "provider"), ("도로명주소", "road_address"),
     ("상세주소", "detail_address"), ("전화번호", "telephone"), ("핸드폰", "mobile_phone"), ("비고", "note"),
 )
+_ENTITY_LABELS = {
+    PERSON_KIND: "사람", HOUSEHOLD_KIND: "가구", MEMBERSHIP_KIND: "가구원",
+    ENROLLMENT_KIND: "식종 가입", ASSIGNMENT_KIND: "배송배정",
+    STATUS_EVENT_KIND: "식종 상태", DRIVER_KIND: "배송담당",
+    ROUTING_EVENT_KIND: "배송 변경", CUSTOM_FIELD_KIND: "사용자 항목",
+    "complaint": "민원",
+}
+_OPERATION_LABELS = {"insert": "추가", "update": "수정", "delete": "삭제"}
 
 
 def build_database_workbook(
@@ -71,30 +79,33 @@ def build_database_workbook(
     calendar = school_lunch_calendar_from_snapshot(snapshot)
     metadata = _metadata(roster, revisions, day)
     if "roster" in sections:
-        _roster_sheets(book, roster, snapshot, routing, calendar, day, metadata, progress)
+        long_mode = _roster_sheets(book, roster, snapshot, routing, calendar, day, progress)
+        metadata["행 형식"] = "명단=식종별, 명단(통합)=통합" if long_mode else "명단=통합"
     progress("민원·변경 이력 시트 작성 중", 0, 0)
     tables = (
         build_history_tables(roster, snapshot, revisions)
         if {"complaints", "history"}.intersection(sections) else {}
     )
     if "complaints" in sections:
-        _add_table(book, "민원", *tables["민원"], metadata)
+        _add_table(book, "민원", *tables["민원"])
     if "history" in sections:
-        _add_table(book, "정보 변경 이력", *tables["정보 변경"], metadata)
-        _add_table(book, "식종 변경 이력", *tables["식종 변경"], metadata)
-        _global_history(book, revisions, metadata)
+        _add_table(book, "정보 변경 이력", *tables["정보 변경"])
+        _add_table(book, "식종 변경 이력", *tables["식종 변경"])
+        _global_history(book, revisions)
+    _add_table(book, "내보내기 정보", ("항목", "값"), tuple(metadata.items()))
     return book
 
 
-def _roster_sheets(book, roster, snapshot, routing, calendar, day, metadata, progress):
+def _roster_sheets(book, roster, snapshot, routing, calendar, day, progress):
     custom = tuple(sorted(roster.custom_fields, key=lambda item: item.display_order))
     resolved = {person.person_id: routing.resolve(roster, person.person_id, day) for person in roster.persons}
     drivers = {person_id: tuple(_driver_identity(view, meal) for meal in _MEALS) for person_id, view in resolved.items()}
     enrolled = {person.person_id: roster.meals_for(person.person_id, on=day) for person in roster.persons}
     long_mode = any(len({drivers[p.person_id][_MEALS.index(meal)] for meal in enrolled[p.person_id]}) > 1 for p in roster.persons)
-    headers = ["사람 UUID", *_profile_headers(custom), "원본 도로명주소", "원본 상세주소"]
+    headers = ["사람 UUID", *_profile_headers(custom)]
     headers += (["식종", "가입", "상태", "배송담당", "배송순서"] if long_mode else ["조식", "중식", "석식", "배송담당", "조식 순서", "중식 순서", "석식 순서"])
     rows = []
+    combined_rows = []
     for index, person in enumerate(roster.persons, 1):
         if index == 1 or index % 100 == 0 or index == len(roster.persons):
             progress("명단 내용 준비 중", index, len(roster.persons))
@@ -103,13 +114,17 @@ def _roster_sheets(book, roster, snapshot, routing, calendar, day, metadata, pro
         profile_values = [_profile_value(profile, key) for _, key in _PROFILE_COLUMNS]
         profile_values[_profile_headers(custom).index("도로명주소")] = effective.road_address
         profile_values[_profile_headers(custom).index("상세주소")] = effective.detail_address
-        base = [str(person.person_id), *profile_values, *[profile.custom_values.get(item.definition_id) for item in custom], profile.road_address, profile.detail_address]
+        base = [str(person.person_id), *profile_values, *[profile.custom_values.get(item.definition_id) for item in custom]]
         meals = enrolled[person.person_id]
         if long_mode:
+            status_cells = [_status(snapshot, person.person_id, meal, day, profile, calendar) if meal in meals else "미가입" for meal in _MEALS]
+            combined_rows.append((*base, *status_cells,
+                                  *(effective.drivers[meal] if meal in meals else "" for meal in _MEALS),
+                                  *(roster.resolve_assignment(person.person_id, meal).sequence or "" if meal in meals else "" for meal in _MEALS)))
             if not meals:
                 rows.append((*base, "", "미가입", "", "", ""))
             for meal in meals:
-                status = _status(snapshot, person.person_id, meal, day, profile, calendar)
+                status = status_cells[_MEALS.index(meal)]
                 rows.append((*base, meal.value, "가입", status, effective.drivers[meal], roster.resolve_assignment(person.person_id, meal).sequence or ""))
         else:
             status_cells = [_status(snapshot, person.person_id, meal, day, profile, calendar) if meal in meals else "미가입" for meal in _MEALS]
@@ -117,11 +132,17 @@ def _roster_sheets(book, roster, snapshot, routing, calendar, day, metadata, pro
             shared = common[0] if common and len(set(common)) == 1 else ""
             rows.append((*base, *status_cells, shared, *(roster.resolve_assignment(person.person_id, meal).sequence or "" for meal in _MEALS)))
     progress("명단·가입기간·배송배정 시트 작성 중", 0, 0)
-    _add_table(book, "명단", tuple(headers), tuple(rows), {**metadata, "행 형식": "식종별" if long_mode else "통합"})
+    _add_table(book, "명단", tuple(headers), tuple(rows))
+    if long_mode:
+        combined_headers = ("사람 UUID", *_profile_headers(custom), "조식", "중식", "석식",
+                            "조식 배송담당", "중식 배송담당", "석식 배송담당",
+                            "조식 순서", "중식 순서", "석식 순서")
+        _add_table(book, "명단(통합)", combined_headers, tuple(combined_rows))
     enrollment_rows = [(str(item.person_id), item.meal.value, item.period.starts_on, item.period.ends_on) for item in roster.enrollments]
-    _add_table(book, "가입기간", ("사람 UUID", "식종", "시작일", "종료일"), tuple(enrollment_rows), metadata)
+    _add_table(book, "가입기간", ("사람 UUID", "식종", "시작일", "종료일"), tuple(enrollment_rows))
     assignment_rows = [(str(item.person_id), "공통" if item.meal is None else item.meal.value, item.driver, item.sequence) for item in roster.assignments]
-    _add_table(book, "배송배정", ("사람 UUID", "식종", "배송담당", "배송순서"), tuple(assignment_rows), metadata)
+    _add_table(book, "배송배정", ("사람 UUID", "식종", "배송담당", "배송순서"), tuple(assignment_rows))
+    return long_mode
 
 
 def _status(snapshot, person_id, meal, day, profile, calendar):
@@ -154,11 +175,13 @@ def _metadata(roster, revisions, day):
     return {"내보내기 기준일": day.isoformat(), "명단 revision UUID": str(roster.revision_id), "변경번호": "" if latest is None else format_revision_timestamp(latest.recorded_at), "시간대": "Asia/Seoul (KST)"}
 
 
-def _global_history(book, revisions, metadata):
+def _global_history(book, revisions):
     headings = ("기록 시각(KST)", "적용일", "변경번호", "사람 UUID", "대상 종류", "대상 UUID", "작업", "사유", "변경자")
     rows = []
-    allowed = {PERSON_KIND, ENROLLMENT_KIND, ASSIGNMENT_KIND, STATUS_EVENT_KIND, DRIVER_KIND, ROUTING_EVENT_KIND, CUSTOM_FIELD_KIND, HOUSEHOLD_KIND, MEMBERSHIP_KIND, "complaint"}
+    allowed = _ENTITY_LABELS.keys()
     for record in sorted(revisions, key=lambda item: item.metadata.recorded_at):
+        if is_roster_import_history(record):
+            continue
         for change in record.changes:
             if change.entity_kind not in allowed:
                 continue
@@ -166,22 +189,18 @@ def _global_history(book, revisions, metadata):
             person_id = state.get("person_id", "") if hasattr(state, "get") else ""
             if change.entity_kind == "roster.person":
                 person_id = str(change.entity_id)
-            rows.append((_kst(record.metadata.recorded_at), record.metadata.effective_on, format_revision_timestamp(record.metadata.recorded_at), person_id, change.entity_kind, str(change.entity_id), change.operation.value, record.metadata.reason, record.metadata.actor.username))
-    _add_table(book, "변경 이력", headings, tuple(rows), metadata)
+            rows.append((_kst(record.metadata.recorded_at), record.metadata.effective_on, format_revision_timestamp(record.metadata.recorded_at), person_id, _ENTITY_LABELS[change.entity_kind], str(change.entity_id), _OPERATION_LABELS[change.operation.value], record.metadata.reason, record.metadata.actor.username))
+    _add_table(book, "변경 이력", headings, tuple(rows))
 
 
-def _add_table(book, title, headings, rows, metadata):
+def _add_table(book, title, headings, rows):
     if len(headings) > 16_384:
         raise ValueError("Excel 열 한도(16,384)를 초과했습니다.")
     for heading in headings:
         _validate_cell_value(heading)
-    if len(rows) + len(metadata) + 3 > 1_048_576:
+    if len(rows) + 1 > 1_048_576:
         raise ValueError("Excel 행 한도(1,048,576)를 초과했습니다.")
     sheet = book.create_sheet(title)
-    for key, value in metadata.items():
-        _literal(sheet.cell(sheet.max_row + 1, 1, key), key)
-        _literal(sheet.cell(sheet.max_row, 2, value), value)
-    sheet.append(())
     sheet.append(tuple(headings))
     header_row = sheet.max_row
     for row in rows:

@@ -18,7 +18,7 @@ from .complaints import ComplaintController
 from .database_export import DatabaseExportController
 from .person_history import create_person_history_dialog
 from .inspector_history import InspectorMealHistory
-from .database_access import CreateDatabaseDialog, DesktopStorageSettings, LoginDialog
+from .database_access import BackupDirectoryDialog, CreateDatabaseDialog, DatabaseLocationDialog, DatabasePasswordChangeDialog, DesktopStorageSettings, LoginDialog
 from .delivery_routing import DeliveryRoutingController
 from .document_completion import (
     DocumentCompletionDialog,
@@ -117,6 +117,9 @@ class DesktopStartupController:
         document_output_dialog_type=DocumentOutputDialog,
         document_completion_dialog_type=DocumentCompletionDialog,
         settings_hub_dialog_type=SettingsHubDialog,
+        database_location_dialog_type=DatabaseLocationDialog,
+        backup_directory_dialog_type=BackupDirectoryDialog,
+        database_password_dialog_type=DatabasePasswordChangeDialog,
         document_directory_dialog_type=DefaultDocumentDirectoryDialog,
         roster_window_type=RosterWindow,
         message_box=QMessageBox,
@@ -153,6 +156,9 @@ class DesktopStartupController:
         self._document_output_dialog_type = document_output_dialog_type
         self._document_completion_dialog_type = document_completion_dialog_type
         self._settings_hub_dialog_type = settings_hub_dialog_type
+        self._database_location_dialog_type = database_location_dialog_type
+        self._backup_directory_dialog_type = backup_directory_dialog_type
+        self._database_password_dialog_type = database_password_dialog_type
         self._document_directory_dialog_type = document_directory_dialog_type
         self._roster_window_type = roster_window_type
         self._message_box = message_box
@@ -205,6 +211,7 @@ class DesktopStartupController:
             roster,
             histories,
             revision_display_code=self._revision_display_code(session, roster),
+            view_settings_scope=str(session.credentials.database_id),
         )
         self._refresh_school_calendar(session, window, roster)
         routing_setter = getattr(window, "set_routing_state", None)
@@ -483,6 +490,66 @@ class DesktopStartupController:
     def _run_settings_hub(self, session: DatabaseSession, window) -> None:
         hub = self._settings_hub_dialog_type(parent=window)
         if hub.exec() != QDialog.DialogCode.Accepted:
+            return
+        if hub.selected_action is SettingsAction.DATABASE_LOCATION:
+            dialog = self._database_location_dialog_type(session, self._settings, parent=window)
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                window.close()
+            return
+        if hub.selected_action is SettingsAction.BACKUP_DIRECTORY:
+            dialog = self._backup_directory_dialog_type(session, self._settings, parent=window)
+            dialog.exec()
+            return
+        if hub.selected_action is SettingsAction.DATABASE_PASSWORD:
+            dialog = self._database_password_dialog_type(session, parent=window)
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            if not dialog.password_changed:
+                self._message_box.information(window, "변경 없음", "현재 비밀번호와 새 비밀번호가 같습니다.")
+            elif (dialog.backup_result.error is not None or
+                  dialog.backup_result.rotation_error is not None or
+                  (dialog.backup_result.rotation is not None and
+                   (dialog.backup_result.rotation.failed or dialog.backup_result.rotation.unreadable))):
+                rotation = dialog.backup_result.rotation
+                updated = 0 if rotation is None else len(rotation.updated)
+                failed = 0 if rotation is None else len(rotation.failed)
+                unreadable = 0 if rotation is None else len(rotation.unreadable)
+                details = []
+                if dialog.backup_result.error is not None:
+                    details.append(f"새 백업 오류: {dialog.backup_result.error}")
+                if dialog.backup_result.rotation_error is not None:
+                    details.append(f"기존 백업 처리 오류: {dialog.backup_result.rotation_error}")
+                if rotation is not None:
+                    details.extend(f"{path.name}: {reason}" for path, reason in rotation.failed)
+                    details.extend(f"{path.name}: 읽거나 검증할 수 없음" for path in rotation.unreadable)
+                title = "비밀번호 변경 완료 · 백업 확인 필요"
+                summary = (
+                    "운영 파일 비밀번호는 새 비밀번호로 변경됐습니다.\n"
+                    f"기존 백업 갱신: {updated}개, 실패: {failed}개, 확인 불가: {unreadable}개.\n"
+                    "갱신 실패 백업은 변경 전 상태로 보존됐습니다. 마지막으로 해당 백업을 열던 비밀번호는 파일마다 다를 수 있습니다. "
+                    "확인 불가 파일은 손상 가능성이 있으니 별도로 확인해주세요.\n"
+                    "설정된 백업 폴더 밖의 복사본도 기존 비밀번호를 사용합니다."
+                )
+                if self._message_box is QMessageBox and details:
+                    warning = QMessageBox(QMessageBox.Icon.Warning, title, summary, QMessageBox.StandardButton.Ok, window)
+                    warning.setDetailedText("\n".join(details))
+                    warning.exec()
+                else:
+                    self._message_box.warning(window, title, summary)
+            else:
+                rotation = dialog.backup_result.rotation
+                backup_note = (
+                    f"설정된 백업 폴더의 기존 백업 {len(rotation.updated)}개도 새 비밀번호로 엽니다. "
+                    if rotation is not None else
+                    "자동 백업 폴더가 설정되지 않아 기존 백업은 변경하지 않았습니다. "
+                )
+                self._message_box.information(
+                    window,
+                    "비밀번호 변경 완료",
+                    "운영 파일 비밀번호가 변경됐습니다. 앞으로 새 비밀번호로 열 수 있습니다. "
+                    + backup_note
+                    + "폴더 밖의 복사본은 기존 비밀번호를 사용합니다.",
+                )
             return
         if hub.selected_action is SettingsAction.PROVIDER:
             outcome = self._provider_settings_controller_type(session).run(parent=window)
@@ -818,7 +885,7 @@ class DesktopStartupController:
 
     def _access_dialog(self, parent: QWidget | None):
         database_path = self._settings.database_path
-        if database_path is None:
+        if database_path is None or not database_path.exists():
             return self._create_dialog_type(settings=self._settings, parent=parent)
         return self._login_dialog_type(
             database_path,

@@ -58,12 +58,24 @@ def test_one_different_enrolled_meal_driver_makes_entire_roster_long_and_keeps_l
     })
     book = build_database_workbook(roster, snapshot, (), day=date(2026, 9, 1), sections=("roster",))
     sheet = book["명단"]
-    headers = [cell.value for cell in sheet[8]]
+    headers = [cell.value for cell in sheet[1]]
     assert "식종" in headers and "조식 순서" not in headers
-    assert sheet.cell(9, 2).value == "=수식"
-    assert sheet.cell(9, 2).data_type == "s"
-    assert sheet.cell(9, headers.index("전화번호") + 1).value == "01001234"
-    assert any(row[0].value == str(second.person_id) and row[headers.index("가입")].value == "가입" for row in sheet.iter_rows(min_row=9))
+    assert sheet.cell(2, 2).value == "=수식"
+    assert sheet.cell(2, 2).data_type == "s"
+    assert sheet.cell(2, headers.index("전화번호") + 1).value == "01001234"
+    assert any(row[0].value == str(second.person_id) and row[headers.index("가입")].value == "가입" for row in sheet.iter_rows(min_row=2))
+    combined = book["명단(통합)"]
+    combined_headers = [cell.value for cell in combined[1]]
+    first_row = next(row for row in combined.iter_rows(min_row=2, values_only=True) if row[0] == str(first.person_id))
+    assert first_row[1] == "=수식"
+    assert combined.cell(2, 2).data_type == "s"
+    assert first_row[combined_headers.index("조식 배송담당")] == "동명이인"
+    assert first_row[combined_headers.index("중식 배송담당")] == "동명이인"
+    assert len(list(combined.iter_rows(min_row=2))) == 2
+    assert sheet.freeze_panes == combined.freeze_panes == "A2"
+    assert sheet.auto_filter.ref.startswith("A1:")
+    assert book.sheetnames[-1] == "내보내기 정보"
+    assert dict(list(book["내보내기 정보"].values)[1:])["행 형식"] == "명단=식종별, 명단(통합)=통합"
 
 
 def test_exports_status_and_complaint_history_from_passed_snapshot_only():
@@ -76,8 +88,8 @@ def test_exports_status_and_complaint_history_from_passed_snapshot_only():
         EntityRef("complaint", complaint.complaint_id): complaint_state(complaint),
     })
     book = build_database_workbook(roster, snapshot, (), day=date(2026, 9, 2))
-    assert book["명단"].cell(9, 2).value == "아동"
+    assert book["명단"].cell(2, 2).value == "아동"
     complaint_sheet = book["민원"]
-    assert complaint_sheet.cell(8, 9).value == "=민원"
-    assert complaint_sheet.cell(8, 9).data_type == "s"
+    assert complaint_sheet.cell(2, 9).value == "=민원"
+    assert complaint_sheet.cell(2, 9).data_type == "s"
     assert "식종 변경 이력" in book.sheetnames

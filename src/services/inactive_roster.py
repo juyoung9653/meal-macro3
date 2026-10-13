@@ -1,9 +1,9 @@
-"""Classify people with a proven, continuous period without meal delivery."""
+"""Classify roster rows without meal delivery over a selected date window."""
 
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import date, datetime, timedelta
 from uuid import UUID
 
@@ -17,12 +17,15 @@ def inactive_person_ids(
     *,
     days: int = 365,
     as_of: date | None = None,
+    status_on: Callable[[UUID, Meal, date], MealStatus | None] | None = None,
 ) -> frozenset[UUID]:
     """Return people without delivery during ``days`` inclusive calendar days.
 
-    An enrolled meal must
-    have an explicit effective STOPPED interval throughout its part of that
-    window. PAUSED and uncovered dates interrupt the run. A past enrollment
+    For one day, every meal must display as STOPPED or unavailable (None).
+    ``status_on`` supplies the roster display's date-specific availability.
+    Longer windows require an explicit effective STOPPED interval throughout
+    each enrolled meal's part of the window. PAUSED and uncovered dates
+    interrupt the run. A past enrollment
     ending before the window is sufficient evidence of earlier participation.
     For an enrollment with no recorded start, a dated STOPPED interval already
     in effect at the window start also establishes that earlier history.
@@ -40,6 +43,8 @@ def inactive_person_ids(
         as_of = date.today()
     if isinstance(as_of, datetime) or not isinstance(as_of, date):
         raise TypeError("기준일은 date여야 합니다.")
+    if status_on is not None and not callable(status_on):
+        raise TypeError("상태 조회자는 호출 가능해야 합니다.")
     try:
         window_start = as_of - timedelta(days=days - 1)
     except OverflowError as exc:
@@ -62,6 +67,17 @@ def inactive_person_ids(
             ):
                 raise ValueError("상태 이력의 사람·식종이 조회 키와 다릅니다.")
             intervals_by_meal[meal] = () if history is None else history.intervals
+        if days == 1:
+            if all(
+                _is_non_delivery_status(
+                    status_on(person.person_id, meal, as_of)
+                    if status_on is not None
+                    else _default_status_on(roster, histories, person.person_id, meal, as_of)
+                )
+                for meal in Meal
+            ):
+                inactive.add(person.person_id)
+            continue
         if not _has_prior_enrollment(enrollments, intervals_by_meal, window_start):
             continue
         if all(
@@ -76,6 +92,25 @@ def inactive_person_ids(
         ):
             inactive.add(person.person_id)
     return frozenset(inactive)
+
+
+def _default_status_on(
+    roster: RosterSnapshot,
+    histories: Mapping[tuple[UUID, Meal], StatusHistory],
+    person_id: UUID,
+    meal: Meal,
+    day: date,
+) -> MealStatus | None:
+    if meal not in roster.meals_for(person_id, on=day):
+        return None
+    history = histories.get((person_id, meal))
+    return MealStatus.DELIVERY if history is None else history.status_on(day)
+
+
+def _is_non_delivery_status(status: MealStatus | None) -> bool:
+    if status is not None and not isinstance(status, MealStatus):
+        raise TypeError("상태 조회 결과는 MealStatus 또는 None이어야 합니다.")
+    return status is None or status is MealStatus.STOPPED
 
 
 def _has_prior_enrollment(

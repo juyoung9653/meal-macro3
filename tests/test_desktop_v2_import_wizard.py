@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from contextlib import contextmanager
 from threading import Event
 from datetime import date
 from pathlib import Path
@@ -11,6 +12,7 @@ from uuid import UUID
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import openpyxl
+from openpyxl.worksheet.table import Table
 import pytest
 from PySide6.QtCore import QDate, QPoint, QPointF, Qt, QTimer
 from PySide6.QtGui import QWheelEvent
@@ -18,6 +20,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog
 
 import src.desktop_v2.import_wizard as import_wizard_module
+import src.importing.workbook as workbook_module
 from src.domain import Meal
 from src.desktop_v2 import RosterImportWizard
 from src.importing import (
@@ -34,12 +37,24 @@ from src.importing import (
 )
 
 
+def _save_with_table(workbook: openpyxl.Workbook, path: Path) -> None:
+    worksheet = workbook.active
+    header_row = 2 if worksheet.title == "조사표" else 1
+    if worksheet.title == "조사표":
+        for column in range(1, worksheet.max_column + 1):
+            cell = worksheet.cell(header_row, column)
+            if cell.value is None:
+                cell.value = f"미사용 {cell.column_letter}"
+    worksheet.add_table(Table(displayName="명단", ref=f"A{header_row}:{worksheet.cell(worksheet.max_row, worksheet.max_column).coordinate}"))
+    workbook.save(path)
+
+
 def test_vacation_lunch_wizard_accepts_source_without_meal_column(app, tmp_path):
     path = tmp_path / "lunch-only.xlsx"
     workbook = openpyxl.Workbook()
     workbook.active.append(("성명", "생년월일"))
     workbook.active.append(("방학아동", "20150302"))
-    workbook.save(path)
+    _save_with_table(workbook, path)
     workbook.close()
 
     wizard = RosterImportWizard(allow_vacation_lunch=True)
@@ -69,7 +84,7 @@ def _combined(path: Path, meal: str = "조식 / 중식") -> Path:
     worksheet.title = "기존 명단"
     worksheet.append(("성명", "생년월일", "식종", "핸드폰", "내부 메모"))
     worksheet.append(("홍길동", "20150302", meal, "010-1234-5678", "복사 금지"))
-    workbook.save(path)
+    _save_with_table(workbook, path)
     workbook.close()
     return path
 
@@ -104,12 +119,139 @@ def _survey(path: Path) -> Path:
         "V": 1,
     }.items():
         worksheet[f"{column}3"] = value
-    workbook.save(path)
+    _save_with_table(workbook, path)
     workbook.close()
     return path
 
 
-def test_guided_route_reaches_selection_only_after_valid_preview(
+def test_wizard_requires_table_and_clears_old_preview_on_file_change(app, tmp_path):
+    table_path = _combined(tmp_path / "with-table.xlsx")
+    plain_path = tmp_path / "without-table.xlsx"
+    workbook = openpyxl.Workbook()
+    workbook.active.append(("성명", "식종"))
+    workbook.active.append(("표 밖 아동", "중식"))
+    workbook.save(plain_path)
+    workbook.close()
+
+    wizard = RosterImportWizard()
+    assert wizard.purpose_combo.parent() is None
+    wizard.path_edit.setText(str(table_path))
+    assert wizard._inspect_source()
+    assert wizard.raw_table.rowCount() == 1
+    wizard.path_edit.setText(str(plain_path))
+    assert wizard.inspection is None
+    assert wizard.raw_table.rowCount() == 0
+    assert not wizard._inspect_source()
+    assert "삽입 → 표" in wizard.error_label.text()
+    assert wizard.table_combo.count() == 0
+    wizard.close()
+
+
+def test_wizard_lists_tables_across_sheets_and_clears_corrections_on_switch(app, tmp_path):
+    path = tmp_path / "two-tables.xlsx"
+    workbook = openpyxl.Workbook()
+    first = workbook.active
+    first.title = "첫 시트"
+    first.append(("성명", "생년월일", "식종"))
+    first.append(("첫 아동", "20150302", "조식"))
+    first.add_table(Table(displayName="기타", ref="A1:C2"))
+    second = workbook.create_sheet("둘째 시트")
+    second["D7"] = "성명"
+    second["E7"] = "생년월일"
+    second["F7"] = "식종"
+    second["D8"] = "둘째 아동"
+    second["E8"] = "20160403"
+    second["F8"] = "중식"
+    second["D9"] = "표 밖 아동"
+    second.add_table(Table(displayName="명단", ref="D7:F8"))
+    workbook.save(path)
+    workbook.close()
+
+    wizard = RosterImportWizard()
+    wizard.path_edit.setText(str(path))
+    assert wizard._inspect_source()
+    assert wizard.table_combo.count() == 2
+    assert wizard.table_combo.currentData() == "명단"
+    assert wizard.table_combo.currentText() == "명단"
+    assert wizard.raw_table.rowCount() == 1
+    assert wizard.raw_table.item(0, 0).text() == "둘째 아동"
+    wizard._go_next()
+    wizard._go_next()
+    assert wizard.preview is not None and wizard.preview.can_continue
+    wizard._go_back()
+    wizard._go_back()
+    wizard._cell_overrides[(8, "F")] = "조식"
+    wizard.table_combo.setCurrentIndex(wizard.table_combo.findData("기타"))
+    assert wizard.inspection is not None and wizard.inspection.selected_table == "기타"
+    assert wizard.preview is None
+    assert wizard._cell_overrides == {}
+    assert wizard.raw_table.item(0, 0).text() == "첫 아동"
+    wizard.close()
+
+
+def test_wizard_can_select_valid_table_after_unsupported_default(app, tmp_path, monkeypatch):
+    path = tmp_path / "unsupported-default.xlsx"
+    workbook = openpyxl.Workbook()
+    first = workbook.active
+    first.append(("데이터",))
+    first.append(("값",))
+    first.add_table(Table(displayName="머리글없음", ref="A1:A2", headerRowCount=0))
+    second = workbook.create_sheet("명단 시트")
+    second.append(("성명", "식종"))
+    second.append(("아동", "중식"))
+    second.add_table(Table(displayName="다른표", ref="A1:B2"))
+    workbook.save(path)
+    workbook.close()
+
+    original_open = workbook_module._open_workbook
+    open_count = 0
+
+    @contextmanager
+    def counted_open(*args, **kwargs):
+        nonlocal open_count
+        open_count += 1
+        with original_open(*args, **kwargs) as opened:
+            yield opened
+
+    monkeypatch.setattr(workbook_module, "_open_workbook", counted_open)
+
+    wizard = RosterImportWizard()
+    wizard.path_edit.setText(str(path))
+    assert not wizard._inspect_source()
+    assert open_count == 1
+    assert "머리글이 없습니다" in wizard.error_label.text()
+    assert wizard.table_combo.count() == 2
+    wizard.table_combo.setCurrentIndex(wizard.table_combo.findData("다른표"))
+    assert wizard.inspection is not None
+    assert wizard.inspection.selected_table == "다른표"
+    wizard.close()
+
+
+def test_wizard_keeps_named_default_selected_when_its_layout_is_unsupported(app, tmp_path):
+    path = tmp_path / "unsupported-named.xlsx"
+    workbook = openpyxl.Workbook()
+    first = workbook.active
+    first.append(("성명", "식종"))
+    first.append(("아동", "중식"))
+    first.add_table(Table(displayName="다른표", ref="A1:B2"))
+    second = workbook.create_sheet("머리글 없는 시트")
+    second["A1"] = "첫 값"
+    second["A2"] = "둘째 값"
+    second.add_table(Table(displayName="명단", ref="A1:A2", headerRowCount=0))
+    workbook.save(path)
+    workbook.close()
+
+    wizard = RosterImportWizard()
+    wizard.path_edit.setText(str(path))
+    assert not wizard._inspect_source()
+    assert wizard.table_combo.currentData() == "명단"
+    assert "머리글이 없습니다" in wizard.error_label.text()
+    wizard.table_combo.setCurrentIndex(wizard.table_combo.findData("다른표"))
+    assert wizard.inspection is not None and wizard.inspection.selected_table == "다른표"
+    wizard.close()
+
+
+def test_clean_import_validates_and_accepts_without_preview(
     app: QApplication,
     tmp_path: Path,
 ):
@@ -143,14 +285,18 @@ def test_guided_route_reaches_selection_only_after_valid_preview(
     assert wizard.page_stack.currentIndex() == 1
     assert not hasattr(wizard, "provider_edit")
     wizard.password_edit.setText("temporary-only")
+    wizard.effective_date_edit.setDate(QDate(2026, 8, 17))
+    assert wizard.next_button.text() == "가져오기"
+    assert wizard.page_stack.widget(1).isAncestorOf(wizard.effective_date_edit)
     wizard._go_next()
 
-    assert wizard.page_stack.currentIndex() == 2
+    assert wizard.page_stack.currentIndex() == 1
     assert wizard.password_edit.text() == ""
     assert wizard.preview is not None and wizard.preview.can_continue
-    assert wizard.person_preview_table.rowCount() == 1
-    wizard.effective_date_edit.setDate(QDate(2026, 8, 17))
+    assert wizard.person_preview_table.rowCount() == 0
+    accepted_selection = wizard.selection()
     wizard._go_next()
+    assert wizard.selection() is accepted_selection
 
     assert wizard.result() == QDialog.DialogCode.Accepted
     selection = wizard.selection()
@@ -209,11 +355,9 @@ def test_preview_error_can_be_fixed_and_rechecked_inside_the_wizard(
     finally:
         unchanged.close()
 
-    wizard.correction_reset_button.click()
-
-    assert wizard.preview is not None and not wizard.preview.can_continue
-    assert wizard.preview.corrected_cells == ()
-    assert not wizard.correction_launch_panel.isHidden()
+    assert wizard.result() == QDialog.DialogCode.Accepted
+    assert wizard.selection().preview.corrected_cells == ((2, "C"),)
+    assert wizard._cell_overrides == {}
     wizard.close()
 
 
@@ -264,7 +408,7 @@ def test_correction_value_column_expands_for_long_values(
     worksheet = workbook.active
     worksheet.append(("성명", "생년월일", "식종"))
     worksheet.append(("긴값아동", long_value, "조식"))
-    workbook.save(path)
+    _save_with_table(workbook, path)
     workbook.close()
     wizard = RosterImportWizard()
     wizard.show()
@@ -284,7 +428,7 @@ def test_correction_value_column_expands_for_long_values(
     wizard.close()
 
 
-def test_preview_allows_unmapped_birth_date_and_groups_missing_values(
+def test_unmapped_optional_birth_date_does_not_show_preview(
     app: QApplication,
     tmp_path: Path,
 ):
@@ -293,7 +437,7 @@ def test_preview_allows_unmapped_birth_date_and_groups_missing_values(
     worksheet = workbook.active
     worksheet.append(("성명", "식종"))
     worksheet.append(("생일미입력", "조식"))
-    workbook.save(path)
+    _save_with_table(workbook, path)
     workbook.close()
     wizard = RosterImportWizard()
     wizard.path_edit.setText(str(path))
@@ -303,15 +447,11 @@ def test_preview_allows_unmapped_birth_date_and_groups_missing_values(
     wizard._go_next()
     wizard._go_next()
 
-    assert wizard.page_stack.currentIndex() == 2
+    assert wizard.page_stack.currentIndex() == 1
     assert wizard.preview is not None and wizard.preview.can_continue
-    assert wizard.next_button.isEnabled()
-    messages = tuple(
-        wizard.issue_list.item(row).text()
-        for row in range(wizard.issue_list.count())
-    )
-    assert any("미입력 · 생년월일 1명" in message for message in messages)
-    assert "미입력 1건" in wizard.preview_summary.text()
+    assert wizard.result() == QDialog.DialogCode.Accepted
+    assert wizard.person_preview_table.rowCount() == 0
+    assert wizard.selection().preview.observations[0].birth_date is None
     wizard.close()
 
 
@@ -325,7 +465,7 @@ def test_preview_explains_later_row_delivery_history_resolution(
     worksheet.append(("성명", "생년월일", "주소", "식종", "담당", "순서"))
     worksheet.append(("이사아동", "20150302", "이전 주소", "조식", "기사A", "001"))
     worksheet.append(("이사아동", "20150302", "현재 주소", "조식", "기사B", "009"))
-    workbook.save(path)
+    _save_with_table(workbook, path)
     workbook.close()
     profile = ImportMappingProfile(
         UUID("83000000-0000-0000-0000-000000000099"),
@@ -360,9 +500,11 @@ def test_preview_explains_later_row_delivery_history_resolution(
     wizard.close()
 
 
-def test_excluded_blank_name_can_be_filled_without_opening_excel(
+@pytest.mark.parametrize("purpose", [ImportPurpose.DATABASE, ImportPurpose.VACATION_LUNCH])
+def test_excluded_blank_name_blocks_only_vacation_until_corrected(
     app: QApplication,
     tmp_path: Path,
+    purpose: ImportPurpose,
 ):
     path = tmp_path / "blank-name.xlsx"
     workbook = openpyxl.Workbook()
@@ -370,9 +512,10 @@ def test_excluded_blank_name_can_be_filled_without_opening_excel(
     worksheet.append(("성명", "생년월일", "식종"))
     worksheet.append((None, "20150302", "조식"))
     worksheet.append(("정상대상자", "20160403", "중식"))
-    workbook.save(path)
+    _save_with_table(workbook, path)
     workbook.close()
-    wizard = RosterImportWizard()
+    wizard = RosterImportWizard(allow_vacation_lunch=True)
+    wizard.purpose_combo.setCurrentIndex(wizard.purpose_combo.findData(purpose))
     wizard.path_edit.setText(str(path))
 
     assert wizard._inspect_source()
@@ -380,8 +523,17 @@ def test_excluded_blank_name_can_be_filled_without_opening_excel(
     wizard._go_next()
 
     assert wizard.preview is not None and wizard.preview.can_continue
+    if purpose is ImportPurpose.DATABASE:
+        assert wizard.result() == QDialog.DialogCode.Accepted
+        assert wizard.page_stack.currentIndex() == 1
+        assert len(wizard.selection().preview.observations) == 1
+        wizard.close()
+        return
     assert wizard.person_preview_table.rowCount() == 1
-    assert "제외" in wizard.correction_table.item(0, 0).text()
+    assert wizard.page_stack.currentIndex() == 2
+    assert not wizard.next_button.isEnabled()
+    assert wizard.result() != QDialog.DialogCode.Accepted
+    assert "오류" in wizard.correction_table.item(0, 0).text()
     editor = wizard._correction_editors[(2, "A")]
     editor.setText("추가대상자")
     wizard.correction_apply_button.click()
@@ -391,6 +543,7 @@ def test_excluded_blank_name_can_be_filled_without_opening_excel(
         observation.name for observation in wizard.preview.observations
     ) == ("추가대상자", "정상대상자")
     assert wizard.preview.corrected_cells == ((2, "A"),)
+    assert wizard.result() == QDialog.DialogCode.Accepted
     wizard.close()
 
 
@@ -401,8 +554,6 @@ def test_government_headers_get_reviewable_defaults_and_private_columns_ignored(
     path = _survey(tmp_path / "survey.xlsx")
     wizard = RosterImportWizard()
     wizard.path_edit.setText(str(path))
-    wizard.header_row_spin.setValue(2)
-    wizard.data_start_row_spin.setValue(3)
 
     assert wizard._inspect_source()
     assert wizard.source_kind_combo.currentData() == "survey-xlsx"
@@ -466,7 +617,7 @@ def test_password_entry_retries_the_protected_workbook_without_reload_click(
 
     assert calls == ["", "excel-password"]
     assert wizard.inspection is not None
-    assert wizard.inspect_button.text() == "선택한 위치 미리보기"
+    assert wizard.inspect_button.text() == "표 미리보기"
     assert wizard.error_label.isHidden()
     wizard.close()
 
@@ -519,7 +670,7 @@ def test_back_from_preview_reuses_password_for_the_same_workbook(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    path = _combined(tmp_path / "password-gated-back.xlsx")
+    path = _combined(tmp_path / "password-gated-back.xlsx", meal="야식")
     password = "excel-password"
     parse_passwords: list[str | None] = []
     original_parse = import_wizard_module.parse_workbook
@@ -740,7 +891,8 @@ def test_preview_loading_uses_its_own_clear_busy_message(
     wizard._go_next()
 
     assert observed == [(True, True, "가져올 명단을 만드는 중입니다", False)]
-    assert wizard.page_stack.currentIndex() == 2
+    assert wizard.page_stack.currentIndex() == 1
+    assert wizard.result() == QDialog.DialogCode.Accepted
     assert wizard.busy_panel.isHidden()
     assert wizard.page_stack.isEnabled()
     wizard.close()

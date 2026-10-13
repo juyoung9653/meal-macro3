@@ -25,6 +25,7 @@ from src.domain.projections import (
 from src.domain.revisions import (
     AuditChange, ChangeOperation,
     HistoricalSnapshot,
+    ImportBatch,
     RevisionActor,
     RevisionMetadata,
     RevisionRecord,
@@ -120,6 +121,10 @@ def test_wide_mode_actual_status_custom_columns_and_literal_roundtrip(base):
     assert first["비고"] == "=not a formula" and first["추가 안내"] == "=literal"
     assert not any(cell.data_type == "f" for sheet in reopened for row in sheet for cell in row)
     assert "식종" not in first
+    assert "명단(통합)" not in reopened.sheetnames
+    assert reopened.sheetnames[-1] == "내보내기 정보"
+    assert {row["항목"]: row["값"] for row in rows(reopened["내보내기 정보"])}["행 형식"] == "명단=통합"
+    assert all(sheet.freeze_panes == "A2" and sheet.auto_filter.ref.startswith("A1:") for sheet in reopened)
     reopened.close()
 
 
@@ -137,21 +142,31 @@ def test_one_legacy_different_or_missing_driver_splits_entire_roster(base, drive
     assert {row["식종"] for row in table if row["성명"] == "둘째"} == {"조식", "석식"}
     assert len([row for row in table if row["성명"] == "미가입 아동"]) == 1
     assert {row["배송담당"] for row in table if row["성명"] == "첫째"} == {"기사A", driver or ""}
+    combined = rows(book["명단(통합)"])
+    assert len(combined) == 3
+    first = next(row for row in combined if row["성명"] == "첫째")
+    assert first["조식 배송담당"] == "기사A"
+    assert first["석식 배송담당"] == (driver or "")
+    assert first["조식 순서"] == first["석식 순서"] == "001"
+    nonenrolled = next(row for row in combined if row["성명"] == "미가입 아동")
+    assert all(nonenrolled[meal] == "미가입" for meal in ("조식", "중식", "석식"))
+    assert {row["항목"]: row["값"] for row in rows(book["내보내기 정보"])}["행 형식"] == "명단=식종별, 명단(통합)=통합"
     book.close()
 
 
-def test_effective_relocation_changes_only_from_its_date_and_preserves_original(base):
+def test_effective_relocation_changes_only_from_its_date_without_original_columns(base):
     change = build_routing_revision(
         base, RoutingState(), person_id=base.persons[0].person_id, effective_on=DAY,
         driver_ids={}, road_address="새 주소", detail_address="202호",
         actor=ACTOR, recorded_at=STAMP, revision_id=uuid4(), event_id=uuid4(),
     )
     roster, snapshot = project(base, (change,))
-    for day, expected in ((date(2026, 9, 20), "이전 주소"), (DAY, "새 주소")):
+    for day, road, detail in ((date(2026, 9, 20), "이전 주소", "101호"), (DAY, "새 주소", "202호")):
         book = build_database_workbook(roster, snapshot, (initial(base), change), day=day, sections=("roster",))
         first = next(row for row in rows(book["명단"]) if row["성명"] == "첫째")
-        assert first["도로명주소"] == expected
-        assert first["원본 도로명주소"] == "이전 주소"
+        assert first["도로명주소"] == road
+        assert first["상세주소"] == detail
+        assert "원본 도로명주소" not in first and "원본 상세주소" not in first
         book.close()
 
 
@@ -289,8 +304,96 @@ def test_secret_setting_not_in_history_and_sections_are_independent(base):
     roster, snapshot = project(base, (record,))
     book = build_database_workbook(roster, snapshot, (initial(base), record), day=DAY, sections=("history",))
     assert "명단" not in book.sheetnames and "민원" not in book.sheetnames
+    assert "행 형식" not in {row["항목"] for row in rows(book["내보내기 정보"])}
     assert secret not in str([list(sheet.values) for sheet in book])
     assert all("password" not in str(row["대상 종류"]) for row in rows(book["변경 이력"]))
     book.close()
     with pytest.raises(ValueError):
         build_database_workbook(roster, snapshot, (), day=DAY, sections=())
+
+
+@pytest.mark.parametrize("sections", [("roster",), ("history",), ("complaints",), ("roster", "complaints", "history")])
+def test_export_information_is_once_and_last_for_each_selection(base, sections):
+    snapshot = HistoricalSnapshot(base.revision_id, roster_entity_states(base))
+    book = build_database_workbook(base, snapshot, (), day=DAY, sections=sections)
+    assert book.sheetnames[-1] == "내보내기 정보"
+    assert book.sheetnames.count("내보내기 정보") == 1
+    info = {row["항목"]: row["값"] for row in rows(book["내보내기 정보"])}
+    assert info["내보내기 기준일"] == DAY.isoformat()
+    assert info["명단 revision UUID"] == str(base.revision_id)
+    assert info["시간대"] == "Asia/Seoul (KST)"
+    assert ("행 형식" in info) is ("roster" in sections)
+    assert all(sheet.cell(1, 1).value not in info for sheet in list(book)[:-1])
+    book.close()
+
+
+def test_global_history_localizes_all_supported_kinds_and_operations(base):
+    from src.domain.projections import (
+        ASSIGNMENT_KIND, CUSTOM_FIELD_KIND, HOUSEHOLD_KIND, MEMBERSHIP_KIND, PERSON_KIND,
+    )
+    from src.domain.delivery_routing import DRIVER_KIND, ROUTING_EVENT_KIND
+
+    labels = {
+        PERSON_KIND: "사람", HOUSEHOLD_KIND: "가구", MEMBERSHIP_KIND: "가구원",
+        ENROLLMENT_KIND: "식종 가입", ASSIGNMENT_KIND: "배송배정",
+        STATUS_EVENT_KIND: "식종 상태", DRIVER_KIND: "배송담당",
+        ROUTING_EVENT_KIND: "배송 변경", CUSTOM_FIELD_KIND: "사용자 항목",
+        "complaint": "민원",
+    }
+    changes = tuple(
+        AuditChange(kind, uuid4(), operation,
+                    None if operation is ChangeOperation.INSERT else {"person_id": str(base.persons[0].person_id)},
+                    None if operation is ChangeOperation.DELETE else {"person_id": str(base.persons[0].person_id)})
+        for kind in labels for operation in ChangeOperation
+    )
+    record = RevisionRecord(
+        RevisionMetadata(uuid4(), base.revision_id, STAMP, DAY, ACTOR, "합성 변경", RevisionSource.UI),
+        changes,
+    )
+    snapshot = HistoricalSnapshot(base.revision_id, roster_entity_states(base))
+    book = build_database_workbook(base, snapshot, (record,), day=DAY, sections=("history",))
+    history = rows(book["변경 이력"])
+    assert len(history) == len(changes)
+    assert {row["대상 종류"] for row in history} == set(labels.values())
+    assert {row["작업"] for row in history} == {"추가", "수정", "삭제"}
+    book.close()
+
+
+@pytest.mark.parametrize("purpose,reason,hidden", [
+    ("database", "Excel 명단 가져오기", True),
+    ("database", "초기 자료 등록", True),
+    (None, "Excel 명단 가져오기", True),  # Older persisted records lack purpose.
+    ("vacation_lunch", "방학 중식 명단 갱신", False),
+])
+def test_roster_import_is_excluded_from_display_history_only(base, purpose, reason, hidden):
+    imported = initial(base)
+    metadata = replace(
+        imported.metadata, reason=reason,
+        decisions={} if purpose is None else {"import_purpose": purpose},
+    )
+    batch = ImportBatch(
+        uuid4(), base.revision_id, "roster.xlsx", "0" * 64, 1, "Sheet1",
+        "fingerprint", {}, DAY,
+    )
+    imported = RevisionRecord(metadata, imported.changes, batch)
+    person = base.persons[0]
+    manual = build_person_profile_revision(
+        base, person.person_id, replace(person.profile, school_name="수정 학교"),
+        actor=ACTOR, recorded_at=STAMP + timedelta(seconds=1),
+        effective_on=DAY, revision_id=uuid4(),
+    ).record
+    assert manual.metadata.parent_revision_id == imported.metadata.revision_id
+    roster, snapshot = project(base, (manual,))
+    records = (imported, manual)
+    tables = build_history_tables(roster, snapshot, records, person_id=person.person_id)
+    for key in ("정보 변경", "식종 변경"):
+        headings, values = tables[key]
+        reasons = {dict(zip(headings, row, strict=True))["사유"] for row in values}
+        assert (reason in reasons) is not hidden
+    info_headers, info_rows = tables["정보 변경"]
+    assert any(dict(zip(info_headers, row, strict=True))["사유"] == manual.metadata.reason for row in info_rows)
+    book = build_database_workbook(roster, snapshot, records, day=DAY, sections=("history",))
+    for sheet_name in ("정보 변경 이력", "식종 변경 이력", "변경 이력"):
+        reasons = {row["사유"] for row in rows(book[sheet_name])}
+        assert (reason in reasons) is not hidden
+    book.close()

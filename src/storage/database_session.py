@@ -11,6 +11,7 @@ from src.domain.documents import DocumentRun
 from src.domain.revisions import RevisionRecord
 
 from .database_backup import (
+    BackupPasswordRotation,
     BackupRecord,
     DatabaseBackupService,
     restore_backup_with_recovery_password,
@@ -34,6 +35,8 @@ class AutomaticBackupResult:
 
     record: BackupRecord | None = None
     error: Exception | None = None
+    rotation: BackupPasswordRotation | None = None
+    rotation_error: Exception | None = None
 
     def __post_init__(self) -> None:
         if self.record is not None and self.error is not None:
@@ -252,6 +255,20 @@ class DatabaseSession:
             self._key_bytes(),
         )
 
+    def prepare_backup_directory(self, directory: str | Path) -> DatabaseBackupService:
+        """Verify a candidate service with a backup before it becomes active."""
+        self._require_open()
+        replacement = DatabaseBackupService(directory)
+        credentials = DatabaseCredentials.load(self.path)
+        replacement.create_backup(
+            self._database, credentials, self._key_bytes(), prune=False,
+        )
+        return replacement
+
+    def activate_backup_directory(self, replacement: DatabaseBackupService) -> None:
+        """Activate a service already checked by prepare_backup_directory."""
+        self._backup_service = replacement
+
     def try_backup_now(self) -> AutomaticBackupResult:
         self._require_open()
         if self._backup_service is None:
@@ -271,11 +288,30 @@ class DatabaseSession:
         unlocked = current.unlock_user(current_password)
         if not hmac.compare_digest(unlocked, self._key_bytes()):
             raise CredentialFormatError("DB와 비밀번호 정보의 key가 일치하지 않습니다.")
+        if current_password == new_password:
+            return AutomaticBackupResult()
         self._credentials = current.change_user_password(
             current_password,
             new_password,
         )
-        return self.try_backup_now()
+        rotation = None
+        rotation_error = None
+        if self._backup_service is not None:
+            try:
+                rotation = self._backup_service.rotate_passwords(
+                    current.database_id, self._key_bytes(), new_password,
+                )
+            except Exception as error:
+                rotation_error = error
+        if self._backup_service is None:
+            return AutomaticBackupResult()
+        try:
+            record = self._backup_service.create_backup(
+                self._database, self._credentials, self._key_bytes(), prune=False,
+            )
+            return AutomaticBackupResult(record=record, rotation=rotation, rotation_error=rotation_error)
+        except Exception as error:
+            return AutomaticBackupResult(error=error, rotation=rotation, rotation_error=rotation_error)
 
     def close(self) -> None:
         if self._closed:

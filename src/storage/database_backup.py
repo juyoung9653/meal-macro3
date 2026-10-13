@@ -74,6 +74,13 @@ class BackupRecord:
     credentials_sha256: str
 
 
+@dataclass(frozen=True)
+class BackupPasswordRotation:
+    updated: tuple[Path, ...] = ()
+    failed: tuple[tuple[Path, str], ...] = ()
+    unreadable: tuple[Path, ...] = ()
+
+
 class DatabaseBackupService:
     """Creates atomic archives from an open encrypted database."""
 
@@ -107,6 +114,7 @@ class DatabaseBackupService:
         database_key: bytes,
         *,
         created_at: datetime | None = None,
+        prune: bool = True,
     ) -> BackupRecord:
         if not self._directory.is_dir():
             raise BackupDirectoryNotFoundError(
@@ -192,18 +200,40 @@ class DatabaseBackupService:
             temporary_archive.unlink(missing_ok=True)
 
         record = inspect_backup(final_path)
-        try:
-            self.prune_backups(
-                record.database_id,
-                protected_path=record.path,
-            )
-        except OSError as error:
-            logger.warning(
-                "새 백업은 생성했지만 오래된 자동 백업을 정리하지 못했습니다: %s",
-                self._directory,
-                exc_info=error,
-            )
+        if prune:
+            try:
+                self.prune_backups(record.database_id, protected_path=record.path)
+            except OSError as error:
+                logger.warning("새 백업은 생성했지만 오래된 자동 백업을 정리하지 못했습니다: %s", self._directory, exc_info=error)
         return record
+
+    def rotate_passwords(
+        self, database_id: UUID, database_key: bytes, new_password: str,
+    ) -> BackupPasswordRotation:
+        """Rewrap verified snapshots in this directory; each replacement is atomic."""
+        if not self._directory.is_dir():
+            raise BackupDirectoryNotFoundError(f"자동 백업 폴더가 없습니다: {self._directory}")
+        updated: list[Path] = []
+        failed: list[tuple[Path, str]] = []
+        unreadable: list[Path] = []
+        candidates = sorted(self._directory.glob(f"*{BACKUP_EXTENSION}"))
+        for candidate in candidates:
+            try:
+                path = candidate.resolve(strict=True)
+                if path.parent != self._directory or not path.is_file():
+                    continue
+                record = inspect_backup(path)
+            except Exception:
+                unreadable.append(candidate)
+                continue
+            if record.database_id != database_id:
+                continue
+            try:
+                _rewrap_backup(path, record, database_key, new_password)
+                updated.append(path)
+            except Exception as error:
+                failed.append((path, str(error)))
+        return BackupPasswordRotation(tuple(updated), tuple(failed), tuple(unreadable))
 
     def list_backups(
         self,
@@ -355,6 +385,55 @@ def backup_has_recovery_password(path: str | Path) -> bool:
     return DatabaseCredentials.from_bytes(payload).recovery_slot is not None
 
 
+def _rewrap_backup(
+    path: Path, record: BackupRecord, database_key: bytes, new_password: str,
+) -> None:
+    """Validate the historical database with the active key before replacement."""
+    with tempfile.TemporaryDirectory(prefix=".mealrewrap-", dir=path.parent) as staging_value:
+        staging = Path(staging_value)
+        database_file = staging / _DATABASE_MEMBER
+        staged_archive = staging / path.name
+        with zipfile.ZipFile(path, "r") as archive:
+            credentials = DatabaseCredentials.from_bytes(archive.read(_CREDENTIAL_MEMBER))
+            manifest = json.loads(archive.read(_MANIFEST_MEMBER).decode("utf-8"))
+            _extract_member(archive, _DATABASE_MEMBER, database_file)
+        if _sha256_file(database_file) != record.database_sha256:
+            raise BackupIntegrityError("백업 DB 내용이 달라졌습니다.")
+        # Opening an older schema can migrate it, so validate a disposable copy.
+        validation_file = staging / "validation.sqlite3"
+        shutil.copyfile(database_file, validation_file)
+        with EncryptedDatabase.open(validation_file, database_key) as database:
+            database.check_integrity()
+            latest = database.latest_revision()
+            if (database.schema_version < record.schema_version or
+                (None if latest is None else latest.metadata.revision_id) != record.latest_revision_id):
+                raise BackupIntegrityError("백업 DB 이력이 기록과 다릅니다.")
+        if _sha256_file(database_file) != record.database_sha256:
+            raise BackupIntegrityError("검증 중 백업 DB 내용이 달라졌습니다.")
+        updated_credentials = credentials.with_user_password(database_key, new_password)
+        credential_payload = updated_credentials.to_bytes()
+        manifest["credentials"]["size"] = len(credential_payload)
+        manifest["credentials"]["sha256"] = hashlib.sha256(credential_payload).hexdigest()
+        with zipfile.ZipFile(staged_archive, "x", compression=zipfile.ZIP_STORED, allowZip64=True) as archive:
+            archive.write(database_file, _DATABASE_MEMBER)
+            archive.writestr(_CREDENTIAL_MEMBER, credential_payload)
+            archive.writestr(_MANIFEST_MEMBER, _json_bytes(manifest))
+        _flush_file(staged_archive)
+        staged_record = inspect_backup(staged_archive)
+        if (staged_record.database_sha256 != record.database_sha256 or
+            staged_record.database_size != record.database_size or
+            staged_record.created_at != record.created_at or
+            staged_record.latest_revision_id != record.latest_revision_id or
+            staged_record.database_id != record.database_id or
+            staged_record.schema_version != record.schema_version):
+            raise BackupIntegrityError("변경한 백업의 이력 또는 DB 내용이 달라졌습니다.")
+        with zipfile.ZipFile(staged_archive, "r") as archive:
+            staged_credentials = DatabaseCredentials.from_bytes(archive.read(_CREDENTIAL_MEMBER))
+            if staged_credentials.unlock_user(new_password) != database_key:
+                raise BackupIntegrityError("새 비밀번호로 백업을 열 수 없습니다.")
+        os.replace(staged_archive, path)
+
+
 def restore_backup_with_user_password(
     backup_path: str | Path,
     destination_database_path: str | Path,
@@ -435,10 +514,10 @@ def _restore_backup(
                 _extract_member(archive, _DATABASE_MEMBER, staged_database)
                 _write_bytes(staged_credentials, credentials.to_bytes())
 
-            with EncryptedDatabase.open(staged_database, key) as restored:
-                restored.check_integrity()
             if _sha256_file(staged_database) != record.database_sha256:
                 raise BackupIntegrityError("복원 중 백업 DB 내용이 달라졌습니다.")
+            with EncryptedDatabase.open(staged_database, key) as restored:
+                restored.check_integrity()
             if destination.exists() or destination_credentials.exists():
                 raise BackupRestoreConflictError(
                     "복원할 위치에 DB 또는 비밀번호 정보 파일이 이미 있습니다."

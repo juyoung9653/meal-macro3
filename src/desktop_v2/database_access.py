@@ -28,6 +28,8 @@ from src.storage import (
     DatabaseSession,
     DatabaseUnlockError,
     PasswordPolicyError,
+    credential_path_for,
+    restore_backup_with_user_password,
 )
 
 from .theme import application_stylesheet, register_application_fonts
@@ -78,6 +80,32 @@ class DesktopStorageSettings:
             str(Path(directory).resolve()),
         )
         self._settings.sync()
+
+    def save_database_path(self, database_path: str | Path) -> None:
+        had_previous = self._settings.contains(_DATABASE_PATH_KEY)
+        previous = self._settings.value(_DATABASE_PATH_KEY, "")
+        self._settings.setValue(_DATABASE_PATH_KEY, str(Path(database_path).resolve()))
+        self._settings.sync()
+        if self._settings.status() != QSettings.Status.NoError:
+            if had_previous:
+                self._settings.setValue(_DATABASE_PATH_KEY, previous)
+            else:
+                self._settings.remove(_DATABASE_PATH_KEY)
+            self._settings.sync()
+            raise OSError("운영 데이터 위치 설정을 저장하지 못했습니다.")
+
+    def save_backup_directory(self, directory: str | Path) -> None:
+        had_previous = self._settings.contains(_BACKUP_DIRECTORY_KEY)
+        previous = self._settings.value(_BACKUP_DIRECTORY_KEY, "")
+        self._settings.setValue(_BACKUP_DIRECTORY_KEY, str(Path(directory).resolve()))
+        self._settings.sync()
+        if self._settings.status() != QSettings.Status.NoError:
+            if had_previous:
+                self._settings.setValue(_BACKUP_DIRECTORY_KEY, previous)
+            else:
+                self._settings.remove(_BACKUP_DIRECTORY_KEY)
+            self._settings.sync()
+            raise OSError("자동 백업 폴더 설정을 저장하지 못했습니다.")
 
 
 class _DatabaseAccessDialog(QDialog):
@@ -438,6 +466,244 @@ class LoginDialog(_DatabaseAccessDialog):
             self.password_edit.setFocus()
             return
         self.accept()
+
+def relocate_database(
+    session: DatabaseSession,
+    destination: str | Path,
+    password: str,
+    settings: DesktopStorageSettings,
+) -> Path:
+    """Install a verified snapshot at a new path, then remember it for startup."""
+    target = Path(destination).resolve()
+    if target == session.path:
+        raise ValueError("현재 운영 파일과 다른 위치를 선택해주세요.")
+    if target.suffix.casefold() != ".sqlite3":
+        raise ValueError("운영 데이터 파일 이름은 .sqlite3로 끝나야 합니다.")
+    if not target.parent.is_dir():
+        raise ValueError("운영 데이터를 저장할 폴더가 없습니다.")
+    backup = session.backup_now()
+    restore_backup_with_user_password(backup.path, target, password)
+    try:
+        settings.save_database_path(target)
+    except Exception:
+        target.unlink(missing_ok=True)
+        credential_path_for(target).unlink(missing_ok=True)
+        raise
+    return target
+
+
+class DatabaseLocationDialog(_DatabaseAccessDialog):
+    """Move the next startup to a new, verified copy of the current DB."""
+
+    def __init__(
+        self,
+        session: DatabaseSession,
+        settings: DesktopStorageSettings,
+        parent: QWidget | None = None,
+    ) -> None:
+        self._source_session = session
+        self._settings = settings
+        super().__init__(
+            window_title="운영 데이터 위치 변경",
+            title="운영 데이터 위치 변경",
+            subtitle="새 위치에 복사한 뒤 프로그램을 종료합니다. 다음 실행부터 새 파일을 사용합니다.",
+            rail_title="데이터 저장 위치",
+            rail_copy="현재 운영 파일의 최신 내용을 확인한 뒤 새 위치에 보관합니다.",
+            route_stops=("새 파일 위치 선택", "비밀번호로 복사본 확인", "다음 실행부터 새 위치 사용"),
+            parent=parent,
+        )
+        self.resize(820, 540)
+        self.setMinimumSize(720, 540)
+        self._content.addWidget(_field_label("현재 운영 데이터 파일"))
+        self.current_path_edit = QLineEdit(str(session.path))
+        self.current_path_edit.setObjectName("currentDatabaseLocationEdit")
+        self.current_path_edit.setReadOnly(True)
+        self._content.addWidget(self.current_path_edit)
+        self.destination_path_edit = QLineEdit()
+        self.destination_path_edit.setObjectName("databaseLocationPathEdit")
+        self.destination_path_edit.setText(str(session.path.with_name(session.path.stem + "-moved.sqlite3")))
+        self._add_path_field(
+            "새 운영 데이터 파일 위치",
+            self.destination_path_edit,
+            "위치 선택",
+            self._browse_destination,
+            help_text="원본은 보존하며 기존 대상 파일은 덮어쓰지 않습니다. 저장할 폴더를 먼저 만들어주세요.",
+        )
+        self.password_edit = QLineEdit()
+        self.password_edit.setObjectName("databaseLocationPasswordEdit")
+        self._add_password_field("현재 운영 파일 비밀번호", self.password_edit)
+        self._add_show_passwords((self.password_edit,))
+        self.submit_button = self._add_actions("위치 변경 후 종료", self._submit)
+
+    def _browse_destination(self) -> None:
+        filename, _filter = QFileDialog.getSaveFileName(
+            self,
+            "새 운영 데이터 파일 위치",
+            self.destination_path_edit.text().strip(),
+            "급식 운영 데이터 (*.sqlite3)",
+        )
+        if filename:
+            path = Path(filename)
+            if path.suffix.casefold() != ".sqlite3":
+                path = path.with_suffix(".sqlite3")
+            self.destination_path_edit.setText(str(path))
+
+    def _submit(self) -> None:
+        self._clear_error()
+        destination = self.destination_path_edit.text().strip()
+        if not destination:
+            self._show_error("새 운영 데이터 파일 위치를 선택해주세요.")
+            return
+        try:
+            relocate_database(
+                self._source_session,
+                destination,
+                self.password_edit.text(),
+                self._settings,
+            )
+        except Exception as error:
+            self._show_error(_friendly_error(error))
+            return
+        self.accept()
+
+
+class BackupDirectoryDialog(_DatabaseAccessDialog):
+    """Change automatic backups while keeping the operating DB open."""
+
+    def __init__(
+        self,
+        session: DatabaseSession,
+        settings: DesktopStorageSettings,
+        parent: QWidget | None = None,
+    ) -> None:
+        self._source_session = session
+        self._settings = settings
+        current = session.backup_directory
+        if current is None:
+            saved = settings.backup_directory
+            current = saved if saved is not None and saved.is_dir() else None
+        self._current_directory = current
+        super().__init__(
+            window_title="자동 백업 폴더 변경",
+            title="자동 백업 폴더",
+            subtitle="새 폴더에 백업을 확인한 뒤 저장합니다. 이후 백업부터 새 폴더를 사용합니다.",
+            rail_title="자동 백업 위치",
+            rail_copy="기존 백업 파일은 원래 폴더에 그대로 보관합니다.",
+            route_stops=("새 폴더 선택", "새 폴더에 백업 확인", "이후 백업 위치 변경"),
+            parent=parent,
+        )
+        self.resize(820, 480)
+        self.setMinimumSize(720, 480)
+        self._content.addWidget(_field_label("현재 자동 백업 폴더"))
+        self.current_directory_edit = QLineEdit(str(current) if current is not None else "설정되지 않음")
+        self.current_directory_edit.setObjectName("currentBackupDirectoryEdit")
+        self.current_directory_edit.setReadOnly(True)
+        self._content.addWidget(self.current_directory_edit)
+        self.backup_directory_edit = QLineEdit(str(current) if current is not None else "")
+        self.backup_directory_edit.setObjectName("newBackupDirectoryEdit")
+        self._add_path_field(
+            "새 자동 백업 폴더",
+            self.backup_directory_edit,
+            "폴더 선택",
+            self._browse_directory,
+            help_text="이미 만든 폴더를 선택해주세요. 기존 백업과 운영 데이터 파일은 옮기지 않습니다.",
+        )
+        self.submit_button = self._add_actions("저장", self._submit)
+
+    def _browse_directory(self) -> None:
+        directory = QFileDialog.getExistingDirectory(
+            self, "새 자동 백업 폴더", self.backup_directory_edit.text().strip(),
+        )
+        if directory:
+            self.backup_directory_edit.setText(directory)
+
+    def _submit(self) -> None:
+        self._clear_error()
+        chosen = self.backup_directory_edit.text().strip()
+        if not chosen:
+            self._show_error("새 자동 백업 폴더를 선택해주세요.")
+            return
+        try:
+            target = Path(chosen).resolve()
+        except (OSError, ValueError):
+            self._show_error("새 자동 백업 폴더 경로가 올바르지 않습니다. 다시 선택해주세요.")
+            return
+        if self._current_directory is not None and target == self._current_directory.resolve():
+            self.accept()
+            return
+        if not target.is_dir():
+            self._show_error("새 자동 백업 폴더가 없습니다. 기존 폴더를 선택해주세요.")
+            return
+        try:
+            replacement = self._source_session.prepare_backup_directory(target)
+            self._settings.save_backup_directory(target)
+            self._source_session.activate_backup_directory(replacement)
+        except OSError as error:
+            self._show_error(
+                "새 자동 백업 폴더에 백업하거나 설정을 저장하지 못했습니다. "
+                "폴더 쓰기 권한과 연결 상태를 확인해주세요. " + _friendly_error(error)
+            )
+            return
+        except Exception as error:
+            self._show_error(_friendly_error(error))
+            return
+        self.accept()
+
+
+class DatabasePasswordChangeDialog(_DatabaseAccessDialog):
+    """Change the open operating file's login password."""
+
+    def __init__(self, session: DatabaseSession, parent: QWidget | None = None) -> None:
+        self._source_session = session
+        self.password_changed = False
+        super().__init__(
+            window_title="운영 파일 비밀번호 변경",
+            title="운영 파일 비밀번호 변경",
+            subtitle="현재 비밀번호를 확인한 뒤 새 비밀번호로 변경합니다.",
+            rail_title="운영 파일 잠금",
+            rail_copy="앞으로 운영 파일을 열 때 새 비밀번호를 사용합니다.",
+            route_stops=("현재 비밀번호 확인", "새 비밀번호 설정", "백업 비밀번호 갱신"),
+            parent=parent,
+        )
+        self.resize(820, 580)
+        self.setMinimumSize(720, 580)
+        self.current_password_edit = QLineEdit()
+        self.current_password_edit.setObjectName("currentDatabasePasswordEdit")
+        self._add_password_field("현재 운영 파일 비밀번호", self.current_password_edit)
+        self.new_password_edit = QLineEdit()
+        self.new_password_edit.setObjectName("newDatabasePasswordEdit")
+        self._add_password_field("새 운영 파일 비밀번호", self.new_password_edit)
+        self.confirm_password_edit = QLineEdit()
+        self.confirm_password_edit.setObjectName("confirmDatabasePasswordEdit")
+        self._add_password_field("새 비밀번호 확인", self.confirm_password_edit)
+        self._add_show_passwords((
+            self.current_password_edit,
+            self.new_password_edit,
+            self.confirm_password_edit,
+        ))
+        self._content.addWidget(_help_label(
+            "설정된 백업 폴더의 기존 백업도 새 비밀번호로 바꿉니다. 폴더 밖의 복사본은 기존 비밀번호를 사용합니다."
+        ))
+        self.submit_button = self._add_actions("비밀번호 변경", self._submit)
+
+    def _submit(self) -> None:
+        self._clear_error()
+        current = self.current_password_edit.text()
+        new = self.new_password_edit.text()
+        if not current or not new or not self.confirm_password_edit.text():
+            self._show_error("현재 비밀번호와 새 비밀번호, 확인 값을 모두 입력해주세요.")
+            return
+        if new != self.confirm_password_edit.text():
+            self._show_error("새 비밀번호와 확인 값이 다릅니다.")
+            return
+        try:
+            self.backup_result = self._source_session.change_user_password(current, new)
+        except Exception as error:
+            self._show_error(_friendly_error(error))
+            return
+        self.password_changed = current != new
+        self.accept()
+
 
 class RestoreBackupDialog(_DatabaseAccessDialog):
     def __init__(

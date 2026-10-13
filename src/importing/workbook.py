@@ -6,13 +6,14 @@ import json
 import re
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from hashlib import sha256
 from io import BytesIO
 from pathlib import Path
 from stat import S_ISREG
 from types import MappingProxyType
+from typing import Any, cast
 from uuid import UUID, uuid5
 from zipfile import BadZipFile
 
@@ -25,10 +26,14 @@ from msoffcrypto.exceptions import (
     ParseError,
 )
 from openpyxl.cell.cell import Cell
-from openpyxl.utils import column_index_from_string, get_column_letter
+from openpyxl.packaging.relationship import get_dependents, get_rels_path
+from openpyxl.utils import column_index_from_string, get_column_letter, range_boundaries
 from openpyxl.utils.datetime import from_excel
 from openpyxl.utils.exceptions import InvalidFileException
 from openpyxl.workbook.workbook import Workbook
+from openpyxl.worksheet._read_only import ReadOnlyWorksheet
+from openpyxl.worksheet.table import Table
+from openpyxl.xml.functions import fromstring
 
 from src.domain.roster import Meal, normalize_phone
 
@@ -42,7 +47,8 @@ from .contracts import (
     SourceReference,
 )
 
-_MAX_COLUMNS = 256
+_MAX_COLUMNS = 256  # Legacy worksheet header discovery only.
+_MAX_XLSX_COLUMN = column_index_from_string("XFD")
 _MAX_DATA_ROWS = 50_000
 _BLANK_ROW_STOP = 100
 _OBSERVATION_NAMESPACE = UUID("bd5ecf05-6f24-47d8-b84d-a5de9b08d094")
@@ -111,7 +117,11 @@ class WorkbookImportPasswordError(WorkbookImportError):
 
 
 class WorkbookStructureError(WorkbookImportError):
-    pass
+    def __init__(
+        self, message: str, *, tables: tuple[WorkbookTable, ...] = ()
+    ) -> None:
+        super().__init__(message)
+        self.tables = tables
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,6 +150,19 @@ class WorkbookPreviewRow:
 
 
 @dataclass(frozen=True, slots=True)
+class WorkbookTable:
+    name: str
+    sheet_name: str
+    ref: str
+    header_row: int
+    data_start_row: int
+    data_end_row: int
+    min_col: int
+    max_col: int
+    header_row_count: int = 1
+
+
+@dataclass(frozen=True, slots=True)
 class WorkbookInspection:
     source_filename: str
     sheet_names: tuple[str, ...]
@@ -148,6 +171,8 @@ class WorkbookInspection:
     columns: tuple[SourceColumn, ...]
     preview_rows: tuple[WorkbookPreviewRow, ...]
     header_fingerprint: str
+    tables: tuple[WorkbookTable, ...] = ()
+    selected_table: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -340,6 +365,8 @@ def inspect_workbook(
     header_row: int = 1,
     data_start_row: int | None = None,
     preview_limit: int = 8,
+    require_table: bool = False,
+    table_name: str | None = None,
 ) -> WorkbookInspection:
     """Read only structure and a small display preview for mapping."""
 
@@ -352,15 +379,37 @@ def inspect_workbook(
     )
     if start_row <= header_row:
         raise ValueError("데이터 시작 행은 헤더 행보다 뒤여야 합니다.")
+    table_mode = require_table or table_name is not None
     with _open_workbook(source_path, password or "") as workbook:
-        worksheet = _select_sheet(workbook, sheet_name)
-        columns = _read_columns(worksheet, header_row)
+        tables = _workbook_tables(workbook) if table_mode else ()
+        try:
+            selected_table = _select_table(tables, table_name) if table_mode else None
+            if selected_table:
+                _validate_table(selected_table)
+            worksheet = (
+                workbook[selected_table.sheet_name]
+                if selected_table
+                else _select_sheet(workbook, sheet_name)
+            )
+            if selected_table:
+                header_row = selected_table.header_row
+                start_row = selected_table.data_start_row
+                columns = _read_columns(
+                    worksheet, header_row, selected_table.min_col, selected_table.max_col
+                )
+            else:
+                columns = _read_columns(worksheet, header_row)
+        except WorkbookStructureError as error:
+            error.tables = tables
+            raise
         fingerprint = _header_fingerprint(header_row, columns)
         rows = _preview_rows(
             worksheet,
             start_row,
             len(columns),
             preview_limit,
+            min_col=selected_table.min_col if selected_table else 1,
+            end_row=selected_table.data_end_row if selected_table else None,
         )
         return WorkbookInspection(
             source_filename=source_path.name,
@@ -370,6 +419,8 @@ def inspect_workbook(
             columns=columns,
             preview_rows=rows,
             header_fingerprint=fingerprint,
+            tables=tables,
+            selected_table=selected_table.name if selected_table else None,
         )
 
 
@@ -381,6 +432,7 @@ def parse_workbook(
     password: str | None = None,
     sample_limit: int = 8,
     cell_overrides: Mapping[tuple[int, str], object] | None = None,
+    table_name: str | None = None,
 ) -> WorkbookImportPreview:
     """Parse mapped cells with optional in-memory corrections."""
 
@@ -392,8 +444,48 @@ def parse_workbook(
     issues: list[ImportIssue] = []
     automatic_source_resolutions: list[AutomaticSourceResolution] = []
     with _open_workbook(source_path, password or "") as workbook:
-        worksheet = _select_sheet(workbook, sheet_name)
-        columns = _read_columns(worksheet, profile.header_row)
+        selected_table = (
+            _select_table(_workbook_tables(workbook), table_name)
+            if table_name is not None
+            else None
+        )
+        if selected_table:
+            _validate_table(selected_table)
+        if (
+            selected_table is not None
+            and sheet_name is not None
+            and sheet_name != selected_table.sheet_name
+        ):
+            raise WorkbookStructureError("선택한 표와 시트가 일치하지 않습니다.")
+        worksheet = (
+            workbook[selected_table.sheet_name]
+            if selected_table
+            else _select_sheet(workbook, sheet_name)
+        )
+        if selected_table:
+            profile = replace(
+                profile,
+                header_row=selected_table.header_row,
+                data_start_row=selected_table.data_start_row,
+            )
+            columns = _read_columns(
+                worksheet,
+                selected_table.header_row,
+                selected_table.min_col,
+                selected_table.max_col,
+            )
+            for row_number, letter in overrides:
+                column_number = column_index_from_string(letter)
+                inside_body = (
+                    selected_table.data_start_row <= row_number <= selected_table.data_end_row
+                    and selected_table.min_col <= column_number <= selected_table.max_col
+                )
+                if not inside_body:
+                    raise WorkbookStructureError(
+                        f"선택한 표의 데이터 범위 밖 셀은 수정할 수 없습니다: {letter}{row_number}"
+                    )
+        else:
+            columns = _read_columns(worksheet, profile.header_row)
         fingerprint = _header_fingerprint(profile.header_row, columns)
         column_indexes = _resolve_profile_columns(profile, columns)
         sample_rows = _preview_rows(
@@ -402,6 +494,8 @@ def parse_workbook(
             len(columns),
             sample_limit,
             overrides,
+            min_col=selected_table.min_col if selected_table else 1,
+            end_row=selected_table.data_end_row if selected_table else None,
         )
         raw = _read_observations(
             worksheet,
@@ -411,6 +505,7 @@ def parse_workbook(
             column_indexes,
             issues,
             overrides,
+            end_row=selected_table.data_end_row if selected_table else None,
         )
     observations = _merge_observations(
         raw,
@@ -561,13 +656,87 @@ def _select_sheet(workbook: Workbook, sheet_name: str | None):
     return workbook[selected]
 
 
-def _read_columns(worksheet, header_row: int) -> tuple[SourceColumn, ...]:
+def _workbook_tables(workbook: Workbook) -> tuple[WorkbookTable, ...]:
+    result: list[WorkbookTable] = []
+    for worksheet in workbook.worksheets:
+        for table in _read_worksheet_tables(cast(ReadOnlyWorksheet, worksheet)):
+            try:
+                min_col, min_row, max_col, max_row = range_boundaries(table.ref)
+                if not all(
+                    isinstance(value, int) and value >= 1
+                    for value in (min_col, min_row, max_col, max_row)
+                ) or min_col > max_col or min_row > max_row:
+                    raise ValueError("잘못된 표 범위")
+            except (TypeError, ValueError) as error:
+                raise WorkbookStructureError(
+                    f"'{table.name}' 표 범위를 읽을 수 없습니다."
+                ) from error
+            totals_rows = table.totalsRowCount
+            if totals_rows is None:
+                totals_rows = 1 if table.totalsRowShown else 0
+            data_end = max_row - totals_rows
+            result.append(
+                WorkbookTable(
+                    table.name, worksheet.title, table.ref,
+                    min_row, min_row + 1, data_end, min_col, max_col,
+                    table.headerRowCount if table.headerRowCount is not None else 1,
+                )
+            )
+    return tuple(result)
+
+
+def _read_worksheet_tables(worksheet: ReadOnlyWorksheet) -> Iterator[Table]:
+    """Read structured table definitions from read-only worksheet relationships."""
+    internal = cast(Any, worksheet)
+    archive = internal.parent._archive
+    relationships_path = get_rels_path(internal._worksheet_path)
+    if relationships_path not in archive.namelist():
+        return
+    try:
+        relationships = get_dependents(archive, relationships_path)
+        for relationship in relationships.find(Table._rel_type):
+            yield Table.from_tree(fromstring(archive.read(relationship.target)))
+    except (BadZipFile, KeyError, TypeError, ValueError) as error:
+        raise WorkbookStructureError(
+            f"'{worksheet.title}' 시트의 Excel 표 정보를 읽을 수 없습니다."
+        ) from error
+
+
+def _validate_table(table: WorkbookTable) -> None:
+    if table.header_row_count != 1:
+        raise WorkbookStructureError(f"'{table.name}' 표에 머리글이 없습니다. 머리글이 있는 Excel 표로 바꿔주세요.")
+    if table.data_end_row < table.header_row:
+        raise WorkbookStructureError(f"'{table.name}' 표의 머리글·합계행 범위가 올바르지 않습니다.")
+    if table.max_col > _MAX_XLSX_COLUMN:
+        raise WorkbookStructureError(
+            f"'{table.name}' 표가 Excel의 마지막 열 XFD를 벗어났습니다."
+        )
+    if table.data_end_row - table.header_row > _MAX_DATA_ROWS:
+        raise WorkbookStructureError(f"'{table.name}' 표는 {_MAX_DATA_ROWS:,}행까지만 가져올 수 있습니다.")
+
+
+def _select_table(tables: tuple[WorkbookTable, ...], name: str | None) -> WorkbookTable:
+    if not tables:
+        raise WorkbookStructureError("Excel 표가 없습니다. Excel에서 명단 범위를 '삽입 → 표'로 만든 뒤 다시 선택해주세요.")
+    if name is None:
+        return next((table for table in tables if table.name == "명단"), tables[0])
+    for table in tables:
+        if table.name == name:
+            return table
+    raise WorkbookStructureError(f"선택한 Excel 표를 찾을 수 없습니다: {name}")
+
+
+def _read_columns(
+    worksheet, header_row: int, min_col: int = 1, max_col: int | None = None
+) -> tuple[SourceColumn, ...]:
+    bounded = max_col is not None
+    max_col = _MAX_COLUMNS if max_col is None else max_col
     cells = next(
         worksheet.iter_rows(
             min_row=header_row,
             max_row=header_row,
-            min_col=1,
-            max_col=_MAX_COLUMNS,
+            min_col=min_col,
+            max_col=max_col,
         ),
         (),
     )
@@ -578,9 +747,10 @@ def _read_columns(worksheet, header_row: int) -> tuple[SourceColumn, ...]:
     )
     if last == 0:
         raise WorkbookStructureError(f"{header_row}행에서 헤더를 찾지 못했습니다.")
+    last_column = max_col if bounded else min_col + last - 1
     return tuple(
-        SourceColumn(index, get_column_letter(index), headers[index - 1])
-        for index in range(1, last + 1)
+        SourceColumn(index, get_column_letter(index), headers[index - min_col])
+        for index in range(min_col, last_column + 1)
     )
 
 
@@ -610,17 +780,26 @@ def _preview_rows(
     column_count: int,
     limit: int,
     overrides: Mapping[tuple[int, str], object] | None = None,
+    *,
+    min_col: int = 1,
+    end_row: int | None = None,
 ) -> tuple[WorkbookPreviewRow, ...]:
     result: list[WorkbookPreviewRow] = []
-    max_row = min(worksheet.max_row or start_row, start_row + max(limit * 5, 20))
+    max_row = (
+        end_row
+        if end_row is not None
+        else min(worksheet.max_row or start_row, start_row + max(limit * 5, 20))
+    )
+    if max_row < start_row:
+        return ()
     rows = worksheet.iter_rows(
         min_row=start_row,
         max_row=max_row,
-        min_col=1,
-        max_col=column_count,
+        min_col=min_col,
+        max_col=min_col + column_count - 1,
     )
     for row_number, row in enumerate(rows, start=start_row):
-        inputs = _cell_inputs(row, row_number, overrides or {})
+        inputs = _cell_inputs(row, row_number, overrides or {}, min_col=min_col)
         values = tuple(_display_value(cell.value) for cell in inputs)
         if not any(values):
             continue
@@ -661,9 +840,11 @@ def _cell_inputs(
     cells: Sequence[Cell],
     row_number: int,
     overrides: Mapping[tuple[int, str], object],
+    *,
+    min_col: int = 1,
 ) -> tuple[_CellInput, ...]:
     result: list[_CellInput] = []
-    for column_index, cell in enumerate(cells, start=1):
+    for column_index, cell in enumerate(cells, start=min_col):
         key = (row_number, get_column_letter(column_index))
         if key in overrides:
             value = overrides[key]
@@ -714,7 +895,7 @@ def _resolve_profile_columns(
 def _resolve_column(token: str, columns: tuple[SourceColumn, ...]) -> int:
     if _COLUMN_PATTERN.fullmatch(token):
         index = column_index_from_string(token.upper())
-        if index <= len(columns):
+        if any(column.index == index for column in columns):
             return index
     key = _text_key(token)
     matches = tuple(column.index for column in columns if _text_key(column.header) == key)
@@ -735,11 +916,13 @@ def _read_observations(
     indexes: Mapping[str, int],
     issues: list[ImportIssue],
     overrides: Mapping[tuple[int, str], object],
+    *,
+    end_row: int | None = None,
 ) -> list[_RawObservation]:
     mapped_indexes = tuple(sorted(set(indexes.values())))
     max_column = max(mapped_indexes)
     first_row = profile.data_start_row
-    declared_last = worksheet.max_row or first_row
+    declared_last = end_row if end_row is not None else worksheet.max_row or first_row
     last_row = min(declared_last, first_row + _MAX_DATA_ROWS - 1)
     result: list[_RawObservation] = []
     blank_run = 0
@@ -754,7 +937,7 @@ def _read_observations(
         cells = _cell_inputs(source_cells, row_number, overrides)
         if all(_is_blank(cells[index - 1].value) for index in mapped_indexes):
             blank_run += 1
-            if saw_data and blank_run >= _BLANK_ROW_STOP:
+            if end_row is None and saw_data and blank_run >= _BLANK_ROW_STOP:
                 break
             continue
         saw_data = True

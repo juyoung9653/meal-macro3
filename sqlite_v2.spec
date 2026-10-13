@@ -1,6 +1,11 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 from PyInstaller.utils.hooks import collect_data_files
+from PyInstaller.utils.win32.versioninfo import (
+    FixedFileInfo, StringFileInfo, StringStruct, StringTable,
+    VarFileInfo, VarStruct, VSVersionInfo,
+)
+from src.version import APP_VERSION, WINDOWS_VERSION
 
 
 holiday_datas = collect_data_files(
@@ -35,7 +40,20 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name="meal_delivery_sqlite_v2",
+    name="meal_delivery",
+    version=VSVersionInfo(
+        ffi=FixedFileInfo(filevers=WINDOWS_VERSION, prodvers=WINDOWS_VERSION),
+        kids=[
+            StringFileInfo([StringTable("041204B0", [
+                StringStruct("FileDescription", "급식 배송 운영"),
+                StringStruct("ProductName", "급식 배송 운영"),
+                StringStruct("FileVersion", APP_VERSION),
+                StringStruct("ProductVersion", APP_VERSION),
+                StringStruct("OriginalFilename", "meal_delivery.exe"),
+            ])]),
+            VarFileInfo([VarStruct("Translation", [0x0412, 1200])]),
+        ],
+    ),
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

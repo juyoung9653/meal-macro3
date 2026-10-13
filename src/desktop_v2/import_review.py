@@ -68,6 +68,24 @@ _HOUSEHOLD_CRITERION_LABELS = {
 }
 
 
+def import_decision_rows(
+    plan: ReconciliationPlan,
+    household_plan: HouseholdGroupingPlan | None,
+) -> tuple[StagedPerson, ...]:
+    """Only identity conflicts and ambiguous households for new people need input."""
+    household_required = set(
+        () if household_plan is None else household_plan.required_decision_ids
+    )
+    return tuple(
+        item for item in plan.staged_people
+        if item.disposition is ReconciliationDisposition.REVIEW
+        or (
+            item.disposition is ReconciliationDisposition.NEW
+            and item.observation.observation_id in household_required
+        )
+    )
+
+
 class ImportReviewDialog(QDialog):
     """Collect link/new/ignore decisions without committing the revision."""
 
@@ -104,6 +122,7 @@ class ImportReviewDialog(QDialog):
         self._roster = roster
         self._plan = plan
         self._household_plan = household_plan
+        self._decision_rows = import_decision_rows(plan, household_plan)
         self._purpose = purpose
         self._lunch_delivering_ids = frozenset(lunch_delivering_ids)
         self._combos: dict[UUID, QComboBox] = {}
@@ -115,7 +134,7 @@ class ImportReviewDialog(QDialog):
         }
         register_application_fonts()
         self.setStyleSheet(application_stylesheet())
-        self.setWindowTitle("명단 가져오기 마지막 확인")
+        self.setWindowTitle("명단 가져오기 · 연결 선택 필요")
         self.resize(1420, 680)
         self.setMinimumSize(1080, 540)
         self._build_ui()
@@ -127,8 +146,12 @@ class ImportReviewDialog(QDialog):
         decisions: dict[UUID, ReconciliationDecision] = {}
         for staged in self._plan.staged_people:
             observation_id = staged.observation.observation_id
-            combo = self._combos[observation_id]
-            data = combo.currentData()
+            combo = self._combos.get(observation_id)
+            data = (
+                combo.currentData() if combo is not None
+                else "new" if staged.disposition is ReconciliationDisposition.NEW
+                else "auto"
+            )
             if data == "auto":
                 continue
             if data == "ignore":
@@ -157,11 +180,11 @@ class ImportReviewDialog(QDialog):
     def household_decisions(self) -> dict[UUID, HouseholdGroupingDecision]:
         if self._household_plan is None:
             return {}
-        decisions = {}
+        decisions = self._household_plan.default_decisions()
         for observation_id, combo in self._household_combos.items():
             household_id = combo.currentData()
             identity_data = self._combos[observation_id].currentData()
-            if household_id == _HOUSEHOLD_PLACEHOLDER and identity_data != "new":
+            if identity_data != "new":
                 continue
             if not isinstance(household_id, UUID):
                 raise ValueError("가구 처리 결정을 확인할 수 없습니다.")
@@ -177,11 +200,11 @@ class ImportReviewDialog(QDialog):
         layout.setSpacing(12)
         header = QHBoxLayout()
         title_column = QVBoxLayout()
-        title = QLabel("4. 명단에 저장할 내용 마지막 확인")
+        title = QLabel("연결이 모호한 항목만 선택해주세요")
         title.setObjectName("workspaceTitle")
         subtitle = QLabel(
             f"적용일 {self._plan.effective_on.isoformat()} · "
-            + ("중식 명단의 사람 연결을 확인하세요. 기존 배송 대상자는 자동 비교합니다." if self._purpose is ImportPurpose.VACATION_LUNCH else "사람 처리와 제안된 가구 묶음을 확인하세요.")
+            + "나머지 명단은 자동 처리합니다. 선택을 마치면 바로 가져옵니다."
         )
         subtitle.setObjectName("workspaceSubtitle")
         title_column.addWidget(title)
@@ -193,7 +216,7 @@ class ImportReviewDialog(QDialog):
         header.addWidget(self._summary)
         layout.addLayout(header)
 
-        self._table = QTableWidget(len(self._plan.staged_people), 10)
+        self._table = QTableWidget(len(self._decision_rows), 10)
         self._table.setHorizontalHeaderLabels(
             (
                 "분류",
@@ -218,7 +241,7 @@ class ImportReviewDialog(QDialog):
         for column, width in enumerate(widths):
             self._table.setColumnWidth(column, width)
         self._table.horizontalHeader().setStretchLastSection(True)
-        for row, staged in enumerate(self._plan.staged_people):
+        for row, staged in enumerate(self._decision_rows):
             self._populate_row(row, staged)
         layout.addWidget(self._table, 1)
 
@@ -234,7 +257,7 @@ class ImportReviewDialog(QDialog):
             | QDialogButtonBox.StandardButton.Ok
         )
         self._buttons.button(QDialogButtonBox.StandardButton.Ok).setText(
-            "확인한 내용 저장"
+            "선택한 내용으로 가져오기"
         )
         self._buttons.button(QDialogButtonBox.StandardButton.Ok).setObjectName(
             "primaryAction"
@@ -514,11 +537,14 @@ class ImportReviewDialog(QDialog):
         )
         if self._purpose is ImportPurpose.VACATION_LUNCH:
             present_ids = {
-                (staged.matched_person_id if combo.currentData() == "auto" else combo.currentData())
+                staged.matched_person_id
                 for staged in self._plan.staged_people
-                for combo in (self._combos[staged.observation.observation_id],)
-                if combo.currentData() != "new"
+                if staged.disposition is ReconciliationDisposition.MATCHED
             }
+            present_ids.update(
+                combo.currentData() for combo in self._combos.values()
+                if isinstance(combo.currentData(), UUID)
+            )
             omitted_count = len(self._lunch_delivering_ids - present_ids)
             self._summary.setText(self._summary.text() + f" · 중식 미배송 전환 {omitted_count}")
         self._buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(

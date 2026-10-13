@@ -6,6 +6,8 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
 import zipfile
+import hashlib
+import json
 
 import pytest
 
@@ -34,6 +36,7 @@ from src.storage import (
     inspect_backup,
 )
 from src.storage.database_backup import backup_has_recovery_password
+import src.storage.database_backup as backup_module
 
 
 REVISION_ID = UUID("70000000-0000-0000-0000-000000000001")
@@ -105,6 +108,146 @@ def test_single_password_create_change_and_restore(tmp_path: Path):
         assert restored.credentials.recovery_slot is None
     with pytest.raises(CredentialUnlockError):
         DatabaseSession.open(destination, "only-password")
+
+
+def test_password_rotation_preserves_historical_snapshots_and_legacy_recovery(tmp_path: Path):
+    backups = tmp_path / "backups"
+    backups.mkdir()
+    with DatabaseSession.create(tmp_path / "source.sqlite3", "first", "recovery", backup_directory=backups) as session:
+        oldest = session.backup_now()
+        session.append_revision(_record())
+        middle = session.change_user_password("first", "second")
+        assert middle.rotation and len(middle.rotation.updated) == 2
+        before = {record.path: inspect_backup(record.path) for record in (oldest, middle.record)}
+        newest = session.change_user_password("second", "third")
+        assert newest.rotation and len(newest.rotation.updated) == 3
+        assert not newest.rotation.failed and not newest.rotation.unreadable
+        for index, (path, original) in enumerate(before.items()):
+            after = inspect_backup(path)
+            assert after.database_sha256 == original.database_sha256
+            assert after.database_size == original.database_size
+            assert after.latest_revision_id == original.latest_revision_id
+            assert after.created_at == original.created_at
+            assert backup_has_recovery_password(path)
+            with zipfile.ZipFile(path) as archive:
+                assert hashlib.sha256(archive.read("database.sqlite3")).hexdigest() == original.database_sha256
+            with pytest.raises(CredentialUnlockError):
+                DatabaseSession.restore_and_open_with_user_password(path, tmp_path / f"old-{index}.sqlite3", "first")
+            with DatabaseSession.restore_and_open_with_user_password(path, tmp_path / f"new-{index}.sqlite3", "third") as restored:
+                assert (restored.database.latest_revision() is None) == (original.latest_revision_id is None)
+
+
+def test_password_rotation_excludes_other_database_and_reports_unreadable(tmp_path: Path):
+    backups = tmp_path / "backups"
+    backups.mkdir()
+    with DatabaseSession.create(tmp_path / "other.sqlite3", "other", backup_directory=backups) as other:
+        foreign = other.backup_now().path
+    foreign_bytes = foreign.read_bytes()
+    broken = backups / "broken.mealbackup"
+    broken.write_bytes(b"broken archive")
+    with DatabaseSession.create(tmp_path / "source.sqlite3", "first", backup_directory=backups) as session:
+        result = session.change_user_password("first", "second")
+        assert result.rotation and result.rotation.unreadable == (broken,)
+        assert result.rotation.failed == ()
+    assert broken.read_bytes() == b"broken archive"
+    assert foreign.read_bytes() == foreign_bytes
+
+
+def test_password_rotation_continues_after_corrupt_credentials(tmp_path: Path):
+    backups = tmp_path / "backups"
+    backups.mkdir()
+    with DatabaseSession.create(tmp_path / "source.sqlite3", "first", backup_directory=backups) as session:
+        corrupt = session.backup_now().path
+        valid = session.backup_now().path
+        with zipfile.ZipFile(corrupt) as archive:
+            database_payload = archive.read("database.sqlite3")
+            manifest = json.loads(archive.read("manifest.json"))
+        bad_credentials = b"not json"
+        manifest["credentials"]["size"] = len(bad_credentials)
+        manifest["credentials"]["sha256"] = hashlib.sha256(bad_credentials).hexdigest()
+        with zipfile.ZipFile(corrupt, "w", compression=zipfile.ZIP_STORED) as archive:
+            archive.writestr("database.sqlite3", database_payload)
+            archive.writestr("credentials.json", bad_credentials)
+            archive.writestr("manifest.json", json.dumps(manifest).encode())
+        original = corrupt.read_bytes()
+        result = session.change_user_password("first", "second")
+        assert result.rotation and result.rotation.unreadable == (corrupt,)
+        assert valid in result.rotation.updated
+        assert corrupt.read_bytes() == original
+
+
+def test_older_schema_backup_rotates_without_migrating_archive_and_restores(tmp_path: Path):
+    backups = tmp_path / "backups"
+    backups.mkdir()
+    with DatabaseSession.create(tmp_path / "source.sqlite3", "first", backup_directory=backups) as session:
+        archive_path = session.backup_now().path
+        with zipfile.ZipFile(archive_path) as archive:
+            database_payload = archive.read("database.sqlite3")
+            credential_payload = archive.read("credentials.json")
+            manifest = json.loads(archive.read("manifest.json"))
+        legacy_file = tmp_path / "legacy.sqlite3"
+        legacy_file.write_bytes(database_payload)
+        connection = apsw.Connection(str(legacy_file))
+        try:
+            connection.pragma("cipher", "chacha20")
+            connection.pragma("hexkey", session.credentials.unlock_user("first").hex())
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute("ALTER TABLE household_projection DROP COLUMN delivery_settings_json")
+            connection.execute("ALTER TABLE person_projection DROP COLUMN delivery_settings_json")
+            connection.execute("DROP TRIGGER schema_migration_no_delete")
+            connection.execute("DELETE FROM schema_migration WHERE version >= 6")
+            connection.execute("""CREATE TRIGGER schema_migration_no_delete
+                BEFORE DELETE ON schema_migration BEGIN
+                SELECT RAISE(ABORT, 'schema migration rows are immutable'); END""")
+            connection.pragma("user_version", 5)
+            connection.execute("COMMIT")
+        finally:
+            connection.close()
+        database_payload = legacy_file.read_bytes()
+        manifest["schema_version"] = 5
+        manifest["database"]["size"] = len(database_payload)
+        manifest["database"]["sha256"] = hashlib.sha256(database_payload).hexdigest()
+        with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_STORED) as archive:
+            archive.writestr("database.sqlite3", database_payload)
+            archive.writestr("credentials.json", credential_payload)
+            archive.writestr("manifest.json", json.dumps(manifest).encode())
+        original_hash = inspect_backup(archive_path).database_sha256
+        result = session.change_user_password("first", "second")
+        assert result.rotation and archive_path in result.rotation.updated
+        rotated = inspect_backup(archive_path)
+        assert rotated.schema_version == 5
+        assert rotated.database_sha256 == original_hash
+        with DatabaseSession.restore_and_open_with_user_password(
+            archive_path, tmp_path / "restored.sqlite3", "second"
+        ) as restored:
+            assert restored.database.schema_version == 7
+            restored.database.check_integrity()
+        assert hashlib.sha256((tmp_path / "restored.sqlite3").read_bytes()).hexdigest() != original_hash
+
+
+def test_password_rotation_replace_failure_keeps_original_and_reports_partial(tmp_path: Path, monkeypatch):
+    backups = tmp_path / "backups"
+    backups.mkdir()
+    with DatabaseSession.create(tmp_path / "source.sqlite3", "first", backup_directory=backups) as session:
+        first = session.backup_now().path
+        second = session.backup_now().path
+        original = second.read_bytes()
+        actual_replace = backup_module.os.replace
+        def fail_second(source, destination):
+            if Path(destination) == second:
+                raise OSError("replacement interrupted")
+            return actual_replace(source, destination)
+        monkeypatch.setattr(backup_module.os, "replace", fail_second)
+        result = session.change_user_password("first", "second")
+        assert result.rotation and len(result.rotation.updated) == 1
+        assert len(result.rotation.failed) == 1
+        assert result.rotation.failed[0][0] == second
+        assert result.record is not None
+        assert second.read_bytes() == original
+        with DatabaseSession.restore_and_open_with_user_password(first, tmp_path / "first-new.sqlite3", "second"):
+            pass
+        with DatabaseSession.restore_and_open_with_user_password(second, tmp_path / "second-old.sqlite3", "first"):
+            pass
 
 
 def test_user_password_opens_db_and_recovery_password_resets_it(tmp_path: Path):

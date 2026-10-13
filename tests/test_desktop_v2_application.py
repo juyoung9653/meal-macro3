@@ -14,7 +14,10 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import openpyxl
 import pytest
+import src.desktop_v2.import_controller as import_controller_module
 from PySide6.QtWidgets import QApplication, QDialog
+from PySide6.QtCore import QDate
+from openpyxl.worksheet.table import Table
 
 from src.desktop_v2 import (
     DesktopStartupController,
@@ -28,6 +31,7 @@ from src.desktop_v2 import (
     GuidedInitialImportController,
     GuidedRosterImportController,
     ImportWizardSelection,
+    RosterImportWizard,
     MealStatusChangeController,
     PersonProfileEditController,
     SchoolCalendarEditOutcome,
@@ -59,6 +63,7 @@ from src.importing import (
     parse_workbook,
 )
 from src.storage import AutomaticBackupResult, DatabaseSession
+from src.storage.database_backup import BackupPasswordRotation
 
 
 PERSON_ID = UUID("84000000-0000-0000-0000-000000000001")
@@ -74,6 +79,25 @@ LUNCH_STATUS_EVENT_ID = UUID("84000000-0000-0000-0000-000000000008")
 @pytest.fixture(scope="module")
 def app():
     return QApplication.instance() or QApplication([])
+
+
+@pytest.fixture(autouse=True)
+def stable_import_person_ids(monkeypatch):
+    """Keep downstream fixture IDs stable while exercising automatic decisions."""
+    original = import_controller_module.build_import_revision
+
+    def build(roster, preview, plan, *, decisions, **kwargs):
+        names = {item.observation_id: item.name for item in preview.observations}
+        fixture_ids = {"홍길동": PERSON_ID, "새아동": LATER_PERSON_ID}
+        decisions = {
+            key: replace(value, person_id=fixture_ids[names[key]])
+            if value.resolution is IdentityResolution.CREATE_NEW and names[key] in fixture_ids
+            else value
+            for key, value in decisions.items()
+        }
+        return original(roster, preview, plan, decisions=decisions, **kwargs)
+
+    monkeypatch.setattr(import_controller_module, "build_import_revision", build)
 
 
 class _Messages:
@@ -92,6 +116,38 @@ class _Messages:
     @classmethod
     def warning(cls, *args):
         cls.warning_calls.append(args)
+
+
+def test_password_rotation_partial_warning_is_bounded_and_truthful(app, tmp_path):
+    _Messages.reset()
+    class Hub:
+        selected_action = SettingsAction.DATABASE_PASSWORD
+        def __init__(self, parent=None):
+            pass
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+    class PasswordDialog:
+        password_changed = True
+        backup_result = AutomaticBackupResult(rotation=BackupPasswordRotation(
+            updated=(tmp_path / "updated.mealbackup",),
+            failed=tuple((tmp_path / f"failed-{index}.mealbackup", "locked") for index in range(100)),
+        ))
+        def __init__(self, session, parent=None):
+            pass
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+    controller = DesktopStartupController(
+        settings_hub_dialog_type=Hub,
+        database_password_dialog_type=PasswordDialog,
+        message_box=_Messages,
+    )
+    controller._run_settings_hub(object(), None)
+    assert len(_Messages.warning_calls) == 1
+    _, title, summary = _Messages.warning_calls[0]
+    assert "변경 완료" in title
+    assert "갱신: 1개, 실패: 100개, 확인 불가: 0개" in summary
+    assert "백업을 열던 비밀번호는 파일마다 다를 수 있습니다" in summary
+    assert "failed-0.mealbackup" not in summary
 
 
 def _selection(tmp_path: Path) -> ImportWizardSelection:
@@ -198,72 +254,20 @@ def _wizard_type(selection: ImportWizardSelection, *, accepted: bool = True):
 
 
 class _AcceptedReview:
+    def __init__(self, *_args, **_kwargs):
+        raise AssertionError("Clean import must not open a final review")
+
+
+class _RejectedReview:
     def __init__(self, roster, plan, parent=None, *, household_plan=None):
-        assert roster is None
-        assert household_plan is not None
-        self._plan = plan
-        self._household_plan = household_plan
+        assert any(item.review_reasons for item in plan.staged_people)
 
-    def exec(self):
-        return QDialog.DialogCode.Accepted
-
-    def decisions(self):
-        observation_id = self._plan.staged_people[0].observation.observation_id
-        return {
-            observation_id: ReconciliationDecision(
-                observation_id,
-                IdentityResolution.CREATE_NEW,
-                PERSON_ID,
-            )
-        }
-
-    def household_decisions(self):
-        return self._household_plan.default_decisions()
-
-
-class _RejectedReview(_AcceptedReview):
     def exec(self):
         return QDialog.DialogCode.Rejected
 
 
-class _AcceptedFollowupReview:
-    def __init__(self, roster, plan, parent=None, *, household_plan=None):
-        assert roster is not None
-        assert household_plan is not None
-        self._plan = plan
-        self._household_plan = household_plan
-
-    def exec(self):
-        return QDialog.DialogCode.Accepted
-
-    def decisions(self):
-        observation_id = self._plan.staged_people[0].observation.observation_id
-        return {
-            observation_id: ReconciliationDecision(
-                observation_id,
-                IdentityResolution.CREATE_NEW,
-                LATER_PERSON_ID,
-            )
-        }
-
-    def household_decisions(self):
-        return self._household_plan.default_decisions()
-
-
-class _AcceptedMatchedFollowupReview:
-    def __init__(self, roster, plan, parent=None, *, household_plan=None):
-        assert roster is not None
-        assert household_plan is not None
-        self._household_plan = household_plan
-
-    def exec(self):
-        return QDialog.DialogCode.Accepted
-
-    def decisions(self):
-        return {}
-
-    def household_decisions(self):
-        return self._household_plan.default_decisions()
+_AcceptedFollowupReview = _AcceptedReview
+_AcceptedMatchedFollowupReview = _AcceptedReview
 
 
 class _AcceptedProfileEditDialog:
@@ -348,12 +352,17 @@ def test_cancelled_file_step_leaves_db_without_fake_revision(
     session.close()
 
 
-def test_cancelled_final_review_also_leaves_empty_db_uncommitted(
+def test_cancelled_identity_conflict_leaves_empty_db_uncommitted(
     app: QApplication,
     tmp_path: Path,
 ):
     session = _session(tmp_path)
     selection = _selection(tmp_path)
+    observation = selection.preview.observations[0]
+    duplicate = replace(observation, observation_id=UUID(int=999))
+    selection = replace(selection, preview=replace(
+        selection.preview, observations=(observation, duplicate),
+    ))
     controller = GuidedInitialImportController(
         session,
         wizard_type=_wizard_type(selection),
@@ -369,7 +378,7 @@ def test_cancelled_final_review_also_leaves_empty_db_uncommitted(
     session.close()
 
 
-def test_accepted_review_commits_first_revision_and_automatic_backup(
+def test_clean_import_skips_review_and_commits_first_revision_and_backup(
     app: QApplication,
     tmp_path: Path,
 ):
@@ -401,6 +410,94 @@ def test_accepted_review_commits_first_revision_and_automatic_backup(
     )
     assert rules[0].rule_id == HOUSEHOLD_RULE_ID
     session.close()
+
+
+@pytest.mark.parametrize("needs_correction", [False, True])
+def test_real_wizard_direct_import_persists_once_and_rejects_duplicate_source(
+    app, tmp_path, monkeypatch, needs_correction,
+):
+    _Messages.reset()
+    _selection(tmp_path)
+    path = tmp_path / "existing.xlsx"
+    workbook = openpyxl.load_workbook(path)
+    worksheet = workbook.active
+    worksheet.add_table(Table(displayName="명단", ref="A1:F2"))
+    if needs_correction:
+        worksheet["C2"] = "야식"
+    workbook.save(path)
+    workbook.close()
+    writes = []
+    append = DatabaseSession.append_revision
+
+    def append_once(session, record):
+        writes.append(record)
+        return append(session, record)
+
+    monkeypatch.setattr(DatabaseSession, "append_revision", append_once)
+
+    class Wizard(RosterImportWizard):
+        def exec(self):
+            accepted = []
+            self.accepted.connect(lambda: accepted.append(True))
+            self.path_edit.setText(str(path))
+            assert self._inspect_source()
+            self._go_next()
+            self.effective_date_edit.setDate(QDate(2026, 8, 17))
+            self._go_next()
+            if needs_correction:
+                assert self.result() != QDialog.DialogCode.Accepted
+                assert self.page_stack.currentIndex() == 2
+                self._correction_editors[(2, "C")].setCurrentText("조식")
+                self._apply_error_corrections()
+            else:
+                assert self.page_stack.currentIndex() == 1
+                assert self.person_preview_table.rowCount() == 0
+            self._go_next()
+            self._apply_error_corrections()
+            assert accepted == [True]
+            return self.result()
+
+    with _session(tmp_path) as session:
+        for attempt in (1, 2):
+            outcome = GuidedRosterImportController(
+                session, wizard_type=Wizard, review_type=_AcceptedReview,
+                actor_provider=lambda: RevisionActor("tester", "S-1-5-21-test"),
+                message_box=_Messages,
+            ).run()
+            if attempt == 1:
+                assert outcome.completed, _Messages.critical_calls
+                assert outcome.backup_result.succeeded
+            else:
+                assert outcome.status is GuidedImportStatus.FAILED
+            assert len(writes) == 1
+            roster = session.database.current_roster()
+            assert len(roster.persons) == 1
+            assert roster.persons[0].person_id == PERSON_ID
+            assert writes[-1].metadata.effective_on == date(2026, 8, 17)
+        assert len(_Messages.critical_calls) == 1
+        assert "변경되는 내용이 없습니다" in _Messages.critical_calls[0][-1]
+        assert _Messages.warning_calls == []
+
+
+def test_direct_import_commit_failure_leaves_no_revision(app, tmp_path, monkeypatch):
+    _Messages.reset()
+    selection = _selection(tmp_path)
+
+    def reject_write(_session, _record):
+        raise OSError("synthetic write failure")
+
+    monkeypatch.setattr(DatabaseSession, "append_revision", reject_write)
+    with _session(tmp_path) as session:
+        outcome = GuidedRosterImportController(
+            session, wizard_type=_wizard_type(selection), review_type=_AcceptedReview,
+            actor_provider=lambda: RevisionActor("tester", "S-1-5-21-test"),
+            message_box=_Messages,
+        ).run()
+        assert outcome.status is GuidedImportStatus.FAILED
+        assert session.database.latest_revision() is None
+        assert session.database.current_roster() is None
+        assert len(_Messages.critical_calls) == 1
+        assert "synthetic write failure" in _Messages.critical_calls[0][-1]
 
 
 def test_later_import_joins_existing_household_and_backup_restores_it(
@@ -749,10 +846,11 @@ def test_startup_builds_roster_window_only_after_guided_import_completes(
             return self._controller.run(parent)
 
     class Window:
-        def __init__(self, roster, histories, *, revision_display_code):
+        def __init__(self, roster, histories, *, revision_display_code, view_settings_scope):
             self.roster = roster
             self.histories = histories
             self.revision_display_code = revision_display_code
+            assert view_settings_scope == str(session.credentials.database_id)
             self.closed = False
             self.replaced = False
             self.replace_count = 0
@@ -1103,7 +1201,8 @@ def test_startup_builds_roster_window_only_after_guided_import_completes(
     assert outcome.ready
     assert outcome.window.roster.person(PERSON_ID).profile.name == "홍길동"
     assert len(outcome.window.histories) == 3
-    assert outcome.window.meal_history_provider(outcome.window.roster.person(PERSON_ID))
+    # Ordinary Excel import history is intentionally hidden in person history.
+    assert not outcome.window.meal_history_provider(outcome.window.roster.person(PERSON_ID))
     assert outcome.window.revision_display_code == format_revision_timestamp(
         session.database.revision(outcome.window.roster.revision_id).metadata.recorded_at
     )

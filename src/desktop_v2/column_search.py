@@ -5,6 +5,7 @@ from PySide6.QtGui import QPolygon
 from PySide6.QtWidgets import (
     QHeaderView, QLineEdit, QMenu, QWidget, QWidgetAction, QVBoxLayout,
     QHBoxLayout, QPushButton, QListWidget, QListWidgetItem, QLabel, QStyle,
+    QStyleOptionHeader,
 )
 
 
@@ -96,6 +97,7 @@ class ColumnSearchHeader(QHeaderView):
         self.buttons: dict[str, QPushButton] = {}
         self._menu = None
         self._keys: list[str] = []
+        self._sort_criteria: tuple[tuple[str, Qt.SortOrder], ...] = ()
         self.sectionResized.connect(self.update_positions)
         self.sectionMoved.connect(self.update_positions)
         self.geometriesChanged.connect(self.update_positions)
@@ -120,6 +122,16 @@ class ColumnSearchHeader(QHeaderView):
             button.setAccessibleName(f"{column.label} 필터")
             self._update_button(column.key)
         self.update_positions()
+        self.set_sort_criteria(self._sort_criteria)
+        self.viewport().update()
+
+    def set_sort_criteria(self, criteria):
+        self._sort_criteria = tuple(criteria)
+        if self._sort_criteria and self._sort_criteria[0][0] in self._keys:
+            key, order = self._sort_criteria[0]
+            self.setSortIndicator(self._keys.index(key), order)
+        else:
+            self.setSortIndicator(-1, Qt.SortOrder.AscendingOrder)
         self.viewport().update()
 
     def _update_button(self, key):
@@ -164,6 +176,7 @@ class ColumnSearchHeader(QHeaderView):
         picker.cancel.clicked.connect(menu.close)
         button = self.buttons[key]
         menu.popup(button.mapToGlobal(button.rect().bottomLeft()))
+        menu.activateWindow()
         picker.search.setFocus()
 
     def _apply_filter(self, key, search, values, menu):
@@ -173,10 +186,45 @@ class ColumnSearchHeader(QHeaderView):
         menu.close()
 
     def paintSection(self, painter, rect, logical_index):
-        painter.save()
-        painter.setClipRect(rect.adjusted(0, 0, -self.BUTTON_WIDTH, 0))
-        super().paintSection(painter, rect, logical_index)
-        painter.restore()
+        key = self._keys[logical_index] if logical_index < len(self._keys) else None
+        active = next(
+            ((priority, order) for priority, (sort_key, order)
+             in enumerate(self._sort_criteria, 1) if sort_key == key),
+            None,
+        )
+        indicator_text = ""
+        indicator_width = 0
+        if active is not None:
+            priority, order = active
+            arrow = "↑" if order == Qt.SortOrder.AscendingOrder else "↓"
+            indicator_text = f"{arrow}{priority}"
+            indicator_width = self.fontMetrics().horizontalAdvance(indicator_text) + 6
+        if self._sort_criteria:
+            option = QStyleOptionHeader()
+            self.initStyleOptionForIndex(option, logical_index)
+            option.rect = rect
+            option.sortIndicator = QStyleOptionHeader.SortIndicator.None_
+            self.style().drawControl(QStyle.ControlElement.CE_HeaderSection, option, painter, self)
+            option.rect = rect.adjusted(0, 0, -self.BUTTON_WIDTH - indicator_width - 2, 0)
+            margin = self.style().pixelMetric(QStyle.PixelMetric.PM_HeaderMargin, option, self)
+            if option.fontMetrics.horizontalAdvance(option.text) + 2 * margin > option.rect.width():
+                option.textAlignment = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+            painter.save()
+            painter.setClipRect(option.rect)
+            self.style().drawControl(QStyle.ControlElement.CE_HeaderLabel, option, painter, self)
+            painter.restore()
+        else:
+            painter.save()
+            painter.setClipRect(rect.adjusted(0, 0, -self.BUTTON_WIDTH, 0))
+            super().paintSection(painter, rect, logical_index)
+            painter.restore()
+        if active is not None:
+            indicator_rect = rect.adjusted(0, 0, -self.BUTTON_WIDTH - 2, 0)
+            indicator_rect.setLeft(indicator_rect.right() - indicator_width + 1)
+            painter.save()
+            painter.setPen(self.palette().text().color())
+            painter.drawText(indicator_rect, Qt.AlignmentFlag.AlignCenter, indicator_text)
+            painter.restore()
         if self.isSortIndicatorShown() and self.sortIndicatorSection() == logical_index:
             x = rect.right() - self.BUTTON_WIDTH - 8
             y = rect.center().y()

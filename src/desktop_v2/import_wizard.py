@@ -38,7 +38,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QProgressBar,
     QScrollArea,
-    QSpinBox,
     QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -64,6 +63,7 @@ from src.importing import (
     WorkbookImportPreview,
     WorkbookInspection,
     WorkbookStructureError,
+    WorkbookTable,
     inspect_workbook,
     parse_workbook,
     proposed_profile,
@@ -109,7 +109,7 @@ _HEADER_ALIASES = {
     ProfileField.MOBILE_PHONE: ("핸드폰", "휴대전화", "휴대폰"),
     ProfileField.NOTE: ("비고", "메모"),
 }
-_ROUTE_STOPS = ("파일 선택", "열 연결 확인", "반영 전 미리보기", "최종 검토")
+_ROUTE_STOPS = ("파일 선택", "열 연결 · 적용일", "오류가 있을 때만 수정")
 _BLANK_TOKEN = "(빈칸)"
 _HOUSEHOLD_CRITERION_LABELS = {
     HouseholdMatchCriterion.MOBILE_PHONE: "핸드폰",
@@ -362,7 +362,7 @@ class RosterImportWizard(QDialog):
         layout.addLayout(
             self._page_heading(
                 "1. 기존 Excel 파일 선택",
-                "명단이 들어 있는 시트와 헤더 위치를 먼저 확인합니다. 파일은 수정하지 않습니다.",
+                "Excel 파일의 표를 선택하고 명단 범위를 확인합니다. 파일은 수정하지 않습니다.",
             )
         )
         form = QFormLayout()
@@ -371,7 +371,7 @@ class RosterImportWizard(QDialog):
         self.purpose_combo.addItem("운영 DB 명단 가져오기", ImportPurpose.DATABASE)
         if self._allow_vacation_lunch:
             self.purpose_combo.addItem("방학 중식 명단 갱신", ImportPurpose.VACATION_LUNCH)
-        form.addRow("가져오기 목적 *", self.purpose_combo)
+            form.addRow("가져오기 목적 *", self.purpose_combo)
         path_row = QHBoxLayout()
         self.path_edit = QLineEdit()
         self.path_edit.setObjectName("importPathEdit")
@@ -392,31 +392,15 @@ class RosterImportWizard(QDialog):
         self.password_edit.editingFinished.connect(self._retry_password_if_needed)
         form.addRow("Excel 파일 비밀번호", self.password_edit)
 
-        self.sheet_combo = QComboBox()
-        self.sheet_combo.setEnabled(False)
-        self.sheet_combo.currentIndexChanged.connect(self._sheet_changed)
-        form.addRow("명단 시트 *", self.sheet_combo)
+        self.table_combo = QComboBox()
+        self.table_combo.setEnabled(False)
+        self.table_combo.currentIndexChanged.connect(self._table_changed)
+        form.addRow("명단 표 *", self.table_combo)
 
-        row_positions = QHBoxLayout()
-        self.header_row_spin = QSpinBox()
-        self.header_row_spin.setRange(1, 500)
-        self.header_row_spin.setValue(1)
-        self.header_row_spin.valueChanged.connect(self._invalidate_layout_only)
-        self.data_start_row_spin = QSpinBox()
-        self.data_start_row_spin.setRange(2, 50001)
-        self.data_start_row_spin.setValue(2)
-        self.data_start_row_spin.valueChanged.connect(self._invalidate_layout_only)
-        row_positions.addWidget(QLabel("헤더 행"))
-        row_positions.addWidget(self.header_row_spin)
-        row_positions.addSpacing(18)
-        row_positions.addWidget(QLabel("데이터 시작 행"))
-        row_positions.addWidget(self.data_start_row_spin)
-        row_positions.addStretch(1)
-        self.inspect_button = QPushButton("선택한 위치 미리보기")
+        self.inspect_button = QPushButton("표 미리보기")
         self.inspect_button.setObjectName("browseAction")
         self.inspect_button.clicked.connect(self._inspect_source)
-        row_positions.addWidget(self.inspect_button)
-        form.addRow("표 위치 *", row_positions)
+        form.addRow("", self.inspect_button)
         layout.addLayout(form)
 
         self.file_status = QLabel("파일을 선택한 뒤 미리보기를 눌러주세요.")
@@ -444,6 +428,18 @@ class RosterImportWizard(QDialog):
         self.lunch_mode_note.setObjectName("sectionLabel")
         self.lunch_mode_note.setWordWrap(True)
         layout.addWidget(self.lunch_mode_note)
+        effective_row = QHBoxLayout()
+        effective_row.addWidget(QLabel("이 명단을 적용할 날짜 (당일 포함) *"))
+        self.effective_date_edit = QDateEdit(QDate.currentDate())
+        self.effective_date_edit.setCalendarPopup(True)
+        self.effective_date_edit.setDisplayFormat("yyyy-MM-dd")
+        effective_row.addWidget(self.effective_date_edit)
+        effective_row.addStretch(1)
+        layout.addLayout(effective_row)
+        import_note = QLabel("가져오기를 누르면 오류를 검사하고 바로 저장합니다. 오류나 모호한 연결이 있을 때만 수정·선택 창이 열립니다.")
+        import_note.setObjectName("muted")
+        import_note.setWordWrap(True)
+        layout.addWidget(import_note)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         body = QWidget()
@@ -479,8 +475,8 @@ class RosterImportWizard(QDialog):
 
         body_layout.addWidget(self._section("가구 묶기 기준"))
         household_copy = QLabel(
-            "체크한 값이 모두 입력되어 있고 모두 같은 사람만 한 가구로 제안합니다. "
-            "빈칸끼리는 같은 값으로 보지 않으며, 최종 검토에서 사람별로 분리할 수 있습니다."
+            "체크한 값이 모두 입력되어 있고 모두 같으면 한 가구로 묶습니다. "
+            "빈칸끼리는 묶지 않으며, 기존 가구 후보가 여러 개일 때만 선택합니다."
         )
         household_copy.setObjectName("muted")
         household_copy.setWordWrap(True)
@@ -630,16 +626,11 @@ class RosterImportWizard(QDialog):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addLayout(
             self._page_heading(
-                "3. 명단에 넣기 전 미리보기",
-                "선택 항목의 빈칸은 그대로 저장됩니다. 빨간 오류만 없으면 다음 단계로 진행할 수 있습니다.",
+                "가져오기 오류 수정",
+                "오류를 수정한 뒤 가져옵니다. 선택 항목의 빈칸은 그대로 저장됩니다.",
             )
         )
         effective_row = QHBoxLayout()
-        effective_row.addWidget(QLabel("이 명단을 적용할 날짜 (당일 포함) *"))
-        self.effective_date_edit = QDateEdit(QDate.currentDate())
-        self.effective_date_edit.setCalendarPopup(True)
-        self.effective_date_edit.setDisplayFormat("yyyy-MM-dd")
-        effective_row.addWidget(self.effective_date_edit)
         effective_row.addStretch(1)
         self.preview_summary = QLabel()
         self.preview_summary.setObjectName("sectionLabel")
@@ -793,7 +784,7 @@ class RosterImportWizard(QDialog):
         )
         correction_actions.addWidget(self.correction_mapping_button)
         correction_actions.addStretch(1)
-        self.correction_apply_button = QPushButton("수정값으로 다시 검사")
+        self.correction_apply_button = QPushButton("수정값으로 가져오기")
         self.correction_apply_button.setObjectName("primaryAction")
         self.correction_apply_button.clicked.connect(
             self._apply_error_corrections
@@ -881,23 +872,27 @@ class RosterImportWizard(QDialog):
         if not path_text:
             self._show_error("기존 Excel 파일을 선택해주세요.")
             return False
-        if self.data_start_row_spin.value() <= self.header_row_spin.value():
-            self._show_error("데이터 시작 행은 헤더 행보다 뒤여야 합니다.")
-            return False
-        selected_sheet = self.sheet_combo.currentData() if self.sheet_combo.count() else None
+        selected_table = (
+            self.table_combo.currentData() if self.table_combo.count() else None
+        )
+        self._inspection = None
+        self._preview = None
+        self._cell_overrides.clear()
+        self.raw_table.clear()
+        self.raw_table.setRowCount(0)
+        self.raw_table.setColumnCount(0)
+        self.file_status.setText("선택한 Excel 표를 확인해주세요.")
+        self._refresh_actions()
         password = self.password_edit.text() or self._source_password or ""
-        header_row = self.header_row_spin.value()
-        data_start_row = self.data_start_row_spin.value()
         try:
             inspection = self._run_busy_task(
                 "Excel 파일을 여는 중입니다",
-                "파일 비밀번호를 확인하고 시트와 표 위치를 읽고 있습니다. 잠시 기다려주세요.",
+                "파일 비밀번호를 확인하고 Excel 표를 읽고 있습니다. 잠시 기다려주세요.",
                 lambda: inspect_workbook(
                     path_text,
                     password=password,
-                    sheet_name=selected_sheet,
-                    header_row=header_row,
-                    data_start_row=data_start_row,
+                    require_table=True,
+                    table_name=selected_table,
                 ),
             )
         except (WorkbookImportPasswordRequiredError, WorkbookImportPasswordError) as error:
@@ -913,31 +908,43 @@ class RosterImportWizard(QDialog):
             return False
         except Exception as error:
             self._password_retry_pending = False
-            self.inspect_button.setText("선택한 위치 미리보기")
+            self.inspect_button.setText("표 미리보기")
+            if isinstance(error, WorkbookStructureError):
+                self._populate_tables(error.tables, selected_table)
             self._show_error(str(error))
             return False
         self._password_retry_pending = False
         self._source_password = password
-        self.inspect_button.setText("선택한 위치 미리보기")
+        self.inspect_button.setText("표 미리보기")
         self._inspection = inspection
-        self._loading_structure = True
-        try:
-            current_sheet = inspection.selected_sheet
-            self.sheet_combo.clear()
-            for sheet in inspection.sheet_names:
-                self.sheet_combo.addItem(sheet, sheet)
-            self.sheet_combo.setCurrentIndex(self.sheet_combo.findData(current_sheet))
-            self.sheet_combo.setEnabled(True)
-        finally:
-            self._loading_structure = False
+        self._populate_tables(inspection.tables, inspection.selected_table)
         self._render_raw_preview(inspection)
         self.file_status.setText(
-            f"{inspection.selected_sheet} · 헤더 {len(inspection.columns)}열 · "
+            f"{inspection.selected_table} · 헤더 {len(inspection.columns)}열 · "
             f"미리보기 {len(inspection.preview_rows)}행을 확인했습니다."
         )
         self._prepare_mapping(inspection)
         self._refresh_actions()
         return True
+
+    def _populate_tables(
+        self, tables: tuple[WorkbookTable, ...], selected_name: str | None
+    ) -> None:
+        if selected_name is None and tables:
+            selected_name = next(
+                (table.name for table in tables if table.name == "명단"),
+                tables[0].name,
+            )
+        self._loading_structure = True
+        try:
+            self.table_combo.clear()
+            for table in tables:
+                self.table_combo.addItem(table.name, table.name)
+            if selected_name is not None:
+                self.table_combo.setCurrentIndex(self.table_combo.findData(selected_name))
+            self.table_combo.setEnabled(bool(tables))
+        finally:
+            self._loading_structure = False
 
     def _retry_password_if_needed(self) -> None:
         if (
@@ -1167,8 +1174,10 @@ class RosterImportWizard(QDialog):
             driver_column=_combo_text(self.driver_combo),
             sequence_column=_combo_text(self.sequence_combo),
             source_reference_column=_combo_text(self.source_reference_combo),
-            header_row=self.header_row_spin.value(),
-            data_start_row=self.data_start_row_spin.value(),
+            header_row=self._inspection.header_row,
+            data_start_row=self._inspection.tables[
+                self.table_combo.currentIndex()
+            ].data_start_row,
             fallback_profile_columns=fallback_columns,
             meal_true_values=_parse_value_list(self.true_values_edit.text()),
             meal_false_values=_parse_value_list(self.false_values_edit.text()),
@@ -1304,11 +1313,12 @@ class RosterImportWizard(QDialog):
         self.correction_table.setRowCount(len(display_issues))
         uneditable = False
         for row, issue in enumerate(display_issues):
-            status = "오류" if issue.blocking else "제외"
+            blocking = issue.blocking or self.purpose_combo.currentData() == ImportPurpose.VACATION_LUNCH
+            status = "오류" if blocking else "제외"
             status_item = QTableWidgetItem(status)
             status_item.setForeground(
                 Qt.GlobalColor.darkRed
-                if issue.blocking
+                if blocking
                 else QColor("#9A5B00")
             )
             self.correction_table.setItem(row, 0, status_item)
@@ -1533,7 +1543,7 @@ class RosterImportWizard(QDialog):
         return matches[0] if len(matches) == 1 else None
 
     def _apply_error_corrections(self) -> None:
-        if self._preview is None or self._busy:
+        if self._preview is None or self._busy or self._selection is not None:
             return
         self._clear_error()
         updates: dict[tuple[int, str], object] = {}
@@ -1553,13 +1563,15 @@ class RosterImportWizard(QDialog):
         self._cell_overrides.update(updates)
         self.correction_dialog.setEnabled(False)
         try:
-            self._load_preview(
+            loaded = self._load_preview(
                 self._preview.profile,
                 title="수정한 값을 다시 확인하는 중입니다",
                 detail="바꾼 셀을 적용해 명단 전체 오류를 다시 검사하고 있습니다.",
             )
         finally:
             self.correction_dialog.setEnabled(True)
+        if loaded:
+            self._finish_import_if_valid()
 
     def _reset_error_corrections(self) -> None:
         if self._preview is None or not self._cell_overrides or self._busy:
@@ -1575,6 +1587,8 @@ class RosterImportWizard(QDialog):
             self._open_correction_dialog()
 
     def _go_next(self) -> None:
+        if self._busy or self._selection is not None:
+            return
         self._clear_error()
         page = self.page_stack.currentIndex()
         if page == 0:
@@ -1603,13 +1617,30 @@ class RosterImportWizard(QDialog):
                 ),
             ):
                 return
+            if self._finish_import_if_valid():
+                return
             self._set_page(2)
             if self._preview is not None and self._preview.blocking_issues:
                 QTimer.singleShot(0, self._open_correction_dialog)
             return
-        if self._preview is None or not self._preview.can_continue:
-            self._show_error("오류를 모두 해결한 뒤 최종 검토로 이동할 수 있습니다.")
-            return
+        self._finish_import_if_valid()
+
+    def _can_import(self) -> bool:
+        return bool(
+            self._preview is not None
+            and self._preview.can_continue
+            and not (
+                self.purpose_combo.currentData() == ImportPurpose.VACATION_LUNCH
+                and self._preview.notices
+            )
+        )
+
+    def _finish_import_if_valid(self) -> bool:
+        if not self._can_import():
+            if self._preview is not None and self._preview.notices and self.purpose_combo.currentData() == ImportPurpose.VACATION_LUNCH:
+                self._show_error("방학 중식 명단에는 제외된 행이 없어야 합니다. 제외된 행을 수정한 뒤 가져와주세요.")
+            return False
+        assert self._preview is not None
         effective_on = self.effective_date_edit.date().toPython()
         self._selection = ImportWizardSelection(
             self._preview,
@@ -1620,6 +1651,7 @@ class RosterImportWizard(QDialog):
             ImportPurpose(self.purpose_combo.currentData()),
         )
         self.accept()
+        return True
 
     def _load_preview(
         self,
@@ -1632,7 +1664,7 @@ class RosterImportWizard(QDialog):
             self._show_error("Excel 파일 위치를 먼저 확인해주세요.")
             return False
         path_text = self.path_edit.text().strip()
-        selected_sheet = self._inspection.selected_sheet
+        selected_table = self._inspection.selected_table
         password = self.password_edit.text() or self._source_password or ""
         try:
             preview = self._run_busy_task(
@@ -1641,7 +1673,7 @@ class RosterImportWizard(QDialog):
                 lambda: parse_workbook(
                     path_text,
                     profile,
-                    sheet_name=selected_sheet,
+                    table_name=selected_table,
                     password=password,
                     cell_overrides=self._cell_overrides,
                 ),
@@ -1652,7 +1684,8 @@ class RosterImportWizard(QDialog):
         self.password_edit.clear()
         self._source_password = password
         self._preview = preview
-        self._render_preview(preview)
+        if not self._can_import() or self.page_stack.currentIndex() == 2:
+            self._render_preview(preview)
         self._refresh_actions()
         return True
 
@@ -1665,7 +1698,7 @@ class RosterImportWizard(QDialog):
         self.page_stack.setCurrentIndex(page)
         self.back_button.setVisible(page > 0)
         self.next_button.setText(
-            ("열 연결 확인으로", "미리보기 만들기", "최종 검토로 이동")[page]
+            ("열 연결 확인으로", "가져오기", "가져오기")[page]
         )
         for index, label in enumerate(self._route_labels):
             if index == min(page, 2):
@@ -1688,7 +1721,7 @@ class RosterImportWizard(QDialog):
             self.next_button.setEnabled(self._inspection is not None)
         elif page == 2:
             self.next_button.setEnabled(
-                self._preview is not None and self._preview.can_continue
+                self._can_import()
             )
         else:
             self.next_button.setEnabled(True)
@@ -1800,7 +1833,7 @@ class RosterImportWizard(QDialog):
             "자동 연결만 보기" if show_details else "열 연결 바꾸기"
         )
 
-    def _sheet_changed(self, *_args) -> None:
+    def _table_changed(self, *_args) -> None:
         if self._loading_structure:
             return
         self._inspection = None
@@ -1810,22 +1843,21 @@ class RosterImportWizard(QDialog):
         self._inspection = None
         self._preview = None
         self._cell_overrides.clear()
+        if hasattr(self, "raw_table"):
+            self.raw_table.clear()
+            self.raw_table.setRowCount(0)
+            self.raw_table.setColumnCount(0)
+            self.file_status.setText("파일을 선택한 뒤 표를 확인해주세요.")
         self._source_password = None
         self._password_retry_pending = False
         if hasattr(self, "inspect_button"):
-            self.inspect_button.setText("선택한 위치 미리보기")
+            self.inspect_button.setText("표 미리보기")
         self._loading_structure = True
         try:
-            self.sheet_combo.clear()
-            self.sheet_combo.setEnabled(False)
+            self.table_combo.clear()
+            self.table_combo.setEnabled(False)
         finally:
             self._loading_structure = False
-        self._refresh_actions()
-
-    def _invalidate_layout_only(self, *_args) -> None:
-        self._inspection = None
-        self._preview = None
-        self._cell_overrides.clear()
         self._refresh_actions()
 
     def _show_error(self, message: str) -> None:

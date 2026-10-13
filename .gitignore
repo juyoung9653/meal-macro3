@@ -21,6 +21,9 @@ venv/
 
 output/
 
+# Local development logs, screenshots, and verification artifacts
+/artifacts/
+
 # Excel temp files
 assets/temp.xlsx
 assets/*[0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F]
@@ -34,3 +37,10 @@ data/
 
 nul
 main.exe
+
+# Legacy local verification output
+/.agent_evidence/
+/.evidence/
+/tests/.person_delivery_ui_tmp*/
+/tests/person_delivery_ui_*.png
+/tests/person_delivery_ui_pytest.log

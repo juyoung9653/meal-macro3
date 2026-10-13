@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QSettings
-from PySide6.QtWidgets import QDialog, QDialogButtonBox, QFormLayout, QSpinBox, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QDialog, QDialogButtonBox, QFormLayout, QLabel, QSpinBox, QVBoxLayout, QWidget
 
 
 class InactiveRosterSettings:
@@ -60,6 +60,7 @@ class InactiveThresholdDialog(QDialog):
         self.days.setValue(days)
         form.addRow("연속 미배송 기간", self.days)
         layout.addLayout(form)
+        layout.addWidget(QLabel("조회 날짜를 포함한 최근 일수를 기준으로 바로 반영됩니다. 취소하면 이전 기준으로 돌아갑니다."))
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel,
             parent=self,

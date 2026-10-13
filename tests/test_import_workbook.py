@@ -3,10 +3,16 @@
 from datetime import date
 from pathlib import Path
 from uuid import UUID
+from zipfile import ZipFile
 
 import msoffcrypto
 import openpyxl
 import pytest
+from openpyxl.utils import get_column_letter
+from openpyxl.worksheet._read_only import ReadOnlyWorksheet
+from openpyxl.worksheet.table import Table
+
+import src.importing.workbook as workbook_module
 from msoffcrypto.format.ooxml import OOXMLFile
 
 from src.domain import Meal
@@ -17,6 +23,7 @@ from src.importing import (
     StoredImportProfile,
     WorkbookImportPasswordError,
     WorkbookImportPasswordRequiredError,
+    WorkbookStructureError,
     inspect_workbook,
     parse_workbook,
     proposed_profile,
@@ -144,6 +151,359 @@ def _encrypt(plain: Path, encrypted: Path, password: str) -> Path:
         assert isinstance(office_file, OOXMLFile)
         office_file.encrypt(password, destination)
     return encrypted
+
+
+def test_table_mode_uses_offset_bounds_and_excludes_totals_and_outside_cells(tmp_path: Path):
+    path = tmp_path / "offset.xlsx"
+    workbook = openpyxl.Workbook()
+    worksheet = workbook.active
+    worksheet.title = "원본"
+    worksheet["A1"] = "표 밖"
+    worksheet["D7"] = "성명"
+    worksheet["E7"] = "생년월일"
+    worksheet["F7"] = "식종"
+    worksheet["D8"] = "표 안 아동"
+    worksheet["E8"] = "20150302"
+    worksheet["F8"] = "조식"
+    worksheet["D10"] = "합계"
+    worksheet["D11"] = "표 밖 아동"
+    worksheet["E11"] = "20160403"
+    worksheet["F11"] = "중식"
+    worksheet.add_table(Table(displayName="명단", ref="D7:F10", totalsRowCount=1))
+    workbook.save(path)
+    workbook.close()
+
+    inspection = inspect_workbook(path, require_table=True)
+    assert inspection.selected_table == "명단"
+    assert inspection.tables[0].ref == "D7:F10"
+    assert tuple(column.letter for column in inspection.columns) == ("D", "E", "F")
+    assert tuple(row.row_number for row in inspection.preview_rows) == (8,)
+    assert inspection.preview_rows[0].values == ("표 안 아동", "20150302", "조식")
+
+    stale_profile = ImportMappingProfile(
+        UUID("81000000-0000-0000-0000-000000000123"),
+        1,
+        "위치 무시",
+        "roster-xlsx",
+        {ProfileField.NAME: "D", ProfileField.BIRTH_DATE: "E"},
+        combined_meals_column="F",
+        header_row=1,
+        data_start_row=2,
+    )
+    preview = parse_workbook(path, stale_profile, table_name="명단")
+    assert preview.can_continue
+    assert preview.profile.header_row == 7
+    assert preview.profile.data_start_row == 8
+    assert tuple(person.name for person in preview.observations) == ("표 안 아동",)
+    assert preview.observations[0].source.row_numbers == (8,)
+    with pytest.raises(WorkbookStructureError, match="범위 밖"):
+        parse_workbook(path, stale_profile, table_name="명단", cell_overrides={(11, "D"): "외부 수정"})
+    outside_column_profile = ImportMappingProfile(
+        UUID("81000000-0000-0000-0000-000000000124"), 1,
+        "외부 열", "roster-xlsx", {ProfileField.NAME: "A"},
+        default_meals=(Meal.LUNCH,),
+    )
+    with pytest.raises(WorkbookStructureError, match="연결한 원본 열"):
+        parse_workbook(path, outside_column_profile, table_name="명단")
+
+
+def test_table_mode_accepts_more_than_365_columns_and_mappings_after_iv(tmp_path: Path):
+    path = tmp_path / "wide-table.xlsx"
+    workbook = openpyxl.Workbook()
+    worksheet = workbook.active
+    for index in range(1, 371):
+        worksheet.cell(1, index, f"필드 {index}")
+    worksheet.cell(1, 365, "성명")
+    worksheet.cell(1, 366, "식종")
+    worksheet.cell(2, 365, "넓은 표 아동")
+    worksheet.cell(2, 366, "중식")
+    worksheet.add_table(Table(displayName="명단", ref=f"A1:{get_column_letter(370)}2"))
+    workbook.save(path)
+    workbook.close()
+
+    inspection = inspect_workbook(path, require_table=True)
+    assert len(inspection.columns) == 370
+    assert inspection.columns[364].letter == get_column_letter(365)
+    profile = ImportMappingProfile(
+        UUID("81000000-0000-0000-0000-000000000128"), 1,
+        "넓은 표", "roster-xlsx",
+        {ProfileField.NAME: get_column_letter(365)},
+        combined_meals_column=get_column_letter(366),
+    )
+    preview = parse_workbook(path, profile, table_name="명단")
+    assert preview.can_continue
+    assert tuple(person.name for person in preview.observations) == ("넓은 표 아동",)
+    assert preview.observations[0].source.row_numbers == (2,)
+
+
+def test_table_mode_accepts_narrow_offset_table_after_iv(tmp_path: Path):
+    path = tmp_path / "offset-after-iv.xlsx"
+    workbook = openpyxl.Workbook()
+    worksheet = workbook.active
+    first = get_column_letter(300)
+    second = get_column_letter(301)
+    last = get_column_letter(302)
+    worksheet.cell(7, 300, "성명")
+    worksheet.cell(7, 301, "식종")
+    worksheet.cell(7, 302, "비고")
+    worksheet.cell(8, 300, "뒤쪽 표 아동")
+    worksheet.cell(8, 301, "조식")
+    worksheet.add_table(Table(displayName="명단", ref=f"{first}7:{last}8"))
+    workbook.save(path)
+    workbook.close()
+
+    inspection = inspect_workbook(path, require_table=True)
+    assert tuple(column.letter for column in inspection.columns) == (first, second, last)
+    assert inspection.preview_rows[0].values == ("뒤쪽 표 아동", "조식", "")
+    profile = ImportMappingProfile(
+        UUID("81000000-0000-0000-0000-000000000129"), 1,
+        "뒤쪽 표", "roster-xlsx", {ProfileField.NAME: first},
+        combined_meals_column=second,
+    )
+    assert parse_workbook(path, profile, table_name="명단").can_continue
+    invalid_profile = ImportMappingProfile(
+        UUID("81000000-0000-0000-0000-000000000130"), 1,
+        "표 밖 열", "roster-xlsx", {ProfileField.NAME: "IV"},
+        combined_meals_column=second,
+    )
+    with pytest.raises(WorkbookStructureError, match="연결한 원본 열"):
+        parse_workbook(path, invalid_profile, table_name="명단")
+
+
+def test_table_mode_accepts_xfd_and_rejects_columns_beyond_it(tmp_path: Path):
+    path = tmp_path / "last-excel-column.xlsx"
+    workbook = openpyxl.Workbook()
+    worksheet = workbook.active
+    worksheet["XFC1"] = "성명"
+    worksheet["XFD1"] = "식종"
+    worksheet["XFC2"] = "마지막 열 아동"
+    worksheet["XFD2"] = "중식"
+    worksheet.add_table(Table(displayName="명단", ref="XFC1:XFD2"))
+    workbook.save(path)
+    workbook.close()
+    inspection = inspect_workbook(path, require_table=True)
+    assert tuple(column.letter for column in inspection.columns) == ("XFC", "XFD")
+    profile = ImportMappingProfile(
+        UUID("81000000-0000-0000-0000-000000000131"), 1,
+        "끝 열", "roster-xlsx", {ProfileField.NAME: "XFC"},
+        combined_meals_column="XFD",
+    )
+    preview = parse_workbook(
+        path, profile, table_name="명단", cell_overrides={(2, "XFD"): "조식"}
+    )
+    assert preview.can_continue
+    assert preview.corrected_cells == ((2, "XFD"),)
+    assert preview.observations[0].meals == (Meal.BREAKFAST,)
+
+    invalid_path = tmp_path / "beyond-excel-column.xlsx"
+    invalid_workbook = openpyxl.Workbook()
+    invalid_sheet = invalid_workbook.active
+    invalid_sheet["XFE1"] = "성명"
+    invalid_sheet["XFE2"] = "불가"
+    invalid_sheet.add_table(Table(displayName="명단", ref="XFE1:XFE2"))
+    invalid_workbook.save(invalid_path)
+    invalid_workbook.close()
+    with pytest.raises(WorkbookStructureError, match="XFD"):
+        inspect_workbook(invalid_path, require_table=True)
+
+
+def test_table_mode_lists_all_sheets_and_defaults_to_named_table(tmp_path: Path):
+    path = tmp_path / "tables.xlsx"
+    workbook = openpyxl.Workbook()
+    first = workbook.active
+    first.title = "첫 시트"
+    first.append(("성명", "식종"))
+    first.append(("첫 아동", "조식"))
+    first.add_table(Table(displayName="기타", ref="A1:B2"))
+    second = workbook.create_sheet("둘째 시트")
+    second.append(("성명", "식종"))
+    second.append(("둘째 아동", "중식"))
+    second.add_table(Table(displayName="명단", ref="A1:B2"))
+    workbook.save(path)
+    workbook.close()
+
+    inspection = inspect_workbook(path, require_table=True)
+    assert tuple((table.name, table.sheet_name, table.ref) for table in inspection.tables) == (
+        ("기타", "첫 시트", "A1:B2"), ("명단", "둘째 시트", "A1:B2")
+    )
+    assert inspection.selected_table == "명단"
+    assert inspection.selected_sheet == "둘째 시트"
+    assert inspect_workbook(path, require_table=True, table_name="기타").selected_sheet == "첫 시트"
+    with pytest.raises(WorkbookStructureError, match="찾을 수 없습니다"):
+        inspect_workbook(path, require_table=True, table_name="없는 표")
+
+
+def test_table_mode_requires_excel_table_without_legacy_fallback(tmp_path: Path):
+    path = tmp_path / "plain.xlsx"
+    workbook = openpyxl.Workbook()
+    workbook.active.append(("성명", "식종"))
+    workbook.active.append(("아동", "중식"))
+    workbook.save(path)
+    workbook.close()
+    assert inspect_workbook(path).columns[0].header == "성명"
+    with pytest.raises(WorkbookStructureError, match="삽입 → 표"):
+        inspect_workbook(path, require_table=True)
+
+
+def test_table_mode_streams_selected_sheet_without_parsing_unrelated_cells(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    path = tmp_path / "unrelated-cells.xlsx"
+    workbook = openpyxl.Workbook()
+    selected = workbook.active
+    selected.append(("성명", "식종"))
+    selected.append(("표 안 아동", "중식"))
+    selected.add_table(Table(displayName="명단", ref="A1:B2"))
+    unrelated = workbook.create_sheet("다른 자료")
+    for row in range(1, 101):
+        for column in range(1, 21):
+            unrelated.cell(row, column, "가져오지 않을 값")
+    workbook.save(path)
+    workbook.close()
+
+    original_load = workbook_module.openpyxl.load_workbook
+    original_iter = ReadOnlyWorksheet.iter_rows
+    load_modes: list[bool] = []
+
+    def streaming_load(*args, **kwargs):
+        load_modes.append(kwargs["read_only"])
+        return original_load(*args, **kwargs)
+
+    def selected_rows_only(self, *args, **kwargs):
+        if self.title == "다른 자료":
+            raise AssertionError("표 밖 시트의 셀을 읽었습니다")
+        return original_iter(self, *args, **kwargs)
+
+    monkeypatch.setattr(workbook_module.openpyxl, "load_workbook", streaming_load)
+    monkeypatch.setattr(
+        ReadOnlyWorksheet, "iter_rows", selected_rows_only
+    )
+    inspection = inspect_workbook(path, require_table=True)
+    profile = ImportMappingProfile(
+        UUID("81000000-0000-0000-0000-000000000127"), 1,
+        "읽기 전용", "roster-xlsx", {ProfileField.NAME: "A"},
+        combined_meals_column="B",
+    )
+    preview = parse_workbook(path, profile, table_name="명단")
+
+    assert inspection.preview_rows[0].values == ("표 안 아동", "중식")
+    assert preview.can_continue
+    assert load_modes == [True, True]
+
+
+@pytest.mark.parametrize("target", ("/xl/tables/table1.xml", "../tables/table1.xml"))
+def test_table_mode_resolves_absolute_and_relative_relationship_targets(
+    tmp_path: Path, target: str,
+):
+    original = tmp_path / "original.xlsx"
+    rewritten = tmp_path / "rewritten.xlsx"
+    workbook = openpyxl.Workbook()
+    worksheet = workbook.active
+    worksheet.append(("성명", "식종"))
+    worksheet.append(("아동", "중식"))
+    worksheet.add_table(Table(displayName="명단", ref="A1:B2"))
+    workbook.save(original)
+    workbook.close()
+    with ZipFile(original) as source, ZipFile(rewritten, "w") as destination:
+        for member in source.infolist():
+            content = source.read(member.filename)
+            if member.filename == "xl/worksheets/_rels/sheet1.xml.rels":
+                content = content.replace(
+                    b'Target="/xl/tables/table1.xml"',
+                    f'Target="{target}"'.encode("utf-8"),
+                )
+            destination.writestr(member, content)
+
+    inspection = inspect_workbook(rewritten, require_table=True)
+    assert inspection.selected_table == "명단"
+    assert inspection.preview_rows[0].values == ("아동", "중식")
+
+
+def test_table_mode_keeps_reading_after_one_hundred_blank_body_rows(tmp_path: Path):
+    path = tmp_path / "gaps.xlsx"
+    workbook = openpyxl.Workbook()
+    worksheet = workbook.active
+    worksheet.append(("성명", "식종"))
+    worksheet.append(("첫 아동", "조식"))
+    worksheet["A103"] = "뒤 아동"
+    worksheet["B103"] = "중식"
+    worksheet.add_table(Table(displayName="명단", ref="A1:B103"))
+    workbook.save(path)
+    workbook.close()
+    profile = ImportMappingProfile(
+        UUID("81000000-0000-0000-0000-000000000125"), 1,
+        "빈 행", "roster-xlsx", {ProfileField.NAME: "A"},
+        combined_meals_column="B",
+    )
+
+    preview = parse_workbook(path, profile, table_name="명단")
+    assert preview.can_continue
+    assert tuple(person.name for person in preview.observations) == ("첫 아동", "뒤 아동")
+    assert preview.observations[-1].source.row_numbers == (103,)
+
+
+def test_table_mode_ignores_unsupported_other_table(tmp_path: Path):
+    path = tmp_path / "mixed.xlsx"
+    workbook = openpyxl.Workbook()
+    first = workbook.active
+    first["A1"] = "첫 값"
+    first["A2"] = "둘째 값"
+    first.add_table(Table(displayName="머리글없음", ref="A1:A2", headerRowCount=0))
+    second = workbook.create_sheet("명단 시트")
+    second.append(("성명", "식종"))
+    second.append(("아동", "중식"))
+    second.add_table(Table(displayName="명단", ref="A1:B2"))
+    workbook.save(path)
+    workbook.close()
+
+    inspection = inspect_workbook(path, require_table=True)
+    assert tuple(table.name for table in inspection.tables) == ("머리글없음", "명단")
+    assert inspection.selected_table == "명단"
+    with pytest.raises(WorkbookStructureError, match="머리글이 없습니다"):
+        inspect_workbook(path, require_table=True, table_name="머리글없음")
+
+
+def test_encrypted_table_mode_retries_password_and_reads_table(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    plain = tmp_path / "plain.xlsx"
+    encrypted = tmp_path / "encrypted.xlsx"
+    workbook = openpyxl.Workbook()
+    worksheet = workbook.active
+    worksheet.append(("성명", "식종"))
+    worksheet.append(("암호 아동", "중식"))
+    worksheet.add_table(Table(displayName="명단", ref="A1:B2"))
+    workbook.save(plain)
+    workbook.close()
+    _encrypt(plain, encrypted, "secret")
+
+    with pytest.raises(WorkbookImportPasswordRequiredError):
+        inspect_workbook(encrypted, require_table=True)
+    with pytest.raises(WorkbookImportPasswordError):
+        inspect_workbook(encrypted, require_table=True, password="wrong")
+    inspection = inspect_workbook(encrypted, require_table=True, password="secret")
+    assert inspection.selected_table == "명단"
+    original_decrypt = OOXMLFile.decrypt
+    decrypt_count = 0
+
+    def counted_decrypt(self, *args, **kwargs):
+        nonlocal decrypt_count
+        decrypt_count += 1
+        return original_decrypt(self, *args, **kwargs)
+
+    monkeypatch.setattr(OOXMLFile, "decrypt", counted_decrypt)
+    with pytest.raises(WorkbookStructureError, match="찾을 수 없습니다") as error:
+        inspect_workbook(
+            encrypted, require_table=True, table_name="없는표", password="secret"
+        )
+    assert tuple(table.name for table in error.value.tables) == ("명단",)
+    assert decrypt_count == 1
+    profile = ImportMappingProfile(
+        UUID("81000000-0000-0000-0000-000000000126"), 1,
+        "암호 표", "roster-xlsx", {ProfileField.NAME: "A"},
+        combined_meals_column="B",
+    )
+    assert parse_workbook(encrypted, profile, table_name="명단", password="secret").can_continue
 
 
 def test_inspection_finds_header_row_columns_and_small_preview(tmp_path: Path):

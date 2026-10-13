@@ -21,6 +21,8 @@ from src.domain.roster import (
     InclusiveDateRange, Meal, MealEnrollment, Person, PersonProfile, RosterSnapshot,
 )
 from src.domain.status import MealStatus, StatusEvent, resolve_status_history
+from src.domain.entitlements import LunchDayRule, SchoolLunchMark
+from src.domain.school_calendar import SchoolLunchCalendar, SchoolLunchDay, SchoolLunchSchoolSchedule
 
 
 REVISION = UUID("af000000-0000-0000-0000-000000000001")
@@ -103,7 +105,7 @@ def _visible_ids(window):
     }
 
 
-def test_window_archive_switch_ignores_view_day_and_restores_after_roster_refresh(app, tmp_path):
+def test_window_archive_switch_follows_view_day_and_restores_after_roster_refresh(app, tmp_path):
     settings = QSettings(str(tmp_path / "archive.ini"), QSettings.Format.IniFormat)
     roster, histories = _roster_and_histories()
     window = RosterWindow(roster, histories, inactive_settings=settings)
@@ -121,12 +123,17 @@ def test_window_archive_switch_ignores_view_day_and_restores_after_roster_refres
     window._archive_action.trigger()
     assert _visible_ids(window) == {ARCHIVED}
     window._on_column_search_changed("name", "")
+    window._set_day(date(2020, 1, 1))
+    assert _visible_ids(window) == set()
     window._set_day(date.today() - timedelta(days=45))
     assert _visible_ids(window) == {ARCHIVED}
 
     def save_days():
         dialog = window.findChild(InactiveThresholdDialog)
         dialog.days.setValue(36500)
+        assert window._roster_title.text() == "장기 미배송 보관함 (0명)"
+        assert _visible_ids(window) == set()
+        assert not settings.contains(InactiveRosterSettings.SETTINGS_KEY)
         dialog.findChild(QDialogButtonBox).button(QDialogButtonBox.StandardButton.Save).click()
     QTimer.singleShot(0, save_days)
     window._archive_threshold_action.trigger()
@@ -145,17 +152,92 @@ def test_window_archive_switch_ignores_view_day_and_restores_after_roster_refres
     window.close()
 
 
-def test_threshold_cancel_keeps_setting(app, tmp_path):
+def test_one_day_archive_matches_selected_day_status_cells(app, tmp_path):
+    selected_day = date(2026, 9, 30)
+    mixed = UUID("af000000-0000-0000-0000-000000000005")
+    all_dash = UUID("af000000-0000-0000-0000-000000000006")
+    paused = UUID("af000000-0000-0000-0000-000000000007")
+    roster = RosterSnapshot(
+        REVISION,
+        persons=(
+            Person(mixed, PersonProfile("미배송·미제공", school_name="샘플초")),
+            Person(all_dash, PersonProfile("전체 미제공")),
+            Person(paused, PersonProfile("일시중지")),
+        ),
+        enrollments=(
+            MealEnrollment(mixed, Meal.DINNER, InclusiveDateRange(date(2024, 1, 1))),
+            MealEnrollment(mixed, Meal.LUNCH, InclusiveDateRange(date(2024, 1, 1))),
+            MealEnrollment(paused, Meal.DINNER, InclusiveDateRange(date(2024, 1, 1))),
+        ),
+    )
+    histories = {
+        (mixed, Meal.DINNER): resolve_status_history(mixed, Meal.DINNER, (
+            StatusEvent(UUID(int=101), REVISION, mixed, Meal.DINNER,
+                        MealStatus.STOPPED, InclusiveDateRange(selected_day),
+                        datetime(2026, 9, 30, tzinfo=UTC)),
+        )),
+        (paused, Meal.DINNER): resolve_status_history(paused, Meal.DINNER, (
+            StatusEvent(UUID(int=102), REVISION, paused, Meal.DINNER,
+                        MealStatus.PAUSED, InclusiveDateRange(selected_day, selected_day),
+                        datetime(2026, 9, 30, tzinfo=UTC)),
+        )),
+    }
+    settings = QSettings(str(tmp_path / "one-day.ini"), QSettings.Format.IniFormat)
+    settings.setValue(InactiveRosterSettings.SETTINGS_KEY, 1)
+    window = RosterWindow(roster, histories, inactive_settings=settings)
+    window._set_day(selected_day)
+
+    assert window.table_model._contexts[mixed].meal_statuses == {
+        Meal.DINNER: MealStatus.STOPPED.value,
+        Meal.BREAKFAST: "-",
+        Meal.LUNCH: "-",
+    }
+    assert _visible_ids(window) == {paused}
+    window._archive_action.trigger()
+    assert _visible_ids(window) == {mixed, all_dash}
+    calendar = SchoolLunchCalendar((SchoolLunchSchoolSchedule(
+        "샘플초", (InclusiveDateRange(selected_day, selected_day),),
+        (SchoolLunchDay(selected_day, LunchDayRule(SchoolLunchMark.VENDOR_REQUIRED)),),
+    ),))
+    window.set_school_calendar(calendar)
+    assert _visible_ids(window) == {all_dash}
+    window.set_school_calendar(SchoolLunchCalendar())
+    assert _visible_ids(window) == {mixed, all_dash}
+    window._set_day(selected_day - timedelta(days=1))
+    assert _visible_ids(window) == {all_dash}
+    window._archive_action.trigger()
+    assert _visible_ids(window) == {mixed, paused}
+    window.close()
+
+
+@pytest.mark.parametrize("close_method", ["cancel", "escape", "close"])
+def test_threshold_cancel_restores_filtered_roster(app, tmp_path, close_method):
     settings = QSettings(str(tmp_path / "archive.ini"), QSettings.Format.IniFormat)
     window = RosterWindow(*_roster_and_histories(), inactive_settings=settings)
+    window._search_input.setText("보관")
+    window._on_column_search_changed("name", "대상")
+    assert _visible_ids(window) == set()
+
     def cancel():
         dialog = window.findChild(InactiveThresholdDialog)
-        dialog.days.setValue(1080)
-        dialog.findChild(QDialogButtonBox).button(QDialogButtonBox.StandardButton.Cancel).click()
+        dialog.days.setValue(36500)
+        assert _visible_ids(window) == {ARCHIVED}
+        assert window._roster_title.text() == "대상자 명단"
+        assert not settings.contains(InactiveRosterSettings.SETTINGS_KEY)
+        if close_method == "cancel":
+            dialog.findChild(QDialogButtonBox).button(QDialogButtonBox.StandardButton.Cancel).click()
+        elif close_method == "escape":
+            QTest.keyClick(dialog, Qt.Key.Key_Escape)
+        else:
+            dialog.close()
+
     QTimer.singleShot(0, cancel)
     window._archive_threshold_action.trigger()
     assert window._archive_settings.days == 365
     assert not settings.contains(InactiveRosterSettings.SETTINGS_KEY)
+    assert window._search_input.text() == "보관"
+    assert window.table_model._column_searches["name"] == "대상"
+    assert _visible_ids(window) == set()
     window.close()
 
 

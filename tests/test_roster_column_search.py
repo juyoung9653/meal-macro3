@@ -1,15 +1,25 @@
 """Column searches combine correctly and stay aligned with moved headers."""
 from dataclasses import replace
 
+import pytest
+
 from PySide6.QtCore import QSettings, Qt
+from PySide6.QtGui import QInputMethodEvent
 from PySide6.QtWidgets import QApplication
 
 from src.desktop_v2.roster_window import RosterTableModel, RosterWindow
 from src.desktop_v2.column_search import ColumnValuePicker
+import src.desktop_v2.inactive_roster as inactive_roster_module
 from tests.test_desktop_v2_roster import (
     _roster, CUSTOM_FIELD_ID, FIRST_PERSON_ID, SERVICE_DAY,
 )
 from src.domain import Meal
+
+
+@pytest.fixture(autouse=True)
+def isolated_archive_preference(monkeypatch, tmp_path):
+    settings = QSettings(str(tmp_path / "archive.ini"), QSettings.Format.IniFormat)
+    monkeypatch.setattr(inactive_roster_module, "QSettings", lambda *_args, **_kwargs: settings)
 
 
 def test_column_search_combines_and_clears():
@@ -33,6 +43,56 @@ def test_column_search_combines_and_clears():
     assert model.rowCount() == 1
     model.sort(0, Qt.SortOrder.DescendingOrder)
     assert model.person_at(0).person_id == FIRST_PERSON_ID
+
+
+def test_global_search_can_include_archived_people_without_changing_archive_view(tmp_path):
+    app = QApplication.instance() or QApplication([])
+    roster = _roster()
+    archived_id = roster.persons[0].person_id
+    model = RosterTableModel(roster)
+    model.set_archive_filter(frozenset({archived_id}), False)
+    assert model.column_filter_values("name") == (roster.persons[1].profile.name,)
+    model.set_search(roster.persons[0].profile.name)
+    assert model.rowCount() == 0
+    model.set_include_hidden_in_search(True)
+    assert set(model.column_filter_values("name")) == {person.profile.name for person in roster.persons}
+    assert model.rowCount() == 1
+    assert model.person_at(0).person_id == archived_id
+    model.set_column_search("school", "없는학교")
+    assert model.rowCount() == 0
+    model.set_column_search("school", "")
+    assert model.rowCount() == 1
+    model.set_search("")
+    assert model.rowCount() == 2
+    model.set_include_hidden_in_search(False)
+    assert model.rowCount() == 1
+    assert model.person_at(0).person_id != archived_id
+    model.set_include_hidden_in_search(True)
+    model.set_search(roster.persons[0].profile.name)
+    model.set_archive_filter(frozenset({archived_id}), True)
+    assert model.column_filter_values("name") == (roster.persons[0].profile.name,)
+    assert model.rowCount() == 1
+    model.set_search(roster.persons[1].profile.name)
+    assert model.rowCount() == 0
+    model.set_include_hidden_in_search(False)
+    assert model.rowCount() == 0
+
+    window = RosterWindow(
+        roster, column_settings=QSettings(str(tmp_path / "hidden.ini"), QSettings.IniFormat)
+    )
+    assert not window._include_hidden_filter.isChecked()
+    window._model.set_archive_filter(frozenset({archived_id}), False)
+    window._search_input.setText(roster.persons[0].profile.name)
+    assert window.table_model.rowCount() == 0
+    window._include_hidden_filter.setChecked(True)
+    app.processEvents()
+    assert window.table_model.rowCount() == 1
+    window._search_input.clear()
+    assert window.table_model.rowCount() == 2
+    window._include_hidden_filter.setChecked(False)
+    assert window.table_model.rowCount() == 1
+    assert window.table_model.person_at(0).person_id != archived_id
+    window.close()
 
 
 def test_removed_custom_column_drops_search():
@@ -85,6 +145,44 @@ def test_header_buttons_follow_layout_and_keep_focus(tmp_path):
     assert header.buttons["name"] is name
     header.open_value_filter("name")
     assert header._menu.findChild(ColumnValuePicker).search.text() == "홍"
+    window.close()
+
+
+def test_header_filter_accepts_ime_commit_and_applies_search(tmp_path):
+    app = QApplication.instance() or QApplication([])
+    window = RosterWindow(
+        _roster(), column_settings=QSettings(str(tmp_path / "ime.ini"), QSettings.IniFormat)
+    )
+    window.show()
+    app.processEvents()
+    header = window._column_search_header
+    header.open_value_filter("name")
+    picker = header._menu.findChild(ColumnValuePicker)
+    app.processEvents()
+    assert picker.search.hasFocus()
+    assert app.focusWindow() is header._menu.windowHandle()
+
+    app.sendEvent(picker.search, QInputMethodEvent("ㅎ", []))
+    assert picker.search.text() == ""
+    commit = QInputMethodEvent()
+    commit.setCommitString("홍")
+    app.sendEvent(picker.search, commit)
+    assert picker.search.text() == "홍"
+    visible_values = {
+        picker.list.item(index).data(Qt.ItemDataRole.UserRole)
+        for index in range(picker.list.count()) if not picker.list.item(index).isHidden()
+    }
+    assert visible_values == {"홍길동"}
+    picker.apply.click()
+    assert window.table_model.rowCount() == 1
+
+    header.open_value_filter("name")
+    picker = header._menu.findChild(ColumnValuePicker)
+    assert picker.search.text() == "홍"
+    picker.search.clear()
+    picker.cancel.click()
+    assert window.table_model.rowCount() == 1
+    assert window.table_model.selected_column_search("name") == "홍"
     window.close()
 
 

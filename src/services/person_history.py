@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 
 from src.domain import HistoricalSnapshot, RevisionRecord, RosterSnapshot
 from src.domain.delivery_routing import ROUTING_EVENT_KIND, routing_state_from_snapshot
-from src.domain.revisions import format_revision_timestamp
+from src.domain.revisions import RevisionSource, format_revision_timestamp
 from src.domain.projections import (
     ASSIGNMENT_KIND,
     CUSTOM_FIELD_KIND,
@@ -26,6 +26,17 @@ _KST = ZoneInfo("Asia/Seoul")
 _INFO_HEADINGS = ("기록 시각(KST)", "적용일", "변경번호", "사람 UUID", "성명", "대상", "항목", "이전 값", "변경 값", "사유", "변경자")
 _MEAL_HEADINGS = ("기록 시각(KST)", "적용일", "변경번호", "사람 UUID", "성명", "식종", "구분", "이전 값", "변경 값", "접수 채널", "사유", "변경자")
 _COMPLAINT_HEADINGS = ("접수 시각(KST)", "기록 시각(KST)", "변경자", "민원 ID", "사람 UUID", "성명", "식종", "채널", "내용")
+
+
+def is_roster_import_history(record: RevisionRecord) -> bool:
+    """Exclude ordinary Excel roster imports from user-facing change histories."""
+    if record.metadata.source is not RevisionSource.IMPORT or record.import_batch is None:
+        return False
+    purpose = record.metadata.decisions.get("import_purpose")
+    if purpose is not None:
+        return purpose == "database"
+    # Older import revisions did not record their purpose.
+    return record.metadata.reason == "Excel 명단 가져오기"
 
 
 def build_history_tables(
@@ -52,6 +63,8 @@ def build_history_tables(
     custom_labels.update({str(item.definition_id): item.name for item in roster.custom_fields})
     drivers = {str(item.driver_id): item.name for item in routing_state_from_snapshot(snapshot).drivers}
     for record in sorted(revisions, key=lambda item: item.metadata.recorded_at):
+        if is_roster_import_history(record):
+            continue
         metadata = record.metadata
         stamp = _kst(metadata.recorded_at)
         code = format_revision_timestamp(metadata.recorded_at)

@@ -34,7 +34,7 @@ from src.importing import (
 )
 from src.storage import AutomaticBackupResult, DatabaseSession
 
-from .import_review import ImportReviewDialog
+from .import_review import ImportReviewDialog, import_decision_rows
 from .import_wizard import RosterImportWizard
 
 
@@ -127,7 +127,7 @@ class GuidedRosterImportController:
             roster=current_roster,
         )
         review = None
-        if purpose is not ImportPurpose.VACATION_LUNCH or plan.by_disposition(ReconciliationDisposition.REVIEW):
+        if import_decision_rows(plan, household_plan):
             review = self._review_type(
                 current_roster,
                 plan,
@@ -151,8 +151,7 @@ class GuidedRosterImportController:
                         )
                         for staged in plan.by_disposition(ReconciliationDisposition.NEW)
                     }
-                    if review is None and purpose is ImportPurpose.VACATION_LUNCH
-                    else {} if review is None else review.decisions()
+                    if review is None else review.decisions()
                 ),
                 actor=self._actor_provider(),
                 recorded_at=datetime.now(UTC),
@@ -160,7 +159,11 @@ class GuidedRosterImportController:
                 batch_id=uuid4(),
                 existing_profile=selection.existing_profile,
                 household_plan=household_plan,
-                household_decisions=(None if purpose is ImportPurpose.VACATION_LUNCH else review.household_decisions()),
+                household_decisions=(
+                    None if household_plan is None
+                    else household_plan.default_decisions() if review is None
+                    else review.household_decisions()
+                ),
                 existing_household_rule=(None if purpose is ImportPurpose.VACATION_LUNCH else selection.existing_household_rule),
                 purpose=purpose,
                 lunch_status_events=lunch_events,

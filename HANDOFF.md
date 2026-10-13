@@ -276,7 +276,7 @@ SQLite v2의 배송 리포트 계산·암호화 Excel·문서 이력·자동 백
   가져오기로 이어진다.
   반복 계산 policy v1은 조식=가입된 모든 달력일, 중식=학교 일정이 허용한 평일,
   석식=평일이며 status·휴무·대체식·서비스일 유효 단가를 같은 source snapshot에서 적용한다.
-- legacy `main.py`는 유지한다. 새 흐름의 별도 실행 진입점은 `python -m src.desktop_v2`다.
+- 현재 실행 진입점은 `python -m src.desktop_v2` 또는 `python sqlite_v2.py`다.
 - 실제 PySide6 6.11.1 + apsw-sqlite3mc 3.53.3.1 + holidays 0.102 환경 전체 검증은
   `656 passed, 5 warnings in 57.90s`였다. 경고 5개는 기존 openpyxl 비문자 헤더 fixture
   경고다. 배송 리포트·조식 policy UI·schema 5·자동 백업 복원과 이번 가져오기 UI 수정까지 포함한다. 사용자가 기능

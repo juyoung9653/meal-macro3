@@ -9,7 +9,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6")
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSettings, Qt
 from PySide6.QtWidgets import QAbstractItemView, QApplication, QDialogButtonBox, QLabel
 
 from src.desktop_v2 import (
@@ -18,6 +18,7 @@ from src.desktop_v2 import (
     RosterWindow,
     StatusPeriodDialog,
 )
+import src.desktop_v2.inactive_roster as inactive_roster_module
 from src.domain import (
     CustomFieldDefinition,
     CustomFieldType,
@@ -70,6 +71,14 @@ SERVICE_DAY = date(2026, 8, 17)
 def app():
     application = QApplication.instance() or QApplication([])
     yield application
+
+
+@pytest.fixture(autouse=True)
+def isolated_archive_preference(monkeypatch, tmp_path):
+    settings = QSettings(str(tmp_path / "archive.ini"), QSettings.Format.IniFormat)
+    monkeypatch.setattr(
+        inactive_roster_module, "QSettings", lambda *_args, **_kwargs: settings
+    )
 
 
 def _roster() -> RosterSnapshot:
@@ -348,10 +357,12 @@ def test_model_sorts_blank_cells_to_one_side(app):
     assert model.person_at(1).person_id == FIRST_PERSON_ID
 
 
-def test_roster_table_enables_header_sorting(app):
+def test_roster_table_uses_independent_header_sorting(app):
     window = RosterWindow(_roster(), _histories())
 
-    assert window._table.isSortingEnabled()
+    assert not window._table.isSortingEnabled()  # Qt's single-column sorter must not race.
+    assert window._table.horizontalHeader().sectionsClickable()
+    assert window.table_model.sort_criteria == ()
     assert "정렬" in window._table.horizontalHeader().toolTip()
     window.close()
 
@@ -787,6 +798,8 @@ def test_import_review_enables_commit_only_after_ambiguous_identity_choice(app):
     ok_button = dialog._buttons.button(QDialogButtonBox.StandardButton.Ok)
 
     assert not ok_button.isEnabled()
+    assert dialog._table.rowCount() == 1
+    assert set(dialog._combos) == {SECOND_OBSERVATION_ID}
     review_combo = dialog._combos[SECOND_OBSERVATION_ID]
     review_combo.setCurrentIndex(review_combo.findData(FIRST_PERSON_ID))
     app.processEvents()
@@ -820,7 +833,7 @@ def test_initial_import_review_defaults_every_valid_row_to_new(app):
     dialog.close()
 
 
-def test_import_review_can_split_one_person_from_proposed_household(app):
+def test_import_review_uses_household_defaults_without_rendering_clean_rows(app):
     observations = (
         PersonObservation(
             FIRST_OBSERVATION_ID,
@@ -863,18 +876,14 @@ def test_import_review_can_split_one_person_from_proposed_household(app):
     )
     dialog = ImportReviewDialog(None, plan, household_plan=household_plan)
 
-    first_combo = dialog._household_combos[FIRST_OBSERVATION_ID]
-    second_combo = dialog._household_combos[SECOND_OBSERVATION_ID]
-    assert first_combo.currentData() == second_combo.currentData()
-    assert "2명" in first_combo.currentText()
-    assert "핸드폰" in first_combo.toolTip()
-
-    second_combo.setCurrentIndex(1)
+    assert dialog._table.rowCount() == 0
+    assert dialog._combos == {}
+    assert dialog._household_combos == {}
     decisions = dialog.household_decisions()
-    assert decisions[FIRST_OBSERVATION_ID].household_id != decisions[
+    assert decisions == household_plan.default_decisions()
+    assert decisions[FIRST_OBSERVATION_ID].household_id == decisions[
         SECOND_OBSERVATION_ID
     ].household_id
-    assert second_combo.currentText() == "이 사람만 별도 가구"
     dialog.close()
 
 
@@ -905,22 +914,13 @@ def test_import_review_defaults_later_new_person_to_matching_existing_household(
     )
     dialog = ImportReviewDialog(roster, plan, household_plan=household_plan)
 
-    combo = dialog._household_combos[THIRD_OBSERVATION_ID]
-    assert combo.currentData() == HOUSEHOLD_ID
-    assert combo.currentText().startswith("기존 가구에 포함")
-    assert "홍길동" in combo.toolTip()
-    assert "핸드폰" in combo.toolTip()
-
-    combo.setCurrentIndex(combo.findData(
-        household_plan.separate_household_ids[THIRD_OBSERVATION_ID]
-    ))
-    assert dialog.household_decisions()[THIRD_OBSERVATION_ID].household_id != (
-        HOUSEHOLD_ID
-    )
+    assert dialog._table.rowCount() == 0
+    assert dialog.household_decisions()[THIRD_OBSERVATION_ID].household_id == HOUSEHOLD_ID
     dialog.close()
 
 
-def test_import_review_requires_choice_when_two_existing_households_match(app):
+@pytest.mark.parametrize("identity", ["new", "ambiguous", "matched"])
+def test_import_review_requires_choice_when_two_existing_households_match(app, identity):
     roster = _roster()
     other_person_id = UUID("80000000-0000-0000-0000-000000000033")
     other_household_id = UUID("80000000-0000-0000-0000-000000000034")
@@ -950,8 +950,8 @@ def test_import_review_requires_choice_when_two_existing_households_match(app):
         THIRD_OBSERVATION_ID,
         SourceReference("later.xlsx", "명단", (2,)),
         {
-            ProfileField.NAME: "후보가 둘인 아동",
-            ProfileField.BIRTH_DATE: date(2019, 5, 4),
+            ProfileField.NAME: "후보가 둘인 아동" if identity == "new" else "홍길동",
+            ProfileField.BIRTH_DATE: date(2015, 3, 2) if identity == "matched" else date(2019, 5, 4),
             ProfileField.MOBILE_PHONE: "01012345678",
         },
         (Meal.LUNCH,),
@@ -979,7 +979,29 @@ def test_import_review_requires_choice_when_two_existing_households_match(app):
         household_plan=household_plan,
     )
     ok_button = dialog._buttons.button(QDialogButtonBox.StandardButton.Ok)
+    if identity == "matched":
+        assert dialog._table.rowCount() == 0
+        assert ok_button.isEnabled()
+        assert dialog.decisions() == {}
+        dialog.close()
+        return
+    assert dialog._table.rowCount() == 1
     combo = dialog._household_combos[THIRD_OBSERVATION_ID]
+    if identity == "ambiguous":
+        person_combo = dialog._combos[THIRD_OBSERVATION_ID]
+        assert not ok_button.isEnabled()
+        person_combo.setCurrentIndex(person_combo.findData(FIRST_PERSON_ID))
+        assert ok_button.isEnabled()
+        assert not combo.isEnabled()
+        person_combo.setCurrentIndex(person_combo.findData("new"))
+        assert not ok_button.isEnabled()
+        assert combo.isEnabled()
+        with pytest.raises(ValueError, match="모두 선택"):
+            dialog.decisions()
+        person_combo.setCurrentIndex(person_combo.findData("ignore"))
+        assert ok_button.isEnabled()
+        assert not combo.isEnabled()
+        person_combo.setCurrentIndex(person_combo.findData("new"))
 
     assert combo.currentText() == "기존 가구 선택 필요"
     assert not ok_button.isEnabled()

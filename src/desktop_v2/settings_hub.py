@@ -31,6 +31,9 @@ class SettingsAction(StrEnum):
     DOCUMENT_TEMPLATE = "document_template"
     DOCUMENT_COLUMN_MAPPING = "document_column_mapping"
     DOCUMENT_DIRECTORY = "document_directory"
+    DATABASE_LOCATION = "database_location"
+    BACKUP_DIRECTORY = "backup_directory"
+    DATABASE_PASSWORD = "database_password"
 
     @property
     def label(self) -> str:
@@ -66,6 +69,21 @@ _SETTINGS_COPY = {
         "새 문서를 모아둘 기본 폴더를 이 컴퓨터에 기억합니다.",
         "이 컴퓨터에만 저장",
     ),
+    SettingsAction.DATABASE_LOCATION: (
+        "운영 데이터 위치",
+        "현재 운영 데이터와 비밀번호 정보를 새 위치로 옮기고 다음 실행부터 사용합니다.",
+        "이 컴퓨터에만 저장",
+    ),
+    SettingsAction.BACKUP_DIRECTORY: (
+        "자동 백업 폴더",
+        "새 백업을 저장할 폴더를 선택합니다. 기존 백업은 원래 폴더에 보관합니다.",
+        "이 컴퓨터에만 저장",
+    ),
+    SettingsAction.DATABASE_PASSWORD: (
+        "운영 파일 비밀번호 변경",
+        "현재 비밀번호를 확인하고 운영 파일을 열 때 사용할 비밀번호를 바꿉니다.",
+        "운영 파일 잠금 변경",
+    ),
     SettingsAction.DOCUMENT_TEMPLATE: (
         "청구서·확인서 양식",
         "문서를 만들 때 사용할 급식 또는 행복도시락 Excel 양식을 선택합니다.",
@@ -84,8 +102,13 @@ class _SettingsActionCard(QPushButton):
     ) -> None:
         super().__init__(parent)
         self.action = action
+        style_scope = (
+            SettingsAction.DOCUMENT_DIRECTORY.value
+            if action in (SettingsAction.DATABASE_LOCATION, SettingsAction.BACKUP_DIRECTORY)
+            else action.value
+        )
         self.setObjectName("settingsActionCard")
-        self.setProperty("scope", action.value)
+        self.setProperty("scope", style_scope)
         self.setAccessibleName(action.label)
         self.setAccessibleDescription(action.description)
         self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
@@ -97,7 +120,7 @@ class _SettingsActionCard(QPushButton):
 
         stamp_label = QLabel(stamp)
         stamp_label.setObjectName("settingsActionStamp")
-        stamp_label.setProperty("scope", action.value)
+        stamp_label.setProperty("scope", style_scope)
         stamp_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         stamp_label.setFixedSize(62, 62)
         stamp_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
@@ -107,7 +130,7 @@ class _SettingsActionCard(QPushButton):
         copy.setSpacing(4)
         scope = QLabel(action.scope_label)
         scope.setObjectName("settingsScopeLabel")
-        scope.setProperty("scope", action.value)
+        scope.setProperty("scope", style_scope)
         title = QLabel(action.label)
         title.setObjectName("settingsCardTitle")
         description = QLabel(action.description)
@@ -162,21 +185,25 @@ class SettingsHubDialog(QDialog):
             (SettingsAction.DOCUMENT_TEMPLATE, "양식"),
             (SettingsAction.DOCUMENT_COLUMN_MAPPING, "연결"),
             (SettingsAction.DOCUMENT_DIRECTORY, "폴더"),
+            (SettingsAction.DATABASE_LOCATION, "DB"),
+            (SettingsAction.BACKUP_DIRECTORY, "백업"),
+            (SettingsAction.DATABASE_PASSWORD, "잠금"),
         )):
             card = _SettingsActionCard(action, stamp=stamp)
             card.clicked.connect(
                 lambda _checked=False, selected=action: self._choose(selected)
             )
             self._cards[action] = card
-            cards.addWidget(card, index // 2, index % 2, 1,
-                            2 if action is SettingsAction.DOCUMENT_DIRECTORY else 1)
+            full_width = action in (SettingsAction.DOCUMENT_DIRECTORY, SettingsAction.DATABASE_LOCATION, SettingsAction.BACKUP_DIRECTORY, SettingsAction.DATABASE_PASSWORD)
+            cards.addWidget(card, index - 2 if full_width else index // 2,
+                            0 if full_width else index % 2, 1, 2 if full_width else 1)
         cards.setColumnStretch(0, 1)
         cards.setColumnStretch(1, 1)
         scroll.setWidget(card_container)
         root.addWidget(scroll, 1)
 
         note = QLabel(
-            "제공기관·비밀번호·문서 양식·출력 연결은 변경 이력에 남습니다. 문서 저장 폴더는 이 컴퓨터에만 저장합니다."
+            "제공기관·Excel 비밀번호·문서 양식·출력 연결은 변경 이력에 남습니다. 문서 저장 폴더·운영 데이터 위치·자동 백업 폴더는 이 컴퓨터에만 저장합니다."
         )
         note.setObjectName("settingsHubNote")
         note.setWordWrap(True)

@@ -8,9 +8,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6")
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QIcon, QPixmap
+from PySide6.QtGui import QIcon, QInputMethodEvent, QPixmap
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QComboBox, QLabel, QLineEdit, QListWidget, QTabBar, QTableWidget, QTableWidgetItem
+from PySide6.QtWidgets import QApplication, QComboBox, QLabel, QLineEdit, QListWidget, QTabBar, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget
 
 from src.desktop_v2.theme import application_stylesheet, register_application_fonts
 
@@ -61,3 +61,38 @@ def test_views_and_tabs_disable_qt_text_elision():
     for widget in (table, listing, combo, editable_combo, tabs, edit):
         widget.close()
     app.setStyleSheet(previous_stylesheet)
+
+
+def test_placeholder_hides_for_ime_preedit_and_recovers_on_cancel_or_focus_loss():
+    app = QApplication.instance() or QApplication([])
+    register_application_fonts()
+    parent = QWidget()
+    layout = QVBoxLayout(parent)
+    edit = QLineEdit()
+    edit.setPlaceholderText("열 검색")
+    other = QLineEdit()
+    layout.addWidget(edit)
+    layout.addWidget(other)
+    parent.show()
+    edit.setFocus()
+    app.processEvents()
+    overlay = edit.findChild(QLabel, "fullPlaceholderText")
+    assert overlay is not None and overlay.isVisible()
+
+    app.sendEvent(edit, QInputMethodEvent("ㅎ", []))
+    assert edit.text() == "" and not overlay.isVisible()
+    app.sendEvent(edit, QInputMethodEvent("", []))
+    assert overlay.isVisible()
+
+    app.sendEvent(edit, QInputMethodEvent("홍", []))
+    commit = QInputMethodEvent()
+    commit.setCommitString("홍")
+    app.sendEvent(edit, commit)
+    assert edit.text() == "홍" and not overlay.isVisible()
+
+    edit.clear()
+    app.sendEvent(edit, QInputMethodEvent("ㅎ", []))
+    other.setFocus()
+    app.processEvents()
+    assert overlay.isVisible()
+    parent.close()

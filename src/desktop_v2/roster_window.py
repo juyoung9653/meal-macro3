@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+from hashlib import sha256
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date, timedelta, timezone
@@ -60,6 +62,7 @@ from src.domain.school_calendar import (
 from src.domain.status import MealStatus, StatusHistory
 from src.services.inactive_roster import inactive_person_ids
 from src.services.meal_service_availability import default_service_weekdays, regular_service_available
+from src.version import APP_VERSION
 
 from .column_layout import RosterColumnLayout
 from .column_search import ColumnSearchHeader
@@ -224,6 +227,7 @@ class RosterTableModel(QAbstractTableModel):
         self._day = date.today()
         self._meal = Meal.LUNCH
         self._search = ""
+        self._include_hidden_in_search = False
         self._column_searches: dict[str, str] = {}
         self._column_values: dict[str, frozenset[str]] = {}
         self._active_only = False
@@ -235,14 +239,10 @@ class RosterTableModel(QAbstractTableModel):
         self._archive_ids: frozenset[UUID] = frozenset()
         self._columns = self._build_columns()
         # Keep the model's established sequence ordering for non-visual consumers.
-        # The table clears it while enabling header sorting, so its first click is
-        # still ascending and the clearable indicator can restore roster order.
-        self._sort_column: int | None = next(
-            index
-            for index, column in enumerate(self._columns)
-            if column.key == "sequence"
+        # The window clears this default before connecting its header clicks.
+        self._sort_criteria: tuple[tuple[str, Qt.SortOrder], ...] = (
+            ("sequence", Qt.SortOrder.AscendingOrder),
         )
-        self._sort_order = Qt.SortOrder.AscendingOrder
         self._people: tuple[Person, ...] = ()
         self._contexts: dict[UUID, _PersonContext] = {}
         self._rebuild_context_projection()
@@ -251,6 +251,23 @@ class RosterTableModel(QAbstractTableModel):
     @property
     def columns(self) -> tuple[_Column, ...]:
         return self._columns
+
+    @property
+    def sort_criteria(self) -> tuple[tuple[str, Qt.SortOrder], ...]:
+        """Active column keys, highest priority first."""
+        return self._sort_criteria
+
+    @property
+    def _sort_column(self) -> int | None:
+        return next(
+            (index for index, column in enumerate(self._columns)
+             if self._sort_criteria and column.key == self._sort_criteria[0][0]),
+            None,
+        )
+
+    @property
+    def _sort_order(self) -> Qt.SortOrder:
+        return self._sort_criteria[0][1] if self._sort_criteria else Qt.SortOrder.AscendingOrder
 
     @property
     def service_day(self) -> date:
@@ -322,6 +339,14 @@ class RosterTableModel(QAbstractTableModel):
         self._refresh_people()
         self.endResetModel()
 
+    def set_include_hidden_in_search(self, enabled: bool) -> None:
+        if enabled == self._include_hidden_in_search:
+            return
+        self.beginResetModel()
+        self._include_hidden_in_search = enabled
+        self._refresh_people()
+        self.endResetModel()
+
     def set_column_search(self, key: str, text: str) -> None:
         """Combine literal, case-insensitive column searches with existing filters."""
         if key not in {column.key for column in self._columns}:
@@ -343,8 +368,7 @@ class RosterTableModel(QAbstractTableModel):
         values = {
             str(self._display_value(person, column, self._contexts[person.person_id]))
             for person in self._roster.persons
-            if self._archive_mode is None
-            or (person.person_id in self._archive_ids) == self._archive_mode
+            if self._matches_archive_filter(person)
         }
         return tuple(sorted(values, key=str.casefold))
 
@@ -365,6 +389,15 @@ class RosterTableModel(QAbstractTableModel):
             self._column_values.pop(key, None)
         else:
             self._column_values[key] = selected
+        self._refresh_people()
+        self.endResetModel()
+
+    def clear_column_filters(self) -> None:
+        if not self._column_searches and not self._column_values:
+            return
+        self.beginResetModel()
+        self._column_searches.clear()
+        self._column_values.clear()
         self._refresh_people()
         self.endResetModel()
 
@@ -393,13 +426,12 @@ class RosterTableModel(QAbstractTableModel):
         if enabled == self._special_only:
             return
         self.beginResetModel()
-        sort_key = self._columns[self._sort_column].key if self._sort_column is not None else None
         self._special_only = enabled
         self._columns = self._build_columns()
         if not enabled:
             self._column_searches.pop("delivery_settings", None)
             self._column_values.pop("delivery_settings", None)
-        self._sort_column = next((index for index, column in enumerate(self._columns) if column.key == sort_key), None)
+        self._prune_sort_criteria()
         self._refresh_people()
         self.endResetModel()
 
@@ -411,11 +443,6 @@ class RosterTableModel(QAbstractTableModel):
         if not isinstance(roster, RosterSnapshot):
             raise TypeError("roster는 RosterSnapshot이어야 합니다.")
         self.beginResetModel()
-        sort_key = (
-            self._columns[self._sort_column].key
-            if self._sort_column is not None
-            else None
-        )
         self._roster = roster
         self._histories = dict(histories or {})
         self._columns = self._build_columns()
@@ -426,15 +453,7 @@ class RosterTableModel(QAbstractTableModel):
         self._column_values = {
             key: value for key, value in self._column_values.items() if key in keys
         }
-        if sort_key is not None:
-            self._sort_column = next(
-                (
-                    index
-                    for index, column in enumerate(self._columns)
-                    if column.key == sort_key
-                ),
-                None,
-            )
+        self._prune_sort_criteria()
         self._rebuild_context_projection()
         self._refresh_people()
         self.endResetModel()
@@ -444,19 +463,37 @@ class RosterTableModel(QAbstractTableModel):
         column: int,
         order: Qt.SortOrder = Qt.SortOrder.AscendingOrder,
     ) -> None:
-        if column == -1:
-            self.beginResetModel()
-            self._sort_column = None
-            self._refresh_people()
-            self.endResetModel()
-            return
-        if not 0 <= column < len(self._columns):
+        """Retain Qt's single-column API; -1 restores source roster order."""
+        if column != -1 and not 0 <= column < len(self._columns):
             return
         self.beginResetModel()
-        self._sort_column = column
-        self._sort_order = order
+        self._sort_criteria = () if column == -1 else ((self._columns[column].key, order),)
         self._refresh_people()
         self.endResetModel()
+
+    def cycle_sort(self, column: int) -> None:
+        """Cycle one column independently without changing other priorities."""
+        if not 0 <= column < len(self._columns):
+            return
+        key = self._columns[column].key
+        criteria = list(self._sort_criteria)
+        for index, (active_key, order) in enumerate(criteria):
+            if active_key == key:
+                if order == Qt.SortOrder.AscendingOrder:
+                    criteria[index] = (key, Qt.SortOrder.DescendingOrder)
+                else:
+                    criteria.pop(index)
+                break
+        else:
+            criteria.append((key, Qt.SortOrder.AscendingOrder))
+        self.beginResetModel()
+        self._sort_criteria = tuple(criteria)
+        self._refresh_people()
+        self.endResetModel()
+
+    def _prune_sort_criteria(self) -> None:
+        keys = {column.key for column in self._columns}
+        self._sort_criteria = tuple(item for item in self._sort_criteria if item[0] in keys)
 
     def person_at(self, row: int) -> Person:
         return self._people[row]
@@ -631,6 +668,13 @@ class RosterTableModel(QAbstractTableModel):
             *custom,
         )
 
+    def _matches_archive_filter(self, person: Person) -> bool:
+        return (
+            self._archive_mode is None
+            or (self._archive_mode is False and self._include_hidden_in_search)
+            or (person.person_id in self._archive_ids) == self._archive_mode
+        )
+
     def _refresh_people(self) -> None:
         people: list[Person] = []
         filters = [(column, self._column_searches[column.key])
@@ -641,9 +685,7 @@ class RosterTableModel(QAbstractTableModel):
         for person in self._roster.persons:
             if self._special_only and not self._delivery_setting_text(person):
                 continue
-            if self._archive_mode is not None and (
-                (person.person_id in self._archive_ids) != self._archive_mode
-            ):
+            if not self._matches_archive_filter(person):
                 continue
             if birth_month is not None and (
                 person.profile.birth_date is None
@@ -673,11 +715,14 @@ class RosterTableModel(QAbstractTableModel):
             ):
                 continue
             people.append(person)
-        if self._sort_column is None:
-            self._people = tuple(people)
-            return
-        reverse = self._sort_order == Qt.SortOrder.DescendingOrder
-        self._people = tuple(sorted(people, key=self._sort_key, reverse=reverse))
+        columns = {column.key: column for column in self._columns}
+        # Stable passes preserve secondary criteria and original roster order on ties.
+        for key, order in reversed(self._sort_criteria):
+            people.sort(
+                key=lambda person: self._sort_value(person, columns[key]),
+                reverse=order == Qt.SortOrder.DescendingOrder,
+            )
+        self._people = tuple(people)
 
     def _rebuild_context_projection(self) -> None:
         """Resolve day-and-meal lookups once, outside the table paint path."""
@@ -718,14 +763,12 @@ class RosterTableModel(QAbstractTableModel):
             )
         self._contexts = contexts
 
-    def _sort_key(self, person: Person) -> tuple[object, ...]:
-        assert self._sort_column is not None
-        column = self._columns[self._sort_column]
+    def _sort_value(self, person: Person, column: _Column) -> tuple[object, ...]:
         context = self._contexts[person.person_id]
         if column.meal is not None:
             status = self._status_for_column(column, context)
             driver = context.meal_drivers[column.meal].casefold()
-            return (status.casefold(), driver, person.profile.name.casefold(), str(person.person_id))
+            return (status.casefold(), driver)
         value = self._display_value(
             person,
             column,
@@ -740,7 +783,7 @@ class RosterTableModel(QAbstractTableModel):
             normalized = (0, int(text))
         else:
             normalized = (1, text.casefold())
-        return (*normalized, person.profile.name.casefold(), str(person.person_id))
+        return normalized
 
     def _resolve_status(
         self,
@@ -748,35 +791,51 @@ class RosterTableModel(QAbstractTableModel):
         meal: Meal,
         meals: tuple[Meal, ...],
     ) -> str:
+        status = self._effective_status_on(person_id, meal, self._day, meals)
+        return "-" if status is None else status.value
+
+    def effective_status_on(self, person_id: UUID, meal: Meal, day: date) -> MealStatus | None:
+        """Return the status shown for a meal on an arbitrary roster day."""
+        return self._effective_status_on(
+            person_id, meal, day, self._roster.meals_for(person_id, on=day)
+        )
+
+    def _effective_status_on(
+        self,
+        person_id: UUID,
+        meal: Meal,
+        day: date,
+        meals: tuple[Meal, ...],
+    ) -> MealStatus | None:
         if meal not in meals:
-            return "-"
+            return None
         has_weekday_override = any(
             setting.meal is meal and setting.weekdays is not None
-            for setting in self._roster.delivery_settings_for(person_id, on=self._day)
+            for setting in self._roster.delivery_settings_for(person_id, on=day)
         )
         if has_weekday_override:
             try:
                 if not regular_service_available(
                     self._roster, self._roster.person(person_id), meal,
-                    self._day, self._school_calendar,
+                    day, self._school_calendar,
                 ):
-                    return "-"
+                    return None
             except SchoolLunchScheduleMissingError:
-                return "-"
+                return None
         if meal is Meal.LUNCH:
             try:
                 if not self._school_calendar.vendor_service_available(
                     self._roster.person(person_id).profile,
-                    self._day,
+                    day,
                 ):
-                    return "-"
+                    return None
             except SchoolLunchScheduleMissingError:
-                return "-"
+                return None
         history = self._histories.get((person_id, meal))
         return (
-            MealStatus.DELIVERY.value
+            MealStatus.DELIVERY
             if history is None
-            else history.status_on(self._day).value
+            else history.status_on(day)
         )
 
     @staticmethod
@@ -1005,12 +1064,26 @@ class RosterWindow(QMainWindow):
         *,
         revision_display_code: str | None = None,
         column_settings=None,
+        view_settings_scope: str | None = None,
         inactive_settings: QSettings | None = None,
         routing_state: RoutingState | None = None,
         school_calendar: SchoolLunchCalendar | None = None,
     ) -> None:
         super().__init__(parent)
         self._column_settings = column_settings
+        self._search_settings = (
+            column_settings if column_settings is not None
+            else QSettings("분당구", "급식 배송 운영 SQLite v2")
+        )
+        # Standalone windows without an injected store/scope are common in tests.
+        # The real startup passes a stable database ID for per-file preferences.
+        self._remember_view = view_settings_scope is not None or column_settings is not None
+        self._search_settings_key = (
+            self._SEARCH_SETTINGS_KEY
+            if view_settings_scope is None
+            else f"{self._SEARCH_SETTINGS_KEY}/{sha256(view_settings_scope.encode('utf-8')).hexdigest()}"
+        )
+        self._restoring_search = False
         self._inactive_settings = inactive_settings
         self._archive_settings = InactiveRosterSettings(inactive_settings)
         self._roster = roster
@@ -1020,7 +1093,14 @@ class RosterWindow(QMainWindow):
             SchoolLunchCalendar() if school_calendar is None else school_calendar
         )
         self._revision_display_code = revision_display_code
-        self._delivery_settings_width = 240
+        remembered_width = 240
+        if self._remember_view:
+            try:
+                remembered_width = int(self._search_settings.value("roster/delivery_settings_width", 240))
+            except (TypeError, ValueError):
+                pass
+        self._delivery_settings_width = remembered_width if remembered_width > 0 else 240
+        self._changing_special_columns = False
         self._model = RosterTableModel(
             roster,
             self._histories,
@@ -1035,11 +1115,13 @@ class RosterWindow(QMainWindow):
             Callable[[Person], tuple[tuple[str, str], ...]] | None
         ) = None
         register_application_fonts()
-        self.setWindowTitle("급식 배송 운영")
+        self.setWindowTitle(f"급식 배송 운영 · {APP_VERSION}")
         self.resize(1440, 860)
         self.setMinimumSize(1080, 680)
         self.setStyleSheet(application_stylesheet())
         self._build_ui()
+        self._table.horizontalHeader().sectionResized.connect(self._remember_delivery_settings_width)
+        self._restore_search_filters()
         self._refresh_archive()
         self._set_day(date.today())
         self._set_meal(Meal.LUNCH)
@@ -1088,7 +1170,7 @@ class RosterWindow(QMainWindow):
             raise TypeError("calendar는 SchoolLunchCalendar여야 합니다.")
         self._school_calendar = calendar
         self._model.set_school_calendar(calendar)
-        self._after_model_reset()
+        self._refresh_archive()
 
     def _build_ui(self) -> None:
         root = QWidget()
@@ -1271,7 +1353,10 @@ class RosterWindow(QMainWindow):
         self._search_input.setAccessibleName("전체 명단 검색")
         self._search_input.textChanged.connect(self._on_search_changed)
         filters.addWidget(self._search_input, 1)
-        filters.addStretch(1)
+        self._include_hidden_filter = QCheckBox("숨긴 행 포함")
+        self._include_hidden_filter.setToolTip("일반 명단에 장기 미배송으로 숨긴 행도 표시하고 검색합니다. 다른 필터는 유지합니다.")
+        self._include_hidden_filter.toggled.connect(self._on_include_hidden_changed)
+        filters.addWidget(self._include_hidden_filter)
         self._driver_filter = QComboBox()
         self._driver_filter.setMinimumWidth(140)
         self._driver_filter.setMaximumWidth(230)
@@ -1296,12 +1381,28 @@ class RosterWindow(QMainWindow):
         self._add_person_button.clicked.connect(lambda: self.person_add_requested.emit(self._model.meal))
         filters.addWidget(self._add_person_button)
         layout.addLayout(filters)
+        self._column_filter_strip = QWidget()
+        filter_notice = QHBoxLayout(self._column_filter_strip)
+        filter_notice.setContentsMargins(0, 0, 0, 0)
+        filter_notice.setSpacing(9)
+        self._column_filter_label = QLabel()
+        self._column_filter_label.setObjectName("workspaceSubtitle")
+        self._column_filter_label.setWordWrap(True)
+        filter_notice.addWidget(self._column_filter_label, 1)
+        self._clear_column_filters_button = QPushButton("칼럼 필터 해제")
+        self._clear_column_filters_button.setObjectName("quietAction")
+        self._clear_column_filters_button.clicked.connect(self._clear_column_filters)
+        filter_notice.addWidget(self._clear_column_filters_button)
+        layout.addWidget(self._column_filter_strip)
+        self._column_filter_strip.hide()
         return frame
 
-    def _refresh_archive(self) -> None:
+    def _refresh_archive(self, *, days: int | None = None) -> None:
         ids = inactive_person_ids(
             self._roster, self._histories,
-            days=self._archive_settings.days,
+            days=self._archive_settings.days if days is None else days,
+            as_of=self._model.service_day,
+            status_on=self._model.effective_status_on,
         )
         self._model.set_archive_filter(ids, self._archive_action.isChecked())
         self._roster_title.setText(
@@ -1312,9 +1413,10 @@ class RosterWindow(QMainWindow):
 
     def _show_archive_threshold(self) -> None:
         dialog = InactiveThresholdDialog(self._archive_settings.days, self)
+        dialog.days.valueChanged.connect(lambda days: self._refresh_archive(days=days))
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self._archive_settings.save_days(dialog.days.value())
-            self._refresh_archive()
+        self._refresh_archive()
         dialog.deleteLater()
 
     def _panel_toggle(
@@ -1448,7 +1550,7 @@ class RosterWindow(QMainWindow):
             if label == "화면·설정":
                 self._archive_action = menu.addAction("장기 미배송 보관함")
                 self._archive_action.setCheckable(True)
-                self._archive_action.toggled.connect(self._refresh_archive)
+                self._archive_action.toggled.connect(lambda _checked: self._refresh_archive())
                 self._archive_threshold_action = menu.addAction("보관 기준 설정")
                 self._archive_threshold_action.triggered.connect(self._show_archive_threshold)
         return menu
@@ -1512,12 +1614,17 @@ class RosterWindow(QMainWindow):
         for index, column in enumerate(self._model.columns):
             header.resizeSection(index, column.width)
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        header.setSortIndicatorClearable(True)
+        self._table.setSortingEnabled(False)
+        self._model.sort(-1)
+        header.setSortIndicatorShown(False)
         header.setSortIndicator(-1, Qt.SortOrder.AscendingOrder)
-        header.setToolTip(
-            "열 이름 클릭: 오름차순 · 내림차순 · 정렬 해제 · ▾: 검색과 값 필터 · 드래그: 칼럼 이동 · 우클릭: 칼럼 설정"
+        header.sectionClicked.connect(self._model.cycle_sort)
+        self._model.modelReset.connect(
+            lambda: header.set_sort_criteria(self._model.sort_criteria)
         )
-        self._table.setSortingEnabled(True)
+        header.setToolTip(
+            "열 이름 클릭: 오름차순 → 내림차순 → 이 열 정렬 해제 · 먼저 선택한 열부터 우선 정렬 · 숫자: 우선순위 · ▾: 검색과 값 필터 · 드래그: 칼럼 이동 · 우클릭: 칼럼 설정"
+        )
         self._column_layout = RosterColumnLayout(
             self._table, self._model.columns, settings=self._column_settings, parent=self
         )
@@ -1748,7 +1855,7 @@ class RosterWindow(QMainWindow):
         self._date_label.setText(day.strftime("%Y.%m.%d"))
         self._weekday_label.setText(f"{_WEEKDAYS[day.weekday()]} · 조회 기준일")
         self._model.set_context(day, self._meal)
-        self._after_model_reset()
+        self._refresh_archive()
 
     def _set_meal(self, meal: Meal) -> None:
         self._meal = meal
@@ -1763,10 +1870,14 @@ class RosterWindow(QMainWindow):
         if not enabled:
             previous = next((i for i, column in enumerate(self._model.columns) if column.key == "delivery_settings"), None)
             if previous is not None:
-                self._delivery_settings_width = self._table.horizontalHeader().sectionSize(previous)
-        self._model.set_special_only(enabled)
-        self._column_layout.replace_columns(self._model.columns)
-        self._column_search_header.replace_columns(self._model.columns)
+                self._remember_delivery_settings_width(previous, 0, self._table.horizontalHeader().sectionSize(previous))
+        self._changing_special_columns = True
+        try:
+            self._model.set_special_only(enabled)
+            self._column_layout.replace_columns(self._model.columns)
+            self._column_search_header.replace_columns(self._model.columns)
+        finally:
+            self._changing_special_columns = False
         if enabled:
             delivery = next(i for i, column in enumerate(self._model.columns) if column.key == "delivery_settings")
             header = self._table.horizontalHeader()
@@ -1774,6 +1885,7 @@ class RosterWindow(QMainWindow):
             name = next(i for i, column in enumerate(self._model.columns) if column.key == "name")
             header.moveSection(header.visualIndex(delivery), header.visualIndex(name) + 1)
         self._after_model_reset()
+        self._save_search_filters()
 
     def _shift_day(self, offset: int) -> None:
         shifted = date.fromordinal(self._model.service_day.toordinal() + offset)
@@ -1785,13 +1897,101 @@ class RosterWindow(QMainWindow):
     def _on_column_values_changed(self, key: str, values) -> None:
         self._model.set_column_values(key, values)
         self._after_model_reset()
+        self._save_search_filters()
+
+    def _remember_delivery_settings_width(self, index: int, _old: int, width: int) -> None:
+        if self._changing_special_columns or width <= 0 or index >= len(self._model.columns):
+            return
+        if self._model.columns[index].key != "delivery_settings":
+            return
+        self._delivery_settings_width = width
+        if not self._remember_view:
+            return
+        self._search_settings.setValue("roster/delivery_settings_width", width)
+        self._search_settings.sync()
 
     def _on_column_search_changed(self, key: str, text: str) -> None:
         self._model.set_column_search(key, text)
         self._after_model_reset()
+        self._save_search_filters()
+
+    def _clear_column_filters(self) -> None:
+        self._model.clear_column_filters()
+        self._column_search_header.refresh_buttons()
+        self._after_model_reset()
+        self._save_search_filters()
 
     def _on_search_changed(self, text: str) -> None:
         self._model.set_search(text)
+        self._after_model_reset()
+        self._save_search_filters()
+
+    def _on_include_hidden_changed(self, enabled: bool) -> None:
+        self._model.set_include_hidden_in_search(enabled)
+        self._after_model_reset()
+        self._save_search_filters()
+
+    _SEARCH_SETTINGS_KEY = "roster/search_v1"
+
+    def _save_search_filters(self) -> None:
+        if self._restoring_search or not self._remember_view:
+            return
+        state = {
+            "global": self._search_input.text(),
+            "include_hidden": self._include_hidden_filter.isChecked(),
+            "special_only": self._special_only_filter.isChecked(),
+            "columns": dict(self._model._column_searches),
+            # Omission means all values; an empty list means explicitly none.
+            "values": {
+                key: sorted(values) for key, values in self._model._column_values.items()
+            },
+        }
+        if not any((state["global"], state["include_hidden"], state["special_only"], state["columns"], state["values"])):
+            self._search_settings.remove(self._search_settings_key)
+        else:
+            self._search_settings.setValue(
+                self._search_settings_key, json.dumps(state, ensure_ascii=False)
+            )
+        self._search_settings.sync()
+
+    def _restore_search_filters(self) -> None:
+        if not self._remember_view:
+            return
+        raw = self._search_settings.value(self._search_settings_key)
+        if not isinstance(raw, str):
+            return
+        try:
+            state = json.loads(raw)
+        except (TypeError, ValueError):
+            return
+        if not isinstance(state, dict):
+            return
+        keys = {column.key for column in self._model.columns}
+        self._restoring_search = True
+        try:
+            if type(state.get("special_only")) is bool:
+                self._special_only_filter.setChecked(state["special_only"])
+                keys = {column.key for column in self._model.columns}
+            global_search = state.get("global")
+            if isinstance(global_search, str):
+                self._search_input.setText(global_search)
+            if type(state.get("include_hidden")) is bool:
+                self._include_hidden_filter.setChecked(state["include_hidden"])
+            searches = state.get("columns")
+            if isinstance(searches, dict):
+                for key, search in searches.items():
+                    if key in keys and isinstance(search, str):
+                        self._model.set_column_search(key, search)
+            selections = state.get("values")
+            if isinstance(selections, dict):
+                for key, values in selections.items():
+                    if key in keys and isinstance(values, list) and all(
+                        isinstance(value, str) for value in values
+                    ):
+                        self._model.set_column_values(key, frozenset(values))
+        finally:
+            self._restoring_search = False
+        self._column_search_header.refresh_buttons()
         self._after_model_reset()
 
     def _refresh_driver_filter(self, selected_driver_id: UUID | None = None) -> None:
@@ -1820,6 +2020,17 @@ class RosterWindow(QMainWindow):
         self._table.clearSelection()
         self._clear_inspector()
         self._count_metric.setText(f"{self._model.rowCount()}명")
+        active_columns = [
+            column.label for column in self._model.columns
+            if column.key in self._model._column_searches
+            or column.key in self._model._column_values
+        ]
+        self._column_filter_strip.setVisible(bool(active_columns))
+        if active_columns:
+            label = f"칼럼 필터 적용 중: {', '.join(active_columns)}"
+            if self._model.rowCount() == 0:
+                label += " · 표시 0명"
+            self._column_filter_label.setText(label)
         for meal, counts in self._model.meal_status_counts().items():
             self._meal_summary_widgets[meal].setText(
                 f"{meal.value}  배송 {counts[MealStatus.DELIVERY.value]} · "

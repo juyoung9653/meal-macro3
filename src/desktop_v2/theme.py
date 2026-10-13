@@ -96,6 +96,12 @@ class _TextClippingGuard(QObject):
         if isinstance(watched, QLineEdit):
             if event.type() == QEvent.Type.Polish:
                 self._install_placeholder(watched)
+            elif event.type() == QEvent.Type.InputMethod:
+                watched.setProperty("imePreeditActive", bool(event.preeditString()))
+                self._sync_placeholder(watched)
+            elif event.type() == QEvent.Type.FocusOut:
+                watched.setProperty("imePreeditActive", False)
+                self._sync_placeholder(watched)
             elif event.type() in (QEvent.Type.Paint, QEvent.Type.Resize, QEvent.Type.Show):
                 self._sync_placeholder(watched)
         if event.type() == QEvent.Type.Polish:
@@ -135,7 +141,10 @@ class _TextClippingGuard(QObject):
         option = QStyleOptionFrame()
         option.initFrom(line)
         label.setGeometry(line.style().subElementRect(QStyle.SubElement.SE_LineEditContents, option, line))
-        label.setVisible(bool(line.placeholderText()) and not line.text() and line.isVisible())
+        label.setVisible(
+            bool(line.placeholderText()) and not line.text()
+            and not line.property("imePreeditActive") and line.isVisible()
+        )
 
 
 def register_application_fonts() -> None:
