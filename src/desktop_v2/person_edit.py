@@ -97,6 +97,7 @@ class PersonProfileEditDialog(QDialog):
         effective_delivery_settings: tuple[HouseholdDeliverySetting, ...] | None = None,
         member_delivery_settings: dict[UUID, tuple[HouseholdDeliverySetting, ...]] | None = None,
         delivery_only: bool = False,
+        defaults_roster: RosterSnapshot | None = None,
     ) -> None:
         if not isinstance(person, Person):
             raise TypeError("person은 Person이어야 합니다.")
@@ -114,6 +115,7 @@ class PersonProfileEditDialog(QDialog):
         )
         self._member_delivery_settings = member_delivery_settings or {}
         self._delivery_only = delivery_only
+        self._defaults_roster = defaults_roster
         self._delivery_days: dict[Meal, tuple[QCheckBox, ...]] = {}
         self._physical_delivery_days: dict[Meal, tuple[QComboBox, ...]] = {}
         self._delivery_forms: dict[Meal, QLineEdit] = {}
@@ -362,13 +364,13 @@ class PersonProfileEditDialog(QDialog):
             days = []
             for index, label in enumerate(("월", "화", "수", "목", "금", "토", "일")):
                 day = QCheckBox(label)
-                default_days = default_service_weekdays(meal)
+                default_days = default_service_weekdays(meal, self._defaults_roster)
                 day.setChecked(index in (setting.weekdays if setting and setting.weekdays is not None else default_days))
                 day.toggled.connect(self._refresh_form_state)
                 weekday_grid.addWidget(day, 0, index + 1)
                 days.append(day)
             delivery_days = []
-            mapping = setting.delivery_weekdays if setting and setting.delivery_weekdays is not None else default_delivery_weekdays(meal)
+            mapping = setting.delivery_weekdays if setting and setting.delivery_weekdays is not None else default_delivery_weekdays(meal, self._defaults_roster)
             for index, day in enumerate(days):
                 delivery_day = QComboBox()
                 delivery_day.setAccessibleName(f"{meal.value} {day.text()} 제공분 실제 배송 요일")
@@ -424,17 +426,17 @@ class PersonProfileEditDialog(QDialog):
 
     def _show_inherited_weekdays(self, meal: Meal) -> None:
         for index, day in enumerate(self._delivery_days[meal]):
-            day.setChecked(index in default_service_weekdays(meal))
+            day.setChecked(index in default_service_weekdays(meal, self._defaults_roster))
 
     def _show_inherited_delivery_weekdays(self, meal: Meal) -> None:
         for index, day in enumerate(self._physical_delivery_days[meal]):
-            day.setCurrentIndex(default_delivery_weekdays(meal)[index])
+            day.setCurrentIndex(default_delivery_weekdays(meal, self._defaults_roster)[index])
 
     def _update_delivery_heading(self) -> None:
         for meal, label in self._delivery_status.items():
             values = self._delivery_values(meal)
             baseline = (
-                default_service_weekdays(meal), default_delivery_weekdays(meal), ""
+                default_service_weekdays(meal, self._defaults_roster), default_delivery_weekdays(meal, self._defaults_roster), ""
             )
             summary = "별도 설정" if values != baseline else "기본값"
             if meal in self._force_reset_meals or values != self._initial_delivery_values[meal]:
@@ -458,8 +460,8 @@ class PersonProfileEditDialog(QDialog):
         days, mapping, form = values
         if not days:
             raise ValueError(f"{meal.value} 제공 요일을 하나 이상 선택해주세요.")
-        weekdays = None if days == default_service_weekdays(meal) else days
-        delivery_weekdays = None if mapping == default_delivery_weekdays(meal) else mapping
+        weekdays = None if days == default_service_weekdays(meal, self._defaults_roster) else days
+        delivery_weekdays = None if mapping == default_delivery_weekdays(meal, self._defaults_roster) else mapping
         if weekdays is None and delivery_weekdays is None and not form:
             return None
         return HouseholdDeliverySetting(meal, weekdays, form or None, delivery_weekdays)
@@ -473,7 +475,7 @@ class PersonProfileEditDialog(QDialog):
         settings = []
         for meal in (Meal.BREAKFAST, Meal.LUNCH, Meal.DINNER):
             values = self._delivery_values(meal)
-            baseline = (default_service_weekdays(meal), default_delivery_weekdays(meal), "")
+            baseline = (default_service_weekdays(meal, self._defaults_roster), default_delivery_weekdays(meal, self._defaults_roster), "")
             preserve_original = values == self._initial_delivery_values[meal] and (
                 meal not in self._force_reset_meals or values != baseline
             )
@@ -761,6 +763,7 @@ class PersonProfileEditController:
                     for member in household_members
                 },
                 delivery_only=delivery_only,
+                defaults_roster=roster,
             )
         else:
             dialog = self._dialog_type(person, parent, message_box=self._message_box)

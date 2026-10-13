@@ -95,6 +95,7 @@ def build_custom_field_create_revision(
         current_roster.enrollments,
         current_roster.assignments,
         (*current_roster.custom_fields, definition),
+        delivery_defaults=current_roster.delivery_defaults,
     )
     return _prepared(
         current_roster,
@@ -162,6 +163,7 @@ def build_custom_field_delete_revision(
         current_roster.enrollments,
         current_roster.assignments,
         fields,
+        delivery_defaults=current_roster.delivery_defaults,
     )
     return _prepared(
         current_roster,

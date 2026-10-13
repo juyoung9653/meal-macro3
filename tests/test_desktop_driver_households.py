@@ -32,23 +32,19 @@ def _row(household, driver, name, *, address="성남시", contact="010-1", meals
     )
 
 
-def test_uuid_filter_unassigned_and_legacy_options(app):
+def test_fixed_uuid_scope_and_no_top_filter_controls(app):
+    from PySide6.QtWidgets import QComboBox, QLineEdit
     first, second = Driver(uuid4(), "동일"), Driver(uuid4(), "동일")
-    rows = (
-        _row(uuid4(), first, first.name),
-        _row(uuid4(), second, second.name),
-        _row(uuid4(), None, ""),
-        _row(uuid4(), None, "이전 기사"),
-    )
+    rows = (_row(uuid4(), first, first.name), _row(uuid4(), second, second.name),
+            _row(uuid4(), None, ""), _row(uuid4(), None, "이전 기사"))
     dialog = DriverHouseholdsDialog(rows, service_day=date(2026, 9, 22), drivers=(first, second), selected_driver_id=second.driver_id)
     assert dialog.table.rowCount() == 1
-    assert dialog.table.item(0, 0).text() == "동일"
-    dialog.driver_filter.setCurrentIndex(dialog.driver_filter.findData(None))
-    assert dialog.table.rowCount() == 1
-    assert dialog.table.item(0, 0).text() == "미지정"
-    dialog.driver_filter.setCurrentIndex(dialog.driver_filter.findData("__legacy_driver__"))
-    assert dialog.table.rowCount() == 1
-    assert dialog.table.item(0, 0).text() == "이전 기사"
+    assert dialog._selected_driver_id == second.driver_id
+    assert not dialog.findChildren(QComboBox)
+    assert not dialog.findChildren(QLineEdit)
+    assert dialog.table.item(0, 3).data(Qt.UserRole).driver_id == second.driver_id
+    dialog._set_column_values("driver", {"이전 기사"})
+    assert dialog.table.rowCount() == 0  # Header filters cannot widen the fixed scope.
     assert dialog.findChild(QDialogButtonBox).button(QDialogButtonBox.StandardButton.Close).text() == "닫기"
     dialog.close()
 
@@ -66,9 +62,9 @@ def test_name_search_empty_state_and_pre_grouped_rows_are_not_reprojected(app):
     assert "석식, 중식" in {
         dialog.table.item(index, 2).text() for index in range(dialog.table.rowCount())
     }
-    dialog.search.setText("9999")
+    dialog._set_column_search("contacts", "9999")
     assert dialog.table.rowCount() == 1
-    dialog.search.setText("없는 가구")
+    dialog._set_column_search("members", "없는 가구")
     assert dialog.table.rowCount() == 0
     assert "해당" in dialog.empty.text()
     dialog.close()
@@ -96,10 +92,9 @@ def test_meal_split_uses_exact_rows_and_restores_merged_view_with_filters_and_so
         ("010-1", "010-2"), ("001", "002", "003", "004"),
         (dinner, breakfast, lunch),
     )
-    dialog = DriverHouseholdsDialog((merged,), service_day=date(2026, 9, 22), drivers=(driver,))
+    dialog = DriverHouseholdsDialog((merged,), service_day=date(2026, 9, 22), drivers=(driver,), selected_driver_id=driver.driver_id)
     dialog.table.selectRow(0)
     dialog.table.sortItems(3, Qt.SortOrder.DescendingOrder)
-    dialog.driver_filter.setCurrentIndex(dialog.driver_filter.findData(driver.driver_id))
     dialog.split_button.click()
     assert dialog.split_button.text() == "분리 해제"
     assert dialog.count.text() == "가구 1건 · 표시 3행"
@@ -111,14 +106,14 @@ def test_meal_split_uses_exact_rows_and_restores_merged_view_with_filters_and_so
     }
     assert dialog.table.item(0, 3).text() == "004"
     assert dialog.table.selectedItems()
-    dialog.search.setText("둘째")
+    dialog._set_column_search("members", "둘째")
     assert dialog.table.rowCount() == 2
     dialog.split_button.click()
     assert dialog.split_button.text() == "식종별 분리"
     assert dialog.table.rowCount() == 1
     assert dialog.table.item(0, 2).text() == "석식, 조식, 중식"
-    assert dialog.driver_filter.currentData() == driver.driver_id
-    assert dialog.search.text() == "둘째"
+    assert dialog._selected_driver_id == driver.driver_id
+    assert dialog._column_searches["members"] == "둘째"
     dialog.close()
 
 
@@ -154,7 +149,7 @@ def test_split_reconciles_exact_values_and_empty_state(app):
 def test_legacy_name_selection_is_not_mistaken_for_unassigned(app):
     driver = Driver(uuid4(), "기사")
     dialog = DriverHouseholdsDialog((_row(uuid4(), None, ""),), service_day=date(2026, 9, 22), drivers=(driver,), selected_driver_id="기사")
-    assert dialog.driver_filter.currentData() == "__all_drivers__"
+    assert dialog._selected_driver_id is None
     assert dialog.table.rowCount() == 1
     dialog.close()
 
@@ -197,7 +192,7 @@ def test_header_click_sorts_numeric_sequences_and_filter_refresh_keeps_rows_inta
     app.processEvents()
     assert header.sortIndicatorOrder() == Qt.SortOrder.DescendingOrder
     assert [dialog.table.item(i, 3).text() for i in range(3)] == ["10", "2", "1"]
-    dialog.search.setText("010-")
+    dialog._set_column_search("contacts", "010-")
     assert [dialog.table.item(i, 1).text() for i in range(3)] == ["가구다", "가구나", "가구가"]
     assert all(dialog.table.item(i, 5).toolTip() == dialog.table.item(i, 5).text() for i in range(3))
 
@@ -218,17 +213,17 @@ def test_each_column_search_filters_its_own_displayed_values(searchable_dialog, 
     assert dialog.table.rowCount() == 4
 
 
-def test_column_searches_combine_with_driver_and_global_search(searchable_dialog):
+def test_column_searches_combine_with_driver_header_filter(searchable_dialog):
     dialog = searchable_dialog
     header = dialog._column_search_header
-    dialog.driver_filter.setCurrentIndex(dialog.driver_filter.findData(dialog._drivers[0].driver_id))
-    dialog.search.setText("010")
+    dialog._set_column_values("driver", {"기사A"})
+    dialog._set_column_search("contacts", "010")
     dialog._set_column_search("address", "판교")
     dialog._set_column_search("meals", "석식")
     assert dialog.table.rowCount() == 1
     assert dialog.table.item(0, 1).text() == "가구다"
     assert dialog.count.text() == "가구 1건 · 표시 1행"
-    dialog.driver_filter.setCurrentIndex(dialog.driver_filter.findData(dialog._drivers[1].driver_id))
+    dialog._set_column_values("driver", {"기사B"})
     assert dialog.table.rowCount() == 0
     assert "해당" in dialog.empty.text()
     dialog._set_column_search("meals", "")

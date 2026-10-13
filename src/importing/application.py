@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import date, timedelta
 from enum import StrEnum
@@ -101,6 +101,7 @@ def apply_reconciliation(
     *,
     new_revision_id: UUID,
     decisions: Mapping[UUID, ReconciliationDecision] | None = None,
+    custom_fields: Sequence[CustomFieldDefinition] = (),
 ) -> ReconciliationResult:
     """Apply confirmed identities; phone-based household candidates stay untouched."""
 
@@ -136,7 +137,27 @@ def apply_reconciliation(
         (assignment.person_id, assignment.meal): assignment
         for assignment in (() if roster is None else roster.assignments)
     }
+    imported_custom_fields = tuple(custom_fields)
     custom_fields = list(() if roster is None else roster.custom_fields)
+    for definition in imported_custom_fields:
+        if not isinstance(definition, CustomFieldDefinition):
+            raise TypeError("custom_fields에는 CustomFieldDefinition만 허용됩니다.")
+        existing = next((item for item in custom_fields if item.definition_id == definition.definition_id), None)
+        if existing is not None:
+            if existing.field_type is not definition.field_type:
+                raise ValueError(f"‘{existing.name}’ 사용자 정의 필드 형식이 가져올 값과 다릅니다.")
+            continue
+        names = {item.name.casefold() for item in custom_fields}
+        name = definition.name
+        ordinal = 2
+        while name.casefold() in names:
+            name = f"{definition.name} ({ordinal})"
+            ordinal += 1
+        custom_fields.append(replace(
+            definition, name=name,
+            display_order=max((item.display_order for item in custom_fields), default=-1) + 1,
+        ))
+    imported_custom_ids = frozenset(definition.definition_id for definition in imported_custom_fields)
     enrollments = list(() if roster is None else roster.enrollments)
     applied: dict[UUID, UUID] = {}
     ignored: list[UUID] = []
@@ -184,6 +205,7 @@ def apply_reconciliation(
             field_id=additional_telephone_field_id,
             field_name=additional_telephone_field_name,
             field_ordinal=additional_telephone_field_ordinal,
+            protected_ids=imported_custom_ids | frozenset(staged.observation.custom_values),
         )
         additional_telephone_fields.update(
             _definitions_by_ordinal(
@@ -199,6 +221,7 @@ def apply_reconciliation(
             field_id=additional_mobile_phone_field_id,
             field_name=additional_mobile_phone_field_name,
             field_ordinal=additional_mobile_phone_field_ordinal,
+            protected_ids=imported_custom_ids | frozenset(staged.observation.custom_values),
         )
         additional_mobile_phone_fields.update(
             _definitions_by_ordinal(
@@ -224,6 +247,7 @@ def apply_reconciliation(
     snapshot = RosterSnapshot(
         revision_id=new_revision_id,
         persons=tuple(sorted(persons_by_id.values(), key=lambda item: str(item.person_id))),
+        **({} if roster is None else {"delivery_defaults": roster.delivery_defaults}),
         households=() if roster is None else roster.households,
         memberships=() if roster is None else roster.memberships,
         enrollments=tuple(
@@ -293,14 +317,19 @@ def _merge_additional_phones(
     field_id: Callable[[int], UUID],
     field_name: Callable[[int], str],
     field_ordinal: Callable[[str], int | None],
+    protected_ids: frozenset[UUID] = frozenset(),
 ) -> tuple[PersonProfile, tuple[CustomFieldDefinition, ...]]:
+    # A user-selected column can have a numbered phone header too. Only slots
+    # created by the automatic phone merger may be deduplicated or reassigned.
     phone_definitions = tuple(
         sorted(
             (
                 definition
                 for definition in custom_fields
                 if definition.field_type is CustomFieldType.TEXT
-                and field_ordinal(definition.name) is not None
+                and (ordinal := field_ordinal(definition.name)) is not None
+                and definition.definition_id == field_id(ordinal)
+                and definition.definition_id not in protected_ids
             ),
             key=lambda definition: field_ordinal(definition.name) or 0,
         )
@@ -329,7 +358,15 @@ def _merge_additional_phones(
         custom_values.pop(definition.definition_id, None)
 
     used_definitions: list[CustomFieldDefinition] = []
-    for ordinal, phone in enumerate(merged_phones, start=2):
+    automatic_ids = {definition.definition_id for definition in phone_definitions}
+    reserved_names = {
+        definition.name.casefold() for definition in custom_fields
+        if definition.definition_id not in automatic_ids
+    }
+    ordinal = 2
+    for phone in merged_phones:
+        while field_name(ordinal).casefold() in reserved_names:
+            ordinal += 1
         definition = _ensure_additional_phone_field(
             custom_fields,
             ordinal,
@@ -338,6 +375,7 @@ def _merge_additional_phones(
         )
         custom_values[definition.definition_id] = phone
         used_definitions.append(definition)
+        ordinal += 1
     return (
         replace(profile, custom_values=custom_values),
         tuple(used_definitions),

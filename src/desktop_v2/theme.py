@@ -1395,6 +1395,25 @@ def application_stylesheet() -> str:
     QTabWidget::pane {{ background: #FFFFFF; border: 1px solid {LINE}; }}
     QTabBar::tab {{ padding: 7px 12px; background: #DDE7EA; }}
     QTabBar::tab:selected {{ background: #FFFFFF; font-weight: 700; }}
+    QTabBar#rosterSheetTabs::tab {{
+        background: {CANVAS};
+        color: {TEXT};
+        font-weight: 700;
+        padding: 7px 12px;
+        margin-right: 3px;
+        border: 1px solid {LINE};
+        border-bottom: 3px solid {LINE};
+        border-top-left-radius: 4px;
+        border-top-right-radius: 4px;
+    }}
+    QTabBar#rosterSheetTabs::tab:!selected:hover {{ background: #DCEFF2; }}
+    QTabBar#rosterSheetTabs::tab:selected {{
+        background: {INK};
+        color: {SURFACE};
+        border-color: {INK};
+        border-bottom-color: {FOCUS};
+    }}
+    QTabBar#rosterSheetTabs::tab:selected:focus {{ border-color: {FOCUS}; }}
     QFrame#schoolCalendarHeader,
     QFrame#schoolCalendarReviewHeader,
     QFrame#schoolCalendarEditHeader {{

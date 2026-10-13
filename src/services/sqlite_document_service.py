@@ -29,6 +29,7 @@ from src.domain.entitlements import (
     MealEntitlement,
     decide_entitlement,
 )
+from src.domain.delivery_defaults import delivery_defaults_state
 from src.domain.projections import (
     roster_from_historical_snapshot,
     status_events_from_historical_snapshot,
@@ -194,9 +195,8 @@ def prepare_monthly_document_data(
             "selected_meals": tuple(meal.value for meal in selected_meals),
             "recurring_service_policy": {
                 "version": RECURRING_MEAL_SERVICE_POLICY_VERSION,
-                "breakfast": "friday_saturday_sunday",
-                "lunch": "reviewed_school_weekdays",
-                "dinner": "weekdays",
+                "defaults": delivery_defaults_state(roster.delivery_defaults),
+                "lunch": "configured_days_and_reviewed_school_weekdays",
                 "household_weekday_override": "replaces_regular_days; lunch_requires_school_service",
                 "household_delivery_weekday": "latest_configured_weekday_on_or_before_service_day",
             },

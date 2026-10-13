@@ -7,6 +7,7 @@ from uuid import uuid4
 
 import pytest
 from PySide6.QtWidgets import QApplication, QDialog
+from PySide6.QtCore import QSettings
 
 from src.desktop_v2.application import DesktopStartupController
 from src.desktop_v2.roster_window import RosterWindow
@@ -99,11 +100,12 @@ def test_settings_provider_action_refreshes_the_saved_roster(monkeypatch):
 
 
 def test_calendar_saved_in_new_revision_refreshes_lunch_and_removal_resets_it(
-    monkeypatch,
+    monkeypatch, tmp_path,
 ):
     app = QApplication.instance() or QApplication([])
     roster = _roster()
-    window = RosterWindow(roster, _histories())
+    preferences = QSettings(str(tmp_path / "view.ini"), QSettings.Format.IniFormat)
+    window = RosterWindow(roster, _histories(), inactive_settings=preferences, column_settings=preferences)
     window._set_day(SERVICE_DAY)
     window._set_meal(Meal.LUNCH)
 

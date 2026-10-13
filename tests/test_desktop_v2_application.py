@@ -137,6 +137,7 @@ def test_password_rotation_partial_warning_is_bounded_and_truthful(app, tmp_path
         def exec(self):
             return QDialog.DialogCode.Accepted
     controller = DesktopStartupController(
+        settings=SimpleNamespace(),
         settings_hub_dialog_type=Hub,
         database_password_dialog_type=PasswordDialog,
         message_box=_Messages,
@@ -1440,6 +1441,7 @@ def test_school_calendar_editor_can_route_to_excel_import():
 
     window = Window()
     controller = DesktopStartupController(
+        settings=SimpleNamespace(),
         school_calendar_edit_controller_type=StoredEditor,
         school_calendar_controller_type=ExcelImporter,
         message_box=_Messages,

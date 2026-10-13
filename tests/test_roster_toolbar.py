@@ -1,7 +1,9 @@
 """Frequent actions stay visible; occasional work remains reachable by menu."""
 
+from datetime import date
+
 import pytest
-from PySide6.QtWidgets import QApplication, QPushButton
+from PySide6.QtWidgets import QApplication, QComboBox, QPushButton
 
 from src.desktop_v2.roster_window import RosterWindow
 from tests.test_desktop_v2_roster import _roster
@@ -11,6 +13,7 @@ from tests.test_desktop_v2_roster import _roster
 def window():
     app = QApplication.instance() or QApplication([])
     view = RosterWindow(_roster())
+    view._set_day(date(2026, 8, 21))
     view.show()
     app.processEvents()
     yield view
@@ -42,7 +45,7 @@ def test_header_only_exposes_frequent_actions(window):
     assert visible == {"문서 만들기", "기사별 가구", "행 추가", "더보기"}
     assert window._more_button.menu() is window._more_menu
     assert window._column_search_header.buttons["name"].isVisible()
-    assert window._driver_filter.isVisible()
+    assert not header.findChildren(QComboBox)
 
 
 def test_row_actions_emit_selected_meal_and_person(window):
@@ -77,7 +80,7 @@ def test_column_settings_remains_reachable_from_more_menu(window, monkeypatch):
     window._columns_action.trigger()
     assert len(menus) == 1
     assert "기본 열 구성으로 되돌리기" in {action.text() for action in menus[0].actions()}
-    assert "사용자 항목 추가·삭제…" in {action.text() for action in menus[0].actions()}
+    assert "사용자 항목 추가·삭제" in {action.text() for action in menus[0].actions()}
 
 
 def test_driver_view_uses_all_delivery_meals_and_current_date_despite_roster_filters(window, monkeypatch):
@@ -88,7 +91,9 @@ def test_driver_view_uses_all_delivery_meals_and_current_date_despite_roster_fil
     from src.desktop_v2 import driver_households
     from src.domain import Meal, MealEnrollment
     from src.domain.delivery_routing import Driver, RoutingEvent, RoutingState
-    from tests.test_desktop_v2_roster import SERVICE_DAY, _calendar, _histories
+    from tests.test_desktop_v2_roster import _calendar, _histories
+
+    service_day = date(2026, 8, 21)
 
     roster = _roster()
     first, second = roster.persons
@@ -100,17 +105,16 @@ def test_driver_view_uses_all_delivery_meals_and_current_date_despite_roster_fil
     ))
     driver_a, driver_b = Driver(uuid4(), "기사A"), Driver(uuid4(), "기사B")
     state = RoutingState((driver_a, driver_b), (
-        RoutingEvent(uuid4(), first.person_id, SERVICE_DAY, 1, {
+        RoutingEvent(uuid4(), first.person_id, service_day, 1, {
             Meal.BREAKFAST: driver_a.driver_id, Meal.LUNCH: driver_a.driver_id,
             Meal.DINNER: driver_b.driver_id,
         }),
-        RoutingEvent(uuid4(), second.person_id, SERVICE_DAY, 2, {Meal.BREAKFAST: driver_a.driver_id}),
+        RoutingEvent(uuid4(), second.person_id, service_day, 2, {Meal.BREAKFAST: driver_a.driver_id}),
     ))
     window.replace_roster(roster, _histories())
     window.set_routing_state(state)
     window.set_school_calendar(_calendar())
-    window._set_day(SERVICE_DAY)
-    window._driver_filter.setCurrentIndex(window._driver_filter.findData(driver_a.driver_id))
+    window._set_day(service_day)
     window.table_model.set_column_search("name", "검색에 해당하는 사람 없음")
     assert window.table_model.rowCount() == 0
     opened = []
@@ -118,6 +122,7 @@ def test_driver_view_uses_all_delivery_meals_and_current_date_despite_roster_fil
     class Dialog:
         def __init__(self, rows, **kwargs):
             opened.append((rows, kwargs))
+            self.sequence_save_requested = SignalStub()
 
         def exec(self):
             return 0
@@ -125,23 +130,27 @@ def test_driver_view_uses_all_delivery_meals_and_current_date_despite_roster_fil
         def deleteLater(self):
             pass
 
+    class SignalStub:
+        def connect(self, callback):
+            pass
+
     monkeypatch.setattr(driver_households, "DriverHouseholdsDialog", Dialog)
     window._driver_households_button.click()
     rows, settings = opened[-1]
-    assert settings["service_day"] == SERVICE_DAY
-    assert settings["selected_driver_id"] == driver_a.driver_id
+    assert settings["service_day"] == service_day
+    assert settings.get("selected_driver_id") is None
     assert settings["drivers"] == state.drivers
     assert len(rows) == 2
     assert {row.driver_id: row.meals for row in rows} == {
         driver_a.driver_id: (Meal.BREAKFAST,), driver_b.driver_id: (Meal.DINNER,),
-    }  # The paused lunch is omitted; other meals remain despite the main lunch filter.
+    }  # Friday's lunch is unavailable; other meals remain despite the main lunch filter.
     assert len(next(row for row in rows if row.driver_id == driver_a.driver_id).member_ids) == 2
 
-    window._set_day(SERVICE_DAY + timedelta(days=1))
+    window._set_day(service_day + timedelta(days=1))
     window._driver_households_button.click()
     rows, settings = opened[-1]
-    assert settings["service_day"] == SERVICE_DAY + timedelta(days=1)
-    assert next(row for row in rows if row.driver_id == driver_a.driver_id).meals == (Meal.BREAKFAST, Meal.LUNCH)
+    assert settings["service_day"] == service_day + timedelta(days=1)
+    assert next(row for row in rows if row.driver_id == driver_a.driver_id).meals == (Meal.BREAKFAST,)
 
 
 def test_driver_households_button_opens_real_dialog_and_can_close(window):

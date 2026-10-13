@@ -23,6 +23,7 @@ from .database_credentials import (
     DatabaseCredentials,
     credential_path_for,
 )
+from .file_lock import ExclusiveFileLock, database_lock
 from .encrypted_database import DatabaseAlreadyExistsError, EncryptedDatabase
 
 
@@ -66,6 +67,7 @@ class DatabaseSession:
         database_key: bytes,
         *,
         backup_directory: str | Path | None = None,
+        _lock: ExclusiveFileLock | None = None,
     ) -> None:
         if len(database_key) != _DATABASE_KEY_BYTES:
             raise ValueError(f"DB key는 {_DATABASE_KEY_BYTES} bytes여야 합니다.")
@@ -78,6 +80,7 @@ class DatabaseSession:
             else DatabaseBackupService(backup_directory)
         )
         self._closed = False
+        self._locks = [] if _lock is None else [_lock]
 
     @classmethod
     def create(
@@ -87,37 +90,46 @@ class DatabaseSession:
         recovery_password: str | None = None,
         *,
         backup_directory: str | Path | None = None,
+        _lock: ExclusiveFileLock | None = None,
     ) -> DatabaseSession:
-        path = Path(database_path).resolve()
-        sidecar = credential_path_for(path)
-        if path.exists():
-            raise DatabaseAlreadyExistsError(f"DB 파일이 이미 있습니다: {path}")
-        if sidecar.exists():
-            raise CredentialAlreadyExistsError(
-                f"DB 비밀번호 정보가 이미 있습니다: {sidecar}"
-            )
-
-        key = secrets.token_bytes(_DATABASE_KEY_BYTES)
-        database = EncryptedDatabase.create(path, key)
+        owned = _lock is None
+        lock = _lock if _lock is not None else database_lock(database_path).acquire()
         try:
-            credentials, returned_key = DatabaseCredentials.create(
-                path,
-                user_password,
-                recovery_password,
-                database_key=key,
+            path = Path(database_path).resolve()
+            sidecar = credential_path_for(path)
+            if path.exists():
+                raise DatabaseAlreadyExistsError(f"DB 파일이 이미 있습니다: {path}")
+            if sidecar.exists():
+                raise CredentialAlreadyExistsError(
+                    f"DB 비밀번호 정보가 이미 있습니다: {sidecar}"
+                )
+
+            key = secrets.token_bytes(_DATABASE_KEY_BYTES)
+            database = EncryptedDatabase.create(path, key)
+            try:
+                credentials, returned_key = DatabaseCredentials.create(
+                    path,
+                    user_password,
+                    recovery_password,
+                    database_key=key,
+                )
+                if not hmac.compare_digest(key, returned_key):
+                    raise CredentialFormatError("생성된 DB key가 일치하지 않습니다.")
+            except Exception:
+                database.close()
+                _remove_created_database(path)
+                raise
+            return cls._from_database(
+                database,
+                credentials,
+                key,
+                backup_directory=backup_directory,
+                _lock=lock,
             )
-            if not hmac.compare_digest(key, returned_key):
-                raise CredentialFormatError("생성된 DB key가 일치하지 않습니다.")
-        except Exception:
-            database.close()
-            _remove_created_database(path)
+        except BaseException:
+            if owned:
+                lock.close()
             raise
-        return cls(
-            database,
-            credentials,
-            key,
-            backup_directory=backup_directory,
-        )
 
     @classmethod
     def open(
@@ -126,17 +138,26 @@ class DatabaseSession:
         user_password: str,
         *,
         backup_directory: str | Path | None = None,
+        _lock: ExclusiveFileLock | None = None,
     ) -> DatabaseSession:
-        path = Path(database_path).resolve()
-        credentials = DatabaseCredentials.load(path)
-        key = credentials.unlock_user(user_password)
-        database = EncryptedDatabase.open(path, key)
-        return cls(
-            database,
-            credentials,
-            key,
-            backup_directory=backup_directory,
-        )
+        owned = _lock is None
+        lock = _lock if _lock is not None else database_lock(database_path).acquire()
+        try:
+            path = Path(database_path).resolve()
+            credentials = DatabaseCredentials.load(path)
+            key = credentials.unlock_user(user_password)
+            database = EncryptedDatabase.open(path, key)
+            return cls._from_database(
+                database,
+                credentials,
+                key,
+                backup_directory=backup_directory,
+                _lock=lock,
+            )
+        except BaseException:
+            if owned:
+                lock.close()
+            raise
 
     @classmethod
     def recover_and_open(
@@ -146,25 +167,34 @@ class DatabaseSession:
         new_user_password: str,
         *,
         backup_directory: str | Path | None = None,
+        _lock: ExclusiveFileLock | None = None,
     ) -> DatabaseSession:
-        path = Path(database_path).resolve()
-        credentials = DatabaseCredentials.load(path)
-        key = credentials.unlock_recovery(recovery_password)
-        database = EncryptedDatabase.open(path, key)
+        owned = _lock is None
+        lock = _lock if _lock is not None else database_lock(database_path).acquire()
         try:
-            updated = credentials.reset_user_password(
-                recovery_password,
-                new_user_password,
+            path = Path(database_path).resolve()
+            credentials = DatabaseCredentials.load(path)
+            key = credentials.unlock_recovery(recovery_password)
+            database = EncryptedDatabase.open(path, key)
+            try:
+                updated = credentials.reset_user_password(
+                    recovery_password,
+                    new_user_password,
+                )
+            except Exception:
+                database.close()
+                raise
+            return cls._from_database(
+                database,
+                updated,
+                key,
+                backup_directory=backup_directory,
+                _lock=lock,
             )
-        except Exception:
-            database.close()
+        except BaseException:
+            if owned:
+                lock.close()
             raise
-        return cls(
-            database,
-            updated,
-            key,
-            backup_directory=backup_directory,
-        )
 
     @classmethod
     def restore_and_open_with_user_password(
@@ -174,17 +204,27 @@ class DatabaseSession:
         user_password: str,
         *,
         backup_directory: str | Path | None = None,
+        _lock: ExclusiveFileLock | None = None,
     ) -> DatabaseSession:
-        restored = restore_backup_with_user_password(
-            backup_path,
-            destination_database_path,
-            user_password,
-        )
-        return cls.open(
-            restored,
-            user_password,
-            backup_directory=backup_directory,
-        )
+        owned = _lock is None
+        lock = _lock if _lock is not None else database_lock(destination_database_path).acquire()
+        try:
+            restored = restore_backup_with_user_password(
+                backup_path,
+                destination_database_path,
+                user_password,
+                _lock=lock,
+            )
+            return cls.open(
+                restored,
+                user_password,
+                backup_directory=backup_directory,
+                _lock=lock,
+            )
+        except BaseException:
+            if owned:
+                lock.close()
+            raise
 
     @classmethod
     def restore_and_open_with_recovery_password(
@@ -195,18 +235,41 @@ class DatabaseSession:
         new_user_password: str,
         *,
         backup_directory: str | Path | None = None,
+        _lock: ExclusiveFileLock | None = None,
     ) -> DatabaseSession:
-        restored = restore_backup_with_recovery_password(
-            backup_path,
-            destination_database_path,
-            recovery_password,
-            new_user_password,
-        )
-        return cls.open(
-            restored,
-            new_user_password,
-            backup_directory=backup_directory,
-        )
+        owned = _lock is None
+        lock = _lock if _lock is not None else database_lock(destination_database_path).acquire()
+        try:
+            restored = restore_backup_with_recovery_password(
+                backup_path,
+                destination_database_path,
+                recovery_password,
+                new_user_password,
+                _lock=lock,
+            )
+            return cls.open(
+                restored,
+                new_user_password,
+                backup_directory=backup_directory,
+                _lock=lock,
+            )
+        except BaseException:
+            if owned:
+                lock.close()
+            raise
+
+    @classmethod
+    def _from_database(cls, database, credentials, key, **kwargs) -> DatabaseSession:
+        try:
+            return cls(database, credentials, key, **kwargs)
+        except BaseException:
+            database.close()
+            raise
+
+    def retain_lock(self, lock: ExclusiveFileLock) -> None:
+        """Keep a successfully relocated destination reserved until shutdown."""
+        self._require_open()
+        self._locks.append(lock)
 
     @property
     def database(self) -> EncryptedDatabase:
@@ -316,10 +379,15 @@ class DatabaseSession:
     def close(self) -> None:
         if self._closed:
             return
-        self._database.close()
-        for index in range(len(self._database_key)):
-            self._database_key[index] = 0
-        self._closed = True
+        try:
+            self._database.close()
+        finally:
+            for index in range(len(self._database_key)):
+                self._database_key[index] = 0
+            self._closed = True
+            for lock in self._locks:
+                lock.close()
+            self._locks.clear()
 
     def __enter__(self) -> DatabaseSession:
         self._require_open()

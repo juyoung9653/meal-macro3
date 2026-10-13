@@ -11,6 +11,7 @@ from collections.abc import Mapping
 from datetime import date, datetime
 from uuid import UUID, uuid5
 
+from .delivery_defaults import DELIVERY_DEFAULTS_ID, DELIVERY_DEFAULTS_KIND, delivery_defaults_from_state, delivery_defaults_state
 from .revisions import (
     AuditChange,
     ChangeOperation,
@@ -132,7 +133,9 @@ def roster_entity_states(
 
     if not isinstance(snapshot, RosterSnapshot):
         raise TypeError("snapshot은 RosterSnapshot이어야 합니다.")
-    return _roster_states(snapshot)
+    states = _roster_states(snapshot)
+    states[EntityRef(DELIVERY_DEFAULTS_KIND, DELIVERY_DEFAULTS_ID)] = delivery_defaults_state(snapshot.delivery_defaults)
+    return states
 
 
 def roster_from_historical_snapshot(snapshot: HistoricalSnapshot) -> RosterSnapshot:
@@ -178,6 +181,7 @@ def roster_from_entity_states(
 
     return RosterSnapshot(
         revision_id=revision_id,
+        delivery_defaults=delivery_defaults_from_state(entities.get(EntityRef(DELIVERY_DEFAULTS_KIND, DELIVERY_DEFAULTS_ID))),
         persons=tuple(sorted(persons, key=lambda person: str(person.person_id))),
         households=tuple(
             sorted(households, key=lambda household: str(household.household_id))

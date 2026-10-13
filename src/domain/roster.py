@@ -247,6 +247,29 @@ class HouseholdDeliverySetting:
             raise ValueError("별도 배송 설정에는 요일이나 형태가 필요합니다.")
 
 
+def standard_delivery_defaults() -> tuple[HouseholdDeliverySetting, ...]:
+    """Original operating defaults used by databases without a saved setting."""
+    return tuple(
+        HouseholdDeliverySetting(
+            meal,
+            (4, 5, 6) if meal is Meal.BREAKFAST else (0, 1, 2, 3, 4),
+            delivery_weekdays=(0, 1, 2, 3, 4, 4, 4) if meal is Meal.BREAKFAST else tuple(range(7)),
+        )
+        for meal in Meal
+    )
+
+
+def validate_delivery_defaults(settings) -> tuple[HouseholdDeliverySetting, ...]:
+    settings = tuple(settings)
+    if any(not isinstance(item, HouseholdDeliverySetting) for item in settings):
+        raise TypeError("식종별 기본값은 배송 설정이어야 합니다.")
+    if len(settings) != len(Meal) or {item.meal for item in settings} != set(Meal):
+        raise ValueError("석식·조식·중식 기본값을 각각 지정해주세요.")
+    if any(item.weekdays is None or item.delivery_weekdays is None or item.form is not None for item in settings):
+        raise ValueError("기본값에는 제공 요일과 배송요일이 필요합니다.")
+    return tuple(sorted(settings, key=lambda item: _MEAL_ORDER.index(item.meal)))
+
+
 @dataclass(frozen=True, slots=True)
 class HouseholdMembership:
     person_id: UUID
@@ -314,6 +337,7 @@ class RosterSnapshot:
     enrollments: tuple[MealEnrollment, ...] = ()
     assignments: tuple[DeliveryAssignment, ...] = ()
     custom_fields: tuple[CustomFieldDefinition, ...] = ()
+    delivery_defaults: tuple[HouseholdDeliverySetting, ...] = field(default_factory=standard_delivery_defaults)
     _persons_by_id: Mapping[UUID, Person] = field(init=False, repr=False)
     _households_by_id: Mapping[UUID, Household] = field(init=False, repr=False)
     _assignments_by_key: Mapping[
@@ -322,6 +346,7 @@ class RosterSnapshot:
 
     def __post_init__(self) -> None:
         _validate_uuid(self.revision_id, "revision ID")
+        object.__setattr__(self, "delivery_defaults", validate_delivery_defaults(self.delivery_defaults))
         persons = tuple(self.persons)
         households = tuple(self.households)
         memberships = tuple(self.memberships)

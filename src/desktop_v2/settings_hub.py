@@ -1,4 +1,4 @@
-"""Plain settings entry point for DB-backed and computer-local settings."""
+"""Plain settings entry point for DB-backed settings and shared paths."""
 
 from __future__ import annotations
 
@@ -30,6 +30,7 @@ class SettingsAction(StrEnum):
     EXPORT_PASSWORD = "export_password"
     DOCUMENT_TEMPLATE = "document_template"
     DOCUMENT_COLUMN_MAPPING = "document_column_mapping"
+    DELIVERY_DEFAULTS = "delivery_defaults"
     DOCUMENT_DIRECTORY = "document_directory"
     DATABASE_LOCATION = "database_location"
     BACKUP_DIRECTORY = "backup_directory"
@@ -49,6 +50,11 @@ class SettingsAction(StrEnum):
 
 
 _SETTINGS_COPY = {
+    SettingsAction.DELIVERY_DEFAULTS: (
+        "식종별 배송 기본값",
+        "별도 설정이 없는 기존·신규 대상자의 제공 요일과 배송요일을 설정합니다.",
+        "변경 이력에 기록",
+    ),
     SettingsAction.PROVIDER: (
         "공통 제공기관",
         "모든 대상자와 생성 문서에 사용할 제공기관을 한 번만 설정합니다.",
@@ -66,18 +72,18 @@ _SETTINGS_COPY = {
     ),
     SettingsAction.DOCUMENT_DIRECTORY: (
         "문서 저장 폴더",
-        "새 문서를 모아둘 기본 폴더를 이 컴퓨터에 기억합니다.",
-        "이 컴퓨터에만 저장",
+        "새 문서를 모아둘 기본 폴더를 공통 설정으로 기억합니다.",
+        "공통 설정으로 저장",
     ),
     SettingsAction.DATABASE_LOCATION: (
         "운영 데이터 위치",
         "현재 운영 데이터와 비밀번호 정보를 새 위치로 옮기고 다음 실행부터 사용합니다.",
-        "이 컴퓨터에만 저장",
+        "공통 설정으로 저장",
     ),
     SettingsAction.BACKUP_DIRECTORY: (
         "자동 백업 폴더",
         "새 백업을 저장할 폴더를 선택합니다. 기존 백업은 원래 폴더에 보관합니다.",
-        "이 컴퓨터에만 저장",
+        "공통 설정으로 저장",
     ),
     SettingsAction.DATABASE_PASSWORD: (
         "운영 파일 비밀번호 변경",
@@ -184,6 +190,7 @@ class SettingsHubDialog(QDialog):
             (SettingsAction.EXPORT_PASSWORD, "잠금"),
             (SettingsAction.DOCUMENT_TEMPLATE, "양식"),
             (SettingsAction.DOCUMENT_COLUMN_MAPPING, "연결"),
+            (SettingsAction.DELIVERY_DEFAULTS, "배송"),
             (SettingsAction.DOCUMENT_DIRECTORY, "폴더"),
             (SettingsAction.DATABASE_LOCATION, "DB"),
             (SettingsAction.BACKUP_DIRECTORY, "백업"),
@@ -194,7 +201,7 @@ class SettingsHubDialog(QDialog):
                 lambda _checked=False, selected=action: self._choose(selected)
             )
             self._cards[action] = card
-            full_width = action in (SettingsAction.DOCUMENT_DIRECTORY, SettingsAction.DATABASE_LOCATION, SettingsAction.BACKUP_DIRECTORY, SettingsAction.DATABASE_PASSWORD)
+            full_width = action in (SettingsAction.DELIVERY_DEFAULTS, SettingsAction.DOCUMENT_DIRECTORY, SettingsAction.DATABASE_LOCATION, SettingsAction.BACKUP_DIRECTORY, SettingsAction.DATABASE_PASSWORD)
             cards.addWidget(card, index - 2 if full_width else index // 2,
                             0 if full_width else index % 2, 1, 2 if full_width else 1)
         cards.setColumnStretch(0, 1)
@@ -203,7 +210,7 @@ class SettingsHubDialog(QDialog):
         root.addWidget(scroll, 1)
 
         note = QLabel(
-            "제공기관·Excel 비밀번호·문서 양식·출력 연결은 변경 이력에 남습니다. 문서 저장 폴더·운영 데이터 위치·자동 백업 폴더는 이 컴퓨터에만 저장합니다."
+            "제공기관·Excel 비밀번호·문서 양식·출력 연결·배송 기본값은 변경 이력에 남습니다. 문서 저장 폴더·운영 데이터 위치·자동 백업 폴더는 같은 프로그램 폴더를 사용하는 모든 PC에 적용됩니다."
         )
         note.setObjectName("settingsHubNote")
         note.setWordWrap(True)

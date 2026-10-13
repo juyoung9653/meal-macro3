@@ -72,6 +72,7 @@ class ImportMappingProfile:
     phone_normalization: PhoneNormalization = PhoneNormalization.KOREAN
     ignored_columns: tuple[str, ...] = ()
     provider_value: str | None = None
+    custom_field_names: Mapping[UUID, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         _validate_uuid(self.profile_id, "import profile ID")
@@ -120,6 +121,12 @@ class ImportMappingProfile:
                 header,
                 "사용자 정의 원본 열",
             )
+        custom_names = {}
+        for definition_id, name in self.custom_field_names.items():
+            if definition_id not in custom_columns:
+                raise ValueError("사용자 정의 필드명에는 연결된 원본 열이 필요합니다.")
+            custom_names[definition_id] = _required_text(name, "사용자 정의 필드명")
+        object.__setattr__(self, "custom_field_names", MappingProxyType(custom_names))
         driver = _optional_text(self.driver_column, "배송담당 열")
         sequence = _optional_text(self.sequence_column, "배송순서 열")
         source_reference = _optional_text(
@@ -263,6 +270,9 @@ class ImportMappingProfile:
             "phone_normalization": self.phone_normalization.value,
             "ignored_columns": list(self.ignored_columns),
             "provider_value": self.provider_value,
+            **({"custom_field_names": {
+                str(key): value for key, value in self.custom_field_names.items()
+            }} if self.custom_field_names else {}),
         }
 
     @classmethod
@@ -324,6 +334,11 @@ class ImportMappingProfile:
                 "ignored_columns",
             ),
             provider_value=manifest.get("provider_value"),
+            custom_field_names={
+                UUID(str(key)): value for key, value in _manifest_mapping(
+                    manifest, "custom_field_names", default={}
+                ).items()
+            },
         )
 
 
@@ -392,6 +407,7 @@ class PersonObservation:
     assignments: tuple[ObservedDeliveryAssignment, ...] = ()
     additional_mobile_phones: tuple[str, ...] = ()
     additional_telephones: tuple[str, ...] = ()
+    custom_values: Mapping[UUID, str | None] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         _validate_uuid(self.observation_id, "observation ID")
@@ -433,6 +449,12 @@ class PersonObservation:
         object.__setattr__(self, "assignments", assignments)
         object.__setattr__(self, "additional_mobile_phones", additional_mobile_phones)
         object.__setattr__(self, "additional_telephones", additional_telephones)
+        custom_values = dict(self.custom_values)
+        for definition_id, value in custom_values.items():
+            _validate_uuid(definition_id, "사용자 정의 필드 ID")
+            if value is not None and not isinstance(value, str):
+                raise TypeError("가져온 사용자 정의 값은 문자열 또는 None이어야 합니다.")
+        object.__setattr__(self, "custom_values", MappingProxyType(custom_values))
 
     @property
     def name(self) -> str:
@@ -463,7 +485,11 @@ class PersonObservation:
                 if base is None or value is not None
             }
         )
-        custom_values = {} if base is None else base.custom_values
+        custom_values = {} if base is None else dict(base.custom_values)
+        custom_values.update({
+            key: value for key, value in self.custom_values.items()
+            if base is None or value is not None
+        })
         return PersonProfile(**values, custom_values=custom_values)
 
     def blank_profile_fields_preserved_from(

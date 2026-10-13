@@ -45,8 +45,9 @@ from .meal_status_edit import MealStatusChangeController
 from .person_edit import PersonProfileEditController
 from .roster_row_edit import RosterRowEditController
 from .provider_settings import ProviderSettingsController
+from .delivery_defaults import DeliveryDefaultsController
 from .roster_window import RosterWindow
-from .sequence_edit import SequenceEditController
+from .sequence_edit import SequenceEditController, SequenceSaveStatus
 from .school_calendar_edit import (
     SchoolCalendarEditController,
     SchoolCalendarEditStatus,
@@ -75,12 +76,14 @@ class DesktopStartupOutcome:
         return self.status is StartupStatus.READY
 
     def close(self) -> None:
-        if self.window is not None:
-            self.window.close()
-        if self.session is not None:
-            self.session.close()
-        self.window = None
-        self.session = None
+        try:
+            if self.window is not None:
+                self.window.close()
+        finally:
+            if self.session is not None:
+                self.session.close()
+            self.window = None
+            self.session = None
 
 
 class DesktopStartupController:
@@ -101,6 +104,7 @@ class DesktopStartupController:
         complaint_controller_type=ComplaintController,
         database_export_controller_type=DatabaseExportController,
         provider_settings_controller_type=ProviderSettingsController,
+        delivery_defaults_controller_type=DeliveryDefaultsController,
         meal_status_controller_type=MealStatusChangeController,
         service_adjustment_controller_type=ServiceAdjustmentController,
         school_calendar_controller_type=SchoolCalendarImportController,
@@ -136,6 +140,7 @@ class DesktopStartupController:
         self._complaint_controller_type = complaint_controller_type
         self._database_export_controller_type = database_export_controller_type
         self._provider_settings_controller_type = provider_settings_controller_type
+        self._delivery_defaults_controller_type = delivery_defaults_controller_type
         self._meal_status_controller_type = meal_status_controller_type
         self._service_adjustment_controller_type = (
             service_adjustment_controller_type
@@ -164,7 +169,25 @@ class DesktopStartupController:
         self._message_box = message_box
 
     def start(self, parent: QWidget | None = None) -> DesktopStartupOutcome:
-        access_dialog = self._access_dialog(parent)
+        access_dialog = None
+        outcome = None
+        try:
+            access_dialog = self._access_dialog(parent)
+            outcome = self._start_with_dialog(access_dialog, parent)
+            return outcome
+        except Exception as error:
+            self._message_box.critical(parent, "운영 데이터를 열지 못했습니다", str(error))
+            return DesktopStartupOutcome(StartupStatus.FAILED)
+        finally:
+            if access_dialog is not None and (outcome is None or not outcome.ready):
+                session = getattr(access_dialog, "session", None)
+                if session is not None:
+                    session.close()
+                release = getattr(access_dialog, "release_reservation", None)
+                if release is not None:
+                    release()
+
+    def _start_with_dialog(self, access_dialog, parent) -> DesktopStartupOutcome:
         if access_dialog.exec() != QDialog.DialogCode.Accepted:
             return DesktopStartupOutcome(StartupStatus.CANCELLED)
         session = access_dialog.session
@@ -237,6 +260,7 @@ class DesktopStartupController:
             ("drivers_requested", lambda: self._run_driver_registry(session, window)),
             ("driver_assignment_requested", lambda person_id, meal: self._run_driver_assignment(session, window, person_id, meal)),
             ("sequence_edit_requested", lambda person_id: self._run_sequence_edit(session, window, person_id)),
+            ("household_sequence_save_requested", lambda targets, value, dialog: self._save_household_sequence(session, window, targets, value, dialog)),
             ("person_add_requested", lambda selected_meal: self._run_roster_row_add(session, window, selected_meal)),
             ("person_delete_requested", lambda person_id: self._run_roster_row_delete(session, window, person_id)),
             ("relocation_requested", lambda person_id: self._run_relocation(session, window, person_id)),
@@ -368,6 +392,13 @@ class DesktopStartupController:
         if roster is not None:
             self._replace_roster_if_changed(session, window, roster)
 
+    def _save_household_sequence(self, session, window, targets, value, dialog) -> None:
+        result = SequenceEditController(session).save_value(targets, value)
+        if result.status is SequenceSaveStatus.SAVED:
+            self._replace_roster_if_changed(session, window, result.roster)
+            dialog.replace_rows(window.driver_household_rows())
+        dialog.show_sequence_result(result)
+
     def _run_complaint(self, session, window, person_id, meal) -> None:
         outcome = self._complaint_controller_type(session).run(
             person_id, meal, window, household_day=window.table_model.service_day
@@ -452,7 +483,11 @@ class DesktopStartupController:
             return
         selection = output.selection()
         if selection.mode is DocumentOutputMode.NEW_DEFAULT:
-            self._settings.save_document_output_directory(selection.directory)
+            try:
+                self._settings.save_document_output_directory(selection.directory)
+            except OSError as error:
+                self._message_box.critical(window, "문서 저장 폴더를 저장하지 못했습니다", str(error))
+                return
         selected_signal = getattr(window, "document_output_selected", None)
         if selected_signal is not None and hasattr(selected_signal, "emit"):
             selected_signal.emit(selection)
@@ -551,6 +586,11 @@ class DesktopStartupController:
                     + "폴더 밖의 복사본은 기존 비밀번호를 사용합니다.",
                 )
             return
+        if hub.selected_action is SettingsAction.DELIVERY_DEFAULTS:
+            outcome = self._delivery_defaults_controller_type(session).run(parent=window)
+            if outcome.completed and outcome.roster is not None:
+                self._replace_roster_if_changed(session, window, outcome.roster)
+            return
         if hub.selected_action is SettingsAction.PROVIDER:
             outcome = self._provider_settings_controller_type(session).run(parent=window)
             if outcome.completed and outcome.roster is not None:
@@ -571,9 +611,10 @@ class DesktopStartupController:
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        self._settings.save_document_output_directory(
-            dialog.selected_directory
-        )
+        try:
+            self._settings.save_document_output_directory(dialog.selected_directory)
+        except OSError as error:
+            self._message_box.critical(window, "문서 저장 폴더를 저장하지 못했습니다", str(error))
 
     def _run_followup_import(self, session: DatabaseSession, window) -> None:
         controller = self._followup_controller_type(session)
@@ -885,7 +926,14 @@ class DesktopStartupController:
 
     def _access_dialog(self, parent: QWidget | None):
         database_path = self._settings.database_path
-        if database_path is None or not database_path.exists():
+        if database_path is None:
+            return self._create_dialog_type(settings=self._settings, parent=parent)
+        try:
+            database_path.stat()
+        except FileNotFoundError:
+            # A deliberately deleted DB can be recreated, but an unavailable
+            # configured share/parent must not silently become first setup.
+            database_path.parent.stat()
             return self._create_dialog_type(settings=self._settings, parent=parent)
         return self._login_dialog_type(
             database_path,

@@ -218,8 +218,10 @@ def test_meal_columns_cache_independent_statuses_drivers_and_replacements(app):
         datetime(2026, 8, 24, 16, 0, tzinfo=UTC),
         "석식 일시중지",
     )
+    from src.domain.roster import HouseholdDeliverySetting
     three_meal_roster = replace(
         roster,
+        persons=tuple(replace(person, delivery_settings=(HouseholdDeliverySetting(Meal.BREAKFAST, tuple(range(7))),)) if person.person_id == FIRST_PERSON_ID else person for person in roster.persons),
         enrollments=(
             *roster.enrollments,
             MealEnrollment(FIRST_PERSON_ID, Meal.BREAKFAST),
@@ -396,7 +398,7 @@ def test_meal_context_menu_emits_status_and_assignment_requests(app):
     window.close()
 
 
-def test_routing_state_updates_effective_delivery_view_and_driver_filter(app):
+def test_routing_state_updates_effective_delivery_view_and_model_driver_filter(app):
     from dataclasses import replace
 
     driver_id = UUID("80000000-0000-0000-0000-000000000031")
@@ -463,10 +465,7 @@ def test_routing_state_updates_effective_delivery_view_and_driver_filter(app):
     assert [action.text() for action in address.actions()] == ["정보 수정", "이사 등록", "이력보기", "민원", "", "명단 행 삭제"]
     address.actions()[1].trigger()
     assert relocation_requests == [FIRST_PERSON_ID]
-    driver_index = window._driver_filter.findData(driver_id)
-    assert driver_index > 0
-    assert window._driver_filter.itemData(driver_index) == driver_id
-    assert isinstance(window._driver_filter.itemData(driver_index), UUID)
+    assert not hasattr(window, "_driver_filter")
     window.close()
 
 
@@ -533,7 +532,7 @@ def test_minimum_width_header_keeps_actions_and_filters_on_separate_rows(app):
         < window._documents_button.parentWidget().width()
     )
     assert window._column_search_header.buttons["name"].isVisible()
-    assert window._driver_filter.geometry().right() < window._driver_households_button.geometry().left()
+    assert window._special_only_filter.geometry().right() < window._driver_households_button.geometry().left()
     window.close()
 
 
@@ -566,7 +565,7 @@ def test_special_household_filter_shows_details_only_while_checked(app):
     window.close()
 
 
-def test_roster_status_respects_explicit_weekdays_without_changing_default(app):
+def test_roster_status_respects_default_and_explicit_weekdays(app):
     from dataclasses import replace
     from src.domain.roster import HouseholdDeliverySetting
 
@@ -576,7 +575,7 @@ def test_roster_status_respects_explicit_weekdays_without_changing_default(app):
     saturday = date(2026, 8, 22)
     model.set_context(saturday, Meal.DINNER)
     status_column = next(i for i, column in enumerate(model.columns) if column.key == "status:dinner")
-    assert model.index(0, status_column).data(model.StatusRole) == MealStatus.DELIVERY.value
+    assert model.index(0, status_column).data(model.StatusRole) == "-"
     weekdays_only = replace(roster, households=(Household(HOUSEHOLD_ID, (
         HouseholdDeliverySetting(Meal.DINNER, (0, 1, 2, 3, 4)),
     )),))

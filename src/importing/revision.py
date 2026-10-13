@@ -117,6 +117,7 @@ def build_import_revision(
         plan,
         new_revision_id=revision_id,
         decisions=decisions,
+        custom_fields=preview.custom_fields,
     )
     lunch_events: tuple[StatusEvent, ...] = ()
     if purpose is ImportPurpose.VACATION_LUNCH:
@@ -340,6 +341,7 @@ def _apply_vacation_lunch(
             if assignment.driver is not None or assignment.sequence is not None
         )),
         custom_fields,
+        delivery_defaults=current.delivery_defaults,
     )
     events = tuple(StatusEvent(
         uuid4(), revision_id, person_id, Meal.LUNCH, status,

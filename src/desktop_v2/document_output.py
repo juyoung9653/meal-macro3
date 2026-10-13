@@ -567,7 +567,7 @@ class DefaultDocumentDirectoryDialog(QDialog):
         header_layout = QVBoxLayout(header)
         header_layout.setContentsMargins(18, 15, 18, 16)
         header_layout.setSpacing(4)
-        eyebrow = QLabel("문서 저장 · 이 컴퓨터의 기본 폴더")
+        eyebrow = QLabel("문서 저장 · 공통 기본 폴더")
         eyebrow.setObjectName("editEyebrow")
         title = QLabel("문서 저장 폴더")
         title.setObjectName("workspaceTitle")
@@ -654,7 +654,7 @@ class DefaultDocumentDirectoryDialog(QDialog):
             if self._current_directory is None:
                 self._name.setText("폴더를 선택해주세요")
                 self._path.setText(
-                    "여기에 저장한 경로는 이 컴퓨터에서만 사용합니다."
+                    "여기에 저장한 경로는 같은 프로그램 폴더를 사용하는 모든 PC에 적용됩니다."
                 )
                 self._error.hide()
             else:
@@ -667,7 +667,7 @@ class DefaultDocumentDirectoryDialog(QDialog):
             self._save_button.setEnabled(False)
             return
         assert self._selected_directory is not None
-        self._status.setText("이 컴퓨터의 기본 문서 폴더")
+        self._status.setText("공통 기본 문서 폴더")
         self._name.setText(
             self._selected_directory.name or str(self._selected_directory)
         )

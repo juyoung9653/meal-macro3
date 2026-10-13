@@ -105,6 +105,7 @@ def build_meal_status_revision(
         enrollments=enrollments,
         assignments=current_roster.assignments,
         custom_fields=current_roster.custom_fields,
+        delivery_defaults=current_roster.delivery_defaults,
     )
     period_text = _period_text(period)
     events = tuple(

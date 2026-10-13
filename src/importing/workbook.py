@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections import Counter
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
@@ -35,7 +36,7 @@ from openpyxl.worksheet._read_only import ReadOnlyWorksheet
 from openpyxl.worksheet.table import Table
 from openpyxl.xml.functions import fromstring
 
-from src.domain.roster import Meal, normalize_phone
+from src.domain.roster import CustomFieldDefinition, CustomFieldType, Meal, normalize_phone
 
 from .contracts import (
     DateNormalization,
@@ -141,6 +142,23 @@ class SourceColumn:
     @property
     def label(self) -> str:
         return f"{self.letter} · {self.header or '(빈 헤더)'}"
+
+
+def custom_column_names(columns: tuple[SourceColumn, ...]) -> dict[str, str]:
+    """Preserve headers while distinguishing duplicate and unnamed source columns."""
+    headers = Counter(column.header.strip().casefold() for column in columns)
+    reserved = set(headers)
+    used: set[str] = set()
+    result = {}
+    for column in columns:
+        name = column.header.strip()
+        if not name or headers[name.casefold()] > 1:
+            name = f"{name} ({column.letter}열)" if name else f"추가 항목 ({column.letter}열)"
+            while name.casefold() in reserved or name.casefold() in used:
+                name += f" ({column.letter}열)"
+        result[column.letter] = name
+        used.add(name.casefold())
+    return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -311,6 +329,7 @@ class WorkbookImportPreview:
     sample_rows: tuple[WorkbookPreviewRow, ...]
     corrected_cells: tuple[tuple[int, str], ...] = ()
     automatic_source_resolutions: tuple[AutomaticSourceResolution, ...] = ()
+    custom_fields: tuple[CustomFieldDefinition, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.profile, ImportMappingProfile):
@@ -325,6 +344,10 @@ class WorkbookImportPreview:
                 "automatic_source_resolutions에는 AutomaticSourceResolution만 허용됩니다."
             )
         object.__setattr__(self, "automatic_source_resolutions", automatic)
+        custom_fields = tuple(self.custom_fields)
+        if any(not isinstance(item, CustomFieldDefinition) for item in custom_fields):
+            raise TypeError("custom_fields에는 CustomFieldDefinition만 허용됩니다.")
+        object.__setattr__(self, "custom_fields", custom_fields)
 
     @property
     def can_continue(self) -> bool:
@@ -348,6 +371,7 @@ class _RawObservation:
     meals: tuple[Meal, ...]
     assignments: tuple[ObservedDeliveryAssignment, ...]
     external_reference: str | None
+    custom_values: dict[UUID, str | None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -488,6 +512,18 @@ def parse_workbook(
             columns = _read_columns(worksheet, profile.header_row)
         fingerprint = _header_fingerprint(profile.header_row, columns)
         column_indexes = _resolve_profile_columns(profile, columns)
+        names = custom_column_names(columns)
+        custom_fields = tuple(
+            CustomFieldDefinition(
+                definition_id,
+                profile.custom_field_names.get(
+                    definition_id, names[get_column_letter(column_indexes[token])]
+                ),
+                CustomFieldType.TEXT,
+                order,
+            )
+            for order, (definition_id, token) in enumerate(profile.custom_field_columns.items())
+        )
         sample_rows = _preview_rows(
             worksheet,
             profile.data_start_row,
@@ -531,6 +567,7 @@ def parse_workbook(
         sample_rows=sample_rows,
         corrected_cells=tuple(sorted(overrides)),
         automatic_source_resolutions=tuple(automatic_source_resolutions),
+        custom_fields=custom_fields,
     )
 
 
@@ -908,6 +945,11 @@ def _resolve_column(token: str, columns: tuple[SourceColumn, ...]) -> int:
     return matches[0]
 
 
+def source_column_letter(token: str, columns: tuple[SourceColumn, ...]) -> str:
+    """Resolve stored header or letter mappings with the same rules as parsing."""
+    return get_column_letter(_resolve_column(token, columns))
+
+
 def _read_observations(
     worksheet,
     workbook: Workbook,
@@ -1034,6 +1076,10 @@ def _parse_row(
         row_number,
         issues,
     )
+    custom_values = {
+        definition_id: _optional_cell_text(cells, token, indexes, row_number, issues, literal=True)
+        for definition_id, token in profile.custom_field_columns.items()
+    }
     if any(issue.row_number == row_number for issue in issues):
         return None
     return _RawObservation(
@@ -1042,6 +1088,7 @@ def _parse_row(
         meals,
         () if assignment is None else (assignment,),
         external_reference,
+        custom_values,
     )
 
 
@@ -1638,6 +1685,13 @@ def _merge_observations(
                 ),
                 additional_mobile_phones=additional_mobile_phones,
                 additional_telephones=additional_telephones,
+                custom_values={
+                    definition_id: " / ".join(dict.fromkeys(
+                        value for item in grouped_rows
+                        if (value := item.custom_values.get(definition_id)) is not None
+                    )) or None
+                    for definition_id in profile.custom_field_columns
+                },
             )
         )
         automatic_source_resolutions.extend(group_resolutions)

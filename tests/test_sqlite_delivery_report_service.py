@@ -185,7 +185,7 @@ def test_breakfast_report_uses_physical_friday_and_keeps_three_entitlements():
     )
     assert prepared.calculation_manifest["target_entitlement_count"] == 3
     assert prepared.calculation_manifest["calculation_contract_version"] == 3
-    assert prepared.calculation_manifest["recurring_service_policy"]["version"] == 3
+    assert prepared.calculation_manifest["recurring_service_policy"]["version"] == 4
     assert prepared.calculation_manifest["household_grouping"]["policy_version"] == 2
     assert prepared.calculation_manifest["report_period"]["basis"] == (
         "physical_delivery_day"
@@ -488,3 +488,33 @@ def test_selected_lunch_period_remains_strict_about_missing_school_schedule():
             date(2026, 8, 3),
             (Meal.LUNCH,),
         )
+
+
+def test_global_defaults_change_breakfast_delivery_without_rewriting_overrides():
+    from src.domain.delivery_defaults import DELIVERY_DEFAULTS_ID, DELIVERY_DEFAULTS_KIND, delivery_defaults_state
+    from src.domain.roster import standard_delivery_defaults
+    snapshot, _ = _snapshot()
+    states = dict(snapshot.entities)
+    defaults = tuple(replace(item, weekdays=(0, 2), delivery_weekdays=(6,) * 7) if item.meal is Meal.BREAKFAST else item for item in standard_delivery_defaults())
+    states[EntityRef(DELIVERY_DEFAULTS_KIND, DELIVERY_DEFAULTS_ID)] = delivery_defaults_state(defaults)
+    prepared = prepare_delivery_report_data(HistoricalSnapshot(snapshot.revision_id, states), date(2026, 8, 23), date(2026, 8, 23), (Meal.BREAKFAST,))
+    assert len(prepared.shipments) == 1
+    assert prepared.shipments[0].delivery_on == date(2026, 8, 23)
+    assert prepared.shipments[0].service_dates == (date(2026, 8, 24), date(2026, 8, 26))
+    assert prepared.calculation_manifest["target_entitlement_count"] == 2
+
+
+def test_global_dinner_mapping_crosses_month_boundary_and_closure_remains():
+    from src.domain.delivery_defaults import DELIVERY_DEFAULTS_ID, DELIVERY_DEFAULTS_KIND, delivery_defaults_state
+    from src.domain.roster import standard_delivery_defaults
+    snapshot, _ = _snapshot(meals=(Meal.DINNER,))
+    states = dict(snapshot.entities)
+    defaults = tuple(replace(item, weekdays=(1,), delivery_weekdays=(0,) * 7) if item.meal is Meal.DINNER else item for item in standard_delivery_defaults())
+    states[EntityRef(DELIVERY_DEFAULTS_KIND, DELIVERY_DEFAULTS_ID)] = delivery_defaults_state(defaults)
+    source = HistoricalSnapshot(snapshot.revision_id, states)
+    prepared = prepare_delivery_report_data(source, date(2026, 8, 31), date(2026, 8, 31), (Meal.DINNER,))
+    assert prepared.shipments[0].service_dates == (date(2026, 9, 1),)
+    change = ServiceAdjustmentChange(uuid4(), InclusiveDateRange(date(2026, 8, 31), date(2026, 8, 31)), (Meal.DINNER,), ServiceTreatment.NOT_PROVIDED, None, (), "closure", datetime.now(UTC))
+    states[EntityRef(SERVICE_ADJUSTMENT_SCHEDULE_KIND, SERVICE_ADJUSTMENT_SCHEDULE_ID)] = service_adjustment_schedule_state(ServiceAdjustmentSchedule((change,)))
+    closed = prepare_delivery_report_data(HistoricalSnapshot(snapshot.revision_id, states), date(2026, 8, 31), date(2026, 8, 31), (Meal.DINNER,))
+    assert not closed.shipments

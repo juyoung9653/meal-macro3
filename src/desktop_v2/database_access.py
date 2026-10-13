@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, Qt
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
@@ -35,77 +35,8 @@ from src.storage import (
 from .theme import application_stylesheet, register_application_fonts
 
 
-_ORGANIZATION = "분당구"
-_APPLICATION = "급식 배송 운영 SQLite v2"
-_DATABASE_PATH_KEY = "storage/database_path"
-_BACKUP_DIRECTORY_KEY = "storage/backup_directory"
-_DOCUMENT_OUTPUT_DIRECTORY_KEY = "documents/output_directory"
-
-
-class DesktopStorageSettings:
-    """Stores paths only; passwords and DB keys never enter QSettings."""
-
-    def __init__(self, settings: QSettings | None = None) -> None:
-        self._settings = settings or QSettings(_ORGANIZATION, _APPLICATION)
-
-    @property
-    def database_path(self) -> Path | None:
-        return _optional_path(self._settings.value(_DATABASE_PATH_KEY, ""))
-
-    @property
-    def backup_directory(self) -> Path | None:
-        return _optional_path(self._settings.value(_BACKUP_DIRECTORY_KEY, ""))
-
-    @property
-    def document_output_directory(self) -> Path | None:
-        return _optional_path(
-            self._settings.value(_DOCUMENT_OUTPUT_DIRECTORY_KEY, "")
-        )
-
-    def save_paths(
-        self,
-        database_path: str | Path,
-        backup_directory: str | Path,
-    ) -> None:
-        self._settings.setValue(_DATABASE_PATH_KEY, str(Path(database_path).resolve()))
-        self._settings.setValue(
-            _BACKUP_DIRECTORY_KEY,
-            str(Path(backup_directory).resolve()),
-        )
-        self._settings.sync()
-
-    def save_document_output_directory(self, directory: str | Path) -> None:
-        self._settings.setValue(
-            _DOCUMENT_OUTPUT_DIRECTORY_KEY,
-            str(Path(directory).resolve()),
-        )
-        self._settings.sync()
-
-    def save_database_path(self, database_path: str | Path) -> None:
-        had_previous = self._settings.contains(_DATABASE_PATH_KEY)
-        previous = self._settings.value(_DATABASE_PATH_KEY, "")
-        self._settings.setValue(_DATABASE_PATH_KEY, str(Path(database_path).resolve()))
-        self._settings.sync()
-        if self._settings.status() != QSettings.Status.NoError:
-            if had_previous:
-                self._settings.setValue(_DATABASE_PATH_KEY, previous)
-            else:
-                self._settings.remove(_DATABASE_PATH_KEY)
-            self._settings.sync()
-            raise OSError("운영 데이터 위치 설정을 저장하지 못했습니다.")
-
-    def save_backup_directory(self, directory: str | Path) -> None:
-        had_previous = self._settings.contains(_BACKUP_DIRECTORY_KEY)
-        previous = self._settings.value(_BACKUP_DIRECTORY_KEY, "")
-        self._settings.setValue(_BACKUP_DIRECTORY_KEY, str(Path(directory).resolve()))
-        self._settings.sync()
-        if self._settings.status() != QSettings.Status.NoError:
-            if had_previous:
-                self._settings.setValue(_BACKUP_DIRECTORY_KEY, previous)
-            else:
-                self._settings.remove(_BACKUP_DIRECTORY_KEY)
-            self._settings.sync()
-            raise OSError("자동 백업 폴더 설정을 저장하지 못했습니다.")
+from .portable_settings import DesktopStorageSettings
+from src.storage.file_lock import database_lock
 
 
 class _DatabaseAccessDialog(QDialog):
@@ -127,6 +58,7 @@ class _DatabaseAccessDialog(QDialog):
         self.setModal(True)
         self.setStyleSheet(application_stylesheet())
         self._session: DatabaseSession | None = None
+        self._reservation = None
         self.backup_result = AutomaticBackupResult()
 
         shell = QHBoxLayout(self)
@@ -160,6 +92,21 @@ class _DatabaseAccessDialog(QDialog):
     @property
     def session(self) -> DatabaseSession | None:
         return self._session
+
+    def release_reservation(self) -> None:
+        if self._reservation is not None:
+            self._reservation.close()
+            self._reservation = None
+
+    def done(self, result: int) -> None:
+        if result != QDialog.DialogCode.Accepted:
+            try:
+                if self._session is not None:
+                    self._session.close()
+                    self._session = None
+            finally:
+                self.release_reservation()
+        super().done(result)
 
     def _build_rail(
         self,
@@ -411,8 +358,14 @@ class CreateDatabaseDialog(_DatabaseAccessDialog):
             return
         self._session = session
         self.backup_result = session.try_backup_now()
-        if self._settings is not None:
-            self._settings.save_paths(database_path, backup_directory)
+        try:
+            if self._settings is not None:
+                self._settings.save_paths(database_path, backup_directory)
+        except Exception as error:
+            session.close()
+            self._session = None
+            self._show_error("운영 파일은 생성됐지만 경로 설정을 저장하지 못했습니다. 파일을 보존했습니다. " + _friendly_error(error))
+            return
         self.accept()
 
 
@@ -433,7 +386,7 @@ class LoginDialog(_DatabaseAccessDialog):
             title="운영 파일 열기",
             subtitle=f"{self._database_path.name}의 비밀번호를 입력해주세요.",
             rail_title="오늘의 운영을 이어갑니다",
-            rail_copy="명단과 배송 이력은 이 컴퓨터의 암호화된 데이터 파일에서 불러옵니다.",
+            rail_copy="명단과 배송 이력은 지정된 암호화 데이터 파일에서 불러옵니다.",
             route_stops=(
                 f"운영 파일 · {self._database_path.name}",
                 "저장할 때 자동 백업",
@@ -451,6 +404,7 @@ class LoginDialog(_DatabaseAccessDialog):
         )
         self._add_show_passwords((self.password_edit,))
         self.submit_button = self._add_actions("운영 파일 열기", self._submit)
+        self._reservation = database_lock(self._database_path).acquire()
 
     def _submit(self) -> None:
         self._clear_error()
@@ -459,12 +413,14 @@ class LoginDialog(_DatabaseAccessDialog):
                 self._database_path,
                 self.password_edit.text(),
                 backup_directory=self._backup_directory,
+                _lock=self._reservation,
             )
         except Exception as error:
             self._show_error(_friendly_error(error))
             self.password_edit.selectAll()
             self.password_edit.setFocus()
             return
+        self._reservation = None  # Session now owns the handle.
         self.accept()
 
 def relocate_database(
@@ -481,13 +437,19 @@ def relocate_database(
         raise ValueError("운영 데이터 파일 이름은 .sqlite3로 끝나야 합니다.")
     if not target.parent.is_dir():
         raise ValueError("운영 데이터를 저장할 폴더가 없습니다.")
-    backup = session.backup_now()
-    restore_backup_with_user_password(backup.path, target, password)
+    lock = database_lock(target).acquire()
     try:
-        settings.save_database_path(target)
-    except Exception:
-        target.unlink(missing_ok=True)
-        credential_path_for(target).unlink(missing_ok=True)
+        backup = session.backup_now()
+        restore_backup_with_user_password(backup.path, target, password, _lock=lock)
+        try:
+            settings.save_database_path(target)
+        except Exception:
+            target.unlink(missing_ok=True)
+            credential_path_for(target).unlink(missing_ok=True)
+            raise
+        session.retain_lock(lock)
+    except BaseException:
+        lock.close()
         raise
     return target
 
@@ -812,8 +774,14 @@ class RestoreBackupDialog(_DatabaseAccessDialog):
         except Exception as error:
             self._show_error(_friendly_error(error))
             return
-        if self._settings is not None:
-            self._settings.save_paths(destination, backup_directory)
+        try:
+            if self._settings is not None:
+                self._settings.save_paths(destination, backup_directory)
+        except Exception as error:
+            self._session.close()
+            self._session = None
+            self._show_error("운영 파일은 복원됐지만 경로 설정을 저장하지 못했습니다. 파일을 보존했습니다. " + _friendly_error(error))
+            return
         self.accept()
 
 
@@ -828,12 +796,6 @@ def _help_label(text: str) -> QLabel:
     label.setObjectName("fieldHelp")
     label.setWordWrap(True)
     return label
-
-
-def _optional_path(value: object) -> Path | None:
-    if not isinstance(value, str) or not value.strip():
-        return None
-    return Path(value).resolve()
 
 
 def _friendly_error(error: Exception) -> str:

@@ -39,15 +39,16 @@ def test_settings_hub_has_db_and_computer_local_jobs(app):
         "생성 Excel 비밀번호",
         "청구서·확인서 양식",
         "출력 칼럼 연결",
+        "식종별 배송 기본값",
         "문서 저장 폴더",
         "운영 데이터 위치",
         "자동 백업 폴더",
         "운영 파일 비밀번호 변경",
     ]
     assert not any("조식 배송 규칙" in action.label for action in SettingsAction)
-    assert "이 컴퓨터" in SettingsAction.DOCUMENT_DIRECTORY.scope_label
-    assert "이 컴퓨터" in SettingsAction.DATABASE_LOCATION.scope_label
-    assert "이 컴퓨터" in SettingsAction.BACKUP_DIRECTORY.scope_label
+    assert "공통 설정" in SettingsAction.DOCUMENT_DIRECTORY.scope_label
+    assert "공통 설정" in SettingsAction.DATABASE_LOCATION.scope_label
+    assert "공통 설정" in SettingsAction.BACKUP_DIRECTORY.scope_label
     with pytest.raises(RuntimeError, match="아직 선택"):
         _ = dialog.selected_action
     dialog.close()
@@ -265,6 +266,7 @@ def test_operating_password_route_reports_result_without_closing_window(accepted
             calls.append(("warning", title, body))
 
     controller = DesktopStartupController(
+        settings=SimpleNamespace(),
         settings_hub_dialog_type=Hub,
         database_password_dialog_type=Password,
         database_location_dialog_type=lambda *_args, **_kwargs: pytest.fail("location route opened"),
@@ -313,6 +315,7 @@ def test_operating_password_route_reports_partial_rotation(app, tmp_path):
         def warning(_parent, title, body):
             calls.append((title, body))
     controller = DesktopStartupController(
+        settings=SimpleNamespace(),
         settings_hub_dialog_type=Hub,
         database_password_dialog_type=Password,
         message_box=Messages,
@@ -350,6 +353,7 @@ def test_output_mapping_setting_routes_without_reimport_and_refreshes_on_save(co
             return SimpleNamespace(completed=completed, roster=roster if completed else None)
 
     controller = DesktopStartupController(
+        settings=SimpleNamespace(),
         settings_hub_dialog_type=Hub,
         document_column_mapping_controller_type=MappingController,
     )

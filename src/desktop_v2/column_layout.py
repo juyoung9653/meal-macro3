@@ -29,6 +29,11 @@ class RosterColumnLayout(QObject):
         *,
         settings: QSettings | None = None,
         parent: QObject | None = None,
+        settings_key: str | None = None,
+        mandatory_keys: frozenset[str] | None = None,
+        migrate_legacy: bool = True,
+        preserve_temporary_keys: frozenset[str] = frozenset(),
+        hide_new_custom_columns: bool = False,
     ) -> None:
         super().__init__(parent or table)
         self._table = table
@@ -38,6 +43,11 @@ class RosterColumnLayout(QObject):
             else QSettings("분당구", "급식 배송 운영 SQLite v2")
         )
         self._columns = tuple(columns)
+        self._settings_key = settings_key or self.SETTINGS_KEY
+        self._mandatory_keys = self.MANDATORY_KEYS if mandatory_keys is None else mandatory_keys
+        self._migrate_legacy = migrate_legacy
+        self._preserve_temporary_keys = preserve_temporary_keys
+        self._hide_new_custom_columns = hide_new_custom_columns
         self._known_widths = {
             self._key(column): self._width(column) for column in self._columns
         }
@@ -60,7 +70,7 @@ class RosterColumnLayout(QObject):
             key = self._key(column)
             action = QAction(self._label(column), menu)
             action.setCheckable(True)
-            required = key in self.MANDATORY_KEYS
+            required = key in self._mandatory_keys
             action.setChecked(required or not self._is_hidden(key))
             if required:
                 action.setText(f"{self._label(column)} (필수)")
@@ -84,9 +94,41 @@ class RosterColumnLayout(QObject):
         # deleted keys and gives newly introduced columns their default width.
         self.save()
 
+    def switch_layout(
+        self, settings_key: str, *, migrate_legacy: bool = False,
+        hide_new_custom_columns: bool = False,
+    ) -> None:
+        """Save the current sheet before applying another sheet to the same table."""
+        self.save()
+        self._settings_key = settings_key
+        self._migrate_legacy = migrate_legacy
+        self._hide_new_custom_columns = hide_new_custom_columns
+        self._known_widths = {self._key(column): self._width(column) for column in self._columns}
+        self._apply_saved_layout()
+
+    def set_visible_keys(self, visible_keys: set[str]) -> None:
+        self._applying = True
+        try:
+            for index, key in enumerate(self._keys()):
+                if key in self._mandatory_keys:
+                    continue
+                width = self._header.sectionSize(index)
+                if width > 0:
+                    self._known_widths[key] = width
+                self._table.setColumnHidden(index, key not in visible_keys)
+        finally:
+            self._applying = False
+        self.save()
+
+    def layout_snapshot(self) -> dict[str, Any]:
+        self.save()
+        return self._read_layout() or self._default_layout()
+
+    def set_hide_new_custom_columns(self, hidden: bool) -> None:
+        self._hide_new_custom_columns = hidden
+
     def reset(self) -> None:
-        self._settings.remove(self.SETTINGS_KEY)
-        self._settings.remove(self.LEGACY_SETTINGS_KEY)
+        self._settings.remove(self._settings_key)
         self._apply_layout(self._default_layout())
         self.save()
 
@@ -97,13 +139,23 @@ class RosterColumnLayout(QObject):
         keys = self._keys()
         order = [keys[self._header.logicalIndex(visual)] for visual in range(len(keys))]
         hidden = [key for index, key in enumerate(keys) if self._table.isColumnHidden(index)]
-        hidden = [key for key in hidden if key not in self.MANDATORY_KEYS]
+        hidden = [key for key in hidden if key not in self._mandatory_keys]
         widths = {
             key: self._header.sectionSize(index)
             if self._header.sectionSize(index) > 0
             else self._known_widths.get(key, self._width(self._columns[index]))
             for index, key in enumerate(keys)
         }
+        previous, _ = self._read_layout_at(self._settings_key)
+        if previous is not None:
+            for key in self._preserve_temporary_keys - set(keys):
+                if key in previous["order"]:
+                    position = previous["order"].index(key)
+                    order.insert(min(position, len(order)), key)
+                if key in previous["hidden"]:
+                    hidden.append(key)
+                if key in previous["widths"]:
+                    widths[key] = previous["widths"][key]
         self._known_widths.update(widths)
         self._write_layout({"order": order, "hidden": hidden, "widths": widths})
 
@@ -130,7 +182,7 @@ class RosterColumnLayout(QObject):
         self.save()
 
     def _set_hidden(self, key: str, hidden: bool) -> None:
-        if key in self.MANDATORY_KEYS:
+        if key in self._mandatory_keys:
             return
         index = self._index_for_key(key)
         if index is None:
@@ -159,7 +211,12 @@ class RosterColumnLayout(QObject):
         keys = self._keys()
         saved_order = [key for key in layout["order"] if key in keys]
         order = saved_order + [key for key in keys if key not in saved_order]
-        hidden = set(layout["hidden"]) - self.MANDATORY_KEYS
+        if "delivery_settings" in keys and "delivery_settings" not in saved_order and "name" in order:
+            order.remove("delivery_settings")
+            order.insert(order.index("name") + 1, "delivery_settings")
+        hidden = set(layout["hidden"]) - self._mandatory_keys
+        if self._hide_new_custom_columns:
+            hidden.update(key for key in keys if key.startswith("custom:") and key not in saved_order)
         widths = layout["widths"]
         self._applying = True
         try:
@@ -186,9 +243,16 @@ class RosterColumnLayout(QObject):
         }
 
     def _read_layout(self) -> dict[str, Any] | None:
-        layout, exists = self._read_layout_at(self.SETTINGS_KEY)
+        layout, exists = self._read_layout_at(self._settings_key)
         if exists:
             return layout
+        if not self._migrate_legacy:
+            return None
+        if self._settings_key != self.SETTINGS_KEY:
+            current, current_exists = self._read_layout_at(self.SETTINGS_KEY)
+            if current_exists and current is not None:
+                self._write_layout(current)
+                return current
         legacy, _ = self._read_layout_at(self.LEGACY_SETTINGS_KEY)
         if legacy is None:
             return None
@@ -222,9 +286,9 @@ class RosterColumnLayout(QObject):
         keys = set(self._keys())
         return (
             {
-                "order": [item for item in order if item in keys],
-                "hidden": [item for item in hidden if item in keys],
-                "widths": {item: width for item, width in widths.items() if item in keys},
+                "order": [item for item in order if item in keys or item in self._preserve_temporary_keys],
+                "hidden": [item for item in hidden if item in keys or item in self._preserve_temporary_keys],
+                "widths": {item: width for item, width in widths.items() if item in keys or item in self._preserve_temporary_keys},
             },
             True,
         )
@@ -238,7 +302,7 @@ class RosterColumnLayout(QObject):
         return {**layout, "order": order}
 
     def _write_layout(self, layout: dict[str, Any]) -> None:
-        self._settings.setValue(self.SETTINGS_KEY, json.dumps(layout, ensure_ascii=False))
+        self._settings.setValue(self._settings_key, json.dumps(layout, ensure_ascii=False))
         self._settings.sync()
 
     def _header_matches_columns(self) -> bool:

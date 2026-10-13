@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from contextlib import contextmanager
+from dataclasses import replace
 from threading import Event
 from datetime import date
 from pathlib import Path
@@ -87,6 +88,83 @@ def _combined(path: Path, meal: str = "조식 / 중식") -> Path:
     _save_with_table(workbook, path)
     workbook.close()
     return path
+
+
+def test_unchecked_additional_column_survives_saved_profile(app, tmp_path):
+    path = _combined(tmp_path / "additional.xlsx")
+    wizard = RosterImportWizard()
+    wizard.path_edit.setText(str(path))
+    assert wizard._inspect_source()
+    extra = wizard.ignored_columns_list.item(4)
+    assert extra.checkState() == Qt.CheckState.Checked
+    extra.setCheckState(Qt.CheckState.Unchecked)
+    profile = wizard._build_profile()
+    assert profile == wizard._build_profile()
+    assert tuple(profile.custom_field_columns.values()) == ("E",)
+    assert tuple(profile.custom_field_names.values()) == ("내부 메모",)
+    preview = parse_workbook(path, profile, table_name="명단")
+    definition_id = next(iter(profile.custom_field_columns))
+    assert preview.observations[0].custom_values == {definition_id: "복사 금지"}
+    stored = StoredImportProfile(profile, preview.header_fingerprint)
+    wizard.close()
+
+    reused = RosterImportWizard(existing_profiles=(stored,))
+    reused.path_edit.setText(str(path))
+    assert reused._inspect_source()
+    assert reused.ignored_columns_list.item(4).checkState() == Qt.CheckState.Unchecked
+    assert reused._build_profile() == profile
+    # Rebuilding widgets for the same table must not reset the saved selection.
+    assert reused._inspect_source()
+    assert reused._build_profile() == profile
+    reused.close()
+
+
+def test_only_active_meal_controls_reserve_source_columns(app, tmp_path):
+    path = _combined(tmp_path / "dormant.xlsx")
+    wizard = RosterImportWizard(allow_vacation_lunch=True)
+    wizard.path_edit.setText(str(path))
+    assert wizard._inspect_source()
+    # A remembered flag control is inactive while combined mode is selected.
+    wizard._set_combo(wizard.breakfast_combo, "E")
+    extra = wizard.ignored_columns_list.item(4)
+    assert extra.flags() & Qt.ItemFlag.ItemIsEnabled
+    extra.setCheckState(Qt.CheckState.Unchecked)
+    assert tuple(wizard._build_profile().custom_field_columns.values()) == ("E",)
+    wizard.meal_mode_combo.setCurrentIndex(wizard.meal_mode_combo.findData("flags"))
+    assert not extra.flags() & Qt.ItemFlag.ItemIsEnabled
+    profile = wizard._build_profile()
+    assert profile.meal_flag_columns == {Meal.BREAKFAST: "E"}
+    assert not profile.custom_field_columns
+    # Vacation import has no active meal source column.
+    wizard.purpose_combo.setCurrentIndex(wizard.purpose_combo.findData(ImportPurpose.VACATION_LUNCH))
+    assert extra.flags() & Qt.ItemFlag.ItemIsEnabled
+    extra.setCheckState(Qt.CheckState.Unchecked)
+    profile = wizard._build_profile()
+    assert profile.default_meals == (Meal.LUNCH,)
+    assert tuple(profile.custom_field_columns.values()) == ("E",)
+    wizard.close()
+
+
+def test_saved_header_name_custom_mapping_restores_values_and_id(app, tmp_path):
+    path = _combined(tmp_path / "saved-header.xlsx")
+    initial = RosterImportWizard()
+    initial.path_edit.setText(str(path))
+    assert initial._inspect_source()
+    initial.ignored_columns_list.item(4).setCheckState(Qt.CheckState.Unchecked)
+    profile = initial._build_profile()
+    definition_id = next(iter(profile.custom_field_columns))
+    profile = replace(profile, custom_field_columns={definition_id: "내부 메모"}, custom_field_names={})
+    stored = StoredImportProfile(profile, initial._inspection.header_fingerprint)
+    initial.close()
+    restored = RosterImportWizard(existing_profiles=(stored,))
+    restored.path_edit.setText(str(path))
+    assert restored._inspect_source()
+    assert restored.ignored_columns_list.item(4).checkState() == Qt.CheckState.Unchecked
+    selected = restored._build_profile()
+    assert selected.custom_field_columns == {definition_id: "E"}
+    assert selected == restored._build_profile()
+    assert parse_workbook(path, selected).observations[0].custom_values == {definition_id: "복사 금지"}
+    restored.close()
 
 
 def _survey(path: Path) -> Path:
@@ -556,7 +634,7 @@ def test_government_headers_get_reviewable_defaults_and_private_columns_ignored(
     wizard.path_edit.setText(str(path))
 
     assert wizard._inspect_source()
-    assert wizard.source_kind_combo.currentData() == "survey-xlsx"
+    assert wizard._build_profile().source_kind == "survey-xlsx"
     assert wizard.profile_name_edit.text() == "정부 조사표"
     assert wizard._mapping_combos[ProfileField.ROAD_ADDRESS].currentData() == "N"
     assert wizard.address_fallback_combo.currentData() == "M"
@@ -900,7 +978,7 @@ def test_preview_loading_uses_its_own_clear_busy_message(
 
 def test_closed_dropdown_does_not_change_with_the_mouse_wheel(app: QApplication):
     wizard = RosterImportWizard()
-    combo = wizard.source_kind_combo
+    combo = wizard.date_normalization_combo
     combo.setCurrentIndex(0)
     wheel = QWheelEvent(
         QPointF(5, 5),

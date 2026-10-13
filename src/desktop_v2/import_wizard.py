@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from typing import Callable, TypeVar
-from uuid import UUID, uuid4
+from uuid import UUID, uuid4, uuid5
 
 from PySide6.QtCore import QDate, QEvent, QEventLoop, QPointF, QSize, QTimer, Qt
 from PySide6.QtGui import (
@@ -70,6 +70,7 @@ from src.importing import (
 )
 
 from .theme import FOCUS, application_stylesheet, register_application_fonts
+from src.importing.workbook import custom_column_names, source_column_letter
 
 
 _FIELD_LABELS = {
@@ -173,6 +174,7 @@ class RosterImportWizard(QDialog):
         self._suggested_profile: StoredImportProfile | None = None
         self._selection: ImportWizardSelection | None = None
         self._profile_id = uuid4()
+        self._source_kind = "roster-xlsx"
         self._household_rule_id = uuid4()
         self._loading_structure = False
         self._mapping_initialized = False
@@ -447,11 +449,7 @@ class RosterImportWizard(QDialog):
         body_layout.setContentsMargins(2, 2, 10, 2)
         identity_form = QFormLayout()
         self.profile_name_edit = QLineEdit("기존 Excel 명단")
-        self.source_kind_combo = QComboBox()
-        self.source_kind_combo.addItem("기존 운영명단", "roster-xlsx")
-        self.source_kind_combo.addItem("정부 조사표", "survey-xlsx")
         identity_form.addRow("설정 이름 *", self.profile_name_edit)
-        identity_form.addRow("원본 종류 *", self.source_kind_combo)
         body_layout.addLayout(identity_form)
         body_layout.addWidget(self._section("인적사항 열"))
         fields_form = QFormLayout()
@@ -604,7 +602,7 @@ class RosterImportWizard(QDialog):
         normalization_form.addRow("전화번호 정리", self.phone_normalization_combo)
         body_layout.addLayout(normalization_form)
         ignored_copy = QLabel(
-            "체크한 열은 운영 데이터에 복사하지 않습니다. 연결하지 않은 열은 기본으로 제외됩니다."
+            "체크한 열은 제외됩니다. 연결하지 않은 열의 체크를 해제하면 원래 열 이름의 추가 항목으로 가져옵니다."
         )
         ignored_copy.setObjectName("muted")
         ignored_copy.setWordWrap(True)
@@ -923,7 +921,13 @@ class RosterImportWizard(QDialog):
             f"{inspection.selected_table} · 헤더 {len(inspection.columns)}열 · "
             f"미리보기 {len(inspection.preview_rows)}행을 확인했습니다."
         )
-        self._prepare_mapping(inspection)
+        try:
+            self._prepare_mapping(inspection)
+        except WorkbookStructureError as error:
+            self._inspection = None
+            self._show_error(str(error))
+            self._refresh_actions()
+            return False
         self._refresh_actions()
         return True
 
@@ -988,6 +992,8 @@ class RosterImportWizard(QDialog):
         self.raw_table.resizeColumnsToContents()
 
     def _prepare_mapping(self, inspection: WorkbookInspection) -> None:
+        self._mapping_initialized = False
+        self._source_kind = "roster-xlsx"
         self._meal_mapping_expanded = False
         self._suggested_profile = next(
             (
@@ -1039,9 +1045,7 @@ class RosterImportWizard(QDialog):
 
     def _apply_profile(self, profile: ImportMappingProfile) -> None:
         self.profile_name_edit.setText(profile.name)
-        index = self.source_kind_combo.findData(profile.source_kind)
-        if index >= 0:
-            self.source_kind_combo.setCurrentIndex(index)
+        self._source_kind = profile.source_kind
         for field, combo in self._mapping_combos.items():
             self._set_combo(combo, profile.profile_columns.get(field))
         fallbacks = profile.fallback_profile_columns.get(ProfileField.ROAD_ADDRESS, ())
@@ -1069,6 +1073,16 @@ class RosterImportWizard(QDialog):
         self.phone_normalization_combo.setCurrentIndex(
             self.phone_normalization_combo.findData(profile.phone_normalization)
         )
+        custom_columns = {
+            source_column_letter(token, self._inspection.columns)
+            for token in profile.custom_field_columns.values()
+        }
+        for row in range(self.ignored_columns_list.count()):
+            item = self.ignored_columns_list.item(row)
+            column = str(item.data(Qt.ItemDataRole.UserRole))
+            item.setCheckState(
+                Qt.CheckState.Unchecked if column in custom_columns else Qt.CheckState.Checked
+            )
 
     def _apply_guesses(self, inspection: WorkbookInspection) -> None:
         for field, combo in self._mapping_combos.items():
@@ -1104,11 +1118,11 @@ class RosterImportWizard(QDialog):
         )
         if _find_header(inspection, ("변경주소",)) is not None:
             self.profile_name_edit.setText("정부 조사표")
-            self.source_kind_combo.setCurrentIndex(
-                self.source_kind_combo.findData("survey-xlsx")
-            )
+            self._source_kind = "survey-xlsx"
 
     def _set_combo(self, combo: QComboBox, value: object) -> None:
+        if isinstance(value, str) and self._inspection is not None:
+            value = source_column_letter(value, self._inspection.columns)
         index = combo.findData(value)
         combo.setCurrentIndex(index if index >= 0 else 0)
 
@@ -1150,11 +1164,13 @@ class RosterImportWizard(QDialog):
                 raise ValueError(
                     "식종별 열을 자동으로 찾지 못했습니다. 아래에서 조식·중식·석식 열을 연결해주세요."
                 )
+        used = self._used_columns()
         ignored = tuple(
             str(item.data(Qt.ItemDataRole.UserRole))
             for row in range(self.ignored_columns_list.count())
             if (item := self.ignored_columns_list.item(row)).checkState()
             == Qt.CheckState.Checked
+            and str(item.data(Qt.ItemDataRole.UserRole)) not in used
         )
         profile_id = (
             self._profile_id
@@ -1162,11 +1178,29 @@ class RosterImportWizard(QDialog):
             else self._suggested_profile.profile_id
         )
         version = 1 if self._suggested_profile is None else self._suggested_profile.version
+        previous = None if self._suggested_profile is None else self._suggested_profile.profile
+        previous_ids = {} if previous is None else {
+            source_column_letter(column, self._inspection.columns): definition_id
+            for definition_id, column in previous.custom_field_columns.items()
+        }
+        custom_columns = {
+            previous_ids.get(column.letter, uuid5(profile_id, f"custom-column:{column.letter}")): column.letter
+            for column in self._inspection.columns
+            if column.letter not in used and column.letter not in ignored
+        }
+        names = custom_column_names(self._inspection.columns)
+        custom_names = {
+            definition_id: (
+                previous.custom_field_names.get(definition_id, names[column])
+                if previous is not None else names[column]
+            )
+            for definition_id, column in custom_columns.items()
+        }
         values = dict(
             profile_id=profile_id,
             version=version,
             name=self.profile_name_edit.text(),
-            source_kind=str(self.source_kind_combo.currentData()),
+            source_kind=self._source_kind,
             profile_columns=profile_columns,
             combined_meals_column=combined,
             meal_flag_columns=meal_flags,
@@ -1188,6 +1222,8 @@ class RosterImportWizard(QDialog):
                 str(self.phone_normalization_combo.currentData())
             ),
             ignored_columns=ignored,
+            custom_field_columns=custom_columns,
+            custom_field_names=custom_names,
             provider_value=None,
         )
         profile = ImportMappingProfile(**values)
@@ -1726,24 +1762,31 @@ class RosterImportWizard(QDialog):
         else:
             self.next_button.setEnabled(True)
 
-    def _mapping_changed(self, *_args) -> None:
-        if not self._mapping_initialized:
-            return
-        used = {
+    def _used_columns(self) -> set[str]:
+        meal_combos = ()
+        if self.purpose_combo.currentData() != ImportPurpose.VACATION_LUNCH:
+            meal_combos = (
+                (self.combined_meal_combo,)
+                if self.meal_mode_combo.currentData() == "combined"
+                else (self.breakfast_combo, self.lunch_combo, self.dinner_combo)
+            )
+        return {
             str(combo.currentData())
             for combo in (
                 *self._mapping_combos.values(),
                 self.address_fallback_combo,
-                self.breakfast_combo,
-                self.lunch_combo,
-                self.dinner_combo,
-                self.combined_meal_combo,
+                *meal_combos,
                 self.driver_combo,
                 self.sequence_combo,
                 self.source_reference_combo,
             )
             if combo.currentData() is not None
         }
+
+    def _mapping_changed(self, *_args) -> None:
+        if not self._mapping_initialized:
+            return
+        used = self._used_columns()
         for row in range(self.ignored_columns_list.count()):
             item = self.ignored_columns_list.item(row)
             column = str(item.data(Qt.ItemDataRole.UserRole))

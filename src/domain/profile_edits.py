@@ -165,6 +165,7 @@ def build_person_profile_revision(
         enrollments=current_roster.enrollments,
         assignments=current_roster.assignments,
         custom_fields=current_roster.custom_fields,
+        delivery_defaults=current_roster.delivery_defaults,
     )
     changes = roster_audit_changes(current_roster, snapshot)
     if not changes:

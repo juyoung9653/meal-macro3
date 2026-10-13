@@ -30,6 +30,8 @@ class DriverHouseholdRow:
     # Exact member/contact/sequence projections for each meal in this row.
     # Empty for callers constructing a display row directly.
     meal_rows: tuple[DriverHouseholdRow, ...] = ()
+    # Preserve missing values that are intentionally absent from display text.
+    has_empty_sequence: bool = False
 
 
 def build_driver_household_rows(
@@ -137,6 +139,7 @@ class _RowParts:
     meals: list[Meal] = field(default_factory=list)
     contacts: list[str] = field(default_factory=list)
     sequences: list[str] = field(default_factory=list)
+    has_empty_sequence: bool = False
 
     def add(
         self,
@@ -156,6 +159,8 @@ class _RowParts:
                 self.contacts.append(contact)
         if meal not in self.meals:
             self.meals.append(meal)
+        if not sequence:
+            self.has_empty_sequence = True
         if sequence is not None and sequence not in self.sequences:
             self.sequences.append(sequence)
 
@@ -170,6 +175,7 @@ class _RowParts:
             self.address,
             tuple(self.contacts),
             tuple(sorted(self.sequences, key=_sequence_sort_key)),
+            has_empty_sequence=self.has_empty_sequence,
         )
 
 

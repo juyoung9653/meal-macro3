@@ -603,6 +603,7 @@ def apply_household_grouping(
         enrollments=result.snapshot.enrollments,
         assignments=result.snapshot.assignments,
         custom_fields=result.snapshot.custom_fields,
+        delivery_defaults=result.snapshot.delivery_defaults,
     )
     manifest = {
         **dict(result.decision_manifest),

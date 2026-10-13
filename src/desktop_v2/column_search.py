@@ -1,11 +1,13 @@
 """Column filter buttons embedded in table headers."""
 
+import json
+
 from PySide6.QtCore import QPoint, Qt, Signal
 from PySide6.QtGui import QPolygon
 from PySide6.QtWidgets import (
     QHeaderView, QLineEdit, QMenu, QWidget, QWidgetAction, QVBoxLayout,
     QHBoxLayout, QPushButton, QListWidget, QListWidgetItem, QLabel, QStyle,
-    QStyleOptionHeader,
+    QStyleOptionHeader, QTreeWidget, QTreeWidgetItem,
 )
 
 
@@ -28,18 +30,7 @@ class ColumnValuePicker(QWidget):
         controls.addWidget(self.select_all)
         controls.addWidget(self.select_none)
         layout.addLayout(controls)
-        self.list = QListWidget()
-        self.list.setMinimumSize(250, 220)
-        self.list.setAccessibleName("열 값 선택")
-        for value in self._values:
-            item = QListWidgetItem(value.replace("\n", " · ") if value else "(빈 값)")
-            item.setData(Qt.ItemDataRole.UserRole, value)
-            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            item.setCheckState(
-                Qt.CheckState.Checked if selected is None or value in selected
-                else Qt.CheckState.Unchecked
-            )
-            self.list.addItem(item)
+        self.list = self._make_value_list(selected)
         layout.addWidget(self.list)
         layout.addWidget(QLabel("선택한 값 중 하나와 일치하는 행을 표시합니다."))
         buttons = QHBoxLayout()
@@ -58,6 +49,21 @@ class ColumnValuePicker(QWidget):
         self.apply.clicked.connect(self._apply)
         self.reset.clicked.connect(lambda: self.applied.emit("", None))
         self._search_values(search_text)
+
+    def _make_value_list(self, selected):
+        self.list = QListWidget()
+        self.list.setMinimumSize(250, 220)
+        self.list.setAccessibleName("열 값 선택")
+        for value in self._values:
+            item = QListWidgetItem(value.replace("\n", " · ") if value else "(빈 값)")
+            item.setData(Qt.ItemDataRole.UserRole, value)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(
+                Qt.CheckState.Checked if selected is None or value in selected
+                else Qt.CheckState.Unchecked
+            )
+            self.list.addItem(item)
+        return self.list
 
     def _search_values(self, text):
         query = " ".join(text.split()).casefold()
@@ -82,18 +88,94 @@ class ColumnValuePicker(QWidget):
         )
 
 
+_SEQUENCE_PREFIX = "sequence-pair:v1:"
+ALL_SEQUENCES_EMPTY = "sequence-aggregate:v1:all-empty"
+
+
+def sequence_pair_token(meal_label, sequence):
+    return _SEQUENCE_PREFIX + json.dumps([meal_label, sequence], ensure_ascii=False)
+
+
+def sequence_pair_value(token):
+    if not token.startswith(_SEQUENCE_PREFIX):
+        return None
+    try:
+        value = json.loads(token[len(_SEQUENCE_PREFIX):])
+    except ValueError:
+        return None
+    return tuple(value) if isinstance(value, list) and len(value) == 2 and all(isinstance(x, str) for x in value) else None
+
+
+class SequenceValuePicker(ColumnValuePicker):
+    """Meal parents select exact sequence leaves; legacy whole-row values stay exact."""
+
+    def _make_value_list(self, selected):
+        tree = QTreeWidget()
+        tree.setHeaderHidden(True)
+        tree.setMinimumSize(280, 250)
+        tree.setAccessibleName("식종별 배송순서 선택")
+        self._leaves = []
+        groups = {}
+        for token in self._values:
+            if token == ALL_SEQUENCES_EMPTY:
+                item = QTreeWidgetItem(tree, ["전체 빈 값"])
+                item.setData(0, Qt.ItemDataRole.UserRole, token)
+                item.setToolTip(0, "모든 식종의 배송순서가 비어 있는 행")
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                item.setCheckState(0, Qt.CheckState.Checked if selected is None or token in selected else Qt.CheckState.Unchecked)
+                self._leaves.append(item)
+                continue
+            pair = sequence_pair_value(token)
+            meal, sequence = pair if pair is not None else ("이전 필터 (행 전체 일치)", token)
+            groups.setdefault(meal, []).append((sequence, token))
+        order = ("석식", "조식", "중식", "공통/식종 미지정", "(빈 값)")
+        for meal in sorted(groups, key=lambda x: (order.index(x) if x in order else len(order), x)):
+            parent = QTreeWidgetItem(tree, [meal])
+            parent.setFlags(parent.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsAutoTristate)
+            for sequence, token in sorted(groups[meal], key=lambda x: (0, int(x[0]), x[0]) if x[0].isdigit() else (1, 0, x[0].casefold())):
+                item = QTreeWidgetItem(parent, [sequence.replace("\n", " · ") or "(빈 값)"])
+                item.setData(0, Qt.ItemDataRole.UserRole, token)
+                item.setToolTip(0, f"{meal}: {sequence}" if sequence else meal)
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                item.setCheckState(0, Qt.CheckState.Checked if selected is None or token in selected else Qt.CheckState.Unchecked)
+                self._leaves.append(item)
+            parent.setExpanded(True)
+        return tree
+
+    def _search_values(self, text):
+        query = " ".join(text.split()).casefold()
+        for item in self._leaves:
+            pair = sequence_pair_value(item.data(0, Qt.ItemDataRole.UserRole))
+            value = f"{pair[0]}: {pair[1]}" if pair else item.text(0)
+            item.setHidden(query not in " ".join(value.split()).casefold())
+        for index in range(self.list.topLevelItemCount()):
+            parent = self.list.topLevelItem(index)
+            if parent.childCount():
+                parent.setHidden(all(parent.child(i).isHidden() for i in range(parent.childCount())))
+
+    def _check_all(self, state):
+        for item in self._leaves:
+            item.setCheckState(0, state)
+
+    def _apply(self):
+        selected = frozenset(item.data(0, Qt.ItemDataRole.UserRole) for item in self._leaves
+                             if item.checkState(0) == Qt.CheckState.Checked)
+        self.applied.emit(self.search.text(), None if selected and selected == frozenset(self._values) else selected)
+
+
 class ColumnSearchHeader(QHeaderView):
     search_changed = Signal(str, str)
     values_changed = Signal(str, object)
     BUTTON_WIDTH = 24
 
     def __init__(self, parent=None, *, values_provider=None, selection_provider=None,
-                 search_provider=None):
+                 search_provider=None, picker_provider=None):
         super().__init__(Qt.Orientation.Horizontal, parent)
         self.setSectionsClickable(True)
         self._values_provider = values_provider
         self._selection_provider = selection_provider
         self._search_provider = search_provider
+        self._picker_provider = picker_provider
         self.buttons: dict[str, QPushButton] = {}
         self._menu = None
         self._keys: list[str] = []
@@ -134,6 +216,25 @@ class ColumnSearchHeader(QHeaderView):
             self.setSortIndicator(-1, Qt.SortOrder.AscendingOrder)
         self.viewport().update()
 
+    def sectionSizeFromContents(self, logical_index):
+        size = super().sectionSizeFromContents(logical_index)
+        if logical_index >= len(self._keys):
+            return size
+        key = self._keys[logical_index]
+        reserved_width = self.BUTTON_WIDTH + 2
+        active = next(
+            ((priority, order) for priority, (sort_key, order)
+             in enumerate(self._sort_criteria, 1) if sort_key == key),
+            None,
+        )
+        if active is not None:
+            priority, order = active
+            arrow = "↑" if order == Qt.SortOrder.AscendingOrder else "↓"
+            indicator_text = f"{arrow}{priority}"
+            reserved_width += self.fontMetrics().horizontalAdvance(indicator_text) + 6
+        size.setWidth(size.width() + reserved_width)
+        return size
+
     def _update_button(self, key):
         active = bool(self._search_provider and self._search_provider(key)) or (
             self._selection_provider is not None
@@ -161,7 +262,8 @@ class ColumnSearchHeader(QHeaderView):
             self._menu.deleteLater()
         menu = QMenu(self)
         self._menu = menu
-        picker = ColumnValuePicker(
+        picker_type = self._picker_provider(key) if self._picker_provider else ColumnValuePicker
+        picker = picker_type(
             self._values_provider(key),
             self._selection_provider(key) if self._selection_provider else None,
             self._search_provider(key) if self._search_provider else "",

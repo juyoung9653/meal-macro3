@@ -20,6 +20,7 @@ from .database_credentials import (
     PasswordPolicyError,
     credential_path_for,
 )
+from .file_lock import ExclusiveFileLock, database_lock
 from .encrypted_database import EncryptedDatabase
 
 
@@ -438,12 +439,15 @@ def restore_backup_with_user_password(
     backup_path: str | Path,
     destination_database_path: str | Path,
     user_password: str,
+    *,
+    _lock: ExclusiveFileLock | None = None,
 ) -> Path:
     return _restore_backup(
         backup_path,
         destination_database_path,
         password=user_password,
         new_user_password=None,
+        _lock=_lock,
         use_recovery=False,
     )
 
@@ -453,6 +457,8 @@ def restore_backup_with_recovery_password(
     destination_database_path: str | Path,
     recovery_password: str,
     new_user_password: str,
+    *,
+    _lock: ExclusiveFileLock | None = None,
 ) -> Path:
     if recovery_password == new_user_password:
         raise PasswordPolicyError(
@@ -463,6 +469,7 @@ def restore_backup_with_recovery_password(
         destination_database_path,
         password=recovery_password,
         new_user_password=new_user_password,
+        _lock=_lock,
         use_recovery=True,
     )
 
@@ -474,68 +481,75 @@ def _restore_backup(
     password: str,
     new_user_password: str | None,
     use_recovery: bool,
+    _lock: ExclusiveFileLock | None = None,
 ) -> Path:
-    record = inspect_backup(backup_path)
-    destination = Path(destination_database_path).resolve()
-    destination_credentials = credential_path_for(destination)
-    if not destination.parent.is_dir():
-        raise BackupDirectoryNotFoundError(
-            f"복원할 DB의 상위 폴더가 없습니다: {destination.parent}"
-        )
-    if destination.exists() or destination_credentials.exists():
-        raise BackupRestoreConflictError(
-            "복원할 위치에 DB 또는 비밀번호 정보 파일이 이미 있습니다."
-        )
+    owned = _lock is None
+    lock = _lock if _lock is not None else database_lock(destination_database_path).acquire()
+    try:
+        record = inspect_backup(backup_path)
+        destination = Path(destination_database_path).resolve()
+        destination_credentials = credential_path_for(destination)
+        if not destination.parent.is_dir():
+            raise BackupDirectoryNotFoundError(
+                f"복원할 DB의 상위 폴더가 없습니다: {destination.parent}"
+            )
+        if destination.exists() or destination_credentials.exists():
+            raise BackupRestoreConflictError(
+                "복원할 위치에 DB 또는 비밀번호 정보 파일이 이미 있습니다."
+            )
 
-    credential_installed = False
-    database_installed = False
-    with tempfile.TemporaryDirectory(
-        prefix=".mealrestore-",
-        dir=destination.parent,
-    ) as staging_value:
-        staging = Path(staging_value)
-        staged_database = staging / destination.name
-        staged_credentials = staging / destination_credentials.name
-        try:
-            with zipfile.ZipFile(record.path, mode="r") as archive:
-                credential_payload = archive.read(_CREDENTIAL_MEMBER)
-                credentials = DatabaseCredentials.from_bytes(credential_payload)
-                key = (
-                    credentials.unlock_recovery(password)
-                    if use_recovery
-                    else credentials.unlock_user(password)
-                )
-                if use_recovery:
-                    assert new_user_password is not None
-                    credentials = credentials.with_user_password(
-                        key,
-                        new_user_password,
+        credential_installed = False
+        database_installed = False
+        with tempfile.TemporaryDirectory(
+            prefix=".mealrestore-",
+            dir=destination.parent,
+        ) as staging_value:
+            staging = Path(staging_value)
+            staged_database = staging / destination.name
+            staged_credentials = staging / destination_credentials.name
+            try:
+                with zipfile.ZipFile(record.path, mode="r") as archive:
+                    credential_payload = archive.read(_CREDENTIAL_MEMBER)
+                    credentials = DatabaseCredentials.from_bytes(credential_payload)
+                    key = (
+                        credentials.unlock_recovery(password)
+                        if use_recovery
+                        else credentials.unlock_user(password)
                     )
-                _extract_member(archive, _DATABASE_MEMBER, staged_database)
-                _write_bytes(staged_credentials, credentials.to_bytes())
+                    if use_recovery:
+                        assert new_user_password is not None
+                        credentials = credentials.with_user_password(
+                            key,
+                            new_user_password,
+                        )
+                    _extract_member(archive, _DATABASE_MEMBER, staged_database)
+                    _write_bytes(staged_credentials, credentials.to_bytes())
 
-            if _sha256_file(staged_database) != record.database_sha256:
-                raise BackupIntegrityError("복원 중 백업 DB 내용이 달라졌습니다.")
-            with EncryptedDatabase.open(staged_database, key) as restored:
-                restored.check_integrity()
-            if destination.exists() or destination_credentials.exists():
-                raise BackupRestoreConflictError(
-                    "복원할 위치에 DB 또는 비밀번호 정보 파일이 이미 있습니다."
-                )
+                if _sha256_file(staged_database) != record.database_sha256:
+                    raise BackupIntegrityError("복원 중 백업 DB 내용이 달라졌습니다.")
+                with EncryptedDatabase.open(staged_database, key) as restored:
+                    restored.check_integrity()
+                if destination.exists() or destination_credentials.exists():
+                    raise BackupRestoreConflictError(
+                        "복원할 위치에 DB 또는 비밀번호 정보 파일이 이미 있습니다."
+                    )
 
-            os.replace(staged_credentials, destination_credentials)
-            credential_installed = True
-            os.replace(staged_database, destination)
-            database_installed = True
-            with EncryptedDatabase.open(destination, key) as restored:
-                restored.check_integrity()
-        except Exception:
-            if database_installed:
-                destination.unlink(missing_ok=True)
-            if credential_installed:
-                destination_credentials.unlink(missing_ok=True)
-            raise
-    return destination
+                os.replace(staged_credentials, destination_credentials)
+                credential_installed = True
+                os.replace(staged_database, destination)
+                database_installed = True
+                with EncryptedDatabase.open(destination, key) as restored:
+                    restored.check_integrity()
+            except Exception:
+                if database_installed:
+                    destination.unlink(missing_ok=True)
+                if credential_installed:
+                    destination_credentials.unlink(missing_ok=True)
+                raise
+        return destination
+    finally:
+        if owned:
+            lock.close()
 
 
 def _parse_manifest(payload: bytes) -> dict[str, object]:

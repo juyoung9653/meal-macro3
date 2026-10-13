@@ -22,6 +22,7 @@ from src.domain.entitlements import (
     plan_breakfast_shipments,
     decide_entitlement,
 )
+from src.domain.delivery_defaults import delivery_defaults_state
 from src.domain.projections import (
     roster_from_historical_snapshot,
     status_events_from_historical_snapshot,
@@ -53,7 +54,6 @@ from src.services.delivery_service import (
 from src.services.meal_service_availability import (
     RECURRING_MEAL_SERVICE_POLICY_VERSION,
     default_delivery_weekdays,
-    has_custom_delivery_weekdays,
     physical_delivery_on,
     regular_service_available,
 )
@@ -225,8 +225,7 @@ def prepare_delivery_report_data(
                         )
                     )
                 elif meal is Meal.BREAKFAST and (
-                    not has_custom_delivery_weekdays(roster, person, meal, service_on)
-                    or physical_delivery_on(roster, person, meal, service_on)
+                    physical_delivery_on(roster, person, meal, service_on)
                     == service_on - timedelta(days=(service_on.weekday() - default_delivery_weekdays(meal)[service_on.weekday()]) % 7)
                 ):
                     normal_breakfast.append(entitlement)
@@ -326,9 +325,8 @@ def prepare_delivery_report_data(
             },
             "recurring_service_policy": {
                 "version": RECURRING_MEAL_SERVICE_POLICY_VERSION,
-                "breakfast": "friday_saturday_sunday",
-                "lunch": "reviewed_school_weekdays",
-                "dinner": "weekdays",
+                "defaults": delivery_defaults_state(roster.delivery_defaults),
+                "lunch": "configured_days_and_reviewed_school_weekdays",
                 "household_weekday_override": "replaces_regular_days; lunch_requires_school_service",
                 "household_delivery_weekday": "latest_configured_weekday_on_or_before_service_day",
             },

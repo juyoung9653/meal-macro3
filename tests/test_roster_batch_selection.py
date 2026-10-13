@@ -89,11 +89,10 @@ def test_batch_targets_keep_only_visible_meal_cells_and_emit(app):
     menu = window._create_context_menu(
         window.table_model.person_at(0), Meal.BREAKFAST, "status:breakfast", targets
     )
-    batch_menu = menu.actions()[-1].menu()
-    assert batch_menu.title() == "선택한 식종 2개 일괄 변경"
+    assert menu.actions()[1].text() == "선택한 식종 2개 · 일시중지"
     requested = []
     window.batch_status_action_requested.connect(lambda *args: requested.append(args))
-    batch_menu.actions()[1].trigger()
+    menu.actions()[1].trigger()
     assert requested == [(targets, MealStatus.PAUSED)]
     window.close()
 

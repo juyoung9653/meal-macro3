@@ -196,7 +196,7 @@ def test_calculates_shared_invoice_and_confirmation_facts_from_source_revision()
     )
     assert prepared.calculation_manifest["billing"]["total_amount"] == 327_000
     assert prepared.calculation_manifest["calculation_contract_version"] == 3
-    assert prepared.calculation_manifest["recurring_service_policy"]["version"] == 3
+    assert prepared.calculation_manifest["recurring_service_policy"]["version"] == 4
 
 
 def test_blocks_enrolled_lunch_when_reviewed_school_period_is_missing():
@@ -267,3 +267,19 @@ def test_custom_lunch_weekday_skips_unneeded_school_schedule_dates():
     )
 
     assert tuple(item.service_on for item in prepared.entitlements) == (monday,)
+
+
+def test_global_defaults_change_billed_service_days_but_not_delivery_date_basis():
+    from dataclasses import replace
+    from src.domain.delivery_defaults import DELIVERY_DEFAULTS_ID, DELIVERY_DEFAULTS_KIND, delivery_defaults_state
+    from src.domain.roster import standard_delivery_defaults
+    snapshot = _source_snapshot()
+    states = dict(snapshot.entities)
+    defaults = tuple(replace(item, weekdays=(0,), delivery_weekdays=(6,) * 7) for item in standard_delivery_defaults())
+    states[EntityRef(DELIVERY_DEFAULTS_KIND, DELIVERY_DEFAULTS_ID)] = delivery_defaults_state(defaults)
+    prepared = prepare_monthly_document_data(HistoricalSnapshot(snapshot.revision_id, states), date(2026, 8, 1), date(2026, 8, 31), tuple(Meal))
+    delivery = prepared.batch.deliveries[0]
+    assert delivery.breakfast_count == 5
+    assert delivery.dinner_count == 4  # Aug 10 remains paused
+    assert delivery.lunch_count == 1  # school calendar allows only Aug 3
+    assert prepared.calculation_manifest["recurring_service_policy"]["defaults"]["meals"][0]["weekdays"] == (0,)

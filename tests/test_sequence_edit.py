@@ -114,7 +114,7 @@ def test_sequence_display_and_context_menu_signal(app):
     common_sequence_column = next(
         i for i, column in enumerate(common_model.columns) if column.key == "sequence"
     )
-    assert common_model.data(common_model.index(0, common_sequence_column)) == "001"
+    assert common_model.data(common_model.index(0, common_sequence_column)) == "석식: 001\n조식: 001\n중식: 001"
     model = RosterTableModel(roster)
     sequence_column = next(i for i, column in enumerate(model.columns) if column.key == "sequence")
     index = model.index(0, sequence_column)
@@ -127,7 +127,7 @@ def test_sequence_display_and_context_menu_signal(app):
     window.person_edit_requested.connect(person_edits.append)
     sequence_menu = window._create_context_menu(roster.persons[0], column_key="sequence")
     assert [action.text() for action in sequence_menu.actions()] == [
-        "순서 수정", "이력보기", "민원", "", "명단 행 삭제…",
+        "순서 수정", "이력보기", "민원", "", "명단 행 삭제",
     ]
     sequence_menu.actions()[0].trigger()
     assert received == [person_id]
@@ -136,7 +136,7 @@ def test_sequence_display_and_context_menu_signal(app):
     assert received == [person_id]
     name_menu = window._create_context_menu(roster.persons[0], column_key="name")
     assert [action.text() for action in name_menu.actions()] == [
-        "정보 수정", "이력보기", "민원", "", "명단 행 삭제…",
+        "정보 수정", "이력보기", "민원", "", "명단 행 삭제",
     ]
     name_menu.actions()[0].trigger()
     assert person_edits == [person_id]

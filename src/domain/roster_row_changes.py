@@ -107,6 +107,7 @@ def build_roster_row_revision(
         enrollments=enrollments,
         assignments=assignments,
         custom_fields=current_roster.custom_fields,
+        delivery_defaults=current_roster.delivery_defaults,
     )
     changes = list(roster_audit_changes(current_roster, snapshot))
     if add_person is not None:

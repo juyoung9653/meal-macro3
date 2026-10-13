@@ -9,6 +9,7 @@ from uuid import UUID
 
 import apsw
 
+from src.domain.delivery_defaults import DELIVERY_DEFAULTS_ID, DELIVERY_DEFAULTS_KIND, delivery_defaults_from_state
 from src.domain.projections import (
     ASSIGNMENT_KIND,
     CUSTOM_FIELD_KIND,
@@ -120,6 +121,16 @@ def load_current_roster(
     enrollments = tuple(_load_enrollments(connection))
     assignments = tuple(_load_assignments(connection))
     custom_fields = tuple(_load_custom_fields(connection))
+    defaults_row = connection.execute(
+        """SELECT change.after_json FROM audit_change AS change
+           JOIN revision ON revision.revision_id = change.revision_id
+           WHERE change.entity_kind = ? AND change.entity_id = ?
+           ORDER BY revision.sequence DESC, change.ordinal DESC LIMIT 1""",
+        (DELIVERY_DEFAULTS_KIND, str(DELIVERY_DEFAULTS_ID)),
+    ).fetchone()
+    defaults = delivery_defaults_from_state(
+        None if defaults_row is None or defaults_row[0] is None else json.loads(defaults_row[0])
+    )
     return RosterSnapshot(
         revision_id,
         persons,
@@ -128,6 +139,7 @@ def load_current_roster(
         enrollments,
         assignments,
         custom_fields,
+        delivery_defaults=defaults,
     )
 
 
@@ -173,7 +185,11 @@ def load_typed_entity_states(
     states: dict[EntityRef, Mapping[str, JsonValue]] = {}
     if latest is not None:
         roster = load_current_roster(connection, UUID(str(latest[0])))
-        states.update(roster_entity_states(roster))
+        states.update(
+            (reference, state)
+            for reference, state in roster_entity_states(roster).items()
+            if reference.entity_kind in TYPED_ENTITY_KINDS
+        )
     for event in load_status_events(connection):
         states[EntityRef(STATUS_EVENT_KIND, event.event_id)] = status_event_state(event)
     return states
