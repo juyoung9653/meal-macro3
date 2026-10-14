@@ -444,6 +444,336 @@ def test_roster_button_requests_bulk_replacement_on_selected_day(app, monkeypatc
     window.close()
 
 
+@pytest.mark.parametrize("batch", [False, True], ids=("single", "batch"))
+def test_right_click_stop_keeps_dated_driver_in_window_and_reload(
+    app, tmp_path, batch,
+):
+    """STOPPED changes status only; dated routing remains a separate timeline."""
+    from datetime import UTC, date, datetime
+
+    from src.desktop_v2.meal_status_edit import MealStatusChangeController
+    from src.desktop_v2.roster_window import RosterWindow
+    from src.domain.delivery_routing import build_driver_revision
+    from src.domain.revisions import RevisionActor
+    from src.domain.roster import InclusiveDateRange
+    from src.domain.status import MealStatus
+    from tests.test_delivery_routing import args
+
+    roster = base_roster()
+    person_id = roster.persons[0].person_id
+    current_driver = Driver(uuid4(), "현재 기사")
+    dinner_driver = Driver(uuid4(), "석식 기사")
+    future_driver = Driver(uuid4(), "예약 기사")
+    future_day = date(2026, 11, 1)
+    notices = Messages()
+
+    class AssignmentDialog:
+        requests = iter((
+            RoutingRequest(
+                DAY,
+                {
+                    Meal.BREAKFAST: current_driver.driver_id,
+                    Meal.DINNER: dinner_driver.driver_id,
+                    Meal.LUNCH: None,
+                },
+            ),
+            RoutingRequest(future_day, {Meal.BREAKFAST: future_driver.driver_id}),
+        ))
+
+        def __init__(self, *_args, **_kwargs):
+            self._request = next(self.requests)
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+        def request(self):
+            return self._request
+
+    targets = (
+        (person_id, Meal.BREAKFAST),
+        (person_id, Meal.DINNER),
+    )
+
+    class StopDialog:
+        def __init__(self, *_args, **kwargs):
+            self._targets = kwargs.get("targets")
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+        def selected_meals(self):
+            return tuple(meal for _person_id, meal in targets) if batch else (
+                Meal.BREAKFAST,
+            )
+
+        def selected_targets(self):
+            return targets if batch else ()
+
+        def selected_status(self):
+            return MealStatus.STOPPED
+
+        def selected_period(self):
+            return InclusiveDateRange(DAY, None)
+
+    class StopController(MealStatusChangeController):
+        def __init__(self, session):
+            super().__init__(
+                session,
+                dialog_type=StopDialog,
+                message_box=notices,
+                actor_provider=lambda: RevisionActor("tester", "test-sid"),
+                recorded_at_provider=lambda: datetime(2026, 10, 1, tzinfo=UTC),
+            )
+
+    path = tmp_path / f"stop-retains-driver-{batch}.sqlite3"
+    with DatabaseSession.create(path, "password", "recovery") as session:
+        initialize(session, roster)
+        state = RoutingState()
+        for driver in (current_driver, dinner_driver, future_driver):
+            result = session.append_revision(build_driver_revision(
+                session.database.current_roster(),
+                state,
+                driver_id=driver.driver_id,
+                name=driver.name,
+                telephone="",
+                **args(),
+            ))
+            assert result.error is None
+            roster, state = loaded(session)
+
+        routing = DeliveryRoutingController(
+            session,
+            change_dialog_type=AssignmentDialog,
+            message_box=notices,
+        )
+        assigned = routing.run_assignment(person_id, Meal.BREAKFAST, DAY)
+        assert assigned.roster is not None
+        assigned = routing.run_assignment(person_id, Meal.BREAKFAST, future_day)
+        assert assigned.roster is not None
+        assert assigned.routing_state.resolve(
+            assigned.roster, person_id, DAY
+        ).drivers == {
+            Meal.BREAKFAST: current_driver.name,
+            Meal.LUNCH: "",
+            Meal.DINNER: dinner_driver.name,
+        }
+
+        window = RosterWindow(
+            assigned.roster,
+            view_settings_scope=f"stop-retains-driver-{uuid4()}",
+        )
+        window._set_day(DAY)
+        window.set_routing_state(assigned.routing_state)
+        controller = DesktopStartupController(
+            settings=SimpleNamespace(),
+            meal_status_controller_type=StopController,
+        )
+        window.status_action_requested.connect(
+            lambda pid, meal, status: controller._run_meal_status_change(
+                session, window, pid, meal, status
+            )
+        )
+        window.batch_status_action_requested.connect(
+            lambda selected, status: controller._run_batch_meal_status_change(
+                session, window, selected, status
+            )
+        )
+        menu = window._create_context_menu(
+            assigned.roster.person(person_id),
+            Meal.BREAKFAST,
+            batch_targets=targets if batch else (),
+        )
+        stop_text = (
+            "선택한 식종 2개 · 중지" if batch else "조식 중지"
+        )
+        next(action for action in menu.actions() if action.text() == stop_text).trigger()
+        app.processEvents()
+
+        model = window.table_model
+        row = next(
+            row for row in range(model.rowCount())
+            if model.person_at(row).person_id == person_id
+        )
+        columns = {column.meal: index for index, column in enumerate(model.columns)}
+        assert model.data(model.index(row, columns[Meal.BREAKFAST])) == "현재 기사\n-"
+        expected_dinner = "석식 기사\n-" if batch else "석식 기사\n배송"
+        assert model.data(model.index(row, columns[Meal.DINNER])) == expected_dinner
+        assert model.data(model.index(row, columns[Meal.LUNCH])) == "미지정\n-"
+        window._set_day(BEFORE)
+        assert model.data(model.index(row, columns[Meal.BREAKFAST])) == "기존 기사\n배송"
+        window._set_day(future_day)
+        assert model.data(model.index(row, columns[Meal.BREAKFAST])) == "예약 기사\n-"
+        window.close()
+
+    with DatabaseSession.open(path, "password") as session:
+        current, state = loaded(session)
+        assert state.resolve(current, person_id, DAY).drivers[Meal.BREAKFAST] == (
+            current_driver.name
+        )
+        assert state.resolve(current, person_id, DAY).drivers[Meal.DINNER] == (
+            dinner_driver.name
+        )
+        assert state.resolve(current, person_id, DAY).drivers[Meal.LUNCH] == ""
+        assert state.resolve(
+            current, person_id, BEFORE
+        ).drivers[Meal.BREAKFAST] == "기존 기사"
+        assert state.resolve(
+            current, person_id, future_day
+        ).drivers[Meal.BREAKFAST] == future_driver.name
+
+
+def test_right_click_stop_keeps_excel_imported_meal_driver_in_window_and_reload(
+    app, tmp_path,
+):
+    """The initial Excel assignment remains the fallback with no routing events."""
+    from datetime import UTC, date, datetime
+
+    import openpyxl
+
+    from src.desktop_v2.meal_status_edit import (
+        MealStatusChangeController,
+        MealStatusChangeDialog,
+    )
+    from src.domain.delivery_routing import routing_state_from_snapshot
+    from src.domain.revisions import RevisionActor
+    from src.domain.roster import InclusiveDateRange
+    from src.domain.status import MealStatus
+    from src.importing.application import IdentityResolution, ReconciliationDecision
+    from src.importing.contracts import ImportMappingProfile, ProfileField
+    from src.importing.reconciliation import stage_reconciliation
+    from src.importing.revision import build_import_revision
+    from src.importing.workbook import parse_workbook
+
+    source = tmp_path / "imported-driver.xlsx"
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "명단"
+    sheet.append(("성명", "생년월일", "식종", "배송담당", "배송순서"))
+    sheet.append(("엑셀 대상자", "20150302", "조식", "엑셀 기사", "001"))
+    workbook.save(source)
+    workbook.close()
+
+    profile = ImportMappingProfile(
+        uuid4(),
+        1,
+        "기사 포함 명단",
+        "roster-xlsx",
+        {
+            ProfileField.NAME: "A",
+            ProfileField.BIRTH_DATE: "B",
+        },
+        combined_meals_column="C",
+        driver_column="D",
+        sequence_column="E",
+    )
+    imported_on = date(2026, 10, 1)
+    preview = parse_workbook(source, profile)
+    plan = stage_reconciliation(
+        None, preview.observations, effective_on=imported_on,
+    )
+    observation_id = preview.observations[0].observation_id
+    person_id = uuid4()
+    prepared = build_import_revision(
+        None,
+        preview,
+        plan,
+        decisions={
+            observation_id: ReconciliationDecision(
+                observation_id, IdentityResolution.CREATE_NEW, person_id,
+            ),
+        },
+        actor=RevisionActor("tester", "test-sid"),
+        recorded_at=datetime(2026, 10, 1, tzinfo=UTC),
+        revision_id=uuid4(),
+        batch_id=uuid4(),
+    )
+    notices = Messages()
+
+    class StopDialog(MealStatusChangeDialog):
+        def exec(self):
+            assert self.selected_meals() == (Meal.BREAKFAST,)
+            assert self.selected_status() is MealStatus.STOPPED
+            assert self.selected_period() == InclusiveDateRange(imported_on, None)
+            self._save()
+            return self.result()
+
+    class StopController(MealStatusChangeController):
+        def __init__(self, session):
+            super().__init__(
+                session,
+                dialog_type=StopDialog,
+                message_box=notices,
+                actor_provider=lambda: RevisionActor("tester", "test-sid"),
+                recorded_at_provider=lambda: datetime(2026, 10, 1, 1, tzinfo=UTC),
+            )
+
+    path = tmp_path / "excel-driver-stop.sqlite3"
+    with DatabaseSession.create(path, "password", "recovery") as session:
+        assert session.append_revision(prepared.record).error is None
+        imported = session.database.current_roster()
+        assert imported is not None
+        assert tuple(
+            (assignment.meal, assignment.driver, assignment.sequence)
+            for assignment in imported.assignments
+        ) == ((Meal.BREAKFAST, "엑셀 기사", "001"),)
+        assert not routing_state_from_snapshot(
+            session.database.snapshot(imported.revision_id)
+        ).events
+
+        controller = DesktopStartupController(
+            settings=SimpleNamespace(),
+            meal_status_controller_type=StopController,
+            message_box=notices,
+        )
+        access = SimpleNamespace(
+            exec=lambda: QDialog.DialogCode.Accepted,
+            session=session,
+        )
+        startup = controller._start_with_dialog(access, None)
+        window = startup.window
+        assert window is not None
+        window._set_day(imported_on)
+        model = window.table_model
+        row = next(
+            row for row in range(model.rowCount())
+            if model.person_at(row).person_id == person_id
+        )
+        breakfast_column = next(
+            index for index, column in enumerate(model.columns)
+            if column.meal is Meal.BREAKFAST
+        )
+        assert model.data(model.index(row, breakfast_column)) == "엑셀 기사\n배송"
+
+        menu = window._create_context_menu(
+            imported.person(person_id), Meal.BREAKFAST,
+        )
+        next(
+            action for action in menu.actions() if action.text() == "조식 중지"
+        ).trigger()
+        app.processEvents()
+
+        row = next(
+            row for row in range(model.rowCount())
+            if model.person_at(row).person_id == person_id
+        )
+        assert model.data(model.index(row, breakfast_column)) == "엑셀 기사\n-"
+        assert not notices.criticals
+        window.close()
+
+    with DatabaseSession.open(path, "password") as session:
+        current = session.database.current_roster()
+        state = routing_state_from_snapshot(
+            session.database.snapshot(current.revision_id)
+        )
+        assert not state.events
+        assert current.resolve_assignment(
+            person_id, Meal.BREAKFAST
+        ).driver == "엑셀 기사"
+        assert state.resolve(
+            current, person_id, imported_on
+        ).drivers[Meal.BREAKFAST] == "엑셀 기사"
+
+
 
 def test_multi_meal_assignment_real_controller_preserves_before_date_and_other_meal(app, tmp_path):
     from src.domain.delivery_routing import build_driver_revision

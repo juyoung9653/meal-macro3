@@ -15,8 +15,14 @@ from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialogButtonBox
 
+from src.desktop_v2.inspector_history import InspectorMealHistory
 from src.desktop_v2.inactive_roster import InactiveRosterSettings, InactiveThresholdDialog
 from src.desktop_v2.roster_window import RosterWindow
+from src.domain.projections import ENROLLMENT_KIND, STATUS_EVENT_KIND
+from src.domain.revisions import (
+    AuditChange, ChangeOperation, HistoricalSnapshot, ImportBatch,
+    RevisionActor, RevisionMetadata, RevisionRecord, RevisionSource,
+)
 from src.domain.roster import (
     InclusiveDateRange, Meal, MealEnrollment, Person, PersonProfile, RosterSnapshot,
 )
@@ -210,6 +216,187 @@ def test_one_day_archive_matches_selected_day_status_cells(app, tmp_path):
     assert _visible_ids(window) == {all_dash}
     window._archive_action.trigger()
     assert _visible_ids(window) == {mixed, paused}
+    window.close()
+
+
+def test_archive_threshold_keeps_zero_history_and_applies_history_boundary(app, tmp_path):
+    selected_day = date(2026, 9, 30)
+    zero_history = UUID("af000000-0000-0000-0000-000000000008")
+    stopped_two_days = UUID("af000000-0000-0000-0000-000000000009")
+    stopped_365_days = UUID("af000000-0000-0000-0000-00000000000a")
+    roster = RosterSnapshot(
+        REVISION,
+        persons=(
+            Person(zero_history, PersonProfile("가입·이력 없음")),
+            Person(stopped_two_days, PersonProfile("이틀 미배송")),
+            Person(stopped_365_days, PersonProfile("365일 미배송")),
+        ),
+        enrollments=(
+            MealEnrollment(stopped_two_days, Meal.DINNER, InclusiveDateRange(date(2020, 1, 1))),
+            MealEnrollment(stopped_365_days, Meal.DINNER, InclusiveDateRange(date(2020, 1, 1))),
+        ),
+    )
+
+    def stopped_history(person_id, starts_on, event_id):
+        event = StatusEvent(
+            event_id, REVISION, person_id, Meal.DINNER, MealStatus.STOPPED,
+            InclusiveDateRange(starts_on), datetime(2026, 9, 30, tzinfo=UTC),
+        )
+        return resolve_status_history(person_id, Meal.DINNER, (event,))
+
+    histories = {
+        (stopped_two_days, Meal.DINNER): stopped_history(
+            stopped_two_days, selected_day - timedelta(days=1), UUID(int=103),
+        ),
+        (stopped_365_days, Meal.DINNER): stopped_history(
+            stopped_365_days, selected_day - timedelta(days=364), UUID(int=104),
+        ),
+    }
+    settings = QSettings(str(tmp_path / "threshold-boundary.ini"), QSettings.Format.IniFormat)
+    settings.setValue(InactiveRosterSettings.SETTINGS_KEY, 1)
+    window = RosterWindow(roster, histories, inactive_settings=settings)
+    window._set_day(selected_day)
+    window._archive_action.trigger()
+
+    assert _visible_ids(window) == {zero_history, stopped_two_days, stopped_365_days}
+    window._refresh_archive(days=2)
+    assert _visible_ids(window) == {zero_history, stopped_two_days, stopped_365_days}
+    window._refresh_archive(days=365)
+    assert _visible_ids(window) == {zero_history, stopped_365_days}
+    window.close()
+
+
+@pytest.mark.parametrize("days", [2, 365])
+def test_imported_enrollment_with_no_visible_history_archives_at_any_threshold(
+    app, tmp_path, days,
+):
+    selected_day = date(2026, 9, 30)
+    person_id = UUID("af000000-0000-0000-0000-00000000000b")
+    revision_id = UUID("af000000-0000-0000-0000-00000000000c")
+    roster = RosterSnapshot(
+        revision_id,
+        persons=(Person(person_id, PersonProfile("가져온 중식 대상", school_name="샘플초")),),
+        enrollments=(
+            MealEnrollment(
+                person_id, Meal.LUNCH, InclusiveDateRange(date(2026, 8, 26)),
+            ),
+        ),
+    )
+    record = RevisionRecord(
+        RevisionMetadata(
+            revision_id, None, datetime(2026, 8, 26, tzinfo=UTC), date(2026, 8, 26),
+            RevisionActor("tester", "sid"), "Excel 명단 가져오기", RevisionSource.IMPORT,
+        ),
+        (
+            AuditChange(
+                ENROLLMENT_KIND, UUID(int=105), ChangeOperation.INSERT, None,
+                {
+                    "person_id": str(person_id),
+                    "meal": Meal.LUNCH.value,
+                    "periods": ({"starts_on": "2026-08-26", "ends_on": None},),
+                },
+            ),
+            AuditChange(
+                STATUS_EVENT_KIND, UUID(int=108), ChangeOperation.INSERT, None,
+                {
+                    "person_id": str(person_id),
+                    "meal": Meal.LUNCH.value,
+                    "status": MealStatus.DELIVERY.value,
+                    "starts_on": "2026-08-26",
+                    "ends_on": None,
+                },
+            ),
+        ),
+        ImportBatch(
+            UUID(int=106), revision_id, "roster.xlsx", "0" * 64, 1, "명단",
+            "headers", {}, date(2026, 8, 26),
+        ),
+    )
+
+    records = {revision_id: record}
+
+    class Database:
+        def snapshot(self, requested_revision_id):
+            assert requested_revision_id in records
+            return HistoricalSnapshot(requested_revision_id, {})
+
+        def revision(self, requested_revision_id):
+            return records[requested_revision_id]
+
+    settings = QSettings(str(tmp_path / f"imported-{days}.ini"), QSettings.Format.IniFormat)
+    settings.setValue(InactiveRosterSettings.SETTINGS_KEY, days)
+    imported_delivery = StatusEvent(
+        UUID(int=108), revision_id, person_id, Meal.LUNCH,
+        MealStatus.DELIVERY, InclusiveDateRange(date(2026, 8, 26)),
+        datetime(2026, 8, 26, tzinfo=UTC),
+    )
+    imported_histories = {
+        (person_id, Meal.LUNCH): resolve_status_history(
+            person_id, Meal.LUNCH, (imported_delivery,),
+        ),
+    }
+    window = RosterWindow(roster, imported_histories, inactive_settings=settings)
+    window._set_day(selected_day)
+    assert _visible_ids(window) == {person_id}
+    meal_history = InspectorMealHistory(Database())
+
+    def provider(person):
+        return meal_history.rows_for(window.roster, person.person_id)
+
+    window.set_meal_change_history_provider(provider)
+
+    assert not meal_history.rows_for(roster, person_id)
+    assert window.table_model._contexts[person_id].meal_statuses == {
+        Meal.DINNER: "-",
+        Meal.BREAKFAST: "-",
+        Meal.LUNCH: "-",
+    }
+    assert _visible_ids(window) == set()
+    window._archive_action.trigger()
+    assert _visible_ids(window) == {person_id}
+
+    window.set_meal_change_history_provider(None)
+    assert _visible_ids(window) == set()
+    window.set_meal_change_history_provider(provider)
+    assert _visible_ids(window) == {person_id}
+
+    manual_revision_id = UUID("af000000-0000-0000-0000-00000000000d")
+    manual_record = RevisionRecord(
+        RevisionMetadata(
+            manual_revision_id, revision_id, datetime(2026, 9, 30, tzinfo=UTC), selected_day,
+            RevisionActor("tester", "sid"), "중식 중지", RevisionSource.UI,
+        ),
+        (
+            AuditChange(
+                STATUS_EVENT_KIND, UUID(int=107), ChangeOperation.INSERT, None,
+                {
+                    "person_id": str(person_id),
+                    "meal": Meal.LUNCH.value,
+                    "status": MealStatus.STOPPED.value,
+                    "starts_on": str(selected_day),
+                    "ends_on": None,
+                },
+            ),
+        ),
+    )
+    records[manual_revision_id] = manual_record
+    manual_roster = RosterSnapshot(
+        manual_revision_id,
+        persons=roster.persons,
+        enrollments=roster.enrollments,
+    )
+    stop = StatusEvent(
+        UUID(int=107), manual_revision_id, person_id, Meal.LUNCH,
+        MealStatus.STOPPED, InclusiveDateRange(selected_day),
+        datetime(2026, 9, 30, tzinfo=UTC),
+    )
+    window.replace_roster(
+        manual_roster,
+        {(person_id, Meal.LUNCH): resolve_status_history(person_id, Meal.LUNCH, (stop,))},
+    )
+
+    assert meal_history.rows_for(manual_roster, person_id)
+    assert _visible_ids(window) == set()
     window.close()
 
 

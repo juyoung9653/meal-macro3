@@ -1216,6 +1216,7 @@ class RosterWindow(QMainWindow):
         self._meal_change_history_provider: (
             Callable[[Person], tuple[tuple[str, str], ...]] | None
         ) = None
+        self._meal_change_history_rows: dict[UUID, tuple] = {}
         register_application_fonts()
         self.setWindowTitle(f"급식 배송 운영 · {APP_VERSION}")
         self.resize(1440, 860)
@@ -1248,6 +1249,7 @@ class RosterWindow(QMainWindow):
             raise TypeError("roster는 RosterSnapshot이어야 합니다.")
         self._roster = roster
         self._histories = dict(histories or {})
+        self._meal_change_history_rows.clear()
         self._revision_display_code = revision_display_code
         self._column_layout.save()
         self._model.replace_roster(roster, self._histories)
@@ -1496,11 +1498,17 @@ class RosterWindow(QMainWindow):
         return frame
 
     def _refresh_archive(self, *, days: int | None = None) -> None:
+        has_visible_history: Callable[[UUID], bool] | None = None
+        if self._meal_change_history_provider is not None:
+            def has_visible_history(person_id: UUID) -> bool:
+                return bool(self._meal_history_rows_for(self._roster.person(person_id)))
+
         ids = inactive_person_ids(
             self._roster, self._histories,
             days=self._archive_settings.days if days is None else days,
             as_of=self._model.service_day,
             status_on=self._model.effective_status_on,
+            has_visible_history=has_visible_history,
         )
         self._model.set_archive_filter(ids, self._archive_action.isChecked())
         self._archive_threshold_button.setVisible(self._archive_action.isChecked())
@@ -2284,7 +2292,18 @@ class RosterWindow(QMainWindow):
         self,
         provider: Callable[[Person], tuple[tuple[str, str], ...]] | None,
     ) -> None:
+        index = self._selected_index()
+        selected_person_id = (
+            self._model.person_at(index.row()).person_id if index.isValid() else None
+        )
         self._meal_change_history_provider = provider
+        self._meal_change_history_rows.clear()
+        self._refresh_archive()
+        if selected_person_id is not None:
+            for row in range(self._model.rowCount()):
+                if self._model.person_at(row).person_id == selected_person_id:
+                    self._table.selectRow(row)
+                    break
         self._update_inspector()
 
     def _show_history(self, person: Person, meal: Meal | None = None) -> None:
@@ -2568,7 +2587,7 @@ class RosterWindow(QMainWindow):
         self._meal_history_list.clear()
         self._meal_history_all_button.setEnabled(True)
         rows = (
-            self._meal_change_history_provider(person)
+            self._meal_history_rows_for(person)
             if self._meal_change_history_provider is not None
             else self._fallback_meal_history_rows(person)
         )
@@ -2609,6 +2628,13 @@ class RosterWindow(QMainWindow):
             item.setSizeHint(QSize(0, 34))
             self._meal_history_list.addItem(item)
         self._meal_history_list.update_row_heights()
+
+    def _meal_history_rows_for(self, person: Person) -> tuple:
+        rows = self._meal_change_history_rows.get(person.person_id)
+        if rows is None:
+            rows = self._meal_change_history_provider(person)
+            self._meal_change_history_rows[person.person_id] = rows
+        return rows
 
     def _fallback_meal_history_rows(self, person: Person) -> tuple[tuple[str, str], ...]:
         history_events = [

@@ -212,6 +212,8 @@ def test_controller_failure_reports_error_without_mutating_visible_or_source_ros
 def test_real_double_click_enter_escape_focus_and_multiline_note(app):
     saved = []
     window = RosterWindow(_roster(), cell_edit_callback=lambda *args: saved.append(args))
+    # These profile-only fixtures have no meal history and belong to the archive.
+    window._include_hidden_filter.setChecked(True)
     window.show()
 
     _double_click(window, 0, "name", app)
@@ -252,6 +254,7 @@ def test_real_double_click_enter_escape_focus_and_multiline_note(app):
 def test_choice_editor_and_sorted_identity_are_bound_at_edit_start(app):
     saved = []
     window = RosterWindow(_roster(), cell_edit_callback=lambda *args: saved.append(args))
+    window._include_hidden_filter.setChecked(True)
     window.show()
     name_column = _column(window, "name")
     window.table_model.cycle_sort(name_column)
@@ -279,6 +282,7 @@ def test_choice_editor_and_sorted_identity_are_bound_at_edit_start(app):
 
     filtered = []
     window = RosterWindow(_roster(), cell_edit_callback=lambda *args: filtered.append(args))
+    window._include_hidden_filter.setChecked(True)
     window.table_model.set_search("가 대상")
     window.show()
     assert window.table_model.rowCount() == 1
@@ -295,6 +299,7 @@ def test_choice_editor_and_sorted_identity_are_bound_at_edit_start(app):
 
 def test_double_click_routes_special_columns_and_keeps_meals_read_only(app):
     window = RosterWindow(_roster())
+    window._include_hidden_filter.setChecked(True)
     sequence, relocation, delivery, cell = [], [], [], []
     window.sequence_edit_requested.connect(sequence.append)
     window.relocation_requested.connect(relocation.append)

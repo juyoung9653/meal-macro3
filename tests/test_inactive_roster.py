@@ -87,9 +87,80 @@ def test_unbounded_enrollment_without_history_remains_active():
     assert inactive_person_ids(roster, {}, as_of=AS_OF) == frozenset()
 
 
-def test_one_day_classifies_all_unenrolled_meals_without_prior_history():
-    assert inactive_person_ids(_roster(), {}, days=1, as_of=AS_OF) == frozenset({PERSON_ID})
-    assert inactive_person_ids(_roster(), {}, days=2, as_of=AS_OF) == frozenset()
+@pytest.mark.parametrize("days", [1, 2, 365])
+@pytest.mark.parametrize("history_form", ["absent", "empty"])
+def test_no_enrollment_or_effective_history_is_inactive_for_any_threshold(days, history_form):
+    histories = (
+        {}
+        if history_form == "absent"
+        else {
+            (PERSON_ID, meal): resolve_status_history(PERSON_ID, meal, ())
+            for meal in Meal
+        }
+    )
+
+    assert inactive_person_ids(_roster(), histories, days=days, as_of=AS_OF) == frozenset({PERSON_ID})
+
+
+def test_no_enrollment_with_effective_status_history_uses_period_rules():
+    histories = _histories(
+        (Meal.DINNER, MealStatus.STOPPED, date(2025, 1, 1), None),
+    )
+
+    assert inactive_person_ids(_roster(), histories, days=365, as_of=AS_OF) == frozenset()
+
+
+@pytest.mark.parametrize("days", [2, 365])
+def test_no_visible_history_uses_current_display_status_for_any_threshold(days):
+    roster = _roster((Meal.LUNCH, date(2026, 8, 26), None))
+
+    assert inactive_person_ids(
+        roster,
+        {},
+        days=days,
+        as_of=AS_OF,
+        status_on=lambda _person_id, _meal, _day: None,
+        has_visible_history=lambda _person_id: False,
+    ) == frozenset({PERSON_ID})
+
+
+@pytest.mark.parametrize("status", [MealStatus.DELIVERY, MealStatus.PAUSED])
+def test_no_visible_history_does_not_exempt_current_delivery_or_pause(status):
+    roster = _roster((Meal.DINNER, date(2024, 1, 1), None))
+    histories = _histories(
+        (Meal.DINNER, MealStatus.STOPPED, date(2025, 1, 1), None),
+    )
+
+    assert inactive_person_ids(
+        roster,
+        histories,
+        days=365,
+        as_of=AS_OF,
+        status_on=lambda _person_id, meal, _day: status if meal is Meal.DINNER else None,
+        has_visible_history=lambda _person_id: False,
+    ) == frozenset()
+
+
+def test_visible_history_keeps_inclusive_duration_rule():
+    roster = _roster((Meal.DINNER, date(2024, 1, 1), None))
+    histories = _histories(
+        (Meal.DINNER, MealStatus.STOPPED, AS_OF - timedelta(days=1), None),
+    )
+
+    assert inactive_person_ids(
+        roster,
+        histories,
+        days=2,
+        as_of=AS_OF,
+        has_visible_history=lambda _person_id: True,
+    ) == frozenset({PERSON_ID})
+    assert inactive_person_ids(
+        roster,
+        histories,
+        days=3,
+        as_of=AS_OF,
+        has_visible_history=lambda _person_id: True,
+    ) == frozenset()
 
 
 def test_one_day_uses_display_availability_for_enrolled_meal():
@@ -185,9 +256,8 @@ def test_prior_ended_enrollment_proves_non_delivery_without_status_event():
     assert inactive_person_ids(roster, {}, as_of=AS_OF) == frozenset({PERSON_ID})
 
 
-@pytest.mark.parametrize("enrollments", [(), ((Meal.DINNER, date(2026, 1, 1), date(2026, 1, 31)),)])
-def test_no_enrollment_or_only_recent_enrollment_lacks_prior_evidence(enrollments):
-    roster = _roster(*enrollments)
+def test_only_recent_enrollment_lacks_prior_evidence():
+    roster = _roster((Meal.DINNER, date(2026, 1, 1), date(2026, 1, 31)))
 
     assert inactive_person_ids(roster, {}, as_of=AS_OF) == frozenset()
 
@@ -211,7 +281,7 @@ def test_leap_day_is_counted_as_a_calendar_day():
     assert inactive_person_ids(roster, histories, days=33, as_of=date(2024, 3, 31)) == frozenset()
 
 
-@pytest.mark.parametrize("days", [1, 365, 1080])
+@pytest.mark.parametrize("days", [1, 2, 365, 1080])
 def test_exact_inclusive_day_boundary(days):
     roster = _roster((Meal.DINNER, date(2020, 1, 1), None))
     first = AS_OF - timedelta(days=days - 1)
