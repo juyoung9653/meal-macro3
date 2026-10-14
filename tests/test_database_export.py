@@ -1,22 +1,24 @@
 from datetime import UTC, date, datetime
 from uuid import uuid4
 
-from src.domain import (
+from src.domain.roster import (
     CustomFieldDefinition,
     CustomFieldType,
-    HistoricalSnapshot,
     InclusiveDateRange,
     Meal,
     MealEnrollment,
     Person,
     PersonProfile,
+    RosterSnapshot,
+)
+from src.domain.revisions import (
+    HistoricalSnapshot,
     RevisionActor,
     RevisionMetadata,
     RevisionRecord,
     RevisionSource,
-    RosterSnapshot,
-    StatusEvent,
 )
+from src.domain.status import StatusEvent
 from src.domain.complaints import Complaint, complaint_state
 from src.domain.intake import IntakeChannel
 from src.domain.projections import STATUS_EVENT_KIND

@@ -9,14 +9,16 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-from src.domain import (
+from src.domain.revisions import (
     HistoricalSnapshot,
-    Meal,
     RevisionRecord,
-    RosterSnapshot,
-    resolve_status_history,
-    status_events_from_historical_snapshot,
 )
+from src.domain.roster import (
+    Meal,
+    RosterSnapshot,
+)
+from src.domain.status import resolve_status_history
+from src.domain.projections import status_events_from_historical_snapshot
 from src.domain.delivery_routing import (
     DRIVER_KIND,
     ROUTING_EVENT_KIND,
@@ -112,6 +114,7 @@ def _roster_sheets(book, roster, snapshot, routing, calendar, day, progress):
         profile = person.profile
         effective = resolved[person.person_id]
         profile_values = [_profile_value(profile, key) for _, key in _PROFILE_COLUMNS]
+        profile_values[_profile_headers(custom).index("관할동")] = effective.jurisdiction
         profile_values[_profile_headers(custom).index("도로명주소")] = effective.road_address
         profile_values[_profile_headers(custom).index("상세주소")] = effective.detail_address
         base = [str(person.person_id), *profile_values, *[profile.custom_values.get(item.definition_id) for item in custom]]

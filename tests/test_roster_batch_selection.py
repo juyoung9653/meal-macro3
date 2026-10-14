@@ -10,8 +10,8 @@ pytest.importorskip("PySide6")
 from PySide6.QtCore import QItemSelectionModel
 from PySide6.QtWidgets import QApplication
 
-from src.desktop_v2 import RosterWindow
-from src.domain import (
+from src.desktop_v2.roster_window import RosterWindow
+from src.domain.roster import (
     DeliveryAssignment,
     Meal,
     MealEnrollment,

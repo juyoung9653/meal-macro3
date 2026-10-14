@@ -19,20 +19,31 @@ from src.domain.revisions import RevisionActor
 from src.domain.roster import Meal, RosterSnapshot
 from src.domain.projections import status_events_from_historical_snapshot
 from src.domain.status import MealStatus, resolve_status_history
-from src.importing import (
+from src.importing.application import (
     IdentityResolution,
-    ImportPurpose,
     ReconciliationDecision,
-    ReconciliationDisposition,
-    StoredHouseholdMatchingRule,
-    StoredImportProfile,
+)
+from src.importing.revision import (
+    ImportPurpose,
     build_import_revision,
-    household_matching_rules_from_snapshot,
-    import_profiles_from_snapshot,
-    stage_household_grouping,
+)
+from src.importing.reconciliation import (
+    ReconciliationDisposition,
     stage_reconciliation,
 )
-from src.storage import AutomaticBackupResult, DatabaseSession
+from src.importing.households import (
+    StoredHouseholdMatchingRule,
+    household_matching_rules_from_snapshot,
+    stage_household_grouping,
+)
+from src.importing.profile_history import (
+    StoredImportProfile,
+    import_profiles_from_snapshot,
+)
+from src.storage.database_session import (
+    AutomaticBackupResult,
+    DatabaseSession,
+)
 
 from .import_review import ImportReviewDialog, import_decision_rows
 from .import_wizard import RosterImportWizard

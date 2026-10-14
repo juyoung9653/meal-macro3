@@ -1,18 +1,11 @@
 from datetime import UTC, date, datetime, timedelta
 from dataclasses import replace
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
-from src.domain.entitlements import LunchDayRule, SchoolLunchMark
-from src.domain.delivery_policies import (
-    BREAKFAST_DELIVERY_POLICY_ID,
-    BREAKFAST_DELIVERY_POLICY_KIND,
-    BreakfastDeliveryPolicyChange,
-    BreakfastDeliveryPolicySchedule,
-    breakfast_delivery_policy_state,
-)
-from src.domain.entitlements import ClosedFridayMode
+from src.domain.entitlements import ClosedFridayMode, LunchDayRule, SchoolLunchMark
+from src.domain.delivery_routing import ROUTING_EVENT_KIND
 from src.domain.projections import roster_entity_states, roster_from_historical_snapshot, status_event_state
 from src.domain.revisions import EntityRef, HistoricalSnapshot
 from src.domain.roster import (
@@ -63,7 +56,6 @@ def _snapshot(
     include_driver: bool = True,
     status_events: tuple[StatusEvent, ...] = (),
     adjustment: ServiceAdjustmentChange | None = None,
-    breakfast_policy: BreakfastDeliveryPolicySchedule | None = None,
     delivery_settings: tuple[HouseholdDeliverySetting, ...] = (),
 ) -> tuple[HistoricalSnapshot, tuple]:
     revision_id = uuid4()
@@ -148,13 +140,6 @@ def _snapshot(
         ] = service_adjustment_schedule_state(
             ServiceAdjustmentSchedule((adjustment,))
         )
-    if breakfast_policy is not None:
-        states[
-            EntityRef(
-                BREAKFAST_DELIVERY_POLICY_KIND,
-                BREAKFAST_DELIVERY_POLICY_ID,
-            )
-        ] = breakfast_delivery_policy_state(breakfast_policy)
     for event in status_events:
         states[EntityRef("status.event", event.event_id)] = status_event_state(event)
     return HistoricalSnapshot(revision_id, states), person_ids
@@ -189,6 +174,33 @@ def test_breakfast_report_uses_physical_friday_and_keeps_three_entitlements():
     assert prepared.calculation_manifest["household_grouping"]["policy_version"] == 2
     assert prepared.calculation_manifest["report_period"]["basis"] == (
         "physical_delivery_day"
+    )
+    breakfast_manifest = prepared.calculation_manifest["breakfast_physical_delivery"]
+    assert breakfast_manifest["policy"] == {
+        "policy_version": 1,
+        "default_closed_friday_mode": ClosedFridayMode.THURSDAY_WEEKEND_ONLY.value,
+        "change_count": 0,
+        "content_sha256": "24536815e0c24815409bb1bc722e7fc826a11e9277e68add506394d36c368038",
+    }
+    assert breakfast_manifest["used_rule_versions"] == (
+        "breakfast-delivery-policy-v1@default",
+    )
+
+
+def test_empty_breakfast_report_keeps_empty_rule_usage():
+    snapshot, _ = _snapshot(people=0)
+
+    prepared = prepare_delivery_report_data(
+        snapshot, date(2026, 8, 21), date(2026, 8, 21), (Meal.BREAKFAST,)
+    )
+
+    assert prepared.reports == ()
+    assert prepared.shipments == ()
+    breakfast_manifest = prepared.calculation_manifest["breakfast_physical_delivery"]
+    assert breakfast_manifest["used_rule_versions"] == ()
+    assert breakfast_manifest["used_closed_friday_modes"] == ()
+    assert breakfast_manifest["policy"]["content_sha256"] == (
+        "24536815e0c24815409bb1bc722e7fc826a11e9277e68add506394d36c368038"
     )
 
 
@@ -392,6 +404,17 @@ def test_replacement_lunch_is_reported_on_saved_actual_delivery_day():
         meals=(Meal.LUNCH,),
         adjustment=adjustment,
     )
+    states = dict(snapshot.entities)
+    states[EntityRef(ROUTING_EVENT_KIND, uuid4())] = {
+        "person_id": str(_person_ids[0]),
+        "effective_on": delivery_on.isoformat(),
+        "position": 1,
+        "driver_ids": {},
+        "road_address": None,
+        "detail_address": None,
+        "jurisdiction": "판교동",
+    }
+    snapshot = HistoricalSnapshot(snapshot.revision_id, states)
 
     prepared = prepare_delivery_report_data(
         snapshot,
@@ -404,6 +427,7 @@ def test_replacement_lunch_is_reported_on_saved_actual_delivery_day():
     assert prepared.reports[0].day == delivery_on
     assert prepared.shipments[0].service_dates == (delivery_on, service_on)
     assert prepared.reports[0].totals.person_total == 1
+    assert "판교동" in prepared.reports[0].rows[0].reference_areas.split(", ")
     assert prepared.calculation_manifest["target_entitlement_count"] == 2
     assert prepared.calculation_manifest["service_adjustments"][
         "relevant_change_ids"
@@ -422,7 +446,7 @@ def test_delivery_report_requires_a_driver_for_every_relevant_target():
         )
 
 
-def test_retired_closed_friday_policy_does_not_override_default_delivery():
+def test_retired_closed_friday_policy_does_not_override_default_delivery(tmp_path):
     thursday = date(2026, 8, 20)
     friday = date(2026, 8, 21)
     closure = ServiceAdjustmentChange(
@@ -435,20 +459,55 @@ def test_retired_closed_friday_policy_does_not_override_default_delivery():
         "금요일 업체 휴무",
         datetime(2026, 8, 1, tzinfo=UTC),
     )
-    policy = BreakfastDeliveryPolicySchedule(
-        (
-            BreakfastDeliveryPolicyChange(
-                uuid4(),
-                date(2026, 1, 1),
-                ClosedFridayMode.SKIP_FRIDAY_WEEKEND,
-                datetime(2026, 8, 1, tzinfo=UTC),
-            ),
-        )
-    )
     snapshot, _person_ids = _snapshot(
         adjustment=closure,
-        breakfast_policy=policy,
     )
+    states = dict(snapshot.entities)
+    states[
+        EntityRef(
+            "delivery.breakfast-policy",
+            UUID("bfa57d7d-6264-5a36-a132-8e1b24b5139e"),
+        )
+    ] = {
+        "policy_version": 1,
+        "default_closed_friday_mode": ClosedFridayMode.THURSDAY_WEEKEND_ONLY.value,
+        "changes": [{
+            "change_id": str(uuid4()),
+            "effective_on": "2026-01-01",
+            "closed_friday_mode": "금토일_미배송",
+            "recorded_at": "2026-08-01T00:00:00+00:00",
+        }],
+    }
+    # Retired policy values are persisted data, independent of executable enums.
+    from src.domain.revisions import (
+        AuditChange, ChangeOperation, RevisionActor, RevisionMetadata,
+        RevisionRecord, RevisionSource,
+    )
+    from src.storage.encrypted_database import EncryptedDatabase
+
+    legacy_ref = EntityRef(
+        "delivery.breakfast-policy", UUID("bfa57d7d-6264-5a36-a132-8e1b24b5139e")
+    )
+    path = tmp_path / "retired-policy.sqlite3"
+    key = bytes.fromhex("11" * 32)
+    record = RevisionRecord(
+        RevisionMetadata(
+            snapshot.revision_id, None, datetime(2026, 8, 1, tzinfo=UTC),
+            date(2026, 8, 1), RevisionActor("tester", "test-sid"),
+            "과거 조식 정책 보존", RevisionSource.UI,
+        ),
+        tuple(
+            AuditChange(ref.entity_kind, ref.entity_id, ChangeOperation.INSERT,
+                        None, state)
+            for ref, state in states.items()
+        ),
+    )
+    with EncryptedDatabase.create(path, key) as database:
+        database.append_revision(record)
+    with EncryptedDatabase.open(path, key) as database:
+        database.check_integrity()
+        snapshot = database.snapshot(snapshot.revision_id)
+        assert snapshot.entities[legacy_ref] == record.changes[-1].after
 
     prepared = prepare_delivery_report_data(
         snapshot,
@@ -467,6 +526,10 @@ def test_retired_closed_friday_policy_does_not_override_default_delivery():
     assert breakfast_manifest["used_closed_friday_modes"] == (
         ClosedFridayMode.THURSDAY_WEEKEND_ONLY.value,
     )
+    assert breakfast_manifest["used_rule_versions"] == (
+        "breakfast-delivery-policy-v1@default",
+    )
+    assert breakfast_manifest["policy"]["change_count"] == 0
     assert breakfast_manifest["unassigned"] == {}
 
 

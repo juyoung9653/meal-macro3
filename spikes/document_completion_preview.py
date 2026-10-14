@@ -15,16 +15,23 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from PySide6.QtWidgets import QApplication
 
-from src.desktop_v2 import (
-    DocumentAction,
+from src.desktop_v2.document_hub import DocumentAction
+from src.desktop_v2.document_completion import (
     DocumentCompletionDialog,
-    DocumentMealSelection,
-    DocumentOutputMode,
-    DocumentPeriodSelection,
     GeneratedDocumentResult,
+)
+from src.desktop_v2.document_meal import DocumentMealSelection
+from src.desktop_v2.document_output import (
+    DocumentOutputMode,
     next_available_document_output,
 )
-from src.domain import Meal, RevisionActor, RevisionSource, RevisionSummary
+from src.desktop_v2.document_period import DocumentPeriodSelection
+from src.domain.roster import Meal
+from src.domain.revisions import (
+    RevisionActor,
+    RevisionSource,
+    RevisionSummary,
+)
 
 
 def main() -> int:

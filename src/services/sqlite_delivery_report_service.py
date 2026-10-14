@@ -10,12 +10,9 @@ from types import MappingProxyType
 from uuid import UUID
 
 from src.core.diff_format import fmt_cell
-from src.domain.delivery_policies import (
-    BreakfastDeliveryPolicySchedule,
-)
 from src.domain.entitlements import (
     BreakfastDeliveryRule,
-    BreakfastShipmentPlan,
+    ClosedFridayMode,
     MealEntitlement,
     PhysicalDeliveryCalendar,
     PhysicalShipment,
@@ -23,6 +20,7 @@ from src.domain.entitlements import (
     decide_entitlement,
 )
 from src.domain.delivery_defaults import delivery_defaults_state
+from src.domain.delivery_routing import RoutingState, routing_state_from_snapshot
 from src.domain.projections import (
     roster_from_historical_snapshot,
     status_events_from_historical_snapshot,
@@ -133,10 +131,14 @@ def prepare_delivery_report_data(
     normalized_staff_sort = _normalize_staff_sort(staff_sort)
 
     roster = roster_from_historical_snapshot(snapshot)
+    routing = routing_state_from_snapshot(snapshot)
     school_calendar = school_lunch_calendar_from_snapshot(snapshot)
     adjustments = service_adjustment_schedule_from_snapshot(snapshot)
-    # Retired user-configurable policy records remain in the ledger only.
-    breakfast_policy = BreakfastDeliveryPolicySchedule()
+    # Retired policy records remain in the ledger, but reports use this fixed rule.
+    breakfast_rule = BreakfastDeliveryRule(
+        "breakfast-delivery-policy-v1@default",
+        ClosedFridayMode.THURSDAY_WEEKEND_ONLY,
+    )
     status_events = status_events_from_historical_snapshot(snapshot)
     events_by_key: defaultdict[tuple[UUID, Meal], list[StatusEvent]] = defaultdict(list)
     for event in status_events:
@@ -243,10 +245,10 @@ def prepare_delivery_report_data(
                         )
                     )
 
-    breakfast_plans = _breakfast_plans(
-        normal_breakfast,
-        physical_calendar,
-        breakfast_policy,
+    breakfast_plans = (
+        (plan_breakfast_shipments(normal_breakfast, physical_calendar, breakfast_rule),)
+        if normal_breakfast
+        else ()
     )
     shipments.extend(
         shipment
@@ -282,7 +284,7 @@ def prepare_delivery_report_data(
         for item in coalesced_shipments
         if (item.delivery_on, item.meal) in relevant_keys
     )
-    presences = _shipment_presences(roster, relevant_shipments)
+    presences = _shipment_presences(roster, relevant_shipments, routing)
     aggregates = {
         key: _aggregate_presences(
             presences.get(key, ()),
@@ -331,14 +333,25 @@ def prepare_delivery_report_data(
                 "household_delivery_weekday": "latest_configured_weekday_on_or_before_service_day",
             },
             "breakfast_physical_delivery": {
-                "policy": breakfast_policy.public_manifest(),
+                "policy": {
+                    "policy_version": 1,
+                    "default_closed_friday_mode": breakfast_rule.closed_friday_mode.value,
+                    "change_count": 0,
+                    "content_sha256": _state_sha256(
+                        {
+                            "policy_version": 1,
+                            "default_closed_friday_mode": breakfast_rule.closed_friday_mode.value,
+                            "changes": (),
+                        }
+                    ),
+                },
                 "used_rule_versions": tuple(
                     plan.rule_version for plan in breakfast_plans
                 ),
                 "used_closed_friday_modes": tuple(
                     sorted(
                         {
-                            breakfast_policy.mode_on(item.service_on).value
+                            breakfast_rule.closed_friday_mode.value
                             for item in normal_breakfast
                         }
                     )
@@ -431,22 +444,6 @@ def _breakfast_calendar(
     return PhysicalDeliveryCalendar(frozenset(closed), frozenset(opened))
 
 
-def _breakfast_plans(
-    entitlements: Sequence[MealEntitlement],
-    calendar: PhysicalDeliveryCalendar,
-    policy: BreakfastDeliveryPolicySchedule,
-) -> tuple[BreakfastShipmentPlan, ...]:
-    grouped: defaultdict[BreakfastDeliveryRule, list[MealEntitlement]] = defaultdict(
-        list
-    )
-    for entitlement in entitlements:
-        grouped[policy.rule_on(entitlement.service_on)].append(entitlement)
-    return tuple(
-        plan_breakfast_shipments(grouped[rule], calendar, rule)
-        for rule in sorted(grouped, key=lambda item: item.version)
-    )
-
-
 def _candidate_delivery(
     meal: Meal,
     treatment: ServiceTreatment,
@@ -510,6 +507,7 @@ def _previous_delivery_keys(
 def _shipment_presences(
     roster: RosterSnapshot,
     shipments: tuple[PhysicalShipment, ...],
+    routing: RoutingState,
 ) -> Mapping[tuple[date, Meal], tuple[_ShipmentPresence, ...]]:
     by_key: defaultdict[tuple[date, Meal], list[_ShipmentPresence]] = defaultdict(list)
     for shipment in shipments:
@@ -535,6 +533,9 @@ def _shipment_presences(
                 "가구 변경 적용일을 확인해주세요."
             )
         assignment = roster.resolve_assignment(shipment.person_id, shipment.meal)
+        delivery_view = routing.resolve(
+            roster, shipment.person_id, shipment.delivery_on
+        )
         driver = "" if assignment.driver is None else assignment.driver.strip()
         if not driver:
             raise ValueError(
@@ -547,7 +548,7 @@ def _shipment_presences(
                 next(iter(household_ids)),
                 driver,
                 "" if assignment.sequence is None else assignment.sequence.strip(),
-                person.profile.jurisdiction or "",
+                delivery_view.jurisdiction or "",
                 next(
                     (
                         setting.form

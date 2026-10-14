@@ -7,19 +7,40 @@ import openpyxl
 import pytest
 from PySide6.QtWidgets import QDialog
 
-from src.domain import Meal, MealEnrollment, Person, PersonProfile, RevisionActor, RosterSnapshot
+from src.domain.roster import (
+    Meal,
+    MealEnrollment,
+    Person,
+    PersonProfile,
+    RosterSnapshot,
+)
+from src.domain.revisions import RevisionActor
 from src.domain.roster import InclusiveDateRange
 from src.domain.status import MealStatus, StatusEvent
 from src.domain.projections import status_events_from_historical_snapshot
 from src.domain.status import resolve_status_history
-from src.importing import (
-    HouseholdMatchingRule, IdentityResolution, ImportMappingProfile, ImportPurpose, PersonObservation, ProfileField,
+from src.importing.households import HouseholdMatchingRule
+from src.importing.application import (
+    IdentityResolution,
     ReconciliationDecision,
-    SourceReference, WorkbookImportPreview, build_import_revision,
-    parse_workbook, stage_reconciliation,
-    import_profiles_from_snapshot,
 )
-from src.storage import DatabaseSession
+from src.importing.contracts import (
+    ImportMappingProfile,
+    PersonObservation,
+    ProfileField,
+    SourceReference,
+)
+from src.importing.revision import (
+    ImportPurpose,
+    build_import_revision,
+)
+from src.importing.workbook import (
+    WorkbookImportPreview,
+    parse_workbook,
+)
+from src.importing.reconciliation import stage_reconciliation
+from src.importing.profile_history import import_profiles_from_snapshot
+from src.storage.database_session import DatabaseSession
 from src.desktop_v2.import_controller import GuidedImportStatus, GuidedRosterImportController
 from src.desktop_v2.import_wizard import ImportWizardSelection
 

@@ -11,7 +11,10 @@ from PySide6.QtWidgets import QApplication
 from src.desktop_v2.column_search import ColumnValuePicker
 import src.desktop_v2.inactive_roster as inactive_roster_module
 from src.desktop_v2.roster_window import RosterWindow
-from src.domain import CustomFieldDefinition, CustomFieldType
+from src.domain.roster import (
+    CustomFieldDefinition,
+    CustomFieldType,
+)
 from tests.test_desktop_v2_roster import _roster, SERVICE_DAY
 
 

@@ -17,11 +17,9 @@ from openpyxl.styles import Alignment
 
 from ..core.diff_format import to_numeric
 from ..core.invoice_data import (
-    EnrichedPersonDict,
     MealPrices,
     MonthlyDelivery,
     MonthlyDeliveryBatch,
-    legacy_recipient,
 )
 from ..core.models import FULL_ADDRESS_FIELD, combine_address
 from ..excel.excel_utils import CENTER_ALIGN, adjust_formula, copy_style
@@ -74,24 +72,22 @@ def _build_price_formula(
     dn_col: str,
     lh_col: str,
     row_idx: int,
-    unit_price_breakfast: int,
-    unit_price_dinner: int,
-    unit_price_lunch: int,
+    prices: MealPrices,
 ) -> str:
     """시트에 존재하는 식사 컬럼만 포함한 청구금액 수식 생성."""
     parts: list[str] = []
 
     bf_idx = col_idx_map.get(bf_col)
     if bf_idx is not None:
-        parts.append(f"{_col_idx_to_letter(bf_idx)}{row_idx}*{unit_price_breakfast}")
+        parts.append(f"{_col_idx_to_letter(bf_idx)}{row_idx}*{prices.breakfast}")
 
     dn_idx = col_idx_map.get(dn_col)
     if dn_idx is not None:
-        parts.append(f"{_col_idx_to_letter(dn_idx)}{row_idx}*{unit_price_dinner}")
+        parts.append(f"{_col_idx_to_letter(dn_idx)}{row_idx}*{prices.dinner}")
 
     lh_idx = col_idx_map.get(lh_col)
     if lh_idx is not None:
-        parts.append(f"{_col_idx_to_letter(lh_idx)}{row_idx}*{unit_price_lunch}")
+        parts.append(f"{_col_idx_to_letter(lh_idx)}{row_idx}*{prices.lunch}")
 
     if not parts:
         return "0"
@@ -107,9 +103,7 @@ def _fill_invoice_sheet(
     people: list[MonthlyDelivery],
     col_mapping: dict,
     template_path: str,
-    unit_price_breakfast: int,
-    unit_price_dinner: int,
-    unit_price_lunch: int,
+    prices: MealPrices,
     meal_type: str = "급식",
     global_note: str | None = None,
 ) -> int:
@@ -169,9 +163,7 @@ def _fill_invoice_sheet(
                     dn_col,
                     lh_col,
                     row_idx,
-                    unit_price_breakfast,
-                    unit_price_dinner,
-                    unit_price_lunch,
+                    prices,
                 )
             )
 
@@ -349,19 +341,16 @@ def _get_sheet_plan(
 
 
 def make_invoice_publication(
-    roster_data: MonthlyDeliveryBatch | list[EnrichedPersonDict],
+    batch: MonthlyDeliveryBatch,
     col_mapping: dict,
     output_path: str,
     template_path: str,
-    year: int,
-    month: int,
-    unit_prices: Mapping[str, int],
-    is_vacation_month: bool = False,
+    *,
     meal_type: str = "급식",
     global_note: str | None = None,
     output_password: str | None = None,
-) -> tuple[int, MonthlyDeliveryBatch, WorkbookPublicationResult]:
-    """roster_data → 청구서템플릿 다중 시트 채워서 output_path 에 저장.
+) -> tuple[int, WorkbookPublicationResult]:
+    """월별 배송 배치 → 청구서템플릿 다중 시트 채워서 output_path 에 저장.
 
     meal_type="급식": 시트 분할 없이 단일 시트에 모든 인원 출력 (방중/학기중 구분 없음).
     meal_type="행복도시락":
@@ -378,28 +367,6 @@ def make_invoice_publication(
     wb = openpyxl.load_workbook(template_path)
     publication_started = False
     try:
-        if isinstance(roster_data, MonthlyDeliveryBatch):
-            batch = roster_data
-        else:
-            prices = MealPrices(
-                breakfast=unit_prices["조식"],
-                lunch=unit_prices["중식"],
-                dinner=unit_prices["석식"],
-            )
-            batch = MonthlyDeliveryBatch(
-                year=year,
-                month=month,
-                prices=prices,
-                is_vacation_month=is_vacation_month,
-                deliveries=tuple(
-                    legacy_recipient(person, position=index)
-                    for index, person in enumerate(roster_data, start=1)
-                ),
-            )
-        unit_price_breakfast = batch.prices.breakfast
-        unit_price_dinner = batch.prices.dinner
-        unit_price_lunch = batch.prices.lunch
-
         for p in batch.deliveries:
             log.debug(
                 "[Split] %s: bf=%d dn=%d lh=%d",
@@ -421,9 +388,7 @@ def make_invoice_publication(
                 people,
                 col_mapping,
                 template_path,
-                unit_price_breakfast,
-                unit_price_dinner,
-                unit_price_lunch,
+                batch.prices,
                 meal_type=meal_type,
                 global_note=global_note,
             )
@@ -432,38 +397,7 @@ def make_invoice_publication(
 
         publication_started = True
         publication = publish_workbook(wb, output_path, password=output_password)
-        return total_count, batch, publication
+        return total_count, publication
     finally:
         if not publication_started:
             wb.close()
-
-
-def make_invoice(
-    roster_data: MonthlyDeliveryBatch | list[EnrichedPersonDict],
-    col_mapping: dict,
-    output_path: str,
-    template_path: str,
-    year: int,
-    month: int,
-    unit_prices: Mapping[str, int],
-    is_vacation_month: bool = False,
-    meal_type: str = "급식",
-    global_note: str | None = None,
-    output_password: str | None = None,
-):
-    """Legacy-compatible writer result without publication metadata."""
-
-    total_count, batch, _publication = make_invoice_publication(
-        roster_data,
-        col_mapping,
-        output_path,
-        template_path,
-        year,
-        month,
-        unit_prices,
-        is_vacation_month=is_vacation_month,
-        meal_type=meal_type,
-        global_note=global_note,
-        output_password=output_password,
-    )
-    return total_count, batch

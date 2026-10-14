@@ -14,12 +14,16 @@ from PySide6.QtWidgets import (
     QMessageBox, QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
-from src.domain import RevisionActor, RosterSnapshot
+from src.domain.revisions import RevisionActor
+from src.domain.roster import RosterSnapshot
 from src.services.document_column_mappings import (
     MappingEditorSpec, build_mapping_revision, load_mapping_overrides,
     mapping_editor_spec,
 )
-from src.storage import AutomaticBackupResult, DatabaseSession
+from src.storage.database_session import (
+    AutomaticBackupResult,
+    DatabaseSession,
+)
 
 from .import_controller import current_windows_actor
 from .theme import application_stylesheet, register_application_fonts
@@ -192,7 +196,12 @@ class DocumentColumnMappingDialog(QDialog):
             label.setWordWrap(True)
             grid.addWidget(label, row, 0)
             if target in spec.locked_targets:
-                reason = "자동 계산" if self.document_kind == "invoice" else "가구 묶음 기준"
+                if self.document_kind == "confirmation":
+                    reason = "가구 묶음 기준"
+                elif target == "제공기관":
+                    reason = "공통 제공기관 자동 적용"
+                else:
+                    reason = "자동 계산"
                 automatic = QLabel(f"{reason} · 수정할 수 없음")
                 automatic.setObjectName("settingsHubNote")
                 grid.addWidget(automatic, row, 1)

@@ -28,7 +28,7 @@ from src.domain.provider_settings import (
 )
 from src.domain.revisions import RevisionActor
 from src.domain.roster import RosterSnapshot
-from src.storage import DatabaseSession
+from src.storage.database_session import DatabaseSession
 
 from .import_controller import current_windows_actor
 from .theme import application_stylesheet, register_application_fonts

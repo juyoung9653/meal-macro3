@@ -15,14 +15,21 @@ pytest.importorskip("PySide6")
 from PySide6.QtCore import QDate
 from PySide6.QtWidgets import QApplication
 
-from src.desktop_v2 import (
+from src.desktop_v2.document_hub import (
     DocumentAction,
+    DocumentSetupRequest,
+)
+from src.desktop_v2.document_period import (
     DocumentPeriodDialog,
     DocumentPeriodSelection,
-    DocumentSetupRequest,
     suggest_document_period,
 )
-from src.domain import Meal, RevisionActor, RevisionSource, RevisionSummary
+from src.domain.roster import Meal
+from src.domain.revisions import (
+    RevisionActor,
+    RevisionSource,
+    RevisionSummary,
+)
 
 
 ANCHOR_DAY = date(2026, 8, 17)

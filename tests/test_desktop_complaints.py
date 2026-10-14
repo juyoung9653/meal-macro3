@@ -35,7 +35,7 @@ from src.domain.roster import (
     PersonProfile,
     RosterSnapshot,
 )
-from src.storage import DatabaseSession
+from src.storage.database_session import DatabaseSession
 
 BASE = UUID("a2000000-0000-0000-0000-000000000001")
 NEXT = UUID("a2000000-0000-0000-0000-000000000002")

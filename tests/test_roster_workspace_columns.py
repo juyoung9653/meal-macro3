@@ -7,12 +7,21 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
-from PySide6.QtCore import QSettings, Qt
+from PySide6.QtCore import QPoint, QSettings, Qt
 from PySide6.QtWidgets import QApplication
 from src.desktop_v2.roster_window import RosterWindow
 from src.desktop_v2.application import DesktopStartupController
-from src.domain import (RosterSnapshot, Person, PersonProfile, Meal, MealEnrollment,
-                        DeliveryAssignment, CustomFieldDefinition, CustomFieldType, MealStatus)
+from src.domain.roster import (
+    RosterSnapshot,
+    Person,
+    PersonProfile,
+    Meal,
+    MealEnrollment,
+    DeliveryAssignment,
+    CustomFieldDefinition,
+    CustomFieldType,
+)
+from src.domain.status import MealStatus
 
 @pytest.fixture
 def app():
@@ -38,8 +47,8 @@ def test_layout_survives_context_sort_and_custom_field_replacement(app, roster, 
     address = col(window, 'address')
     header.moveSection(header.visualIndex(address), 0)
     header.resizeSection(address, 277)
-    menu = window._column_layout.create_menu()
-    next(a for a in menu.actions() if a.text() == '학교').trigger()
+    menu = window._column_layout.create_menu(column_key="school")
+    next(a for a in menu.actions() if a.text() == "숨기기").trigger()
     window._set_meal(Meal.BREAKFAST)
     window.table_model.sort(col(window, 'name'), Qt.SortOrder.DescendingOrder)
     assert header.logicalIndex(0) == address
@@ -62,6 +71,7 @@ def test_layout_survives_context_sort_and_custom_field_replacement(app, roster, 
 
 def test_meal_cell_context_targets_clicked_meal_and_history(app, roster, tmp_path):
     window = RosterWindow(roster, column_settings=settings(tmp_path))
+    window._set_day(date(2026, 10, 16))
     window.show()
     app.processEvents()
     person = roster.persons[0]
@@ -79,13 +89,103 @@ def test_meal_cell_context_targets_clicked_meal_and_history(app, roster, tmp_pat
     assert window._table.horizontalHeader().sectionsMovable()
     window.close()
 
+
+def test_reordered_header_context_targets_visual_column(app, roster, tmp_path, monkeypatch):
+    window = RosterWindow(roster, column_settings=settings(tmp_path))
+    header = window._table.horizontalHeader()
+    address = col(window, "address")
+    header.moveSection(header.visualIndex(address), 0)
+    captured = []
+    monkeypatch.setattr(
+        window,
+        "_show_column_menu",
+        lambda position, *, column_key=None: captured.append(column_key),
+    )
+
+    window._show_header_column_menu(
+        QPoint(header.sectionViewportPosition(address) + 4, header.height() // 2)
+    )
+
+    assert captured == ["address"]
+    window.close()
+
+
+def test_builtin_alias_and_hidden_labels_persist_per_database(app, roster, tmp_path):
+    path = tmp_path / "columns.ini"
+    first = RosterWindow(
+        roster,
+        column_settings=QSettings(str(path), QSettings.Format.IniFormat),
+        view_settings_scope="db-a",
+    )
+    assert first._rename_column("name", "아동명")
+    assert first._rename_column("school", "재학 학교")
+    assert not first._rename_column("name", "아동명")
+    with pytest.raises(ValueError, match="입력"):
+        first._rename_column("name", "   ")
+    first._column_layout._set_hidden("name", True)
+    first._column_layout._set_hidden("school", True)
+    first.table_model.set_column_search("name", "테스트")
+    first._refresh_column_filter_strip()
+    assert "아동명" in first._column_filter_label.text()
+    menu = first._column_layout.create_menu()
+    hidden_menu = next(
+        action.menu() for action in menu.actions()
+        if action.text() == "숨기기 해제"
+    )
+    assert {action.text() for action in hidden_menu.actions()} >= {"아동명", "재학 학교"}
+    first.close()
+
+    restored = RosterWindow(
+        roster,
+        column_settings=QSettings(str(path), QSettings.Format.IniFormat),
+        view_settings_scope="db-a",
+    )
+    labels = {column.key: column.label for column in restored.table_model.columns}
+    assert labels["name"] == "아동명"
+    assert labels["school"] == "재학 학교"
+    assert restored._table.isColumnHidden(col(restored, "name"))
+    assert restored._table.isColumnHidden(col(restored, "school"))
+    restored.close()
+
+    isolated = RosterWindow(
+        roster,
+        column_settings=QSettings(str(path), QSettings.Format.IniFormat),
+        view_settings_scope="db-b",
+    )
+    labels = {column.key: column.label for column in isolated.table_model.columns}
+    assert labels["name"] == "성명"
+    assert labels["school"] == "학교"
+    assert not isolated._table.isColumnHidden(col(isolated, "name"))
+    isolated.close()
+
+
+def test_all_hidden_columns_can_be_recovered_from_column_menu(app, roster, tmp_path):
+    window = RosterWindow(roster, column_settings=settings(tmp_path))
+    window._rename_column("name", "아동명")
+    window._column_layout.set_visible_keys(set())
+    assert all(
+        window._table.isColumnHidden(index)
+        for index in range(window.table_model.columnCount())
+    )
+
+    menu = window._column_layout.create_menu()
+    hidden_menu = next(
+        action.menu() for action in menu.actions()
+        if action.text() == "숨기기 해제"
+    )
+    name_action = next(action for action in hidden_menu.actions() if action.text() == "아동명")
+    name_action.trigger()
+
+    assert not window._table.isColumnHidden(col(window, "name"))
+    window.close()
+
 def test_custom_field_cancel_does_not_replace_roster():
     class Cancelled:
         def __init__(self, session):
             pass
         def run(self, *, parent):
             return SimpleNamespace(roster=None)
-    controller = DesktopStartupController(custom_field_controller_type=Cancelled)
+    controller = DesktopStartupController(settings=SimpleNamespace(), custom_field_controller_type=Cancelled)
     controller._run_custom_fields(object(), object())
 
 def test_custom_field_result_refreshes_window(monkeypatch, roster):
@@ -94,7 +194,7 @@ def test_custom_field_result_refreshes_window(monkeypatch, roster):
             pass
         def run(self, *, parent):
             return SimpleNamespace(roster=roster)
-    controller = DesktopStartupController(custom_field_controller_type=Completed)
+    controller = DesktopStartupController(settings=SimpleNamespace(), custom_field_controller_type=Completed)
     calls = []
     monkeypatch.setattr(controller, '_replace_roster_if_changed', lambda *args: calls.append(args))
     session, window = object(), object()

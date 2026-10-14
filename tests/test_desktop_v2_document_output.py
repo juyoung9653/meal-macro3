@@ -14,17 +14,22 @@ pytest.importorskip("PySide6")
 
 from PySide6.QtWidgets import QApplication
 
-from src.desktop_v2 import (
-    DocumentAction,
-    DocumentMealSelection,
+from src.desktop_v2.document_hub import DocumentAction
+from src.desktop_v2.document_meal import DocumentMealSelection
+from src.desktop_v2.document_output import (
     DocumentOutputDialog,
     DocumentOutputMode,
     DocumentOutputSelection,
-    DocumentPeriodSelection,
     next_available_document_output,
     suggest_document_filename,
 )
-from src.domain import Meal, RevisionActor, RevisionSource, RevisionSummary
+from src.desktop_v2.document_period import DocumentPeriodSelection
+from src.domain.roster import Meal
+from src.domain.revisions import (
+    RevisionActor,
+    RevisionSource,
+    RevisionSummary,
+)
 
 
 @pytest.fixture(scope="module")

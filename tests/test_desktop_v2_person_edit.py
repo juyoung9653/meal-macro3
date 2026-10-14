@@ -9,8 +9,11 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 from PySide6.QtWidgets import QApplication, QDialog, QLabel, QMessageBox
 
-from src.desktop_v2 import PersonProfileEditDialog
-from src.domain import Person, PersonProfile
+from src.desktop_v2.person_edit import PersonProfileEditDialog
+from src.domain.roster import (
+    Person,
+    PersonProfile,
+)
 
 PERSON_ID = UUID("86000000-0000-0000-0000-000000000001")
 CUSTOM_FIELD_ID = UUID("86000000-0000-0000-0000-000000000002")
@@ -315,9 +318,14 @@ def test_delivery_controller_copy_unchanged_inherited_person_to_sibling(app):
     from uuid import uuid4
 
     from src.desktop_v2.person_edit import PersonProfileEditController
-    from src.domain import Household, HouseholdMembership, RevisionActor, RosterSnapshot
+    from src.domain.roster import (
+        Household,
+        HouseholdMembership,
+        RosterSnapshot,
+    )
+    from src.domain.revisions import RevisionActor
     from src.domain.roster import HouseholdDeliverySetting, Meal
-    from src.storage import DatabaseSession
+    from src.storage.database_session import DatabaseSession
 
     setting = HouseholdDeliverySetting(Meal.DINNER, form="도시락")
     person = Person(uuid4(), PersonProfile("본인"))
@@ -360,7 +368,12 @@ def test_controller_saves_household_phone_changes_in_one_revision(app):
     from uuid import uuid4
 
     from src.desktop_v2.person_edit import PersonProfileEditController
-    from src.domain import Household, HouseholdMembership, RevisionActor, RosterSnapshot
+    from src.domain.roster import (
+        Household,
+        HouseholdMembership,
+        RosterSnapshot,
+    )
+    from src.domain.revisions import RevisionActor
 
     person = Person(uuid4(), PersonProfile("본인", mobile_phone="010-1111-1111"))
     sibling = Person(uuid4(), PersonProfile("가족", mobile_phone="010-2222-2222"))
@@ -374,7 +387,7 @@ def test_controller_saves_household_phone_changes_in_one_revision(app):
         return SimpleNamespace(error=None)
     from unittest.mock import Mock
 
-    from src.storage import DatabaseSession
+    from src.storage.database_session import DatabaseSession
 
     session = Mock(spec=DatabaseSession)
     session.database = SimpleNamespace(current_roster=lambda: roster)
@@ -402,9 +415,14 @@ def test_delivery_controller_changes_one_person_and_accepted_noop_skips_revision
     from uuid import uuid4
 
     from src.desktop_v2.person_edit import PersonProfileEditController, PersonProfileEditStatus
-    from src.domain import Household, HouseholdMembership, RevisionActor, RosterSnapshot
+    from src.domain.roster import (
+        Household,
+        HouseholdMembership,
+        RosterSnapshot,
+    )
+    from src.domain.revisions import RevisionActor
     from src.domain.roster import HouseholdDeliverySetting, Meal
-    from src.storage import DatabaseSession
+    from src.storage.database_session import DatabaseSession
 
     person = Person(uuid4(), PersonProfile("본인"))
     sibling = Person(uuid4(), PersonProfile("가족"))
@@ -462,9 +480,14 @@ def test_delivery_controller_copies_to_selected_day_household_when_membership_ch
     from uuid import uuid4
 
     from src.desktop_v2.person_edit import PersonProfileEditController
-    from src.domain import Household, HouseholdMembership, RevisionActor, RosterSnapshot
+    from src.domain.roster import (
+        Household,
+        HouseholdMembership,
+        RosterSnapshot,
+    )
+    from src.domain.revisions import RevisionActor
     from src.domain.roster import HouseholdDeliverySetting, InclusiveDateRange, Meal
-    from src.storage import DatabaseSession
+    from src.storage.database_session import DatabaseSession
 
     selected_day = date(2026, 9, 1)
     current_day = date(2026, 10, 1)

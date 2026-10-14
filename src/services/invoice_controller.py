@@ -18,16 +18,14 @@ from ..core.delivery_matrix import (
     RosterEntry,
 )
 from ..core.invoice_data import (
-    EnrichedPersonDict,
     MealPrices,
     MonthlyDelivery,
     MonthlyDeliveryBatch,
     WeeklyDelivery,
 )
-from ..core.models import FULL_ADDRESS_FIELD, combine_address
 from ..core.settings import get_settings
 from ..excel.annual_workbook import AnnualWorkbook
-from ..generators.invoice_generator import make_invoice
+from ..generators.invoice_generator import make_invoice_publication
 
 _MEAL_ORDER = {meal: index for index, meal in enumerate(ALLOWED_MEALS)}
 
@@ -67,8 +65,6 @@ class InvoiceResult:
     success: bool
     count: int = 0
     batch: MonthlyDeliveryBatch | None = None
-    # Deprecated compatibility projection for non-application callers.
-    enriched: list[EnrichedPersonDict] = field(default_factory=list)
     warnings: list[InvoiceWarning] = field(default_factory=list)
     error: str | None = None
 
@@ -140,15 +136,11 @@ class InvoiceService:
             )
 
         try:
-            count, rendered = make_invoice(
+            count, _publication = make_invoice_publication(
                 batch,
                 config.col_mapping,
                 config.output_path,
                 template_path=config.template_path,
-                year=config.year,
-                month=config.month,
-                unit_prices=unit_prices,
-                is_vacation_month=batch.is_vacation_month,
                 meal_type=config.meal_type,
                 global_note=config.global_note,
                 output_password=config.output_password,
@@ -156,21 +148,18 @@ class InvoiceService:
         except Exception as error:  # noqa: BLE001 - 생성 실패를 결과로 반환
             return InvoiceResult(success=False, error=f"청구서 생성 실패:\n{error}")
 
-        if not isinstance(rendered, MonthlyDeliveryBatch):
-            return InvoiceResult(success=False, error="청구서 생성 결과 형식이 올바르지 않습니다.")
-        if count != len(rendered.deliveries):
+        if count != len(batch.deliveries):
             return InvoiceResult(
                 success=False,
                 error=(
                     "청구서 생성 결과 건수가 일치하지 않습니다: "
-                    f"작성 {count}건, 출력 대상 {len(rendered.deliveries)}건"
+                    f"작성 {count}건, 출력 대상 {len(batch.deliveries)}건"
                 ),
             )
         return InvoiceResult(
             success=True,
             count=count,
             batch=batch,
-            enriched=[_legacy_record(item, batch.prices) for item in batch.deliveries],
         )
 
     def _resolve_book(self, config: InvoiceGenerationConfig) -> AnnualDeliveryBook:
@@ -406,40 +395,6 @@ def _build_monthly_delivery(
         dinner_count=summary.counts["석식"],
         weekly=tuple(summary.weekly),
     )
-
-
-def _legacy_record(delivery: MonthlyDelivery, prices: MealPrices) -> EnrichedPersonDict:
-    """Explicit one-way compatibility projection; application paths never consume it."""
-    record = delivery.roster.as_dict()
-    if "도로명주소" in record or "상세주소" in record:
-        record[FULL_ADDRESS_FIELD] = combine_address(
-            record.get("도로명주소"), record.get("상세주소")
-        )
-    record.update(
-        {
-            "_note": delivery.note,
-            "_total": delivery.total_count,
-            "_amount": f"{delivery.amount(prices):,}원",
-            "_bf_cnt": delivery.breakfast_count,
-            "_lh_cnt": delivery.lunch_count,
-            "_dn_cnt": delivery.dinner_count,
-            "weekly_meal_counts": [
-                {
-                    "week": item.week,
-                    "start_date": f"{item.start_date:%Y%m%d}",
-                    "end_date": f"{item.end_date:%Y%m%d}",
-                    "조식": item.breakfast_count,
-                    "중식": item.lunch_count,
-                    "석식": item.dinner_count,
-                }
-                for item in delivery.weekly
-            ],
-            "배송담당": delivery.delivery_staff,
-            "배송순서": delivery.delivery_sequence,
-            "연번": delivery.delivery_sequence,
-        }
-    )
-    return record  # type: ignore[return-value]
 
 
 def _join_unique(values: Iterable[object]) -> str:

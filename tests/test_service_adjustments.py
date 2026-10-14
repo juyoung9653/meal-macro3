@@ -5,12 +5,13 @@ from uuid import UUID
 
 import pytest
 
-from src.domain import (
+from src.domain.roster import (
     InclusiveDateRange,
     Meal,
-    PublicHolidayCandidate,
+)
+from src.domain.public_holidays import PublicHolidayCandidate
+from src.domain.service_adjustments import (
     ReplacementDeliveryOverride,
-    RevisionActor,
     ServiceAdjustmentChange,
     ServiceAdjustmentOrigin,
     ServiceAdjustmentSchedule,
@@ -21,6 +22,7 @@ from src.domain import (
     service_adjustment_schedule_from_state,
     service_adjustment_schedule_state,
 )
+from src.domain.revisions import RevisionActor
 
 
 BASE_REVISION_ID = UUID("81000000-0000-0000-0000-000000000001")
@@ -432,3 +434,102 @@ def test_batch_replacement_requires_every_selected_holiday_meal_cell():
             revision_id=REVISION_ID,
             change_ids=(CLOSURE_CHANGE_ID, BATCH_CHANGE_ID),
         )
+
+
+def test_batch_replacement_only_requires_explicit_scheduled_targets():
+    targets = (
+        (CHUSEOK_EVE.day, Meal.BREAKFAST),
+        (CHUSEOK_EVE.day, Meal.LUNCH),
+        (CHUSEOK.day, Meal.LUNCH),
+    )
+    deliveries = (
+        ReplacementDeliveryOverride(
+            Meal.BREAKFAST,
+            CHUSEOK_EVE.day,
+            date(2026, 9, 23),
+        ),
+        ReplacementDeliveryOverride(
+            Meal.LUNCH,
+            CHUSEOK_EVE.day,
+            date(2026, 9, 23),
+        ),
+        ReplacementDeliveryOverride(
+            Meal.LUNCH,
+            CHUSEOK.day,
+            date(2026, 9, 22),
+        ),
+    )
+
+    prepared = build_public_holiday_review_revision(
+        BASE_REVISION_ID,
+        None,
+        (CHUSEOK_EVE, CHUSEOK),
+        (Meal.BREAKFAST, Meal.LUNCH),
+        ServiceTreatment.REPLACEMENT,
+        deliveries,
+        actor=RevisionActor("tester", "S-1-5-21-test"),
+        recorded_at=RECORDED_AT,
+        revision_id=REVISION_ID,
+        change_ids=(CLOSURE_CHANGE_ID, BATCH_CHANGE_ID),
+        replacement_targets=targets,
+    )
+
+    assert prepared.changes[0].meals == (Meal.BREAKFAST, Meal.LUNCH)
+    assert prepared.changes[1].meals == (Meal.LUNCH,)
+    assert prepared.schedule.provision_for(
+        Meal.BREAKFAST,
+        CHUSEOK.day,
+    ).treatment is ServiceTreatment.NORMAL
+    assert prepared.schedule.provision_for(
+        Meal.LUNCH,
+        CHUSEOK.day,
+    ).delivery_on == date(2026, 9, 22)
+
+    with pytest.raises(ValueError, match="모든 공휴일·식종"):
+        build_public_holiday_review_revision(
+            BASE_REVISION_ID,
+            None,
+            (CHUSEOK_EVE, CHUSEOK),
+            (Meal.BREAKFAST, Meal.LUNCH),
+            ServiceTreatment.REPLACEMENT,
+            deliveries[:-1],
+            actor=RevisionActor("tester", "S-1-5-21-test"),
+            recorded_at=RECORDED_AT,
+            revision_id=REVISION_ID,
+            change_ids=(CLOSURE_CHANGE_ID, BATCH_CHANGE_ID),
+            replacement_targets=targets,
+        )
+
+
+def test_batch_replacement_audit_omits_holiday_without_scheduled_targets():
+    prepared = build_public_holiday_review_revision(
+        BASE_REVISION_ID,
+        None,
+        (CHUSEOK_EVE, CHUSEOK),
+        (Meal.BREAKFAST, Meal.LUNCH),
+        ServiceTreatment.REPLACEMENT,
+        (
+            ReplacementDeliveryOverride(
+                Meal.LUNCH,
+                CHUSEOK.day,
+                date(2026, 9, 22),
+            ),
+        ),
+        actor=RevisionActor("tester", "S-1-5-21-test"),
+        recorded_at=RECORDED_AT,
+        revision_id=REVISION_ID,
+        change_ids=(CLOSURE_CHANGE_ID, BATCH_CHANGE_ID),
+        replacement_targets=((CHUSEOK.day, Meal.LUNCH),),
+    )
+
+    assert len(prepared.changes) == 1
+    assert prepared.changes[0].change_id == BATCH_CHANGE_ID
+    assert prepared.changes[0].public_holiday == CHUSEOK
+    assert prepared.record.metadata.effective_on == CHUSEOK.day
+    assert len(
+        prepared.record.metadata.decisions["public_holiday_reviews"]
+    ) == 1
+    assert prepared.schedule.provision_for(
+        Meal.LUNCH,
+        CHUSEOK_EVE.day,
+    ).treatment is ServiceTreatment.NORMAL

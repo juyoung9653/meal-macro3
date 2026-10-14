@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from uuid import UUID
 
@@ -12,7 +12,6 @@ from .roster import (
     CustomFieldDefinition,
     CustomFieldType,
     Person,
-    PersonProfile,
     RosterSnapshot,
 )
 
@@ -87,15 +86,10 @@ def build_custom_field_create_revision(
         len(current_roster.custom_fields),
         choices,
     )
-    snapshot = RosterSnapshot(
-        revision_id,
-        current_roster.persons,
-        current_roster.households,
-        current_roster.memberships,
-        current_roster.enrollments,
-        current_roster.assignments,
-        (*current_roster.custom_fields, definition),
-        delivery_defaults=current_roster.delivery_defaults,
+    snapshot = replace(
+        current_roster,
+        revision_id=revision_id,
+        custom_fields=(*current_roster.custom_fields, definition),
     )
     return _prepared(
         current_roster,
@@ -155,15 +149,11 @@ def build_custom_field_delete_revision(
         for item in current_roster.custom_fields
         if item.definition_id != definition_id
     )
-    snapshot = RosterSnapshot(
-        revision_id,
-        persons,
-        current_roster.households,
-        current_roster.memberships,
-        current_roster.enrollments,
-        current_roster.assignments,
-        fields,
-        delivery_defaults=current_roster.delivery_defaults,
+    snapshot = replace(
+        current_roster,
+        revision_id=revision_id,
+        persons=persons,
+        custom_fields=fields,
     )
     return _prepared(
         current_roster,
@@ -188,27 +178,9 @@ def build_custom_field_delete_revision(
 def _without_value(person: Person, definition_id: UUID) -> Person:
     values = dict(person.profile.custom_values)
     values.pop(definition_id, None)
-    return Person(
-        person.person_id,
-        PersonProfile(
-            name=person.profile.name,
-            birth_date=person.profile.birth_date,
-            school_type=person.profile.school_type,
-            school_name=person.profile.school_name,
-            grade=person.profile.grade,
-            class_name=person.profile.class_name,
-            household_head_name=person.profile.household_head_name,
-            relationship_to_child=person.profile.relationship_to_child,
-            jurisdiction=person.profile.jurisdiction,
-            provider=person.profile.provider,
-            road_address=person.profile.road_address,
-            detail_address=person.profile.detail_address,
-            telephone=person.profile.telephone,
-            mobile_phone=person.profile.mobile_phone,
-            note=person.profile.note,
-            custom_values=values,
-        ),
-        person.delivery_settings,
+    return replace(
+        person,
+        profile=replace(person.profile, custom_values=values),
     )
 
 

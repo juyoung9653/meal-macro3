@@ -19,7 +19,7 @@ from PyQt6.QtWidgets import (
 from ..core.invoice_data import InvoiceData
 from ..core.settings import get_settings
 from ..core.user_preferences import UserPreferences
-from ..generators.confirm_generator import make_confirm
+from ..generators.confirm_generator import make_confirm_publication
 
 
 class ConfirmTab(QWidget):
@@ -152,13 +152,14 @@ class ConfirmTab(QWidget):
             self._invalidate_result()
 
             template_path = self._s.get_confirm_template_path(self._meal_type)
-            self.confirms = make_confirm(
-                roster_data=active_batch,
+            filename = self._s.get("confirm", "output_filename_format").format(
+                year=active_batch.year, month=active_batch.month
+            )
+            self.confirms, _publication = make_confirm_publication(
+                batch=active_batch,
                 col_mapping=self._data.col_mapping,
-                output_dir=self.output_dir,
+                output_path=os.path.join(self.output_dir, filename),
                 template_path=template_path,
-                year=self._data.year,
-                month=self._data.month,
                 meal_type=self._meal_type,
             )
             if self.confirms:

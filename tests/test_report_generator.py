@@ -10,7 +10,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import openpyxl
 import pytest
-from PyQt6.QtCore import QSettings
+from PyQt6.QtCore import QPoint, QPointF, QSettings, Qt
+from PyQt6.QtGui import QWheelEvent
 from PyQt6.QtWidgets import QApplication, QPushButton
 
 from src.core.delivery_matrix import ALLOWED_MEALS, AnnualDeliveryBook
@@ -223,6 +224,31 @@ def test_report_tab_removes_save_button_and_opens_excel_after_build(
         assert tab.open_btn.isEnabled()
         assert tab.result_tabs.count() == len(results)
         assert "Excel 실행 완료" in tab.info_label.text()
+    finally:
+        tab.close()
+
+
+def test_report_tab_dates_ignore_mouse_wheel(qapp: QApplication):
+    day = date(2026, 7, 28)
+    tab = report_tab_module.ReportTab(
+        annual_book=AnnualDeliveryBook(2026, (), (), (day,))
+    )
+    try:
+        for editor in (tab.date_start, tab.date_end):
+            original = editor.date()
+            editor.setFocus()
+            wheel = QWheelEvent(
+                QPointF(4, 4),
+                QPointF(4, 4),
+                QPoint(),
+                QPoint(0, 120),
+                Qt.MouseButton.NoButton,
+                Qt.KeyboardModifier.NoModifier,
+                Qt.ScrollPhase.ScrollUpdate,
+                False,
+            )
+            QApplication.sendEvent(editor, wheel)
+            assert editor.date() == original
     finally:
         tab.close()
 

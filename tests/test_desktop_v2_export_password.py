@@ -12,24 +12,29 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 from PySide6.QtWidgets import QApplication, QDialog, QLineEdit
 
-from src.desktop_v2 import ExportPasswordController, ExportPasswordDialog
+from src.desktop_v2.export_password import (
+    ExportPasswordController,
+    ExportPasswordDialog,
+)
 from src.desktop_v2.export_password import (
     CURRENT_PASSWORD_ACCESS_MILLISECONDS,
     _clear_copied_password_if_current,
 )
-from src.domain import (
+from src.domain.export_security import (
     EXPORT_PASSWORD_SETTING_ID,
     EXPORT_PASSWORD_SETTING_KIND,
+    ExportPasswordSetting,
+    export_password_setting_from_state,
+)
+from src.domain.revisions import (
     AuditChange,
     ChangeOperation,
-    ExportPasswordSetting,
     RevisionActor,
     RevisionMetadata,
     RevisionRecord,
     RevisionSource,
-    export_password_setting_from_state,
 )
-from src.storage import DatabaseSession
+from src.storage.database_session import DatabaseSession
 
 
 BASE_REVISION_ID = UUID("6b000000-0000-0000-0000-000000000001")

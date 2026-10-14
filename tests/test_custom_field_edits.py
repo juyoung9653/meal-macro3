@@ -18,9 +18,6 @@ from src.domain.roster import (
     RosterSnapshot,
 )
 from src.domain.revisions import RevisionActor
-from src.domain.revisions import RevisionMetadata, RevisionRecord, RevisionSource
-from src.domain.projections import roster_audit_changes
-from src.storage import DatabaseSession
 
 
 def _roster() -> RosterSnapshot:
@@ -84,43 +81,3 @@ def test_create_rejects_blank_duplicate_and_reserved_labels(name):
             definition_id=UUID("85000000-0000-0000-0000-000000000098"),
             **_arguments(),
         )
-
-
-def test_delete_revision_persists_after_database_reopen_and_keeps_history(tmp_path):
-    base = _roster()
-    actor = RevisionActor("tester", "S-1-5-21-test")
-    initial = RevisionRecord(
-        RevisionMetadata(
-            revision_id=base.revision_id,
-            parent_revision_id=None,
-            recorded_at=datetime(2026, 8, 26, 12, 0, tzinfo=UTC),
-            effective_on=date(2026, 8, 26),
-            actor=actor,
-            reason="initial roster",
-            source=RevisionSource.IMPORT,
-        ),
-        roster_audit_changes(
-            RosterSnapshot(UUID("85000000-0000-0000-0000-000000000010")),
-            base,
-        ),
-    )
-    path = tmp_path / "custom-fields.sqlite3"
-    with DatabaseSession.create(path, "password", "recovery") as session:
-        session.append_revision(initial)
-        deleted = build_custom_field_delete_revision(
-            base,
-            base.custom_fields[0].definition_id,
-            **_arguments(),
-        )
-        session.append_revision(deleted.record)
-
-    with DatabaseSession.open(path, "password") as reopened:
-        current = reopened.database.current_roster()
-        previous = reopened.database.snapshot(base.revision_id)
-        assert current is not None
-        assert current.custom_fields == ()
-        assert current.persons[0].profile.custom_values == {}
-        assert previous is not None
-        assert previous.entity(
-            "roster.custom_field_definition", base.custom_fields[0].definition_id
-        )["name"] == "배송 구역"

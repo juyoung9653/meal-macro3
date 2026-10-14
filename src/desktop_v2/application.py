@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -9,9 +10,10 @@ from PySide6.QtWidgets import QDialog, QMessageBox, QWidget
 
 from src.domain.delivery_routing import routing_state_from_snapshot
 from src.domain.roster import Meal
+from src.domain.status import resolve_status_history
 from src.domain.revisions import format_revision_timestamp
 from src.domain.school_calendar import school_lunch_calendar_from_snapshot
-from src.storage import DatabaseSession
+from src.storage.database_session import DatabaseSession
 
 from .custom_fields import CustomFieldController
 from .complaints import ComplaintController
@@ -43,6 +45,7 @@ from .import_controller import (
 )
 from .meal_status_edit import MealStatusChangeController
 from .person_edit import PersonProfileEditController
+from .roster_cell_edit import RosterCellEditController
 from .roster_row_edit import RosterRowEditController
 from .provider_settings import ProviderSettingsController
 from .delivery_defaults import DeliveryDefaultsController
@@ -98,6 +101,7 @@ class DesktopStartupController:
         guided_controller_type=GuidedInitialImportController,
         followup_controller_type=GuidedRosterImportController,
         profile_edit_controller_type=PersonProfileEditController,
+        roster_cell_edit_controller_type=RosterCellEditController,
         roster_row_controller_type=RosterRowEditController,
         custom_field_controller_type=CustomFieldController,
         routing_controller_type=DeliveryRoutingController,
@@ -134,6 +138,7 @@ class DesktopStartupController:
         self._guided_controller_type = guided_controller_type
         self._followup_controller_type = followup_controller_type
         self._profile_edit_controller_type = profile_edit_controller_type
+        self._roster_cell_edit_controller_type = roster_cell_edit_controller_type
         self._roster_row_controller_type = roster_row_controller_type
         self._custom_field_controller_type = custom_field_controller_type
         self._routing_controller_type = routing_controller_type
@@ -259,11 +264,13 @@ class DesktopStartupController:
             ("driver_replacement_requested", lambda: self._run_driver_replacement(session, window)),
             ("drivers_requested", lambda: self._run_driver_registry(session, window)),
             ("driver_assignment_requested", lambda person_id, meal: self._run_driver_assignment(session, window, person_id, meal)),
+            ("batch_driver_assignment_requested", lambda targets: self._run_batch_driver_assignment(session, window, targets)),
             ("sequence_edit_requested", lambda person_id: self._run_sequence_edit(session, window, person_id)),
             ("household_sequence_save_requested", lambda targets, value, dialog: self._save_household_sequence(session, window, targets, value, dialog)),
             ("person_add_requested", lambda selected_meal: self._run_roster_row_add(session, window, selected_meal)),
             ("person_delete_requested", lambda person_id: self._run_roster_row_delete(session, window, person_id)),
             ("relocation_requested", lambda person_id: self._run_relocation(session, window, person_id)),
+            ("cell_edit_requested", lambda person_id, column_key, text: self._run_roster_cell_edit(session, window, person_id, column_key, text)),
         ):
             signal = getattr(window, signal_name, None)
             if signal is not None and hasattr(signal, "connect"):
@@ -384,6 +391,12 @@ class DesktopStartupController:
     def _run_driver_assignment(self, session, window, person_id, meal) -> None:
         outcome = self._routing_controller_type(session).run_assignment(
             person_id, meal, window.table_model.service_day, parent=window
+        )
+        self._apply_routing_outcome(session, window, outcome)
+
+    def _run_batch_driver_assignment(self, session, window, targets) -> None:
+        outcome = self._routing_controller_type(session).run_batch_assignment(
+            targets, window.table_model.service_day, parent=window
         )
         self._apply_routing_outcome(session, window, outcome)
 
@@ -629,12 +642,7 @@ class DesktopStartupController:
                 "명단은 저장됐지만 새 화면 상태를 확인할 수 없습니다. 프로그램을 다시 열어주세요.",
             )
             return
-        window.replace_roster(
-            roster,
-            self._histories(session, roster),
-            revision_display_code=self._revision_display_code(session, roster),
-        )
-        self._refresh_school_calendar(session, window, roster)
+        self._replace_roster(session, window, roster)
 
     def _run_person_edit(self, session: DatabaseSession, window, person_id, *, delivery_only: bool = False) -> None:
         controller = self._profile_edit_controller_type(session)
@@ -653,12 +661,30 @@ class DesktopStartupController:
                 "프로그램을 다시 열어주세요.",
             )
             return
-        window.replace_roster(
-            roster,
-            self._histories(session, roster),
-            revision_display_code=self._revision_display_code(session, roster),
+        self._replace_roster(session, window, roster)
+
+    def _run_roster_cell_edit(
+        self,
+        session: DatabaseSession,
+        window,
+        person_id,
+        column_key: str,
+        text: str,
+    ) -> None:
+        outcome = self._roster_cell_edit_controller_type(session).save(
+            person_id, column_key, text, window
         )
-        self._refresh_school_calendar(session, window, roster)
+        if not outcome.completed:
+            return
+        roster = outcome.roster
+        if roster is None:
+            self._message_box.critical(
+                window,
+                "수정한 명단 셀을 표시하지 못했습니다",
+                "값은 저장됐지만 새 화면 상태를 확인할 수 없습니다. 프로그램을 다시 열어주세요.",
+            )
+            return
+        self._replace_roster(session, window, roster)
 
     def _run_roster_row_add(self, session: DatabaseSession, window, selected_meal) -> None:
         outcome = self._roster_row_controller_type(session).add(
@@ -710,12 +736,7 @@ class DesktopStartupController:
                 "프로그램을 다시 열어주세요.",
             )
             return
-        window.replace_roster(
-            roster,
-            self._histories(session, roster),
-            revision_display_code=self._revision_display_code(session, roster),
-        )
-        self._refresh_school_calendar(session, window, roster)
+        self._replace_roster(session, window, roster)
 
     def _run_batch_meal_status_change(self, session, window, targets, status) -> None:
         outcome = self._meal_status_controller_type(session).run_batch(
@@ -737,12 +758,7 @@ class DesktopStartupController:
                 "단가는 저장됐지만 새 화면 상태를 확인할 수 없습니다. 프로그램을 다시 열어주세요.",
             )
             return
-        window.replace_roster(
-            roster,
-            self._histories(session, roster),
-            revision_display_code=self._revision_display_code(session, roster),
-        )
-        self._refresh_school_calendar(session, window, roster)
+        self._replace_roster(session, window, roster)
 
     def _run_service_adjustment_change(
         self,
@@ -762,12 +778,7 @@ class DesktopStartupController:
                 "프로그램을 다시 열어주세요.",
             )
             return
-        window.replace_roster(
-            roster,
-            self._histories(session, roster),
-            revision_display_code=self._revision_display_code(session, roster),
-        )
-        self._refresh_school_calendar(session, window, roster)
+        self._replace_roster(session, window, roster)
 
     def _run_school_calendar(
         self,
@@ -790,12 +801,7 @@ class DesktopStartupController:
                 "프로그램을 다시 열어주세요.",
             )
             return
-        window.replace_roster(
-            roster,
-            self._histories(session, roster),
-            revision_display_code=self._revision_display_code(session, roster),
-        )
-        self._refresh_school_calendar(session, window, roster)
+        self._replace_roster(session, window, roster)
 
     def _run_school_calendar_import(
         self,
@@ -815,12 +821,7 @@ class DesktopStartupController:
                 "프로그램을 다시 열어주세요.",
             )
             return
-        window.replace_roster(
-            roster,
-            self._histories(session, roster),
-            revision_display_code=self._revision_display_code(session, roster),
-        )
-        self._refresh_school_calendar(session, window, roster)
+        self._replace_roster(session, window, roster)
 
     def _run_export_password_change(
         self,
@@ -892,13 +893,16 @@ class DesktopStartupController:
             and displayed.revision_id == roster.revision_id
         ):
             return False
+        self._replace_roster(session, window, roster)
+        return True
+
+    def _replace_roster(self, session, window, roster) -> None:
         window.replace_roster(
             roster,
             self._histories(session, roster),
             revision_display_code=self._revision_display_code(session, roster),
         )
         self._refresh_school_calendar(session, window, roster)
-        return True
 
     @staticmethod
     def _refresh_school_calendar(session, window, roster) -> None:
@@ -910,10 +914,16 @@ class DesktopStartupController:
 
     @staticmethod
     def _histories(session: DatabaseSession, roster):
+        if not roster.persons:
+            return {}
+        events_by_key = defaultdict(list)
+        for event in session.database.status_events():
+            events_by_key[(event.person_id, event.meal)].append(event)
         return {
-            (person.person_id, meal): session.database.status_history(
+            (person.person_id, meal): resolve_status_history(
                 person.person_id,
                 meal,
+                tuple(events_by_key[(person.person_id, meal)]),
             )
             for person in roster.persons
             for meal in Meal

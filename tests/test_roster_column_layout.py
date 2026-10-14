@@ -72,18 +72,24 @@ def visual_keys(view, columns):
     return [columns[header.logicalIndex(index)].key for index in range(len(columns))]
 
 
-def test_defaults_and_menu_enforce_mandatory_columns(app, settings):
+def test_defaults_and_context_menu_enforce_mandatory_columns(app, settings):
     view, _ = make_view()
     layout = RosterColumnLayout(view, BASE_COLUMNS, settings=settings)
-    menu = layout.create_menu()
-    actions = {action.text(): action for action in menu.actions() if action.isCheckable()}
 
     assert visual_keys(view, BASE_COLUMNS) == [column.key for column in BASE_COLUMNS]
     assert all(view.columnWidth(index) == column.width for index, column in enumerate(BASE_COLUMNS))
-    assert actions["이름 (필수)"].isChecked() and not actions["이름 (필수)"].isEnabled()
-    assert actions["생년월일 (필수)"].isChecked() and not actions["생년월일 (필수)"].isEnabled()
-    actions["주소"].trigger()
+    assert "숨기기" not in {
+        action.text() for action in layout.create_menu(column_key="name").actions()
+    }
+    address_menu = layout.create_menu(column_key="address")
+    next(action for action in address_menu.actions() if action.text() == "숨기기").trigger()
     assert view.isColumnHidden(5)
+    menu = layout.create_menu()
+    hidden_menu = next(
+        action.menu() for action in menu.actions()
+        if action.text() == "숨기기 해제"
+    )
+    assert [action.text() for action in hidden_menu.actions()] == ["주소"]
     view.close()
 
 
@@ -93,7 +99,8 @@ def test_move_resize_hide_and_round_trip(app, settings):
     header = view.horizontalHeader()
     header.moveSection(header.visualIndex(5), 0)
     header.resizeSection(5, 211)
-    layout.create_menu().actions()[5].trigger()
+    menu = layout.create_menu(column_key="address")
+    next(action for action in menu.actions() if action.text() == "숨기기").trigger()
     layout.save()
     view.close()
 

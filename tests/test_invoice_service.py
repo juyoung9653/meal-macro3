@@ -15,6 +15,7 @@ from src.core.delivery_matrix import (
     DeliveryRow,
     RosterEntry,
 )
+from src.core.invoice_data import MealPrices, WeeklyDelivery
 from src.services import invoice_controller
 from src.services.invoice_controller import InvoiceGenerationConfig, InvoiceService
 
@@ -181,9 +182,9 @@ def template_path(tmp_path: Path) -> str:
 @pytest.fixture
 def invoice_spy(monkeypatch: pytest.MonkeyPatch) -> Mock:
     spy = Mock(
-        side_effect=lambda batch, *_args, **_kwargs: (len(batch.deliveries), batch)
+        side_effect=lambda batch, *_args, **_kwargs: (len(batch.deliveries), None)
     )
-    monkeypatch.setattr(invoice_controller, "make_invoice", spy)
+    monkeypatch.setattr(invoice_controller, "make_invoice_publication", spy)
     return spy
 
 
@@ -209,26 +210,19 @@ def test_counts_only_target_month_delivered_and_ignores_roster_flags(
     result = InvoiceService().generate(_config(template_path, _service_book()))
 
     assert result.success, result.error
-    assert result.count == len(result.enriched) == 1
-    person = result.enriched[0]
-    assert (person["_bf_cnt"], person["_lh_cnt"], person["_dn_cnt"]) == (2, 1, 1)
-    assert person["_total"] == 4
+    assert result.count == len(result.batch.deliveries) == 1
+    person = result.batch.deliveries[0]
+    assert (person.breakfast_count, person.lunch_count, person.dinner_count) == (
+        2,
+        1,
+        1,
+    )
+    assert person.total_count == 4
     assert invoice_spy.call_args.args[0] is result.batch
 
-    # 원본 비고는 그대로 남고 모든 레거시 전달 필드는 더 이상 만들지 않는다.
-    assert person.get("비고") == "견과류 알레르기"
-    assert person["_note"] == "견과류 알레르기"
-    assert {
-        "_breakfast",
-        "_dinner",
-        "_lunch",
-        "_delivery_start",
-        "_delivery_end",
-        "_daily",
-        "_delivery_rows_raw",
-        "_reception_memo",
-        "excluded_dates",
-    }.isdisjoint(person)
+    # 표시 비고와 원본 명단 값이 함께 보존된다.
+    assert person.roster.extra.get("비고") == "견과류 알레르기"
+    assert person.note == "견과류 알레르기"
 
 
 def test_generates_invoice_for_people_with_one_meal_row_each(
@@ -258,8 +252,12 @@ def test_generates_invoice_for_people_with_one_meal_row_each(
     assert result.success, result.error
     assert result.count == 3
     counts_by_name = {
-        item["성명"]: (item["_bf_cnt"], item["_lh_cnt"], item["_dn_cnt"])
-        for item in result.enriched
+        item.roster.extra["성명"]: (
+            item.breakfast_count,
+            item.lunch_count,
+            item.dinner_count,
+        )
+        for item in result.batch.deliveries
     }
     assert counts_by_name == {
         "김아침": (3, 0, 0),
@@ -274,11 +272,10 @@ def test_projects_staff_and_sequence_from_person_delivery_rows_deterministically
     result = InvoiceService().generate(_config(template_path, _service_book()))
 
     assert result.success, result.error
-    person = result.enriched[0]
+    person = result.batch.deliveries[0]
     # 식종의 정규 순서(조식→중식→석식), 중복 제거 규칙.
-    assert person["배송담당"] == "기사A / 기사B"
-    assert person["배송순서"] == "003 / 2"
-    assert person["연번"] == "003 / 2"
+    assert person.delivery_staff == "기사A / 기사B"
+    assert person.delivery_sequence == "003 / 2"
 
 
 def test_metadata_uses_only_rows_delivered_in_target_month(
@@ -317,10 +314,9 @@ def test_metadata_uses_only_rows_delivered_in_target_month(
     result = InvoiceService().generate(_config(template_path, book))
 
     assert result.success, result.error
-    assert result.count == len(result.enriched) == 1
-    assert result.enriched[0]["배송담당"] == "6월기사"
-    assert result.enriched[0]["배송순서"] == "006"
-    assert result.enriched[0]["연번"] == "006"
+    assert result.count == len(result.batch.deliveries) == 1
+    assert result.batch.deliveries[0].delivery_staff == "6월기사"
+    assert result.batch.deliveries[0].delivery_sequence == "006"
 
 
 def test_rejects_blank_staff_on_target_month_delivered_row(
@@ -389,9 +385,8 @@ def test_allows_blank_sequence_on_target_month_delivered_row(
     result = InvoiceService().generate(_config(template_path, book))
 
     assert result.success, result.error
-    assert result.enriched[0]["배송담당"] == "기사A"
-    assert result.enriched[0]["배송순서"] == ""
-    assert result.enriched[0]["연번"] == ""
+    assert result.batch.deliveries[0].delivery_staff == "기사A"
+    assert result.batch.deliveries[0].delivery_sequence == ""
     invoice_spy.assert_called_once()
 
 
@@ -401,48 +396,13 @@ def test_attaches_exact_weekly_meal_counts_once_from_typed_dates(
     result = InvoiceService().generate(_config(template_path, _service_book()))
 
     assert result.success, result.error
-    assert result.enriched[0]["weekly_meal_counts"] == [
-        {
-            "week": 1,
-            "start_date": "20260601",
-            "end_date": "20260606",
-            "조식": 1,
-            "중식": 0,
-            "석식": 0,
-        },
-        {
-            "week": 2,
-            "start_date": "20260607",
-            "end_date": "20260613",
-            "조식": 1,
-            "중식": 0,
-            "석식": 0,
-        },
-        {
-            "week": 3,
-            "start_date": "20260614",
-            "end_date": "20260620",
-            "조식": 0,
-            "중식": 1,
-            "석식": 0,
-        },
-        {
-            "week": 4,
-            "start_date": "20260621",
-            "end_date": "20260627",
-            "조식": 0,
-            "중식": 0,
-            "석식": 0,
-        },
-        {
-            "week": 5,
-            "start_date": "20260628",
-            "end_date": "20260630",
-            "조식": 0,
-            "중식": 0,
-            "석식": 1,
-        },
-    ]
+    assert result.batch.deliveries[0].weekly == (
+        WeeklyDelivery(1, date(2026, 6, 1), date(2026, 6, 6), 1, 0, 0),
+        WeeklyDelivery(2, date(2026, 6, 7), date(2026, 6, 13), 1, 0, 0),
+        WeeklyDelivery(3, date(2026, 6, 14), date(2026, 6, 20), 0, 1, 0),
+        WeeklyDelivery(4, date(2026, 6, 21), date(2026, 6, 27), 0, 0, 0),
+        WeeklyDelivery(5, date(2026, 6, 28), date(2026, 6, 30), 0, 0, 1),
+    )
 
 
 @pytest.mark.parametrize(
@@ -490,11 +450,11 @@ def test_breakfast_uses_weekend_cells_or_vba_three_meal_fallback(
     result = InvoiceService().generate(_config(template_path, book))
 
     assert result.success, result.error
-    assert result.enriched[0]["_bf_cnt"] == expected_count
-    assert sum(
-        week["조식"]
-        for week in result.enriched[0]["weekly_meal_counts"]
-    ) == expected_count
+    assert result.batch.deliveries[0].breakfast_count == expected_count
+    assert (
+        sum(week.breakfast_count for week in result.batch.deliveries[0].weekly)
+        == expected_count
+    )
     invoice_spy.assert_called_once()
 
 
@@ -546,7 +506,6 @@ def test_zero_only_entered_month_proceeds_with_zero_invoice(
 
     assert result.success, result.error
     assert result.count == 0
-    assert result.enriched == []
     assert result.batch is not None and result.batch.deliveries == ()
     invoice_spy.assert_called_once()
 
@@ -664,11 +623,7 @@ def test_uses_default_prices_and_allows_partial_explicit_override(
     result = InvoiceService().generate(config)
 
     assert result.success, result.error
-    assert invoice_spy.call_args.kwargs["unit_prices"] == {
-        "조식": 10_000,
-        "중식": 9_500,
-        "석식": 9_500,
-    }
+    assert invoice_spy.call_args.args[0].prices == MealPrices(10_000, 9_500, 9_500)
 
 
 def test_passes_global_note_to_invoice_writer(
@@ -713,12 +668,8 @@ def test_uses_central_settings_unit_price_override(
     result = InvoiceService().generate(_config(template_path, _service_book()))
 
     assert result.success, result.error
-    assert invoice_spy.call_args.kwargs["unit_prices"] == {
-        "조식": 1_111,
-        "중식": 2_222,
-        "석식": 3_333,
-    }
-    assert result.enriched[0]["_amount"] == "7,777원"
+    assert invoice_spy.call_args.args[0].prices == MealPrices(1_111, 2_222, 3_333)
+    assert result.batch.deliveries[0].amount(result.batch.prices) == 7_777
 
 
 def test_loads_book_through_annual_workbook_when_only_path_is_configured(
@@ -759,3 +710,23 @@ def test_missing_book_and_path_is_a_clear_failure(
     assert "연간 배송" in (result.error or "")
     assert "경로" in (result.error or "")
     invoice_spy.assert_not_called()
+
+
+@pytest.mark.parametrize("failure", [OSError("저장 실패"), (0, None)])
+def test_writer_failure_does_not_forward_confirmation_batch(
+    template_path: str, invoice_spy: Mock, failure: object
+):
+    if isinstance(failure, Exception):
+        invoice_spy.side_effect = failure
+    else:
+        invoice_spy.side_effect = None
+        invoice_spy.return_value = failure
+
+    result = InvoiceService().generate(_config(template_path, _service_book()))
+
+    assert not result.success
+    assert result.batch is None
+    assert result.error
+    assert (
+        "저장 실패" if isinstance(failure, Exception) else "건수가 일치"
+    ) in result.error

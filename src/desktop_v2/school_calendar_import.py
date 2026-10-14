@@ -15,7 +15,6 @@ from PySide6.QtCore import QDate, Qt
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
-    QDateEdit,
     QDialog,
     QFileDialog,
     QFrame,
@@ -55,8 +54,12 @@ from src.importing.workbook import (
     WorkbookImportPasswordError,
     WorkbookImportPasswordRequiredError,
 )
-from src.storage import AutomaticBackupResult, DatabaseSession
+from src.storage.database_session import (
+    AutomaticBackupResult,
+    DatabaseSession,
+)
 
+from .date_edit import WheelSafeDateEdit
 from .import_controller import current_windows_actor
 from .theme import application_stylesheet, register_application_fonts
 
@@ -419,9 +422,9 @@ class SchoolCalendarImportDialog(QDialog):
 class _RowEditors:
     source_row: int
     school: QTableWidgetItem
-    starts_on: QDateEdit
+    starts_on: WheelSafeDateEdit
     starts_mark: QComboBox
-    ends_on: QDateEdit
+    ends_on: WheelSafeDateEdit
     ends_mark: QComboBox
     note: str | None
 
@@ -430,8 +433,8 @@ class _RowEditors:
 class _NoteEditors:
     candidate: SchoolCalendarNoteCandidate
     action: QComboBox
-    starts_on: QDateEdit
-    ends_on: QDateEdit
+    starts_on: WheelSafeDateEdit
+    ends_on: WheelSafeDateEdit
     grades: QLineEdit
     fields: QFrame
 
@@ -947,17 +950,17 @@ def _section_label(text: str) -> QLabel:
     return label
 
 
-def _date_edit(value: date | None) -> QDateEdit:
+def _date_edit(value: date | None) -> WheelSafeDateEdit:
     if value is None:
         raise ValueError("날짜 editor에는 날짜가 필요합니다.")
-    editor = QDateEdit(QDate(value.year, value.month, value.day))
+    editor = WheelSafeDateEdit(QDate(value.year, value.month, value.day))
     editor.setCalendarPopup(True)
     editor.setDisplayFormat("yyyy.MM.dd")
     editor.setObjectName("schoolCalendarDate")
     return editor
 
 
-def _python_date(editor: QDateEdit) -> date:
+def _python_date(editor: WheelSafeDateEdit) -> date:
     value = editor.date()
     return date(value.year(), value.month(), value.day())
 

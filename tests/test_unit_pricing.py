@@ -13,18 +13,11 @@ apsw = pytest.importorskip(
     reason="install requirements-sqlite-v2.txt for encrypted DB integration tests",
 )
 
-from src.domain import (
+from src.domain.unit_pricing import (
     DEFAULT_MEAL_UNIT_PRICE,
     UNIT_PRICE_POLICY_VERSION,
     UNIT_PRICE_SCHEDULE_ID,
     UNIT_PRICE_SCHEDULE_KIND,
-    AuditChange,
-    ChangeOperation,
-    Meal,
-    RevisionActor,
-    RevisionMetadata,
-    RevisionRecord,
-    RevisionSource,
     UnitPriceChange,
     UnitPriceSchedule,
     build_unit_price_revision,
@@ -34,7 +27,16 @@ from src.domain import (
     unit_price_schedule_from_state,
     unit_price_schedule_state,
 )
-from src.storage import EncryptedDatabase
+from src.domain.revisions import (
+    AuditChange,
+    ChangeOperation,
+    RevisionActor,
+    RevisionMetadata,
+    RevisionRecord,
+    RevisionSource,
+)
+from src.domain.roster import Meal
+from src.storage.encrypted_database import EncryptedDatabase
 
 
 KEY = bytes.fromhex("79" * 32)

@@ -88,7 +88,7 @@ def test_settings_provider_action_refreshes_the_saved_roster(monkeypatch):
             assert parent is window
             return SimpleNamespace(completed=True, roster=roster)
 
-    controller = DesktopStartupController(
+    controller = DesktopStartupController(settings=SimpleNamespace(),
         settings_hub_dialog_type=Hub, provider_settings_controller_type=Provider
     )
     calls = []
@@ -114,7 +114,7 @@ def test_calendar_saved_in_new_revision_refreshes_lunch_and_removal_resets_it(
         col = next(i for i, c in enumerate(model.columns) if c.key == "status:lunch")
         return model.data(model.index(0, col))
 
-    controller = DesktopStartupController()
+    controller = DesktopStartupController(settings=SimpleNamespace(), )
     monkeypatch.setattr(controller, "_histories", lambda *_: _histories())
     monkeypatch.setattr(controller, "_revision_display_code", lambda *_: "변경 2")
     schedule = _calendar().schedules[0]

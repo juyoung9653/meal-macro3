@@ -19,50 +19,69 @@ from PySide6.QtWidgets import QApplication, QDialog
 from PySide6.QtCore import QDate
 from openpyxl.worksheet.table import Table
 
-from src.desktop_v2 import (
+from src.desktop_v2.application import (
     DesktopStartupController,
-    DocumentAction,
-    GeneratedDocumentResult,
-    DocumentMealSelection,
+    StartupStatus,
+)
+from src.desktop_v2.document_hub import DocumentAction
+from src.desktop_v2.document_completion import GeneratedDocumentResult
+from src.desktop_v2.document_meal import DocumentMealSelection
+from src.desktop_v2.document_output import (
     DocumentOutputMode,
-    DocumentPeriodSelection,
+    next_available_document_output,
+    suggest_document_filename,
+)
+from src.desktop_v2.document_period import DocumentPeriodSelection
+from src.desktop_v2.import_controller import (
     GuidedImportOutcome,
     GuidedImportStatus,
     GuidedInitialImportController,
     GuidedRosterImportController,
+)
+from src.desktop_v2.import_wizard import (
     ImportWizardSelection,
     RosterImportWizard,
-    MealStatusChangeController,
-    PersonProfileEditController,
+)
+from src.desktop_v2.meal_status_edit import MealStatusChangeController
+from src.desktop_v2.person_edit import PersonProfileEditController
+from src.desktop_v2.school_calendar_edit import (
     SchoolCalendarEditOutcome,
     SchoolCalendarEditStatus,
-    StartupStatus,
-    SettingsAction,
-    next_available_document_output,
-    suggest_document_filename,
 )
-from src.domain import (
+from src.desktop_v2.settings_hub import SettingsAction
+from src.domain.roster import (
     InclusiveDateRange,
     Meal,
-    MealStatus,
+)
+from src.domain.status import MealStatus
+from src.domain.revisions import (
     RevisionActor,
     RevisionSummary,
     RevisionSource,
 )
 from src.domain.revisions import format_revision_timestamp
-from src.importing import (
+from src.importing.households import (
     HouseholdMatchingRule,
+    StoredHouseholdMatchingRule,
+    household_matching_rules_from_snapshot,
+)
+from src.importing.application import (
     IdentityResolution,
+    ReconciliationDecision,
+)
+from src.importing.contracts import (
     ImportMappingProfile,
     ProfileField,
-    ReconciliationDecision,
-    StoredHouseholdMatchingRule,
-    StoredImportProfile,
-    household_matching_rules_from_snapshot,
-    import_profiles_from_snapshot,
-    parse_workbook,
 )
-from src.storage import AutomaticBackupResult, DatabaseSession
+from src.importing.profile_history import (
+    StoredImportProfile,
+    import_profiles_from_snapshot,
+)
+from src.importing.workbook import parse_workbook
+from src.storage.database_session import (
+    AutomaticBackupResult,
+    DatabaseSession,
+)
 from src.storage.database_backup import BackupPasswordRotation
 
 
@@ -1454,3 +1473,55 @@ def test_school_calendar_editor_can_route_to_excel_import():
         ("excel", window),
         ("replace", roster, {}, "20260831-100203"),
     ]
+
+
+def test_roster_histories_share_one_read_without_mixing_people_or_meals():
+    from src.domain.status import StatusEvent
+
+    first, second, removed = UUID(int=701), UUID(int=702), UUID(int=703)
+    revision_id = UUID(int=704)
+    recorded_at = datetime(2026, 9, 1, tzinfo=UTC)
+    stop = StatusEvent(UUID(int=705), revision_id, first, Meal.BREAKFAST,
+                       MealStatus.STOPPED, InclusiveDateRange(date(2026, 9, 1), None), recorded_at)
+    resume = StatusEvent(UUID(int=706), revision_id, first, Meal.BREAKFAST,
+                         MealStatus.DELIVERY, InclusiveDateRange(date(2026, 9, 3), None), recorded_at)
+    other = StatusEvent(UUID(int=707), revision_id, second, Meal.DINNER,
+                        MealStatus.PAUSED, InclusiveDateRange(date(2026, 9, 2), date(2026, 9, 4)), recorded_at)
+    removed_event = StatusEvent(UUID(int=708), revision_id, removed, Meal.LUNCH,
+                                MealStatus.STOPPED, InclusiveDateRange(date(2026, 9, 1), None), recorded_at)
+    reads = []
+
+    def status_events():
+        reads.append(True)
+        return stop, other, resume, removed_event
+
+    session = SimpleNamespace(database=SimpleNamespace(status_events=status_events))
+    roster = SimpleNamespace(persons=(SimpleNamespace(person_id=first), SimpleNamespace(person_id=second)))
+    histories = DesktopStartupController._histories(session, roster)
+
+    assert len(reads) == 1
+    assert set(histories) == {(person, meal) for person in (first, second) for meal in Meal}
+    breakfast = histories[first, Meal.BREAKFAST]
+    assert breakfast.events == (stop, resume)
+    assert breakfast.status_on(date(2026, 9, 2)) is MealStatus.PAUSED
+    assert breakfast.status_on(date(2026, 9, 3)) is MealStatus.DELIVERY
+    assert histories[first, Meal.DINNER].events == ()
+    assert histories[second, Meal.DINNER].status_on(date(2026, 9, 4)) is MealStatus.PAUSED
+    assert histories[second, Meal.DINNER].status_on(date(2026, 9, 5)) is MealStatus.DELIVERY
+
+
+def test_empty_roster_histories_need_no_database_read():
+    assert DesktopStartupController._histories(
+        SimpleNamespace(database=object()), SimpleNamespace(persons=())
+    ) == {}
+
+
+def test_roster_history_read_error_is_not_replaced_with_default_delivery():
+    def status_events():
+        raise RuntimeError("history read failed")
+
+    with pytest.raises(RuntimeError, match="history read failed"):
+        DesktopStartupController._histories(
+            SimpleNamespace(database=SimpleNamespace(status_events=status_events)),
+            SimpleNamespace(persons=(SimpleNamespace(person_id=UUID(int=701)),)),
+        )

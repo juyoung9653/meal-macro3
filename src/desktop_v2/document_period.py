@@ -9,7 +9,6 @@ from datetime import date, datetime
 from PySide6.QtCore import QDate, Qt
 from PySide6.QtWidgets import (
     QComboBox,
-    QDateEdit,
     QDialog,
     QDialogButtonBox,
     QFrame,
@@ -23,6 +22,7 @@ from PySide6.QtWidgets import (
 from src.domain.revisions import RevisionSummary, format_revision_timestamp
 from src.domain.roster import Meal
 
+from .date_edit import WheelSafeDateEdit
 from .document_hub import DocumentAction, DocumentSetupRequest
 from .theme import application_stylesheet, register_application_fonts
 
@@ -99,9 +99,9 @@ class DocumentPeriodDialog(QDialog):
         )
         self._year: QSpinBox | None = None
         self._month: QComboBox | None = None
-        self._starts_on: QDateEdit | None = None
-        self._ends_on: QDateEdit | None = None
-        self._day: QDateEdit | None = None
+        self._starts_on: WheelSafeDateEdit | None = None
+        self._ends_on: WheelSafeDateEdit | None = None
+        self._day: WheelSafeDateEdit | None = None
 
         register_application_fonts()
         self.setObjectName("documentPeriodDialog")
@@ -317,15 +317,15 @@ def _month_bounds(year: int, month: int) -> tuple[date, date]:
     return date(year, month, 1), date(year, month, monthrange(year, month)[1])
 
 
-def _date_edit(day: date) -> QDateEdit:
-    editor = QDateEdit(QDate(day.year, day.month, day.day))
+def _date_edit(day: date) -> WheelSafeDateEdit:
+    editor = WheelSafeDateEdit(QDate(day.year, day.month, day.day))
     editor.setObjectName("documentPeriodDate")
     editor.setCalendarPopup(True)
     editor.setDisplayFormat("yyyy.MM.dd")
     return editor
 
 
-def _python_date(editor: QDateEdit) -> date:
+def _python_date(editor: WheelSafeDateEdit) -> date:
     value = editor.date()
     return date(value.year(), value.month(), value.day())
 

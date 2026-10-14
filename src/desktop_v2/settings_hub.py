@@ -97,6 +97,42 @@ _SETTINGS_COPY = {
     ),
 }
 
+_SETTINGS_STAMPS = {
+    SettingsAction.PROVIDER: "기관",
+    SettingsAction.EXPORT_PASSWORD: "잠금",
+    SettingsAction.DOCUMENT_TEMPLATE: "양식",
+    SettingsAction.DOCUMENT_COLUMN_MAPPING: "연결",
+    SettingsAction.DELIVERY_DEFAULTS: "배송",
+    SettingsAction.DOCUMENT_DIRECTORY: "폴더",
+    SettingsAction.DATABASE_LOCATION: "DB",
+    SettingsAction.BACKUP_DIRECTORY: "백업",
+    SettingsAction.DATABASE_PASSWORD: "잠금",
+}
+
+_SETTINGS_GROUPS = (
+    (
+        "공통 운영",
+        (SettingsAction.PROVIDER, SettingsAction.DELIVERY_DEFAULTS),
+    ),
+    (
+        "문서 출력",
+        (
+            SettingsAction.DOCUMENT_TEMPLATE,
+            SettingsAction.DOCUMENT_COLUMN_MAPPING,
+            SettingsAction.EXPORT_PASSWORD,
+            SettingsAction.DOCUMENT_DIRECTORY,
+        ),
+    ),
+    (
+        "데이터 보관·보안",
+        (
+            SettingsAction.DATABASE_LOCATION,
+            SettingsAction.BACKUP_DIRECTORY,
+            SettingsAction.DATABASE_PASSWORD,
+        ),
+    ),
+)
+
 
 class _SettingsActionCard(QPushButton):
     def __init__(
@@ -118,7 +154,7 @@ class _SettingsActionCard(QPushButton):
         self.setAccessibleName(action.label)
         self.setAccessibleDescription(action.description)
         self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self.setMinimumHeight(112)
+        self.setMinimumHeight(124)
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(15, 14, 16, 14)
@@ -182,31 +218,32 @@ class SettingsHubDialog(QDialog):
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         card_container = QWidget()
-        cards = QGridLayout(card_container)
-        cards.setContentsMargins(0, 0, 0, 0)
-        cards.setSpacing(12)
-        for index, (action, stamp) in enumerate((
-            (SettingsAction.PROVIDER, "기관"),
-            (SettingsAction.EXPORT_PASSWORD, "잠금"),
-            (SettingsAction.DOCUMENT_TEMPLATE, "양식"),
-            (SettingsAction.DOCUMENT_COLUMN_MAPPING, "연결"),
-            (SettingsAction.DELIVERY_DEFAULTS, "배송"),
-            (SettingsAction.DOCUMENT_DIRECTORY, "폴더"),
-            (SettingsAction.DATABASE_LOCATION, "DB"),
-            (SettingsAction.BACKUP_DIRECTORY, "백업"),
-            (SettingsAction.DATABASE_PASSWORD, "잠금"),
-        )):
-            card = _SettingsActionCard(action, stamp=stamp)
+        card_groups = QVBoxLayout(card_container)
+        card_groups.setContentsMargins(0, 0, 0, 0)
+        card_groups.setSpacing(14)
+        for action in SettingsAction:
+            card = _SettingsActionCard(action, stamp=_SETTINGS_STAMPS[action])
             card.clicked.connect(
                 lambda _checked=False, selected=action: self._choose(selected)
             )
             self._cards[action] = card
-            full_width = action in (SettingsAction.DELIVERY_DEFAULTS, SettingsAction.DOCUMENT_DIRECTORY, SettingsAction.DATABASE_LOCATION, SettingsAction.BACKUP_DIRECTORY, SettingsAction.DATABASE_PASSWORD)
-            cards.addWidget(card, index - 2 if full_width else index // 2,
-                            0 if full_width else index % 2, 1, 2 if full_width else 1)
-        cards.setColumnStretch(0, 1)
-        cards.setColumnStretch(1, 1)
+        self._group_actions = dict(_SETTINGS_GROUPS)
+        for title, actions in _SETTINGS_GROUPS:
+            heading = QLabel(title)
+            heading.setObjectName("editEyebrow")
+            card_groups.addWidget(heading)
+            cards = QGridLayout()
+            cards.setContentsMargins(0, 0, 0, 0)
+            cards.setHorizontalSpacing(12)
+            cards.setVerticalSpacing(12)
+            for index, action in enumerate(actions):
+                cards.addWidget(self._cards[action], index // 2, index % 2)
+            cards.setColumnStretch(0, 1)
+            cards.setColumnStretch(1, 1)
+            card_groups.addLayout(cards)
+        card_groups.addStretch(1)
         scroll.setWidget(card_container)
+        self._scroll = scroll
         root.addWidget(scroll, 1)
 
         note = QLabel(

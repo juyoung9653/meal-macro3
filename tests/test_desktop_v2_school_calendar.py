@@ -30,7 +30,7 @@ from src.importing.school_calendar import (
     inspect_school_calendar_workbook,
     parse_school_calendar_workbook,
 )
-from src.storage import DatabaseSession
+from src.storage.database_session import DatabaseSession
 
 
 BASE_REVISION_ID = UUID("92000000-0000-0000-0000-000000000001")

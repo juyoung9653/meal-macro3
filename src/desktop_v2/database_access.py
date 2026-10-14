@@ -19,18 +19,22 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from src.storage import (
+from src.storage.database_session import (
     AutomaticBackupResult,
+    DatabaseSession,
+)
+from src.storage.database_backup import (
     BackupFormatError,
     BackupIntegrityError,
     BackupRestoreConflictError,
-    CredentialUnlockError,
-    DatabaseSession,
-    DatabaseUnlockError,
-    PasswordPolicyError,
-    credential_path_for,
     restore_backup_with_user_password,
 )
+from src.storage.database_credentials import (
+    CredentialUnlockError,
+    PasswordPolicyError,
+    credential_path_for,
+)
+from src.storage.encrypted_database import DatabaseUnlockError
 
 from .theme import application_stylesheet, register_application_fonts
 

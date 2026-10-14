@@ -15,12 +15,14 @@ from openpyxl.worksheet.table import Table
 import src.importing.workbook as workbook_module
 from msoffcrypto.format.ooxml import OOXMLFile
 
-from src.domain import Meal
-from src.importing import (
+from src.domain.roster import Meal
+from src.importing.contracts import (
     ImportMappingProfile,
     PhoneNormalization,
     ProfileField,
-    StoredImportProfile,
+)
+from src.importing.profile_history import StoredImportProfile
+from src.importing.workbook import (
     WorkbookImportPasswordError,
     WorkbookImportPasswordRequiredError,
     WorkbookStructureError,

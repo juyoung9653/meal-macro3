@@ -155,22 +155,29 @@ def load_status_events(
         raise TypeError("meal은 Meal 또는 None이어야 합니다.")
 
     clauses: list[str] = []
-    parameters: list[str] = []
+    parameters: list[str] = [STATUS_EVENT_KIND]
     if person_id is not None:
-        clauses.append("person_id = ?")
+        clauses.append("event.person_id = ?")
         parameters.append(str(person_id))
     if meal is not None:
-        clauses.append("meal = ?")
+        clauses.append("event.meal = ?")
         parameters.append(meal.value)
     where = "" if not clauses else " WHERE " + " AND ".join(clauses)
     rows = connection.execute(
         """
-        SELECT event_id, created_revision_id, person_id, meal, status,
-               starts_on, ends_on, recorded_at, source_text
-        FROM status_event_projection
+        SELECT event.event_id, event.created_revision_id, event.person_id,
+               event.meal, event.status, event.starts_on, event.ends_on,
+               event.recorded_at, event.source_text
+        FROM status_event_projection AS event
+        JOIN audit_change AS change
+          ON change.revision_id = event.created_revision_id
+         AND change.entity_kind = ?
+         AND change.entity_id = event.event_id
+         AND change.operation = 'insert'
+        JOIN revision ON revision.revision_id = change.revision_id
         """
         + where
-        + " ORDER BY recorded_at, event_id",
+        + " ORDER BY revision.sequence, change.ordinal",
         parameters,
     )
     return tuple(_status_event_from_row(row) for row in rows)

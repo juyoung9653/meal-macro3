@@ -18,7 +18,7 @@ from .revisions import (
     RevisionRecord,
     RevisionSource,
 )
-from .roster import Meal
+from .roster import Meal, canonical_meals
 
 
 DEFAULT_MEAL_UNIT_PRICE = 10_000
@@ -39,7 +39,7 @@ class UnitPriceChange:
 
     def __post_init__(self) -> None:
         _validate_uuid(self.change_id, "단가 변경 ID")
-        object.__setattr__(self, "meals", _canonical_meals(self.meals))
+        object.__setattr__(self, "meals", canonical_meals(self.meals))
         object.__setattr__(self, "unit_price", _unit_price(self.unit_price))
         _validate_date(self.effective_on, "단가 적용일")
         _validate_datetime(self.recorded_at, "단가 기록 시각")
@@ -176,7 +176,7 @@ def global_unit_price_note(
     if not isinstance(schedule, UnitPriceSchedule):
         raise TypeError("schedule은 UnitPriceSchedule이어야 합니다.")
     _validate_closed_period(starts_on, ends_on)
-    selected_meals = _canonical_meals(meals)
+    selected_meals = canonical_meals(meals)
 
     grouped: dict[
         tuple[tuple[date, date, int], ...],
@@ -229,7 +229,7 @@ def build_unit_price_revision(
     if not isinstance(actor, RevisionActor):
         raise TypeError("actor는 RevisionActor여야 합니다.")
     _validate_datetime(recorded_at, "단가 기록 시각")
-    selected_meals = _canonical_meals(meals)
+    selected_meals = canonical_meals(meals)
     change = UnitPriceChange(
         change_id=change_id,
         meals=selected_meals,
@@ -348,17 +348,6 @@ def unit_price_schedule_from_state(
             )
         )
     return UnitPriceSchedule(default, tuple(changes))
-
-
-def _canonical_meals(meals: Sequence[Meal]) -> tuple[Meal, ...]:
-    values = tuple(meals)
-    if not values:
-        raise ValueError("하나 이상의 식종을 선택해야 합니다.")
-    if any(not isinstance(meal, Meal) for meal in values):
-        raise TypeError("meals에는 Meal만 허용됩니다.")
-    if len(set(values)) != len(values):
-        raise ValueError("선택한 식종은 중복될 수 없습니다.")
-    return tuple(meal for meal in Meal if meal in values)
 
 
 def _unit_price(value: object) -> int:

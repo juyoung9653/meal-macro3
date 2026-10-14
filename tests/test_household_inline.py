@@ -16,8 +16,16 @@ from src.desktop_v2.column_search import ALL_SEQUENCES_EMPTY, SequenceValuePicke
 from src.desktop_v2.driver_households import DriverHouseholdsDialog
 from src.desktop_v2.roster_window import RosterTableModel, RosterWindow
 from src.desktop_v2.sequence_edit import SequenceEditController, SequenceSaveStatus
-from src.domain import Meal, MealEnrollment, Person, PersonProfile, RosterSnapshot, DeliveryAssignment, RevisionActor
-from src.storage import DatabaseSession
+from src.domain.roster import (
+    Meal,
+    MealEnrollment,
+    Person,
+    PersonProfile,
+    RosterSnapshot,
+    DeliveryAssignment,
+)
+from src.domain.revisions import RevisionActor
+from src.storage.database_session import DatabaseSession
 from tests.test_delivery_routing import initialize
 from tests.test_sequence_workflow import manifest_rows, roster_fixture
 
@@ -262,7 +270,10 @@ def test_application_inline_commit_refreshes_preserves_filters_and_failure_displ
 
 @pytest.mark.parametrize("second_sequence", (None, "001"))
 def test_real_projection_prefills_only_uniform_values_including_missing(app, tmp_path, second_sequence):
-    from src.domain import Household, HouseholdMembership
+    from src.domain.roster import (
+        Household,
+        HouseholdMembership,
+    )
     from src.domain.delivery_routing import RoutingState
     from src.services.driver_households import build_driver_household_rows
 

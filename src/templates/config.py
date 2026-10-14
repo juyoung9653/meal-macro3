@@ -46,13 +46,21 @@ def auto_detect_semantic_columns(template_columns: list[str]) -> dict[str, str]:
     """
     roles = _get_semantic_column_roles()
 
+    def normalized(value: str) -> str:
+        compact = "".join(value.split())
+        for suffix in ("(급식수)", "(원)"):
+            compact = compact.removesuffix(suffix)
+        return compact
+
     def find(patterns: list[str]) -> str:
+        normalized_patterns = tuple(normalized(pattern) for pattern in patterns)
         for col in template_columns:
-            if col in patterns:
+            if normalized(col) in normalized_patterns:
                 return col
         for col in template_columns:
-            for p in patterns:
-                if p in col:
+            normalized_col = normalized(col)
+            for pattern in normalized_patterns:
+                if len(pattern) > 1 and pattern in normalized_col:
                     return col
         return ""
 

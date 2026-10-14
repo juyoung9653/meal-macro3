@@ -4,13 +4,24 @@ from datetime import UTC, date, datetime
 from uuid import uuid4
 
 import pytest
-from src.domain import (RosterSnapshot, Person, PersonProfile, RevisionActor,
-    RevisionMetadata, RevisionRecord, RevisionSource, CustomFieldType,
-    build_person_profile_revision)
+from src.domain.roster import (
+    RosterSnapshot,
+    Person,
+    PersonProfile,
+    CustomFieldType,
+)
+from src.domain.revisions import (
+    RevisionActor,
+    RevisionMetadata,
+    RevisionRecord,
+    RevisionSource,
+)
+from src.domain.profile_edits import build_person_profile_revision
 from src.domain.projections import roster_audit_changes, roster_from_historical_snapshot
 from src.domain.custom_field_edits import (
     build_custom_field_create_revision, build_custom_field_delete_revision)
-from src.storage import DatabaseSession, RevisionConflictError
+from src.storage.database_session import DatabaseSession
+from src.storage.encrypted_database import RevisionConflictError
 
 
 def metadata():
@@ -65,4 +76,5 @@ def test_custom_fields_create_edit_delete_reopen_and_stale_delete_is_atomic(tmp_
         assert all(field_id not in p.profile.custom_values for p in current.persons)
         historical = roster_from_historical_snapshot(session.database.snapshot(values_revision))
         assert historical.custom_fields[0].definition_id == field_id
+        assert historical.custom_fields[0].name == '추가 수량'
         assert {p.person_id: p.profile.custom_values[field_id] for p in historical.persons} == expected_values

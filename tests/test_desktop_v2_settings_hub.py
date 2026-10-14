@@ -11,15 +11,15 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6")
 
-from PySide6.QtWidgets import QApplication, QDialog
+from PySide6.QtWidgets import QApplication, QDialog, QLabel
 
-from src.desktop_v2 import (
-    DefaultDocumentDirectoryDialog,
-    DesktopStartupController,
+from src.desktop_v2.document_output import DefaultDocumentDirectoryDialog
+from src.desktop_v2.application import DesktopStartupController
+from src.desktop_v2.settings_hub import (
     SettingsAction,
     SettingsHubDialog,
 )
-from src.storage import AutomaticBackupResult
+from src.storage.database_session import AutomaticBackupResult
 from src.storage.database_backup import BackupPasswordRotation
 
 
@@ -51,6 +51,41 @@ def test_settings_hub_has_db_and_computer_local_jobs(app):
     assert "공통 설정" in SettingsAction.BACKUP_DIRECTORY.scope_label
     with pytest.raises(RuntimeError, match="아직 선택"):
         _ = dialog.selected_action
+    dialog.close()
+
+
+def test_settings_hub_groups_equal_half_width_cards_at_minimum_size(app):
+    dialog = SettingsHubDialog()
+    dialog.resize(800, 620)
+    dialog.show()
+    app.processEvents()
+
+    assert dialog._group_actions == {
+        "공통 운영": (
+            SettingsAction.PROVIDER,
+            SettingsAction.DELIVERY_DEFAULTS,
+        ),
+        "문서 출력": (
+            SettingsAction.DOCUMENT_TEMPLATE,
+            SettingsAction.DOCUMENT_COLUMN_MAPPING,
+            SettingsAction.EXPORT_PASSWORD,
+            SettingsAction.DOCUMENT_DIRECTORY,
+        ),
+        "데이터 보관·보안": (
+            SettingsAction.DATABASE_LOCATION,
+            SettingsAction.BACKUP_DIRECTORY,
+            SettingsAction.DATABASE_PASSWORD,
+        ),
+    }
+    widths = {card.width() for card in dialog._cards.values()}
+    assert len(widths) == 1
+    assert dialog._cards[SettingsAction.DATABASE_PASSWORD].width() < (
+        dialog._scroll.viewport().width() * 0.6
+    )
+    for card in dialog._cards.values():
+        labels = {label.objectName(): label for label in card.findChildren(QLabel)}
+        for name in ("settingsCardTitle", "settingsCardDescription"):
+            assert labels[name].height() >= labels[name].minimumSizeHint().height()
     dialog.close()
 
 

@@ -11,7 +11,11 @@ from datetime import datetime
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from src.domain import HistoricalSnapshot, RevisionRecord, RosterSnapshot
+from src.domain.revisions import (
+    HistoricalSnapshot,
+    RevisionRecord,
+)
+from src.domain.roster import RosterSnapshot
 from src.domain.delivery_routing import ROUTING_EVENT_KIND, routing_state_from_snapshot
 from src.domain.revisions import RevisionSource, format_revision_timestamp
 from src.domain.projections import (

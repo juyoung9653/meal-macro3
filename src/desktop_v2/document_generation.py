@@ -13,15 +13,17 @@ from uuid import UUID, uuid4
 from PySide6.QtWidgets import QMessageBox, QWidget
 
 from src.core.settings import SettingsManager, get_settings
-from src.domain import (
+from src.domain.documents import (
     DocumentKind,
     DocumentRun,
-    DocumentTemplateProfile,
-    RevisionActor,
-    RosterSnapshot,
-    require_document_template_setting,
-    require_export_password_setting,
 )
+from src.domain.document_templates import (
+    DocumentTemplateProfile,
+    require_document_template_setting,
+)
+from src.domain.revisions import RevisionActor
+from src.domain.roster import RosterSnapshot
+from src.domain.export_security import require_export_password_setting
 from src.excel.publication import WorkbookPublicationResult
 from src.generators.confirm_generator import make_confirm_publication
 from src.generators.invoice_generator import make_invoice_publication
@@ -37,7 +39,10 @@ from src.services.document_column_mappings import (
     mapping_setting_from_snapshot,
 )
 from src.services.sqlite_document_service import prepare_monthly_document_data
-from src.storage import AutomaticBackupResult, DatabaseSession
+from src.storage.database_session import (
+    AutomaticBackupResult,
+    DatabaseSession,
+)
 
 from .document_completion import GeneratedDocumentResult
 from .document_hub import DocumentAction
@@ -208,19 +213,11 @@ class DocumentGenerationController:
                     load_mapping_overrides(current_snapshot, profile_key, "invoice"),
                 )
                 _validate_custom_mapping_sources(column_mapping, current_roster)
-                _count, _batch, publication = self._invoice_writer(
+                _count, publication = self._invoice_writer(
                     prepared.batch,
                     column_mapping,
                     str(refreshed.output_path),
                     str(template_path),
-                    period.starts_on.year,
-                    period.starts_on.month,
-                    {
-                        "조식": prepared.batch.prices.breakfast,
-                        "중식": prepared.batch.prices.lunch,
-                        "석식": prepared.batch.prices.dinner,
-                    },
-                    is_vacation_month=prepared.batch.is_vacation_month,
                     meal_type=profile_key,
                     global_note=prepared.global_note,
                     output_password=password_setting.password,
@@ -242,8 +239,6 @@ class DocumentGenerationController:
                     column_mapping,
                     refreshed.output_path,
                     str(template_path),
-                    period.starts_on.year,
-                    period.starts_on.month,
                     meal_type=profile_key,
                     output_password=password_setting.password,
                 )

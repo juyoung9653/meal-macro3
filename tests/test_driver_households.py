@@ -1,7 +1,7 @@
 from datetime import date
 from uuid import UUID
 
-from src.domain import (
+from src.domain.roster import (
     DeliveryAssignment,
     CustomFieldDefinition,
     CustomFieldType,

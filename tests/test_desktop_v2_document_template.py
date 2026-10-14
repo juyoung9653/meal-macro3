@@ -10,20 +10,25 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 from PySide6.QtWidgets import QApplication, QDialog
 
-from src.desktop_v2 import DocumentTemplateController, DocumentTemplateDialog
-from src.domain import (
+from src.desktop_v2.document_template import (
+    DocumentTemplateController,
+    DocumentTemplateDialog,
+)
+from src.domain.document_templates import (
     DOCUMENT_TEMPLATE_SETTING_ID,
     DOCUMENT_TEMPLATE_SETTING_KIND,
+    DocumentTemplateProfile,
+    document_template_setting_from_state,
+)
+from src.domain.revisions import (
     AuditChange,
     ChangeOperation,
-    DocumentTemplateProfile,
     RevisionActor,
     RevisionMetadata,
     RevisionRecord,
     RevisionSource,
-    document_template_setting_from_state,
 )
-from src.storage import DatabaseSession
+from src.storage.database_session import DatabaseSession
 
 
 BASE_REVISION_ID = UUID("6c000000-0000-0000-0000-000000000001")

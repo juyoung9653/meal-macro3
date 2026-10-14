@@ -7,7 +7,6 @@ from datetime import date
 from PySide6.QtCore import QDate
 from PySide6.QtWidgets import (
     QCheckBox,
-    QDateEdit,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
@@ -19,6 +18,7 @@ from PySide6.QtWidgets import (
 from src.domain.roster import InclusiveDateRange
 from src.domain.status import MealStatus
 
+from .date_edit import WheelSafeDateEdit
 from .theme import application_stylesheet, register_application_fonts
 
 
@@ -116,13 +116,13 @@ class StatusPeriodDialog(QDialog):
         self.accept()
 
 
-def _date_edit(value: date) -> QDateEdit:
-    editor = QDateEdit(QDate(value.year, value.month, value.day))
+def _date_edit(value: date) -> WheelSafeDateEdit:
+    editor = WheelSafeDateEdit(QDate(value.year, value.month, value.day))
     editor.setCalendarPopup(True)
     editor.setDisplayFormat("yyyy.MM.dd")
     return editor
 
 
-def _python_date(editor: QDateEdit) -> date:
+def _python_date(editor: WheelSafeDateEdit) -> date:
     value = editor.date()
     return date(value.year(), value.month(), value.day())

@@ -3,30 +3,36 @@
 from datetime import UTC, date, datetime
 from uuid import UUID
 
-from src.domain import (
+from src.domain.entitlements import (
     BreakfastDeliveryRule,
     ClosedFridayMode,
     EntitlementExclusion,
-    Household,
-    HouseholdMembership,
-    InclusiveDateRange,
     LunchDayRule,
-    Meal,
-    MealEnrollment,
     MealEntitlement,
-    MealStatus,
-    Person,
-    PersonProfile,
     PhysicalDeliveryCalendar,
-    RosterSnapshot,
     SchoolLunchMark,
-    ServiceProvision,
-    ServiceTreatment,
-    StatusEvent,
     UnassignedReason,
     decide_entitlement,
     plan_breakfast_shipments,
+)
+from src.domain.roster import (
+    Household,
+    HouseholdMembership,
+    InclusiveDateRange,
+    Meal,
+    MealEnrollment,
+    Person,
+    PersonProfile,
+    RosterSnapshot,
+)
+from src.domain.status import (
+    MealStatus,
+    StatusEvent,
     resolve_status_history,
+)
+from src.domain.service_adjustments import (
+    ServiceProvision,
+    ServiceTreatment,
 )
 
 
@@ -188,26 +194,3 @@ def test_closed_friday_rule_can_move_only_weekend_entitlements_to_thursday():
     assert tuple(item.entitlement.service_on for item in plan.unassigned) == (friday,)
     assert plan.unassigned[0].reason is UnassignedReason.CLOSED_FRIDAY_POLICY
     assert plan.entitlement_count == 4
-
-
-def test_closed_friday_skip_mode_surfaces_all_three_undelivered_entitlements():
-    friday = date(2026, 8, 21)
-    entitlements = tuple(
-        MealEntitlement(PERSON_ID, Meal.BREAKFAST, friday.replace(day=day))
-        for day in (21, 22, 23)
-    )
-    calendar = PhysicalDeliveryCalendar(closed_days=frozenset({friday}))
-    rule = BreakfastDeliveryRule(
-        "breakfast-v2",
-        ClosedFridayMode.SKIP_FRIDAY_WEEKEND,
-    )
-
-    plan = plan_breakfast_shipments(entitlements, calendar, rule)
-
-    assert plan.shipments == ()
-    assert len(plan.unassigned) == 3
-    assert all(
-        item.reason is UnassignedReason.CLOSED_FRIDAY_POLICY
-        for item in plan.unassigned
-    )
-    assert plan.entitlement_count == 3

@@ -8,6 +8,7 @@ from uuid import UUID
 import zipfile
 import hashlib
 import json
+import tempfile
 
 import pytest
 
@@ -24,17 +25,20 @@ from src.domain.revisions import (
     RevisionRecord,
     RevisionSource,
 )
-from src.domain import DocumentKind, DocumentRun
-from src.storage import (
+from src.domain.documents import (
+    DocumentKind,
+    DocumentRun,
+)
+from src.storage.database_backup import (
     BACKUP_EXTENSION,
     BackupFormatError,
     BackupRestoreConflictError,
-    CredentialUnlockError,
     DEFAULT_MAX_BACKUPS,
     DatabaseBackupService,
-    DatabaseSession,
     inspect_backup,
 )
+from src.storage.database_credentials import CredentialUnlockError
+from src.storage.database_session import DatabaseSession
 from src.storage.database_backup import backup_has_recovery_password
 import src.storage.database_backup as backup_module
 
@@ -42,6 +46,34 @@ import src.storage.database_backup as backup_module
 REVISION_ID = UUID("70000000-0000-0000-0000-000000000001")
 ENTITY_ID = UUID("70000000-0000-0000-0000-000000000002")
 DOCUMENT_RUN_ID = UUID("70000000-0000-0000-0000-000000000003")
+
+
+def _legacy_backup(session, directory: Path):
+    """Build the shipped v1 archive independently of the current writer."""
+    with tempfile.TemporaryDirectory() as folder:
+        database_file = Path(folder) / "database.sqlite3"
+        session.database.backup_to(database_file, session._key_bytes())
+        payload = database_file.read_bytes()
+    credentials = session.credentials.to_bytes()
+    latest = session.database.latest_revision()
+    manifest = {
+        "format": "meal-delivery-v2-backup", "version": 1,
+        "created_at": datetime.now(UTC).isoformat(),
+        "source_database_name": session.path.name,
+        "database_id": str(session.credentials.database_id),
+        "schema_version": session.database.schema_version,
+        "latest_revision_id": str(latest.metadata.revision_id) if latest else None,
+        "database": {"member": "database.sqlite3", "size": len(payload),
+                     "sha256": hashlib.sha256(payload).hexdigest()},
+        "credentials": {"member": "credentials.json", "size": len(credentials),
+                        "sha256": hashlib.sha256(credentials).hexdigest()},
+    }
+    path = directory / "legacy.mealbackup"
+    with zipfile.ZipFile(path, "x", compression=zipfile.ZIP_STORED) as archive:
+        archive.writestr("database.sqlite3", payload)
+        archive.writestr("credentials.json", credentials)
+        archive.writestr("manifest.json", json.dumps(manifest).encode())
+    return inspect_backup(path)
 
 
 def _record() -> RevisionRecord:
@@ -180,7 +212,7 @@ def test_older_schema_backup_rotates_without_migrating_archive_and_restores(tmp_
     backups = tmp_path / "backups"
     backups.mkdir()
     with DatabaseSession.create(tmp_path / "source.sqlite3", "first", backup_directory=backups) as session:
-        archive_path = session.backup_now().path
+        archive_path = _legacy_backup(session, backups).path
         with zipfile.ZipFile(archive_path) as archive:
             database_payload = archive.read("database.sqlite3")
             credential_payload = archive.read("credentials.json")
@@ -332,7 +364,15 @@ def test_backup_restores_exact_revision_with_everyday_password(tmp_path: Path):
 
 
 def test_backup_restores_household_delivery_settings(tmp_path: Path):
-    from src.domain import Household, HouseholdMembership, Meal, Person, PersonProfile, RosterSnapshot, roster_audit_changes
+    from src.domain.roster import (
+        Household,
+        HouseholdMembership,
+        Meal,
+        Person,
+        PersonProfile,
+        RosterSnapshot,
+    )
+    from src.domain.projections import roster_audit_changes
     from src.domain.roster import HouseholdDeliverySetting
 
     source = tmp_path / "settings.sqlite3"
@@ -491,6 +531,7 @@ def test_retention_keeps_latest_for_same_database_only_and_preserves_unknown_fil
             first.credentials,
             first_key,
             created_at=base + timedelta(minutes=1),
+            force_full=True,
         )
         other_database = service.create_backup(
             second.database,
@@ -506,6 +547,7 @@ def test_retention_keeps_latest_for_same_database_only_and_preserves_unknown_fil
             first.credentials,
             first_key,
             created_at=base + timedelta(minutes=2),
+            force_full=True,
         )
     finally:
         first.close()

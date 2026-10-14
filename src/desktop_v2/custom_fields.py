@@ -28,7 +28,7 @@ from src.domain.custom_field_edits import (
 )
 from src.domain.revisions import RevisionActor
 from src.domain.roster import CustomFieldDefinition, CustomFieldType, RosterSnapshot
-from src.storage import DatabaseSession
+from src.storage.database_session import DatabaseSession
 
 from .import_controller import current_windows_actor
 from .theme import application_stylesheet, register_application_fonts

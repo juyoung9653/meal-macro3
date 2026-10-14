@@ -23,17 +23,20 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from src.domain import (
+from src.domain.document_templates import (
     DOCUMENT_TEMPLATE_SETTING_ID,
     DOCUMENT_TEMPLATE_SETTING_KIND,
     DocumentTemplateProfile,
     DocumentTemplateSetting,
-    RevisionActor,
-    RosterSnapshot,
     build_document_template_revision,
     document_template_setting_from_state,
 )
-from src.storage import AutomaticBackupResult, DatabaseSession
+from src.domain.revisions import RevisionActor
+from src.domain.roster import RosterSnapshot
+from src.storage.database_session import (
+    AutomaticBackupResult,
+    DatabaseSession,
+)
 
 from .import_controller import current_windows_actor
 from .theme import application_stylesheet, register_application_fonts

@@ -158,14 +158,19 @@ def test_effective_relocation_changes_only_from_its_date_without_original_column
     change = build_routing_revision(
         base, RoutingState(), person_id=base.persons[0].person_id, effective_on=DAY,
         driver_ids={}, road_address="새 주소", detail_address="202호",
+        jurisdiction="수내동",
         actor=ACTOR, recorded_at=STAMP, revision_id=uuid4(), event_id=uuid4(),
     )
     roster, snapshot = project(base, (change,))
-    for day, road, detail in ((date(2026, 9, 20), "이전 주소", "101호"), (DAY, "새 주소", "202호")):
+    for day, road, detail, jurisdiction in (
+        (date(2026, 9, 20), "이전 주소", "101호", ""),
+        (DAY, "새 주소", "202호", "수내동"),
+    ):
         book = build_database_workbook(roster, snapshot, (initial(base), change), day=day, sections=("roster",))
         first = next(row for row in rows(book["명단"]) if row["성명"] == "첫째")
         assert first["도로명주소"] == road
         assert first["상세주소"] == detail
+        assert first["관할동"] == jurisdiction
         assert "원본 도로명주소" not in first and "원본 상세주소" not in first
         book.close()
 

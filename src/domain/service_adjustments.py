@@ -20,7 +20,7 @@ from .revisions import (
     RevisionSource,
 )
 from .public_holidays import PublicHolidayCandidate
-from .roster import InclusiveDateRange, Meal
+from .roster import InclusiveDateRange, Meal, canonical_meals
 
 
 SERVICE_ADJUSTMENT_POLICY_VERSION = 1
@@ -90,7 +90,7 @@ class ServiceAdjustmentChange:
             raise TypeError("휴무 기간은 InclusiveDateRange여야 합니다.")
         if self.period.starts_on is None or self.period.ends_on is None:
             raise ValueError("휴무 기간에는 시작일과 종료일이 모두 필요합니다.")
-        object.__setattr__(self, "meals", _canonical_meals(self.meals))
+        object.__setattr__(self, "meals", canonical_meals(self.meals))
         if not isinstance(self.treatment, ServiceTreatment):
             raise TypeError("식사 처리는 ServiceTreatment여야 합니다.")
         if self.default_delivery_on is not None:
@@ -293,7 +293,7 @@ def previous_common_operating_day(
 
     if not isinstance(schedule, ServiceAdjustmentSchedule):
         raise TypeError("schedule은 ServiceAdjustmentSchedule이어야 합니다.")
-    selected_meals = _canonical_meals(meals)
+    selected_meals = canonical_meals(meals)
     _validate_date(starts_on, "휴무 시작일")
     excluded = frozenset(excluded_days)
     for excluded_day in excluded:
@@ -406,6 +406,7 @@ def build_public_holiday_review_revision(
     recorded_at: datetime,
     revision_id: UUID,
     change_ids: tuple[UUID, ...],
+    replacement_targets: tuple[tuple[date, Meal], ...] | None = None,
     reason: str = "공휴일 운영 일괄 검토 저장",
 ) -> PreparedPublicHolidayReviewRevision:
     """Append N holiday decisions in one schedule audit and one revision."""
@@ -419,7 +420,7 @@ def build_public_holiday_review_revision(
     _validate_datetime(recorded_at, "공휴일 검토 기록 시각")
     if not isinstance(treatment, ServiceTreatment):
         raise TypeError("식사 처리는 ServiceTreatment여야 합니다.")
-    selected_meals = _canonical_meals(meals)
+    selected_meals = canonical_meals(meals)
     candidates = tuple(public_holidays)
     if not candidates:
         raise ValueError("하나 이상의 공휴일 후보를 선택해야 합니다.")
@@ -447,15 +448,35 @@ def build_public_holiday_review_revision(
     actual_keys = tuple((item.service_on, item.meal) for item in deliveries)
     if len(set(actual_keys)) != len(actual_keys):
         raise ValueError("같은 공휴일·식종의 대체식 제공일이 중복되었습니다.")
-    expected_keys = {
+    selectable_keys = {
         (candidate.day, meal)
         for candidate in candidates
         for meal in selected_meals
     }
+    if replacement_targets is None:
+        expected_keys = selectable_keys
+    else:
+        targets = tuple(replacement_targets)
+        if any(
+            not isinstance(item, tuple)
+            or len(item) != 2
+            or isinstance(item[0], datetime)
+            or not isinstance(item[0], date)
+            or not isinstance(item[1], Meal)
+            for item in targets
+        ):
+            raise TypeError("대체식 제공 대상이 올바르지 않습니다.")
+        if len(set(targets)) != len(targets):
+            raise ValueError("대체식 제공 대상은 중복될 수 없습니다.")
+        expected_keys = set(targets)
+        if not expected_keys.issubset(selectable_keys):
+            raise ValueError("대체식 제공 대상이 선택한 공휴일·식종 범위 밖입니다.")
     if treatment is ServiceTreatment.REPLACEMENT:
+        if not expected_keys:
+            raise ValueError("선택한 범위에 대체식을 제공할 예정 식사가 없습니다.")
         if set(actual_keys) != expected_keys:
             raise ValueError(
-                "선택한 모든 공휴일·식종의 대체식 제공일이 필요합니다."
+                "대체식 제공 대상인 모든 공휴일·식종의 제공일이 필요합니다."
             )
     elif deliveries:
         raise ValueError("정상 운영·미제공에는 대체식 제공일이 없어야 합니다.")
@@ -477,11 +498,22 @@ def build_public_holiday_review_revision(
     changes: list[ServiceAdjustmentChange] = []
     updated = schedule
     for candidate, change_id in ordered_pairs:
+        change_meals = (
+            tuple(
+                meal
+                for meal in selected_meals
+                if (candidate.day, meal) in expected_keys
+            )
+            if treatment is ServiceTreatment.REPLACEMENT
+            else selected_meals
+        )
+        if not change_meals:
+            continue
         default_delivery_on: date | None = None
         overrides: tuple[ReplacementDeliveryOverride, ...] = ()
         if treatment is ServiceTreatment.REPLACEMENT:
             default_delivery_on = delivery_by_key[
-                (candidate.day, selected_meals[0])
+                (candidate.day, change_meals[0])
             ]
             overrides = tuple(
                 ReplacementDeliveryOverride(
@@ -489,14 +521,14 @@ def build_public_holiday_review_revision(
                     candidate.day,
                     delivery_by_key[(candidate.day, meal)],
                 )
-                for meal in selected_meals
+                for meal in change_meals
                 if delivery_by_key[(candidate.day, meal)]
                 != default_delivery_on
             )
         change = ServiceAdjustmentChange(
             change_id,
             InclusiveDateRange(candidate.day, candidate.day),
-            selected_meals,
+            change_meals,
             treatment,
             default_delivery_on,
             overrides,
@@ -735,17 +767,6 @@ def service_adjustment_schedule_from_state(
             )
         )
     return ServiceAdjustmentSchedule(tuple(changes))
-
-
-def _canonical_meals(meals: Sequence[Meal]) -> tuple[Meal, ...]:
-    values = tuple(meals)
-    if not values:
-        raise ValueError("하나 이상의 식종을 선택해야 합니다.")
-    if any(not isinstance(meal, Meal) for meal in values):
-        raise TypeError("meals에는 Meal만 허용됩니다.")
-    if len(set(values)) != len(values):
-        raise ValueError("선택한 식종은 중복될 수 없습니다.")
-    return tuple(meal for meal in Meal if meal in values)
 
 
 def _service_adjustment_decision(

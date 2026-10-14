@@ -14,8 +14,12 @@ pytest.importorskip("PySide6")
 
 from PySide6.QtWidgets import QApplication
 
-from src.desktop_v2 import DocumentSourceDialog
-from src.domain import RevisionActor, RevisionSource, RevisionSummary
+from src.desktop_v2.document_source import DocumentSourceDialog
+from src.domain.revisions import (
+    RevisionActor,
+    RevisionSource,
+    RevisionSummary,
+)
 
 
 FIRST_ID = UUID("56000000-0000-0000-0000-000000000001")

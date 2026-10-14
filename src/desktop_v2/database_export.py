@@ -7,7 +7,6 @@ from time import monotonic
 from PySide6.QtCore import QDate, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtWidgets import (
     QCheckBox,
-    QDateEdit,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
@@ -22,6 +21,7 @@ from src.domain.export_security import require_export_password_setting
 from src.excel.publication import publish_workbook
 from src.services.database_export import build_database_workbook
 
+from .date_edit import WheelSafeDateEdit
 from .ledger_reader import load_revision_chain
 from .theme import application_stylesheet, register_application_fonts
 
@@ -44,7 +44,7 @@ class DatabaseExportDialog(QDialog):
         intro.setWordWrap(True)
         layout.addWidget(intro)
         form = QFormLayout()
-        self.day = QDateEdit(QDate(day.year, day.month, day.day))
+        self.day = WheelSafeDateEdit(QDate(day.year, day.month, day.day))
         self.day.setCalendarPopup(True)
         self.day.setDisplayFormat("yyyy-MM-dd")
         form.addRow("명단 조회 기준일", self.day)

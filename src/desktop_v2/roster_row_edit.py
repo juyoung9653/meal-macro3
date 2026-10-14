@@ -9,15 +9,20 @@ from enum import StrEnum
 from uuid import UUID, uuid4
 
 from PySide6.QtCore import QDate
-from PySide6.QtWidgets import QCheckBox, QComboBox, QDateEdit, QDialog, QFormLayout, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QCheckBox, QComboBox, QDialog, QFormLayout, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QVBoxLayout, QWidget
 
-from src.domain.delivery_routing import Driver, RoutingState, routing_state_from_snapshot
-from src.domain.roster import CustomFieldDefinition, CustomFieldType, DeliveryAssignment, Household, Meal, Person, PersonProfile, RosterSnapshot
+from src.domain.delivery_routing import RoutingState, routing_state_from_snapshot
+from src.domain.roster import CustomFieldDefinition, CustomFieldType, DeliveryAssignment, Meal, Person, PersonProfile, RosterSnapshot
 from src.domain.roster_row_changes import build_roster_row_revision
 from src.domain.revisions import RevisionActor
 from src.domain.status import MealStatus
-from src.storage import AutomaticBackupResult, DatabaseSession
+from src.importing.households import household_matching_rules_from_snapshot, match_existing_household_id
+from src.storage.database_session import (
+    AutomaticBackupResult,
+    DatabaseSession,
+)
 
+from .date_edit import WheelSafeDateEdit
 from .import_controller import current_windows_actor
 from .person_edit import _FIELD_LABELS, _custom_value, _parse_optional_date
 from .theme import application_stylesheet, register_application_fonts
@@ -36,7 +41,7 @@ class RosterRowCreateRequest:
 class RosterRowCreateDialog(QDialog):
     """Collect a new person's profile and at least one enrolled meal."""
 
-    def __init__(self, selected_meal: Meal = Meal.LUNCH, start_date: date | None = None, parent: QWidget | None = None, *, custom_fields: tuple[CustomFieldDefinition, ...] = (), drivers: tuple[Driver, ...] = (), households: tuple[Household, ...] = (), household_labels: dict[UUID, str] | None = None) -> None:
+    def __init__(self, selected_meal: Meal = Meal.LUNCH, start_date: date | None = None, parent: QWidget | None = None, *, custom_fields: tuple[CustomFieldDefinition, ...] = (), household_matcher: Callable[[PersonProfile, date], UUID | None] | None = None) -> None:
         super().__init__(parent)
         register_application_fonts()
         self.setStyleSheet(application_stylesheet())
@@ -44,12 +49,13 @@ class RosterRowCreateDialog(QDialog):
         self.resize(760, 640)
         self.setMinimumSize(650, 580)
         self._custom_fields = custom_fields
+        self._household_matcher = household_matcher
         self._editors: dict[str, QLineEdit | QPlainTextEdit | QComboBox] = {}
         root = QVBoxLayout(self)
         title = QLabel("대상자 추가")
         title.setObjectName("workspaceTitle")
         root.addWidget(title)
-        hint = QLabel("명단의 인적사항, 가입 식종, 배송담당과 순서를 한 번에 입력합니다. 배송 시작일 전에는 배송 대상에 포함되지 않습니다.")
+        hint = QLabel("명단의 인적사항과 가입 식종을 입력합니다. 배송 시작일 전에는 배송 대상에 포함되지 않습니다.")
         hint.setObjectName("workspaceSubtitle")
         hint.setWordWrap(True)
         root.addWidget(hint)
@@ -60,8 +66,8 @@ class RosterRowCreateDialog(QDialog):
         body_layout = QVBoxLayout(body)
         body_layout.setContentsMargins(0, 0, 0, 0)
         for title_text, keys in (
-            ("기본·학교", ("name", "birth_date", "school_type", "school_name", "grade", "class_name")),
-            ("가구·기관", ("household_head_name", "relationship_to_child", "jurisdiction", "provider")),
+            ("기본·학교", ("name", "birth_date", "school_type", "school_name", "grade")),
+            ("가구", ("household_head_name", "relationship_to_child", "jurisdiction")),
             ("연락처·주소", ("mobile_phone", "telephone", "road_address", "detail_address")),
         ):
             frame = QFrame()
@@ -72,7 +78,7 @@ class RosterRowCreateDialog(QDialog):
             section.addWidget(label)
             grid = QGridLayout()
             for index, key in enumerate(keys):
-                field_label = QLabel(_FIELD_LABELS.get(key, {"class_name": "반", "provider": "제공기관"}.get(key, key)) + (" *" if key == "name" else ""))
+                field_label = QLabel(_FIELD_LABELS.get(key, key) + (" *" if key == "name" else ""))
                 editor = QLineEdit()
                 editor.setObjectName(f"newPerson_{key}")
                 editor.setClearButtonEnabled(True)
@@ -127,66 +133,11 @@ class RosterRowCreateDialog(QDialog):
             meals_row.addWidget(check)
         delivery_form.addRow("가입 식종 *", meals_row)
         day = start_date or date.today()
-        self.start_date_edit = QDateEdit(QDate(day.year, day.month, day.day))
+        self.start_date_edit = WheelSafeDateEdit(QDate(day.year, day.month, day.day))
         self.start_date_edit.setObjectName("deliveryStartDate")
         self.start_date_edit.setCalendarPopup(True)
         self.start_date_edit.setDisplayFormat("yyyy-MM-dd")
         delivery_form.addRow("배송 시작일 *", self.start_date_edit)
-        self.household_combo = QComboBox()
-        self.household_combo.setObjectName("newPerson_household")
-        self.household_combo.addItem("가구 연결 없음", None)
-        for household in households:
-            self.household_combo.addItem((household_labels or {}).get(household.household_id, "구성원 없는 가구"), household.household_id)
-        delivery_form.addRow("기존 가구", self.household_combo)
-        self._driver_combos: dict[Meal, QComboBox] = {}
-        self._legacy_driver_edits: dict[Meal, QLineEdit] = {}
-        self._sequence_edits: dict[Meal, QLineEdit] = {}
-        self._status_combos: dict[Meal, QComboBox] = {}
-        self._pause_end_edits: dict[Meal, QLineEdit] = {}
-        name_counts = {driver.name: sum(other.name == driver.name for other in drivers) for driver in drivers}
-        for meal in (Meal.DINNER, Meal.BREAKFAST, Meal.LUNCH):
-            row = QHBoxLayout()
-            driver_combo = QComboBox()
-            driver_combo.setObjectName(f"newPerson_driver_{meal.name}")
-            driver_combo.addItem("미지정", None)
-            for driver in drivers:
-                detail = driver.telephone or str(driver.driver_id)[:8]
-                label = f"{driver.name} · {detail}" if name_counts[driver.name] > 1 or driver.telephone else driver.name
-                driver_combo.addItem(label, driver.driver_id)
-            row.addWidget(driver_combo, 2)
-            legacy_edit = QLineEdit()
-            legacy_edit.setObjectName(f"newPerson_legacy_driver_{meal.name}")
-            legacy_edit.setPlaceholderText("미등록 기사명")
-            row.addWidget(legacy_edit, 1)
-            sequence_edit = QLineEdit()
-            sequence_edit.setObjectName(f"newPerson_sequence_{meal.name}")
-            sequence_edit.setPlaceholderText("배송순서")
-            row.addWidget(sequence_edit, 1)
-            delivery_form.addRow(f"{meal.value} 담당·순서", row)
-            self._driver_combos[meal], self._legacy_driver_edits[meal], self._sequence_edits[meal] = driver_combo, legacy_edit, sequence_edit
-            status_row = QHBoxLayout()
-            status_combo = QComboBox()
-            status_combo.setObjectName(f"newPerson_status_{meal.name}")
-            for status in MealStatus:
-                status_combo.addItem(status.value, status)
-            status_row.addWidget(status_combo)
-            pause_end = QLineEdit()
-            pause_end.setObjectName(f"newPerson_pause_end_{meal.name}")
-            pause_end.setPlaceholderText("일시중지 종료일 YYYY-MM-DD")
-            pause_end.setEnabled(False)
-            status_combo.currentIndexChanged.connect(lambda _index, combo=status_combo, editor=pause_end, check=self._meal_checks[meal]: editor.setEnabled(check.isChecked() and combo.currentData() == MealStatus.PAUSED))
-            status_row.addWidget(pause_end)
-            delivery_form.addRow(f"{meal.value} 초기 상태", status_row)
-            self._status_combos[meal], self._pause_end_edits[meal] = status_combo, pause_end
-            controls = (driver_combo, sequence_edit, status_combo)
-            self._meal_checks[meal].toggled.connect(lambda checked, widgets=controls, legacy_editor=legacy_edit, selected=driver_combo, end=pause_end, status_box=status_combo: (
-                [widget.setEnabled(checked) for widget in widgets],
-                legacy_editor.setEnabled(checked and selected.currentData() is None),
-                end.setEnabled(checked and status_box.currentData() == MealStatus.PAUSED),
-            ))
-            driver_combo.currentIndexChanged.connect(lambda _index, selected=driver_combo, editor=legacy_edit, check=self._meal_checks[meal]: editor.setEnabled(selected.currentData() is None and check.isChecked()))
-            for widget in (*controls, legacy_edit):
-                widget.setEnabled(self._meal_checks[meal].isChecked())
         body_layout.addWidget(delivery_frame)
         scroll.setWidget(body)
         root.addWidget(scroll, 1)
@@ -226,41 +177,25 @@ class RosterRowCreateDialog(QDialog):
                     custom_values[definition.definition_id] = parsed
             profile = PersonProfile(
                 name=value("name"), birth_date=_parse_optional_date(value("birth_date")),
-                **{key: value(key) or None for key in ("school_type", "school_name", "grade", "class_name", "household_head_name", "relationship_to_child", "jurisdiction", "provider", "road_address", "detail_address", "telephone", "mobile_phone", "note")},
+                **{key: value(key) or None for key in ("school_type", "school_name", "grade", "household_head_name", "relationship_to_child", "jurisdiction", "road_address", "detail_address", "telephone", "mobile_phone", "note")},
                 custom_values=custom_values,
             )
             meals = tuple(meal for meal, check in self._meal_checks.items() if check.isChecked())
             if not meals:
                 raise ValueError("가입 식종을 하나 이상 선택해주세요.")
-            assignments = {}
-            statuses = {}
-            for meal in (Meal.DINNER, Meal.BREAKFAST, Meal.LUNCH):
-                registered = self._driver_combos[meal].currentData()
-                legacy = self._legacy_driver_edits[meal].text().strip() if registered is None else ""
-                sequence = self._sequence_edits[meal].text().strip() or None
-                status = MealStatus(self._status_combos[meal].currentData())
-                pause_text = self._pause_end_edits[meal].text().strip()
-                if meal not in meals:
-                    continue
-                if registered is not None or legacy or sequence:
-                    assignments[meal] = (registered if registered is not None else legacy or None, sequence)
-                if status is MealStatus.PAUSED:
-                    if not pause_text:
-                        raise ValueError(f"{meal.value} 일시중지 종료일을 입력해주세요.")
-                    pause_end = _parse_optional_date(pause_text)
-                    if pause_end < self.start_date_edit.date().toPython():
-                        raise ValueError(f"{meal.value} 일시중지 종료일은 배송 시작일 이후여야 합니다.")
-                    statuses[meal] = (status, pause_end)
-                elif status is MealStatus.STOPPED:
-                    statuses[meal] = (status, None)
-        except (TypeError, ValueError) as error:
+            selected_day = self.start_date_edit.date()
+            starts_on = date(selected_day.year(), selected_day.month(), selected_day.day())
+            household_id = (
+                self._household_matcher(profile, starts_on)
+                if self._household_matcher is not None else None
+            )
+        except (TypeError, ValueError, KeyError) as error:
             self._error.setText(str(error))
             self._error.show()
             return
-        selected_day = self.start_date_edit.date()
         self._profile, self._meals = profile, meals
-        self._start_date = date(selected_day.year(), selected_day.month(), selected_day.day())
-        self._request = RosterRowCreateRequest(profile, meals, self._start_date, assignments, self.household_combo.currentData(), statuses)
+        self._start_date = starts_on
+        self._request = RosterRowCreateRequest(profile, meals, starts_on, {}, household_id, {})
         self.accept()
 
     def values(self) -> tuple[PersonProfile, tuple[Meal, ...], date]:
@@ -336,20 +271,32 @@ class RosterRowEditController:
         roster = self._session.database.current_roster()
         if roster is None:
             return self._failure(parent, ValueError("현재 명단이 없습니다."))
-        state = (
-            routing_state_from_snapshot(self._session.database.snapshot(roster.revision_id))
-            if hasattr(self._session.database, "snapshot") else RoutingState()
-        )
+        snapshot = None
+        household_rule = None
         if self._dialog_type is RosterRowCreateDialog:
             on = service_day or date.today()
-            household_labels = {}
-            for household in roster.households:
-                members = roster.household_members(household.household_id, on=on)
-                if members:
-                    names = ", ".join(person.profile.name for person in members)
-                    address = next((person.profile.road_address for person in members if person.profile.road_address), None)
-                    household_labels[household.household_id] = names + (f" · {address}" if address else "")
-            dialog = self._dialog_type(selected_meal, on, parent, custom_fields=roster.custom_fields, drivers=state.drivers, households=roster.households, household_labels=household_labels)
+            try:
+                snapshot = (
+                    self._session.database.snapshot(roster.revision_id)
+                    if hasattr(self._session.database, "snapshot") else None
+                )
+                household_rules = household_matching_rules_from_snapshot(snapshot)
+                if len(household_rules) > 1:
+                    raise ValueError(
+                        "활성 가구 묶기 규칙이 둘 이상이라 대상자를 추가할 수 없습니다."
+                    )
+                household_rule = household_rules[0].rule if household_rules else None
+            except Exception as error:
+                return self._failure(parent, error)
+            dialog = self._dialog_type(
+                selected_meal,
+                on,
+                parent,
+                custom_fields=roster.custom_fields,
+                household_matcher=lambda profile, starts_on: match_existing_household_id(
+                    profile, household_rule, roster, effective_on=starts_on,
+                ),
+            )
         else:
             dialog = self._dialog_type(selected_meal, service_day or date.today(), parent)
         if dialog.exec() != QDialog.DialogCode.Accepted:
@@ -359,6 +306,27 @@ class RosterRowEditController:
             profile, meals, starts_on = dialog.values()
             return self._commit(parent, add_person=Person(person_id, profile), enroll_meals=meals, delivery_starts_on=starts_on)
         request = dialog.request()
+        try:
+            if snapshot is None and hasattr(self._session.database, "snapshot"):
+                snapshot = self._session.database.snapshot(roster.revision_id)
+            household_rules = household_matching_rules_from_snapshot(snapshot)
+            if len(household_rules) > 1:
+                raise ValueError("활성 가구 묶기 규칙이 둘 이상이라 대상자를 추가할 수 없습니다.")
+            household_rule = household_rules[0].rule if household_rules else None
+            household_id = request.household_id
+            if household_id is None:
+                household_id = match_existing_household_id(
+                    request.profile,
+                    household_rule,
+                    roster,
+                    effective_on=request.starts_on,
+                )
+            state = (
+                routing_state_from_snapshot(snapshot)
+                if snapshot is not None and request.assignments else RoutingState()
+            )
+        except Exception as error:
+            return self._failure(parent, error)
         meal_assignments = []
         driver_ids = {}
         for meal, (driver, sequence) in request.assignments.items():
@@ -369,7 +337,7 @@ class RosterRowEditController:
         return self._commit(
             parent, add_person=Person(person_id, request.profile), enroll_meals=request.meals,
             delivery_starts_on=request.starts_on, meal_assignments=tuple(meal_assignments),
-            household_id=request.household_id, driver_ids=driver_ids, routing_state=state,
+            household_id=household_id, driver_ids=driver_ids, routing_state=state,
             routing_event_id=uuid4() if driver_ids else None, initial_statuses=request.statuses,
             status_event_ids={meal: uuid4() for meal in request.statuses},
         )

@@ -11,7 +11,8 @@ from src.domain.document_column_mappings import (
 )
 from src.domain.revisions import EntityRef, HistoricalSnapshot, RevisionActor
 from src.generators.confirm_generator import _mapped_source_column
-from src.services.document_column_mappings import mapping_editor_spec
+from src.services.document_column_mappings import effective_mapping, mapping_editor_spec
+from src.templates.config import auto_detect_semantic_columns
 
 
 def test_scope_reset_noop_and_history():
@@ -57,3 +58,58 @@ def test_confirmation_locked_grouping_fields_have_accurate_reason():
     assert set(spec.locked_targets) == {"도로명주소", "상세주소", "관할동"}
     for target in spec.locked_targets:
         assert spec.target_labels[target] == f"{target} (가구 묶음 기준)"
+
+
+def test_semantic_total_prefers_normalized_exact_header_over_relationship_substring():
+    detected = auto_detect_semantic_columns(
+        ["아동과의\n관계", "계 (급식수)", "청구금액 (원)"]
+    )
+
+    assert detected["__calc_total"] == "계 (급식수)"
+    assert detected["__calc_price"] == "청구금액 (원)"
+
+
+def test_semantic_total_does_not_use_single_character_substring_fallback():
+    detected = auto_detect_semantic_columns(["아동과의 관계", "제공기관"])
+
+    assert detected["__calc_total"] == "계"
+
+
+@pytest.mark.parametrize("profile", ["급식", "행복도시락"])
+def test_invoice_relationship_is_editable_but_total_and_provider_are_automatic(profile):
+    spec = mapping_editor_spec(profile, "invoice")
+    normalized = {
+        "".join(target.split()).replace("(급식수)", ""): target
+        for target in spec.targets
+    }
+    relationship = normalized["아동과의관계"]
+    total = normalized["계"]
+
+    assert spec.defaults[relationship] == "아동과의 관계"
+    assert relationship not in spec.locked_targets
+    assert total in spec.locked_targets
+    assert "제공기관" in spec.locked_targets
+    assert spec.target_labels["제공기관"] == "제공기관 (공통 설정 자동 적용)"
+
+
+def test_effective_invoice_mapping_ignores_stale_automatic_column_overrides():
+    defaults = {
+        "__calc_total": "계 (급식수)",
+        "아동과의 관계": "아동과의 관계",
+        "제공기관": "제공기관",
+    }
+
+    mapping = effective_mapping(
+        defaults,
+        {
+            "아동과의 관계": "custom:relationship",
+            "계 (급식수)": "아동과의 관계",
+            "제공기관": "학교명",
+            "연번": "학교명",
+        },
+    )
+
+    assert mapping["아동과의 관계"] == "custom:relationship"
+    assert "계 (급식수)" not in mapping
+    assert mapping["제공기관"] == "제공기관"
+    assert "연번" not in mapping

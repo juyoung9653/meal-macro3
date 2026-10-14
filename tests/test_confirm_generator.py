@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import os
+from datetime import date
 from pathlib import Path
 
 import openpyxl
 import pytest
-
-from datetime import date
 
 from src.core.delivery_matrix import RosterEntry
 from src.core.invoice_data import (
@@ -17,31 +16,25 @@ from src.core.invoice_data import (
     MonthlyDeliveryBatch,
     WeeklyDelivery,
 )
-from src.generators.confirm_generator import make_confirm, make_confirm_publication
+from src.generators.confirm_generator import make_confirm_publication
 from src.templates.template_scanner import scan_placeholders
 
 
 def _weekly_counts(
     *, breakfast: int = 0, lunch: int = 0, dinner: int = 0
-) -> list[dict]:
-    ranges = [
-        ("20260601", "20260606"),
-        ("20260607", "20260613"),
-        ("20260614", "20260620"),
-        ("20260621", "20260627"),
-        ("20260628", "20260630"),
-    ]
-    return [
-        {
-            "week": week,
-            "start_date": start,
-            "end_date": end,
-            "조식": breakfast if week == 1 else 0,
-            "중식": lunch if week == 1 else 0,
-            "석식": dinner if week == 1 else 0,
-        }
+) -> tuple[WeeklyDelivery, ...]:
+    ranges = [(1, 6), (7, 13), (14, 20), (21, 27), (28, 30)]
+    return tuple(
+        WeeklyDelivery(
+            week,
+            date(2026, 6, start),
+            date(2026, 6, end),
+            breakfast if week == 1 else 0,
+            lunch if week == 1 else 0,
+            dinner if week == 1 else 0,
+        )
         for week, (start, end) in enumerate(ranges, start=1)
-    ]
+    )
 
 
 def _roster_person(
@@ -50,18 +43,28 @@ def _roster_person(
     *,
     detail_address: object = "",
     dong: object = "정자동",
-) -> dict:
-    return {
-        "성명": name,
-        "세대주 성명": f"{name} 보호자",
-        "핸드폰": "010-1111-1111",
-        "관할동": dong,
-        "도로명주소": address,
-        "상세주소": detail_address,
-        "_note": "",
-        "배송담당": "기사A",
-        "weekly_meal_counts": _weekly_counts(lunch=1),
-    }
+    source_row: int = 2,
+) -> MonthlyDelivery:
+    return MonthlyDelivery(
+        roster=RosterEntry(
+            source_row,
+            {
+                "성명": name,
+                "세대주 성명": f"{name} 보호자",
+                "핸드폰": "010-1111-1111",
+                "관할동": dong,
+                "도로명주소": address,
+                "상세주소": detail_address,
+            },
+        ),
+        note="",
+        delivery_staff="기사A",
+        delivery_sequence="",
+        breakfast_count=0,
+        lunch_count=1,
+        dinner_count=0,
+        weekly=_weekly_counts(lunch=1),
+    )
 
 
 def _typed_delivery(name: str, household_key: str, address: str) -> MonthlyDelivery:
@@ -83,9 +86,7 @@ def _typed_delivery(name: str, household_key: str, address: str) -> MonthlyDeliv
         0,
         1,
         0,
-        (
-            WeeklyDelivery(1, date(2026, 6, 1), date(2026, 6, 6), 0, 1, 0),
-        ),
+        (WeeklyDelivery(1, date(2026, 6, 1), date(2026, 6, 6), 0, 1, 0),),
         billing_amount=10_000,
         household_key=household_key,
     )
@@ -111,8 +112,6 @@ def test_typed_db_household_ids_do_not_merge_same_address(
         {},
         tmp_path / "stable-households.xlsx",
         confirm_template,
-        2026,
-        6,
         meal_type="급식",
     )
 
@@ -140,8 +139,6 @@ def test_typed_same_household_requires_one_consistent_address(tmp_path: Path):
             {},
             tmp_path / "invalid-household.xlsx",
             "사용되지않는.xlsx",
-            2026,
-            6,
             meal_type="급식",
         )
 
@@ -158,35 +155,53 @@ def test_renders_existing_template_from_prepared_weekly_data_without_reader_call
     tmp_path: Path, confirm_template: str
 ):
     people = [
-        {
-            "성명": "홍길동",
-            "세대주 성명": "홍보호",
-            "핸드폰": "010-1111-1111",
-            "관할동": "정자동",
-            "도로명주소": "성남시 분당구 같은집",
-            "_note": "견과류 알레르기",
-            "배송담당": "기사A",
-            "weekly_meal_counts": _weekly_counts(breakfast=1, lunch=2),
-        },
-        {
-            "성명": "김영희",
-            "세대주 성명": "김보호",
-            "핸드폰": "010-2222-2222",
-            "관할동": "정자동",
-            "도로명주소": "성남시 분당구 같은집",
-            "_note": "",
-            "배송담당": "기사B",
-            "weekly_meal_counts": _weekly_counts(dinner=3),
-        },
+        MonthlyDelivery(
+            roster=RosterEntry(
+                2,
+                {
+                    "성명": "홍길동",
+                    "세대주 성명": "홍보호",
+                    "핸드폰": "010-1111-1111",
+                    "관할동": "정자동",
+                    "도로명주소": "성남시 분당구 같은집",
+                },
+            ),
+            note="견과류 알레르기",
+            delivery_staff="기사A",
+            delivery_sequence="",
+            breakfast_count=1,
+            lunch_count=2,
+            dinner_count=0,
+            weekly=_weekly_counts(breakfast=1, lunch=2),
+        ),
+        MonthlyDelivery(
+            roster=RosterEntry(
+                3,
+                {
+                    "성명": "김영희",
+                    "세대주 성명": "김보호",
+                    "핸드폰": "010-2222-2222",
+                    "관할동": "정자동",
+                    "도로명주소": "성남시 분당구 같은집",
+                },
+            ),
+            note="",
+            delivery_staff="기사B",
+            delivery_sequence="",
+            breakfast_count=0,
+            lunch_count=0,
+            dinner_count=3,
+            weekly=_weekly_counts(dinner=3),
+        ),
     ]
 
-    created = make_confirm(
-        roster_data=people,
+    created, _publication = make_confirm_publication(
+        batch=MonthlyDeliveryBatch(
+            2026, 6, MealPrices(9500, 9500, 9500), False, tuple(people)
+        ),
         col_mapping={},
-        output_dir=str(tmp_path),
+        output_path=tmp_path / "확인서_202606.xlsx",
         template_path=confirm_template,
-        year=2026,
-        month=6,
         meal_type="급식",
     )
 
@@ -233,13 +248,13 @@ def test_same_road_with_different_detail_addresses_are_separate_households(
         _roster_person("102호 대상", "성남대로 1", detail_address="102호"),
     ]
 
-    created = make_confirm(
-        roster_data=people,
+    created, _publication = make_confirm_publication(
+        batch=MonthlyDeliveryBatch(
+            2026, 6, MealPrices(9500, 9500, 9500), False, tuple(people)
+        ),
         col_mapping={},
-        output_dir=str(tmp_path),
+        output_path=tmp_path / "확인서_202606.xlsx",
         template_path=confirm_template,
-        year=2026,
-        month=6,
         meal_type="급식",
     )
 
@@ -263,24 +278,33 @@ def test_same_road_with_different_detail_addresses_are_separate_households(
 def test_none_roster_values_render_as_blanks_with_safe_sheet_fallback(
     tmp_path: Path, confirm_template: str
 ):
-    person = {
-        "성명": None,
-        "세대주 성명": None,
-        "핸드폰": None,
-        "관할동": None,
-        "도로명주소": "성남시 분당구 유효주소",
-        "_note": None,
-        "배송담당": None,
-        "weekly_meal_counts": _weekly_counts(lunch=1),
-    }
+    person = MonthlyDelivery(
+        roster=RosterEntry(
+            2,
+            {
+                "성명": None,
+                "세대주 성명": None,
+                "핸드폰": None,
+                "관할동": None,
+                "도로명주소": "성남시 분당구 유효주소",
+            },
+        ),
+        note="",
+        delivery_staff="",
+        delivery_sequence="",
+        breakfast_count=0,
+        lunch_count=1,
+        dinner_count=0,
+        weekly=_weekly_counts(lunch=1),
+    )
 
-    created = make_confirm(
-        roster_data=[person],
+    created, _publication = make_confirm_publication(
+        batch=MonthlyDeliveryBatch(
+            2026, 6, MealPrices(9500, 9500, 9500), False, (person,)
+        ),
         col_mapping={},
-        output_dir=str(tmp_path),
+        output_path=tmp_path / "확인서_202606.xlsx",
         template_path=confirm_template,
-        year=2026,
-        month=6,
         meal_type="급식",
     )
 
@@ -302,20 +326,27 @@ def test_none_roster_values_render_as_blanks_with_safe_sheet_fallback(
 
 
 def test_rejects_single_blank_mapped_address_with_dong_and_name(tmp_path: Path):
-    person = {
-        "이름": "주소없는대상자",
-        "동": "정자동",
-        "주소": " \r\n ",
-    }
+    person = MonthlyDelivery(
+        roster=RosterEntry(
+            2, {"이름": "주소없는대상자", "동": "정자동", "주소": " \r\n "}
+        ),
+        note="",
+        delivery_staff="",
+        delivery_sequence="",
+        breakfast_count=0,
+        lunch_count=1,
+        dinner_count=0,
+        weekly=(),
+    )
 
     with pytest.raises(ValueError) as exc_info:
-        make_confirm(
-            roster_data=[person],
+        make_confirm_publication(
+            batch=MonthlyDeliveryBatch(
+                2026, 6, MealPrices(9500, 9500, 9500), False, (person,)
+            ),
             col_mapping={"도로명주소": "주소", "성명": "이름", "관할동": "동"},
-            output_dir=str(tmp_path),
+            output_path=tmp_path / "확인서_202606.xlsx",
             template_path="사용되지않는_확인서템플릿.xlsx",
-            year=2026,
-            month=6,
             meal_type="급식",
         )
 
@@ -332,17 +363,17 @@ def test_rejects_multiple_blank_addresses_with_names_and_roster_positions(
     names = ["첫번째", "두번째"]
     people = [
         _roster_person(names[0], None),
-        _roster_person(names[1], " \n "),
+        _roster_person(names[1], " \n ", source_row=3),
     ]
 
     with pytest.raises(ValueError) as exc_info:
-        make_confirm(
-            roster_data=people,
+        make_confirm_publication(
+            batch=MonthlyDeliveryBatch(
+                2026, 6, MealPrices(9500, 9500, 9500), False, tuple(people)
+            ),
             col_mapping={},
-            output_dir=str(tmp_path),
+            output_path=tmp_path / "확인서_202606.xlsx",
             template_path="사용되지않는_확인서템플릿.xlsx",
-            year=2026,
-            month=6,
             meal_type="급식",
         )
 
@@ -359,16 +390,19 @@ def test_rejects_six_person_household_with_names_and_roster_positions(
 ):
     address = "성남시 분당구 여섯명가구"
     names = [f"대상자{i}" for i in range(1, 7)]
-    people = [_roster_person(name, address) for name in names]
+    people = [
+        _roster_person(name, address, source_row=index)
+        for index, name in enumerate(names, start=2)
+    ]
 
     with pytest.raises(ValueError) as exc_info:
-        make_confirm(
-            roster_data=people,
+        make_confirm_publication(
+            batch=MonthlyDeliveryBatch(
+                2026, 6, MealPrices(9500, 9500, 9500), False, tuple(people)
+            ),
             col_mapping={},
-            output_dir=str(tmp_path),
+            output_path=tmp_path / "확인서_202606.xlsx",
             template_path="사용되지않는_확인서템플릿.xlsx",
-            year=2026,
-            month=6,
             meal_type="급식",
         )
 
@@ -385,15 +419,18 @@ def test_renders_five_person_household_without_omission(
 ):
     address = "성남시 분당구 다섯명가구"
     names = [f"대상자{i}" for i in range(1, 6)]
-    people = [_roster_person(name, address) for name in names]
+    people = [
+        _roster_person(name, address, source_row=index)
+        for index, name in enumerate(names, start=2)
+    ]
 
-    created = make_confirm(
-        roster_data=people,
+    created, _publication = make_confirm_publication(
+        batch=MonthlyDeliveryBatch(
+            2026, 6, MealPrices(9500, 9500, 9500), False, tuple(people)
+        ),
         col_mapping={},
-        output_dir=str(tmp_path),
+        output_path=tmp_path / "확인서_202606.xlsx",
         template_path=confirm_template,
-        year=2026,
-        month=6,
         meal_type="급식",
     )
 
@@ -415,24 +452,33 @@ def test_happy_lunch_delivery_phone_placeholder_is_explicitly_blank(tmp_path: Pa
     if not os.path.exists(template):
         pytest.skip("행복도시락 확인서 템플릿 없음")
 
-    person = {
-        "성명": "홍길동",
-        "세대주 성명": "홍보호",
-        "핸드폰": "010-1111-1111",
-        "관할동": "정자동",
-        "도로명주소": "성남시 분당구 1",
-        "_note": "",
-        "배송담당": "기사A",
-        "weekly_meal_counts": _weekly_counts(lunch=1),
-    }
+    person = MonthlyDelivery(
+        roster=RosterEntry(
+            2,
+            {
+                "성명": "홍길동",
+                "세대주 성명": "홍보호",
+                "핸드폰": "010-1111-1111",
+                "관할동": "정자동",
+                "도로명주소": "성남시 분당구 1",
+            },
+        ),
+        note="",
+        delivery_staff="기사A",
+        delivery_sequence="",
+        breakfast_count=0,
+        lunch_count=1,
+        dinner_count=0,
+        weekly=_weekly_counts(lunch=1),
+    )
 
-    created = make_confirm(
-        roster_data=[person],
+    created, _publication = make_confirm_publication(
+        batch=MonthlyDeliveryBatch(
+            2026, 6, MealPrices(9500, 9500, 9500), False, (person,)
+        ),
         col_mapping={},
-        output_dir=str(tmp_path),
+        output_path=tmp_path / "확인서_202606.xlsx",
         template_path=template,
-        year=2026,
-        month=6,
         meal_type="행복도시락",
     )
 

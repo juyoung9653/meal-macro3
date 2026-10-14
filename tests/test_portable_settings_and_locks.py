@@ -15,7 +15,9 @@ from PySide6.QtWidgets import QApplication, QDialog
 from src.desktop_v2.portable_settings import DesktopStorageSettings, application_directory, application_lock
 from src.desktop_v2.database_access import LoginDialog, CreateDatabaseDialog, RestoreBackupDialog, relocate_database
 from src.desktop_v2.application import DesktopStartupController, DesktopStartupOutcome, StartupStatus
-from src.storage import DatabaseSession, credential_path_for, restore_backup_with_user_password
+from src.storage.database_session import DatabaseSession
+from src.storage.database_credentials import credential_path_for
+from src.storage.database_backup import restore_backup_with_user_password
 from src.storage.file_lock import ExclusiveFileLock, FileLockError, database_lock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")

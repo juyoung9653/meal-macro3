@@ -11,7 +11,6 @@ from PyQt6.QtCore import QDate, QSize, Qt
 from PyQt6.QtGui import QTextDocument
 from PyQt6.QtWidgets import (
     QCheckBox,
-    QDateEdit,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
@@ -34,6 +33,7 @@ from ..excel.report_viewer import open_excel
 from ..excel.report_viewer import show_excel as show_report_excel
 from ..services.delivery_service import REPORT_HEADERS, DeliveryReport, DeliveryService
 from ..widgets.order_editor import StaffOrderDialog
+from .date_edit import WheelSafeDateEdit
 
 log = logging.getLogger(__name__)
 
@@ -126,14 +126,14 @@ class ReportTab(QWidget):
         date_group = QGroupBox("① 날짜 범위")
         date_layout = QHBoxLayout(date_group)
 
-        self.date_start = QDateEdit()
+        self.date_start = WheelSafeDateEdit()
         self.date_start.setCalendarPopup(True)
         self.date_start.setDate(QDate.currentDate())
         self.date_start.setDisplayFormat("yyyy-MM-dd")
         date_layout.addWidget(QLabel("시작:"))
         date_layout.addWidget(self.date_start)
 
-        self.date_end = QDateEdit()
+        self.date_end = WheelSafeDateEdit()
         self.date_end.setCalendarPopup(True)
         self.date_end.setDate(QDate.currentDate())
         self.date_end.setDisplayFormat("yyyy-MM-dd")

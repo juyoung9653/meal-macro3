@@ -12,14 +12,14 @@ pytest.importorskip("PySide6")
 from PySide6.QtCore import QSettings, Qt
 from PySide6.QtWidgets import QAbstractItemView, QApplication, QDialogButtonBox, QLabel
 
-from src.desktop_v2 import (
-    ImportReviewDialog,
+from src.desktop_v2.import_review import ImportReviewDialog
+from src.desktop_v2.roster_window import (
     RosterTableModel,
     RosterWindow,
-    StatusPeriodDialog,
 )
+from src.desktop_v2.status_edit import StatusPeriodDialog
 import src.desktop_v2.inactive_roster as inactive_roster_module
-from src.domain import (
+from src.domain.roster import (
     CustomFieldDefinition,
     CustomFieldType,
     DeliveryAssignment,
@@ -28,10 +28,12 @@ from src.domain import (
     InclusiveDateRange,
     Meal,
     MealEnrollment,
-    MealStatus,
     Person,
     PersonProfile,
     RosterSnapshot,
+)
+from src.domain.status import (
+    MealStatus,
     StatusEvent,
     resolve_status_history,
 )
@@ -42,16 +44,18 @@ from src.domain.school_calendar import (
     SchoolLunchDay,
     SchoolLunchSchoolSchedule,
 )
-from src.importing import (
+from src.importing.households import (
     HouseholdMatchCriterion,
     HouseholdMatchingRule,
-    IdentityResolution,
+    stage_household_grouping,
+)
+from src.importing.application import IdentityResolution
+from src.importing.contracts import (
     PersonObservation,
     ProfileField,
     SourceReference,
-    stage_household_grouping,
-    stage_reconciliation,
 )
+from src.importing.reconciliation import stage_reconciliation
 
 REVISION_ID = UUID("80000000-0000-0000-0000-000000000001")
 FIRST_PERSON_ID = UUID("80000000-0000-0000-0000-000000000002")
@@ -93,6 +97,7 @@ def _roster() -> RosterSnapshot:
                     school_name="샘플초",
                     grade="6학년",
                     mobile_phone="010-1234-5678",
+                    jurisdiction="정자동",
                     road_address="성남대로 1",
                     custom_values={CUSTOM_FIELD_ID: "A구역"},
                 ),
@@ -180,7 +185,7 @@ def test_model_filters_by_selected_meal_and_exposes_dynamic_columns(app):
     assert model.rowCount() == 1
 
 
-def test_lunch_without_a_reviewed_school_schedule_displays_dash_with_driver(app):
+def test_lunch_current_status_requires_reviewed_school_schedule(app):
     model = RosterTableModel(_roster(), _histories())
     model.set_context(SERVICE_DAY, Meal.LUNCH)
     lunch_column = next(
@@ -250,7 +255,7 @@ def test_meal_columns_cache_independent_statuses_drivers_and_replacements(app):
     assert tuple(columns)[:5] == (
         "name", "birth_date", "status:dinner", "status:breakfast", "status:lunch"
     )
-    assert model.data(model.index(0, columns["status:breakfast"])) == "기사B\n미배송"
+    assert model.data(model.index(0, columns["status:breakfast"])) == "기사B\n-"
     assert model.data(model.index(0, columns["status:lunch"])) == "기사A\n일시중지"
     assert model.data(model.index(0, columns["status:dinner"])) == "기사C\n일시중지"
     assert model.data(model.index(0, columns["status:breakfast"]), model.StatusRole) == "중지"
@@ -384,7 +389,7 @@ def test_meal_context_menu_emits_status_and_assignment_requests(app):
     assert [action.text() for action in menu.actions()] == [
         "중식 배송",
         "중식 일시중지",
-        "중식 미배송",
+        "중식 중지",
         "배송담당 변경",
         "이력보기",
         "민원",
@@ -395,6 +400,45 @@ def test_meal_context_menu_emits_status_and_assignment_requests(app):
     assert requested == [(FIRST_PERSON_ID, Meal.LUNCH, MealStatus.PAUSED)]
     menu.actions()[3].trigger()
     assert assignments == [(FIRST_PERSON_ID, Meal.LUNCH)]
+    window.close()
+
+
+def test_same_household_lists_only_meals_delivered_on_selected_day(app):
+    window = RosterWindow(_roster(), _histories(), school_calendar=_calendar())
+    window._set_day(SERVICE_DAY)
+    window.show()
+    selected_row = next(
+        row
+        for row in range(window.table_model.rowCount())
+        if window.table_model.person_at(row).person_id == FIRST_PERSON_ID
+    )
+    window._table.selectRow(selected_row)
+    app.processEvents()
+
+    headings = {label.text() for label in window.findChildren(QLabel)}
+    assert "같은 가구" in headings
+    assert "같은 가구 · 선택일 기준" not in headings
+    assert {
+        window._household_list.item(row).text()
+        for row in range(window._household_list.count())
+    } == {"홍길동   -", "김아침   조식"}
+    assert window.driver_household_rows() == ()
+
+    window._set_day(SERVICE_DAY + timedelta(days=1))
+    selected_row = next(
+        row
+        for row in range(window.table_model.rowCount())
+        if window.table_model.person_at(row).person_id == FIRST_PERSON_ID
+    )
+    window._table.selectRow(selected_row)
+    app.processEvents()
+    assert {
+        window._household_list.item(row).text()
+        for row in range(window._household_list.count())
+    } == {"홍길동   중식", "김아침   조식"}
+    (driver_row,) = window.driver_household_rows()
+    assert driver_row.member_names == ("홍길동",)
+    assert driver_row.meals == (Meal.LUNCH,)
     window.close()
 
 
@@ -413,6 +457,7 @@ def test_routing_state_updates_effective_delivery_view_and_model_driver_filter(a
                 {Meal.LUNCH: driver_id},
                 "새 주소로 2",
                 "101호",
+                "수내동",
             ),
         ),
     )
@@ -432,14 +477,27 @@ def test_routing_state_updates_effective_delivery_view_and_model_driver_filter(a
     address_column = next(
         index for index, column in enumerate(model.columns) if column.key == "address"
     )
+    jurisdiction_column = next(
+        index
+        for index, column in enumerate(model.columns)
+        if column.key == "jurisdiction"
+    )
 
     model.set_context(date.fromordinal(SERVICE_DAY.toordinal() - 1), Meal.LUNCH)
     assert model.data(model.index(0, lunch_column)) == "기사A\n-"
     assert model.data(model.index(0, address_column)) == "성남대로 1"
+    assert model.data(model.index(0, jurisdiction_column)) == "정자동"
     model.set_context(SERVICE_DAY, Meal.LUNCH)
 
     assert model.data(model.index(0, lunch_column)) == "기사변경\n일시중지"
     assert model.data(model.index(0, address_column)) == "새 주소로 2 101호"
+    assert model.data(model.index(0, jurisdiction_column)) == "수내동"
+    model.set_search("수내동")
+    assert model.rowCount() == 1
+    model.set_search("")
+    model.set_column_values("jurisdiction", frozenset({"수내동"}))
+    assert model.rowCount() == 1
+    model.set_column_values("jurisdiction", None)
     model.set_active_only(False)
     model.set_driver_filter(driver_id)
     assert model.rowCount() == 2
@@ -565,7 +623,7 @@ def test_special_household_filter_shows_details_only_while_checked(app):
     window.close()
 
 
-def test_roster_status_respects_default_and_explicit_weekdays(app):
+def test_roster_current_status_ignores_default_and_explicit_weekdays(app):
     from dataclasses import replace
     from src.domain.roster import HouseholdDeliverySetting
 
@@ -575,17 +633,200 @@ def test_roster_status_respects_default_and_explicit_weekdays(app):
     saturday = date(2026, 8, 22)
     model.set_context(saturday, Meal.DINNER)
     status_column = next(i for i, column in enumerate(model.columns) if column.key == "status:dinner")
-    assert model.index(0, status_column).data(model.StatusRole) == "-"
+    assert model.index(0, status_column).data(model.StatusRole) == MealStatus.DELIVERY.value
     weekdays_only = replace(roster, households=(Household(HOUSEHOLD_ID, (
         HouseholdDeliverySetting(Meal.DINNER, (0, 1, 2, 3, 4)),
     )),))
     model.replace_roster(weekdays_only)
-    assert model.index(0, status_column).data(model.StatusRole) == "-"
+    assert model.index(0, status_column).data(model.StatusRole) == MealStatus.DELIVERY.value
     saturday_service = replace(roster, households=(Household(HOUSEHOLD_ID, (
         HouseholdDeliverySetting(Meal.DINNER, (5,)),
     )),))
     model.replace_roster(saturday_service)
     assert model.index(0, status_column).data(model.StatusRole) == MealStatus.DELIVERY.value
+
+
+def test_roster_current_status_honors_history_and_enrollment_boundaries_on_off_days(app):
+    from dataclasses import replace
+
+    friday = date(2026, 8, 21)
+    saturday = friday + timedelta(days=1)
+    sunday = friday + timedelta(days=2)
+    monday = friday + timedelta(days=3)
+    roster = replace(
+        _roster(),
+        enrollments=(
+            *_roster().enrollments,
+            MealEnrollment(
+                FIRST_PERSON_ID,
+                Meal.DINNER,
+                InclusiveDateRange(friday, sunday),
+            ),
+        ),
+        assignments=(
+            *_roster().assignments,
+            DeliveryAssignment(FIRST_PERSON_ID, Meal.DINNER, "기사D", "030"),
+        ),
+    )
+    pause = StatusEvent(
+        UUID("80000000-0000-0000-0000-000000000071"),
+        REVISION_ID,
+        FIRST_PERSON_ID,
+        Meal.DINNER,
+        MealStatus.PAUSED,
+        InclusiveDateRange(saturday, saturday),
+        datetime(2026, 8, 20, tzinfo=UTC),
+    )
+    stop = StatusEvent(
+        UUID("80000000-0000-0000-0000-000000000072"),
+        REVISION_ID,
+        FIRST_PERSON_ID,
+        Meal.DINNER,
+        MealStatus.STOPPED,
+        InclusiveDateRange(sunday),
+        datetime(2026, 8, 20, 1, tzinfo=UTC),
+    )
+    histories = {
+        (FIRST_PERSON_ID, Meal.DINNER): resolve_status_history(
+            FIRST_PERSON_ID,
+            Meal.DINNER,
+            (pause, stop),
+        )
+    }
+    model = RosterTableModel(roster, histories)
+    model.set_active_only(False)
+    status_column = next(
+        index
+        for index, column in enumerate(model.columns)
+        if column.key == "status:dinner"
+    )
+
+    for day, display, role in (
+        (friday, "기사D\n배송", MealStatus.DELIVERY.value),
+        (saturday, "기사D\n일시중지", MealStatus.PAUSED.value),
+        (sunday, "기사D\n-", MealStatus.STOPPED.value),
+        (monday, "기사D\n-", "-"),
+    ):
+        model.set_context(day, Meal.DINNER)
+        index = model.index(0, status_column)
+        assert index.data() == display
+        assert index.data(model.StatusRole) == role
+
+
+def test_lunch_status_requires_calendar_eligibility_not_recurring_weekday(app):
+    from dataclasses import replace
+    from src.domain.roster import HouseholdDeliverySetting
+
+    monday = SERVICE_DAY
+    tuesday = monday + timedelta(days=1)
+    wednesday = monday + timedelta(days=2)
+    thursday = monday + timedelta(days=3)
+    friday = monday + timedelta(days=4)
+    saturday = monday + timedelta(days=5)
+    calendar = SchoolLunchCalendar((
+        SchoolLunchSchoolSchedule(
+            "샘플초",
+            (InclusiveDateRange(monday, friday),),
+            (
+                SchoolLunchDay(
+                    monday,
+                    LunchDayRule(SchoolLunchMark.VENDOR_REQUIRED),
+                ),
+                SchoolLunchDay(
+                    tuesday,
+                    LunchDayRule(SchoolLunchMark.SCHOOL_PROVIDES),
+                ),
+                SchoolLunchDay(
+                    wednesday,
+                    LunchDayRule(
+                        SchoolLunchMark.SCHOOL_PROVIDES,
+                        frozenset({"6학년"}),
+                    ),
+                ),
+                SchoolLunchDay(
+                    thursday,
+                    LunchDayRule(SchoolLunchMark.VENDOR_REQUIRED),
+                ),
+                SchoolLunchDay(
+                    friday,
+                    LunchDayRule(SchoolLunchMark.VENDOR_REQUIRED),
+                ),
+            ),
+        ),
+    ))
+    roster = replace(
+        _roster(),
+        households=(
+            Household(
+                HOUSEHOLD_ID,
+                (HouseholdDeliverySetting(Meal.LUNCH, (4,)),),
+            ),
+        ),
+    )
+    pause = StatusEvent(
+        UUID("80000000-0000-0000-0000-000000000081"),
+        REVISION_ID,
+        FIRST_PERSON_ID,
+        Meal.LUNCH,
+        MealStatus.PAUSED,
+        InclusiveDateRange(thursday, thursday),
+        datetime(2026, 8, 16, tzinfo=UTC),
+    )
+    stop = StatusEvent(
+        UUID("80000000-0000-0000-0000-000000000082"),
+        REVISION_ID,
+        FIRST_PERSON_ID,
+        Meal.LUNCH,
+        MealStatus.STOPPED,
+        InclusiveDateRange(friday, friday),
+        datetime(2026, 8, 16, 1, tzinfo=UTC),
+    )
+    histories = {
+        (FIRST_PERSON_ID, Meal.LUNCH): resolve_status_history(
+            FIRST_PERSON_ID,
+            Meal.LUNCH,
+            (pause, stop),
+        )
+    }
+    model = RosterTableModel(roster, histories)
+
+    assert model.effective_status_on(FIRST_PERSON_ID, Meal.LUNCH, monday) is None
+    model.set_school_calendar(calendar)
+    assert (
+        model.effective_status_on(FIRST_PERSON_ID, Meal.LUNCH, monday)
+        is MealStatus.DELIVERY
+    )
+    assert model.effective_status_on(FIRST_PERSON_ID, Meal.LUNCH, tuesday) is None
+    assert (
+        model.effective_status_on(FIRST_PERSON_ID, Meal.LUNCH, wednesday)
+        is MealStatus.DELIVERY
+    )
+    assert (
+        model.effective_status_on(FIRST_PERSON_ID, Meal.LUNCH, thursday)
+        is MealStatus.PAUSED
+    )
+    assert (
+        model.effective_status_on(FIRST_PERSON_ID, Meal.LUNCH, friday)
+        is MealStatus.STOPPED
+    )
+    assert model.effective_status_on(FIRST_PERSON_ID, Meal.LUNCH, saturday) is None
+    assert (
+        model.effective_status_on(
+            FIRST_PERSON_ID,
+            Meal.LUNCH,
+            monday - timedelta(days=3),
+        )
+        is None
+    )
+    assert (
+        model.effective_status_on(
+            FIRST_PERSON_ID,
+            Meal.LUNCH,
+            monday + timedelta(days=7),
+        )
+        is None
+    )
+    assert model.effective_status_on(SECOND_PERSON_ID, Meal.LUNCH, monday) is None
 
 
 def test_row_selection_populates_household_inspector(app):
@@ -1203,8 +1444,9 @@ def test_birth_month_sidebar_dropdown_filters_below_meals(app):
     dropdown.setCurrentIndex(0)
     assert window._model.rowCount() == 2
     assert dropdown.geometry().top() > max(
-        summary.geometry().bottom()
-        for summary in window._meal_summary_widgets.values()
+        (summary.geometry().bottom()
+         for summary in window._meal_summary_widgets.values() if summary.isVisible()),
+        default=0,
     )
     assert dropdown.geometry().bottom() < window._count_metric.geometry().top()
     assert window._revision_label.geometry().bottom() < window.height()

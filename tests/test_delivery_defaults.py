@@ -11,7 +11,7 @@ from src.domain.revisions import HistoricalSnapshot, RevisionActor, RevisionMeta
 from src.domain.roster import Household, HouseholdDeliverySetting, HouseholdMembership, Meal, Person, PersonProfile, RosterSnapshot, standard_delivery_defaults
 from src.domain.school_calendar import SchoolLunchCalendar
 from src.services.meal_service_availability import physical_delivery_on, regular_service_available
-from src.storage import DatabaseSession
+from src.storage.database_session import DatabaseSession
 
 
 def changed_defaults():

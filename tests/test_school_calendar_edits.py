@@ -5,23 +5,29 @@ from uuid import UUID
 
 import pytest
 
-from src.domain import (
+from src.domain.revisions import (
     EntityRef,
     HistoricalSnapshot,
-    InclusiveDateRange,
-    LunchDayRule,
     RevisionActor,
     RevisionSource,
+)
+from src.domain.roster import InclusiveDateRange
+from src.domain.entitlements import (
+    LunchDayRule,
+    SchoolLunchMark,
+)
+from src.domain.school_calendar import (
     SCHOOL_LUNCH_SCHEDULE_KIND,
     SchoolLunchDay,
-    SchoolLunchMark,
     SchoolLunchSchoolSchedule,
+    school_lunch_calendar_from_snapshot,
+    school_lunch_school_schedule_state,
+)
+from src.domain.school_calendar_edits import (
     apply_school_lunch_rule_period,
     build_school_calendar_edit_revision,
     replace_school_lunch_rule_segment,
-    school_lunch_calendar_from_snapshot,
     school_lunch_rule_segments,
-    school_lunch_school_schedule_state,
 )
 
 

@@ -6,9 +6,11 @@ from uuid import UUID
 
 import pytest
 
-from src.domain import (
+from src.domain.revisions import (
     EntityRef,
     HistoricalSnapshot,
+)
+from src.domain.roster import (
     Household,
     HouseholdMembership,
     HouseholdDeliverySetting,
@@ -18,23 +20,29 @@ from src.domain import (
     PersonProfile,
     RosterSnapshot,
 )
-from src.importing import (
+from src.importing.contracts import (
     DateNormalization,
-    IdentityResolution,
     ImportMappingProfile,
     ObservedDeliveryAssignment,
     PersonObservation,
     PhoneNormalization,
     ProfileField,
+    SourceReference,
+)
+from src.importing.application import (
+    IdentityResolution,
     ReconciliationDecision,
+    apply_reconciliation,
+)
+from src.importing.reconciliation import (
     ReconciliationDisposition,
     ReviewReason,
-    SourceReference,
+    stage_reconciliation,
+)
+from src.importing.profile_history import (
     StoredImportProfile,
-    apply_reconciliation,
     import_profile_audit_change,
     import_profiles_from_snapshot,
-    stage_reconciliation,
 )
 
 REVISION_ID = UUID("70000000-0000-0000-0000-000000000001")

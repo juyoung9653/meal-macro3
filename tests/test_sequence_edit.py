@@ -16,7 +16,7 @@ from src.desktop_v2.sequence_edit import SequenceEditController, SequenceEditDia
 from src.domain.roster import DeliveryAssignment, Meal
 from src.domain.revisions import RevisionActor
 from src.domain.sequence_edits import build_sequence_revision
-from src.storage import DatabaseSession
+from src.storage.database_session import DatabaseSession
 from tests.test_delivery_routing import base_roster, initialize
 
 
@@ -119,7 +119,7 @@ def test_sequence_display_and_context_menu_signal(app):
     sequence_column = next(i for i, column in enumerate(model.columns) if column.key == "sequence")
     index = model.index(0, sequence_column)
     assert model.data(index) == "석식: 001\n조식: 010\n중식: 001"
-    assert "우클릭 → 순서 수정" in model.data(index, Qt.ItemDataRole.ToolTipRole)
+    assert "더블클릭 → 순서 수정" in model.data(index, Qt.ItemDataRole.ToolTipRole)
     window = RosterWindow(roster)
     received = []
     person_edits = []
@@ -133,7 +133,7 @@ def test_sequence_display_and_context_menu_signal(app):
     assert received == [person_id]
     assert person_edits == []
     window._table.doubleClicked.emit(window.table_model.index(0, sequence_column))
-    assert received == [person_id]
+    assert received == [person_id, person_id]
     name_menu = window._create_context_menu(roster.persons[0], column_key="name")
     assert [action.text() for action in name_menu.actions()] == [
         "정보 수정", "이력보기", "민원", "", "명단 행 삭제",

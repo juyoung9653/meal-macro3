@@ -13,23 +13,25 @@ apsw = pytest.importorskip(
     reason="install requirements-sqlite-v2.txt for encrypted DB integration tests",
 )
 
-from src.domain import (
+from src.domain.export_security import (
     EXPORT_PASSWORD_POLICY_VERSION,
     EXPORT_PASSWORD_SETTING_ID,
     EXPORT_PASSWORD_SETTING_KIND,
-    AuditChange,
-    ChangeOperation,
-    RevisionActor,
-    RevisionMetadata,
-    RevisionRecord,
-    RevisionSource,
     build_export_password_revision,
     export_password_setting_from_snapshot,
     export_password_setting_from_state,
     export_password_setting_state,
     require_export_password_setting,
 )
-from src.storage import EncryptedDatabase
+from src.domain.revisions import (
+    AuditChange,
+    ChangeOperation,
+    RevisionActor,
+    RevisionMetadata,
+    RevisionRecord,
+    RevisionSource,
+)
+from src.storage.encrypted_database import EncryptedDatabase
 
 
 KEY = bytes.fromhex("6a" * 32)
@@ -110,7 +112,7 @@ def test_state_round_trip_preserves_secret_only_in_encrypted_entity_state():
 
 
 def test_unconfigured_snapshot_blocks_unprotected_v2_output():
-    from src.domain import HistoricalSnapshot
+    from src.domain.revisions import HistoricalSnapshot
 
     snapshot = HistoricalSnapshot(BASE_REVISION_ID, {})
 

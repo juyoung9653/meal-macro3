@@ -7,15 +7,17 @@ from uuid import UUID
 
 import pytest
 
-from src.domain import (
+from src.domain.billing import (
     SERVICE_DATE_PRICING_MODE,
-    Meal,
-    MealEntitlement,
     PersonBillingSummary,
     UnitPriceBreakdownLine,
+    price_entitlements,
+)
+from src.domain.roster import Meal
+from src.domain.entitlements import MealEntitlement
+from src.domain.unit_pricing import (
     UnitPriceChange,
     UnitPriceSchedule,
-    price_entitlements,
 )
 
 

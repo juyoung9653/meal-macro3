@@ -12,26 +12,38 @@ import msoffcrypto
 import openpyxl
 import pytest
 
-from src.desktop_v2 import (
-    DocumentAction,
-    DocumentGenerationController,
-    DocumentMealSelection,
+from src.desktop_v2.document_hub import DocumentAction
+from src.desktop_v2.document_generation import DocumentGenerationController
+from src.desktop_v2.document_meal import DocumentMealSelection
+from src.desktop_v2.document_output import (
     DocumentOutputMode,
-    DocumentPeriodSelection,
     next_available_document_output,
 )
-from src.domain import (
+from src.desktop_v2.document_period import DocumentPeriodSelection
+from src.domain.revisions import (
     AuditChange,
     ChangeOperation,
+    RevisionActor,
+    RevisionMetadata,
+    RevisionRecord,
+    RevisionSource,
+)
+from src.domain.document_templates import (
     DOCUMENT_TEMPLATE_SETTING_ID,
     DOCUMENT_TEMPLATE_SETTING_KIND,
-    EXPORT_PASSWORD_SETTING_ID,
-    EXPORT_PASSWORD_SETTING_KIND,
-    DocumentKind,
     DocumentTemplateProfile,
     DocumentTemplateSetting,
-    DeliveryAssignment,
+    document_template_setting_state,
+)
+from src.domain.export_security import (
+    EXPORT_PASSWORD_SETTING_ID,
+    EXPORT_PASSWORD_SETTING_KIND,
     ExportPasswordSetting,
+    export_password_setting_state,
+)
+from src.domain.documents import DocumentKind
+from src.domain.roster import (
+    DeliveryAssignment,
     Household,
     HouseholdMembership,
     InclusiveDateRange,
@@ -39,15 +51,9 @@ from src.domain import (
     MealEnrollment,
     Person,
     PersonProfile,
-    RevisionActor,
-    RevisionMetadata,
-    RevisionRecord,
-    RevisionSource,
     RosterSnapshot,
-    document_template_setting_state,
-    export_password_setting_state,
-    roster_audit_changes,
 )
+from src.domain.projections import roster_audit_changes
 from src.domain.entitlements import LunchDayRule, SchoolLunchMark
 from src.domain.school_calendar import (
     SCHOOL_LUNCH_SCHEDULE_KIND,
@@ -55,7 +61,7 @@ from src.domain.school_calendar import (
     SchoolLunchSchoolSchedule,
     school_lunch_school_schedule_state,
 )
-from src.storage import DatabaseSession
+from src.storage.database_session import DatabaseSession
 from src.templates.config import read_template_columns
 from src.templates.template_scanner import scan_placeholders
 from src.services.document_column_mappings import (

@@ -5,9 +5,11 @@ from uuid import UUID
 
 import pytest
 
-from src.domain import (
+from src.domain.revisions import (
     EntityRef,
     HistoricalSnapshot,
+)
+from src.domain.roster import (
     Household,
     HouseholdMembership,
     InclusiveDateRange,
@@ -16,24 +18,29 @@ from src.domain import (
     PersonProfile,
     RosterSnapshot,
 )
-from src.importing import (
+from src.importing.households import (
     HOUSEHOLD_MATCHING_RULE_KIND,
     HouseholdGroupingDecision,
     HouseholdMatchCriterion,
     HouseholdMatchingRule,
-    IdentityResolution,
-    PersonObservation,
-    ProfileField,
-    ReconciliationDecision,
-    SourceReference,
     StoredHouseholdMatchingRule,
     apply_household_grouping,
-    apply_reconciliation,
     household_matching_rule_audit_change,
     household_matching_rules_from_snapshot,
     stage_household_grouping,
-    stage_reconciliation,
 )
+from src.importing.application import (
+    IdentityResolution,
+    ReconciliationDecision,
+    apply_reconciliation,
+)
+from src.importing.contracts import (
+    PersonObservation,
+    ProfileField,
+    SourceReference,
+)
+from src.importing.reconciliation import stage_reconciliation
+from src.importing.households import match_existing_household_id
 
 
 EFFECTIVE_ON = date(2026, 8, 26)
@@ -130,6 +137,84 @@ def _existing_roster(
         households=tuple(households),
         memberships=tuple(memberships),
     )
+
+
+def test_row_add_matching_uses_normalized_default_mobile_and_requires_a_value():
+    roster = _existing_roster()
+    assert match_existing_household_id(
+        PersonProfile("신규", mobile_phone="010 1234 5678"),
+        None,
+        roster,
+        effective_on=EFFECTIVE_ON,
+    ) == EXISTING_HOUSEHOLD_1
+    assert match_existing_household_id(
+        PersonProfile("신규"),
+        None,
+        roster,
+        effective_on=EFFECTIVE_ON,
+    ) is None
+
+
+def test_row_add_matching_uses_all_saved_rule_criteria():
+    roster = _existing_roster()
+    rule = HouseholdMatchingRule(
+        RULE_ID,
+        1,
+        (
+            HouseholdMatchCriterion.HOUSEHOLD_HEAD_NAME,
+            HouseholdMatchCriterion.ADDRESS,
+        ),
+    )
+    assert match_existing_household_id(
+        PersonProfile(
+            "신규",
+            household_head_name="  홍   보호자 ",
+            road_address="성남대로 1",
+            detail_address="101호",
+        ),
+        rule,
+        roster,
+        effective_on=EFFECTIVE_ON,
+    ) == EXISTING_HOUSEHOLD_1
+    assert match_existing_household_id(
+        PersonProfile(
+            "신규",
+            household_head_name="홍 보호자",
+            road_address="성남대로 1",
+            detail_address="다른 집",
+        ),
+        rule,
+        roster,
+        effective_on=EFFECTIVE_ON,
+    ) is None
+
+
+def test_row_add_matching_rejects_ambiguous_households():
+    with pytest.raises(ValueError, match="기존 가구가 둘 이상"):
+        match_existing_household_id(
+            PersonProfile("신규", mobile_phone="010-1234-5678"),
+            None,
+            _existing_roster(duplicate_phone_household=True),
+            effective_on=EFFECTIVE_ON,
+        )
+
+
+def test_row_add_matching_ignores_membership_inactive_on_start_date():
+    roster = _existing_roster(
+        first_membership_period=InclusiveDateRange(None, EFFECTIVE_ON)
+    )
+    assert match_existing_household_id(
+        PersonProfile("신규", mobile_phone="01012345678"),
+        None,
+        roster,
+        effective_on=EFFECTIVE_ON,
+    ) == EXISTING_HOUSEHOLD_1
+    assert match_existing_household_id(
+        PersonProfile("신규", mobile_phone="01012345678"),
+        None,
+        roster,
+        effective_on=EFFECTIVE_ON.replace(day=EFFECTIVE_ON.day + 1),
+    ) is None
 
 
 def test_default_mobile_rule_normalizes_phone_and_proposes_one_household():

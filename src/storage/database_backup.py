@@ -10,24 +10,29 @@ import re
 import shutil
 import tempfile
 import zipfile
-from dataclasses import dataclass
-from datetime import UTC, datetime
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
 
 from .database_credentials import (
     DatabaseCredentials,
+    CredentialFormatError,
     PasswordPolicyError,
     credential_path_for,
 )
 from .file_lock import ExclusiveFileLock, database_lock
 from .encrypted_database import EncryptedDatabase
+from src.storage import backup_snapshot
+from .migrations import CURRENT_SCHEMA_VERSION
 
 
 BACKUP_EXTENSION = ".mealbackup"
 DEFAULT_MAX_BACKUPS = 100
 _FORMAT = "meal-delivery-v2-backup"
 _VERSION = 1
+_SNAPSHOT_VERSION = 2
+FULL_BACKUP_INTERVAL = timedelta(days=7)
 _DATABASE_MEMBER = "database.sqlite3"
 _CREDENTIAL_MEMBER = "credentials.json"
 _MANIFEST_MEMBER = "manifest.json"
@@ -73,6 +78,15 @@ class BackupRecord:
     database_size: int
     database_sha256: str
     credentials_sha256: str
+    format_version: int = 1
+    backup_kind: str = "full"
+    backup_id: UUID | None = None
+    parent_backup_id: UUID | None = None
+    parent_database_sha256: str | None = None
+    full_backup_id: UUID | None = None
+    full_created_at: datetime | None = None
+    snapshot_size: int | None = None
+    snapshot_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -116,6 +130,7 @@ class DatabaseBackupService:
         *,
         created_at: datetime | None = None,
         prune: bool = True,
+        force_full: bool = False,
     ) -> BackupRecord:
         if not self._directory.is_dir():
             raise BackupDirectoryNotFoundError(
@@ -139,64 +154,63 @@ class DatabaseBackupService:
             raise BackupAlreadyExistsError(f"백업 파일이 이미 있습니다: {final_path}")
         temporary_archive = self._directory / f".{backup_name}.{uuid4().hex}.tmp"
 
+        snapshot = database.snapshot_bytes()
         latest = database.latest_revision()
         latest_revision_id = (
             None if latest is None else latest.metadata.revision_id
         )
+        compressed = backup_snapshot.compress_full(snapshot)
+        parent = None
+        if not force_full:
+            records = self.list_backups(database_id=credentials.database_id)
+            predecessor = records[0] if records else None
+            if (predecessor is not None and predecessor.format_version == 2
+                    and predecessor.schema_version == database.schema_version
+                    and predecessor.created_at <= timestamp
+                    and predecessor.full_created_at is not None
+                    and timestamp - predecessor.full_created_at < FULL_BACKUP_INTERVAL):
+                try:
+                    previous_snapshot = _reconstruct_snapshot(predecessor, database_key)
+                    delta = backup_snapshot.compress_delta(previous_snapshot, snapshot)
+                    if len(delta) < len(compressed):
+                        compressed, parent = delta, predecessor
+                except (BackupFormatError, BackupIntegrityError, OSError):
+                    logger.warning("이전 백업을 검증할 수 없어 전체 백업을 생성합니다: %s", predecessor.path)
+        backup_id = uuid4()
+        credential_payload = credentials.to_bytes()
+        manifest = {
+            "format": _FORMAT, "version": _SNAPSHOT_VERSION,
+            "created_at": timestamp.isoformat(),
+            "source_database_name": database.path.name,
+            "database_id": str(credentials.database_id),
+            "schema_version": database.schema_version,
+            "latest_revision_id": None if latest_revision_id is None else str(latest_revision_id),
+            "backup_kind": "full" if parent is None else "incremental",
+            "backup_id": str(backup_id),
+            "parent_backup_id": None if parent is None else str(parent.backup_id),
+            "parent_database_sha256": None if parent is None else parent.snapshot_sha256,
+            "full_backup_id": str(backup_id if parent is None else parent.full_backup_id),
+            "full_created_at": (timestamp if parent is None else parent.full_created_at).isoformat(),
+            "snapshot": {"size": len(snapshot), "sha256": hashlib.sha256(snapshot).hexdigest()},
+            "credentials": {"member": _CREDENTIAL_MEMBER, "size": len(credential_payload),
+                            "sha256": hashlib.sha256(credential_payload).hexdigest()},
+        }
+        payload = backup_snapshot.encrypt(compressed, database_key, manifest)
+        manifest["database"] = {"member": _DATABASE_MEMBER, "size": len(payload),
+                                "sha256": hashlib.sha256(payload).hexdigest()}
         try:
-            with tempfile.TemporaryDirectory(
-                prefix=".mealbackup-",
-                dir=self._directory,
-            ) as staging_value:
-                staging = Path(staging_value)
-                database_file = staging / _DATABASE_MEMBER
-                credential_file = staging / _CREDENTIAL_MEMBER
-                database.backup_to(database_file, database_key)
-                _write_bytes(credential_file, credentials.to_bytes())
-
-                database_sha256 = _sha256_file(database_file)
-                credentials_sha256 = _sha256_file(credential_file)
-                manifest = {
-                    "format": _FORMAT,
-                    "version": _VERSION,
-                    "created_at": timestamp.isoformat(),
-                    "source_database_name": database.path.name,
-                    "database_id": str(credentials.database_id),
-                    "schema_version": database.schema_version,
-                    "latest_revision_id": (
-                        None
-                        if latest_revision_id is None
-                        else str(latest_revision_id)
-                    ),
-                    "database": {
-                        "member": _DATABASE_MEMBER,
-                        "size": database_file.stat().st_size,
-                        "sha256": database_sha256,
-                    },
-                    "credentials": {
-                        "member": _CREDENTIAL_MEMBER,
-                        "size": credential_file.stat().st_size,
-                        "sha256": credentials_sha256,
-                    },
-                }
-                manifest_file = staging / _MANIFEST_MEMBER
-                _write_bytes(manifest_file, _json_bytes(manifest))
-
-                with zipfile.ZipFile(
-                    temporary_archive,
-                    mode="x",
-                    compression=zipfile.ZIP_STORED,
-                    allowZip64=True,
-                ) as archive:
-                    archive.write(database_file, _DATABASE_MEMBER)
-                    archive.write(credential_file, _CREDENTIAL_MEMBER)
-                    archive.write(manifest_file, _MANIFEST_MEMBER)
-                _flush_file(temporary_archive)
-                if final_path.exists():
-                    raise BackupAlreadyExistsError(
-                        f"백업 파일이 이미 있습니다: {final_path}"
-                    )
-                os.replace(temporary_archive, final_path)
+            with zipfile.ZipFile(temporary_archive, "x", compression=zipfile.ZIP_STORED,
+                                 allowZip64=True) as archive:
+                archive.writestr(_DATABASE_MEMBER, payload)
+                archive.writestr(_CREDENTIAL_MEMBER, credential_payload)
+                archive.writestr(_MANIFEST_MEMBER, _json_bytes(manifest))
+            _flush_file(temporary_archive)
+            staged_record = inspect_backup(temporary_archive)
+            if _reconstruct_snapshot(staged_record, database_key) != snapshot:
+                raise BackupIntegrityError("새 백업의 snapshot 검증에 실패했습니다.")
+            if final_path.exists():
+                raise BackupAlreadyExistsError(f"백업 파일이 이미 있습니다: {final_path}")
+            os.replace(temporary_archive, final_path)
         finally:
             temporary_archive.unlink(missing_ok=True)
 
@@ -277,7 +291,7 @@ class DatabaseBackupService:
         *,
         protected_path: str | Path | None = None,
     ) -> tuple[Path, ...]:
-        """Keep the newest configured count for one DB lineage only."""
+        """Keep newest restore points and every ancestor they depend on."""
 
         if not isinstance(database_id, UUID):
             raise TypeError("database ID는 UUID여야 합니다.")
@@ -290,6 +304,21 @@ class DatabaseBackupService:
             raise ValueError("보호할 백업 파일은 자동 백업 폴더 안에 있어야 합니다.")
 
         records = self.list_backups(database_id=database_id)
+        # An unreadable archive might be a needed child or parent. Keep files
+        # until the ambiguity is repaired instead of making recovery worse.
+        for candidate in self._directory.glob(f"*{BACKUP_EXTENSION}"):
+            try:
+                inspect_backup(candidate)
+            except Exception:
+                # Clearly unrelated non-ZIP files remain untouched; a damaged
+                # archive may contain lineage information we cannot trust.
+                try:
+                    with candidate.open("rb") as stream:
+                        zip_header = stream.read(2) == b"PK"
+                except OSError:
+                    return ()
+                if zip_header or zipfile.is_zipfile(candidate):
+                    return ()
         keep: set[Path] = set()
         if protected is not None and any(
             record.path == protected for record in records
@@ -299,6 +328,13 @@ class DatabaseBackupService:
             if len(keep) >= self._max_backups:
                 break
             keep.add(record.path)
+
+        try:
+            for record in records:
+                if record.path in keep and record.format_version == 2:
+                    keep.update(item.path for item in _snapshot_chain(record, records=records))
+        except (BackupFormatError, BackupIntegrityError, OSError):
+            return ()
 
         removed: list[Path] = []
         for record in records:
@@ -315,13 +351,15 @@ class DatabaseBackupService:
 
 
 def inspect_backup(path: str | Path) -> BackupRecord:
+    return _inspect_backup(path, verify_credentials=True)
+
+
+def _inspect_backup(path: str | Path, *, verify_credentials: bool) -> BackupRecord:
     backup_path = Path(path).resolve()
     if not backup_path.is_file():
         raise BackupDirectoryNotFoundError(f"백업 파일이 없습니다: {backup_path}")
     try:
         with zipfile.ZipFile(backup_path, mode="r") as archive:
-            if archive.testzip() is not None:
-                raise BackupIntegrityError("백업 압축 데이터가 손상되었습니다.")
             names = archive.namelist()
             if len(names) != len(_EXPECTED_MEMBERS) or set(names) != _EXPECTED_MEMBERS:
                 raise BackupFormatError("백업 파일 구성이 올바르지 않습니다.")
@@ -336,8 +374,13 @@ def inspect_backup(path: str | Path) -> BackupRecord:
                 _MAX_CREDENTIAL_BYTES,
             )
             manifest = _parse_manifest(manifest_payload)
-            credentials = DatabaseCredentials.from_bytes(credential_payload)
-            if str(credentials.database_id) != manifest["database_id"]:
+            if manifest["version"] == 2 and any(info.compress_type != zipfile.ZIP_STORED for info in archive.infolist()):
+                raise BackupFormatError("백업 ZIP 압축 형식이 올바르지 않습니다.")
+            if manifest["version"] == 2 and archive.getinfo(_DATABASE_MEMBER).file_size > backup_snapshot.MAX_SNAPSHOT_BYTES + 1024 * 1024:
+                raise BackupFormatError("백업 payload가 비정상적으로 큽니다.")
+            credentials = (DatabaseCredentials.from_bytes(credential_payload)
+                           if verify_credentials else None)
+            if credentials is not None and str(credentials.database_id) != manifest["database_id"]:
                 raise BackupIntegrityError(
                     "백업 DB와 비밀번호 정보의 식별자가 다릅니다."
                 )
@@ -346,7 +389,7 @@ def inspect_backup(path: str | Path) -> BackupRecord:
             credential_info = archive.getinfo(_CREDENTIAL_MEMBER)
             if database_info.file_size != manifest["database_size"]:
                 raise BackupIntegrityError("백업 DB 크기가 기록과 다릅니다.")
-            if credential_info.file_size != manifest["credentials_size"]:
+            if verify_credentials and credential_info.file_size != manifest["credentials_size"]:
                 raise BackupIntegrityError(
                     "백업 비밀번호 정보 크기가 기록과 다릅니다."
                 )
@@ -354,11 +397,11 @@ def inspect_backup(path: str | Path) -> BackupRecord:
             credentials_sha256 = _sha256_member(archive, _CREDENTIAL_MEMBER)
             if database_sha256 != manifest["database_sha256"]:
                 raise BackupIntegrityError("백업 DB의 SHA-256이 기록과 다릅니다.")
-            if credentials_sha256 != manifest["credentials_sha256"]:
+            if verify_credentials and credentials_sha256 != manifest["credentials_sha256"]:
                 raise BackupIntegrityError(
                     "백업 비밀번호 정보의 SHA-256이 기록과 다릅니다."
                 )
-    except zipfile.BadZipFile as error:
+    except (zipfile.BadZipFile, CredentialFormatError) as error:
         raise BackupFormatError("선택한 파일은 올바른 DB 백업이 아닙니다.") from error
 
     return BackupRecord(
@@ -375,6 +418,15 @@ def inspect_backup(path: str | Path) -> BackupRecord:
         database_size=manifest["database_size"],
         database_sha256=database_sha256,
         credentials_sha256=credentials_sha256,
+        format_version=manifest["version"],
+        backup_kind=manifest.get("backup_kind", "full"),
+        backup_id=manifest.get("backup_id"),
+        parent_backup_id=manifest.get("parent_backup_id"),
+        parent_database_sha256=manifest.get("parent_database_sha256"),
+        full_backup_id=manifest.get("full_backup_id"),
+        full_created_at=manifest.get("full_created_at"),
+        snapshot_size=manifest.get("snapshot_size"),
+        snapshot_sha256=manifest.get("snapshot_sha256"),
     )
 
 
@@ -386,10 +438,133 @@ def backup_has_recovery_password(path: str | Path) -> bool:
     return DatabaseCredentials.from_bytes(payload).recovery_slot is not None
 
 
+def _snapshot_chain(record: BackupRecord, *, records: tuple[BackupRecord, ...] | None = None) -> tuple[BackupRecord, ...]:
+    """Resolve immutable IDs in this directory, rejecting ambiguous dependencies."""
+    if not 1 <= record.schema_version <= CURRENT_SCHEMA_VERSION:
+        raise BackupFormatError("지원하지 않는 백업 schema version입니다.")
+    if record.backup_kind == "full":
+        return (record,)
+    directory = record.path.parent.resolve()
+    by_id = {}
+    ambiguous = set()
+    if records is None:
+        discovered = []
+        for candidate in directory.glob(f"*{BACKUP_EXTENSION}"):
+            path = candidate.resolve()
+            if path.parent != directory or path == record.path:
+                continue
+            try:
+                discovered.append(_inspect_backup(path, verify_credentials=False))
+            except (BackupFormatError, BackupIntegrityError, OSError):
+                continue
+        records = tuple(discovered)
+    for item in records:
+        if item.path == record.path:
+            continue
+        if item.format_version != 2:
+            continue
+        previous = by_id.get(item.backup_id)
+        if previous is None:
+            by_id[item.backup_id] = item
+        elif replace(item, path=previous.path,
+                     credentials_sha256=previous.credentials_sha256) != previous:
+            # Identical copies (including independently rewrapped credentials)
+            # are interchangeable. Only conflicting required ancestors block us.
+            ambiguous.add(item.backup_id)
+    chain = []
+    seen = set()
+    current = record
+    while True:
+        if current.backup_id in seen:
+            raise BackupIntegrityError("백업 의존 관계가 순환합니다.")
+        seen.add(current.backup_id)
+        if not 1 <= current.schema_version <= CURRENT_SCHEMA_VERSION:
+            raise BackupFormatError("지원하지 않는 백업 schema version입니다.")
+        chain.append(current)
+        if current.backup_kind == "full":
+            break
+        if current.parent_backup_id in ambiguous:
+            raise BackupIntegrityError("필요한 이전 백업 식별자에 서로 다른 내용이 있습니다.")
+        parent = by_id.get(current.parent_backup_id)
+        if parent is None:
+            raise BackupIntegrityError("증분 백업에 필요한 이전 백업 파일이 없습니다.")
+        if (parent.database_id != current.database_id
+                or parent.schema_version != current.schema_version
+                or parent.snapshot_sha256 != current.parent_database_sha256
+                or parent.created_at > current.created_at
+                or parent.full_backup_id != current.full_backup_id
+                or parent.full_created_at != current.full_created_at):
+            raise BackupIntegrityError("증분 백업의 이전 이력 또는 식별자가 다릅니다.")
+        current = parent
+    return tuple(reversed(chain))
+
+
+def _reconstruct_snapshot(record: BackupRecord, database_key: bytes) -> bytes:
+    snapshot = None
+    for item in _snapshot_chain(record):
+        try:
+            with zipfile.ZipFile(item.path, "r") as archive:
+                manifest = json.loads(_read_small_member(archive, _MANIFEST_MEMBER, _MAX_MANIFEST_BYTES))
+                payload = archive.read(_DATABASE_MEMBER)
+            if hashlib.sha256(payload).hexdigest() != item.database_sha256:
+                raise BackupIntegrityError("백업 payload가 변경되었습니다.")
+            snapshot = backup_snapshot.decrypt(payload, database_key, manifest, snapshot)
+            if (len(snapshot) != item.snapshot_size
+                    or hashlib.sha256(snapshot).hexdigest() != item.snapshot_sha256
+                    or snapshot[:16] != b"SQLite format 3\x00"
+                    or int.from_bytes(snapshot[60:64], "big") != item.schema_version):
+                raise BackupIntegrityError("복원 snapshot 크기, SHA-256 또는 schema가 다릅니다.")
+        except (BackupFormatError, BackupIntegrityError, OSError):
+            raise
+        except Exception as error:
+            raise BackupIntegrityError("백업 인증 또는 증분 데이터 검증에 실패했습니다.") from error
+    if snapshot is None:
+        raise BackupIntegrityError("복원할 snapshot이 없습니다.")
+    return snapshot
+
+
+def _rewrap_snapshot_backup(path: Path, record: BackupRecord, database_key: bytes,
+                            new_password: str) -> None:
+    snapshot = _reconstruct_snapshot(record, database_key)
+    with tempfile.TemporaryDirectory(prefix=".mealrewrap-", dir=path.parent) as staging_value:
+        staging = Path(staging_value)
+        validation_file = staging / "validation.sqlite3"
+        EncryptedDatabase.restore_snapshot(snapshot, validation_file, database_key)
+        with EncryptedDatabase.open(validation_file, database_key) as database:
+            latest = database.latest_revision()
+            if ((None if latest is None else latest.metadata.revision_id) != record.latest_revision_id
+                    or database.schema_version < record.schema_version):
+                raise BackupIntegrityError("백업 DB 이력이 기록과 다릅니다.")
+        with zipfile.ZipFile(path, "r") as archive:
+            credentials = DatabaseCredentials.from_bytes(archive.read(_CREDENTIAL_MEMBER))
+            manifest = json.loads(archive.read(_MANIFEST_MEMBER))
+            payload = archive.read(_DATABASE_MEMBER)
+        credential_payload = credentials.with_user_password(database_key, new_password).to_bytes()
+        manifest["credentials"]["size"] = len(credential_payload)
+        manifest["credentials"]["sha256"] = hashlib.sha256(credential_payload).hexdigest()
+        staged = staging / path.name
+        with zipfile.ZipFile(staged, "x", compression=zipfile.ZIP_STORED, allowZip64=True) as archive:
+            archive.writestr(_DATABASE_MEMBER, payload)
+            archive.writestr(_CREDENTIAL_MEMBER, credential_payload)
+            archive.writestr(_MANIFEST_MEMBER, _json_bytes(manifest))
+        _flush_file(staged)
+        staged_record = inspect_backup(staged)
+        if (staged_record.database_sha256 != record.database_sha256
+                or staged_record.snapshot_sha256 != record.snapshot_sha256
+                or staged_record.backup_id != record.backup_id):
+            raise BackupIntegrityError("비밀번호 변경 중 백업 내용이 달라졌습니다.")
+        if DatabaseCredentials.from_bytes(credential_payload).unlock_user(new_password) != database_key:
+            raise BackupIntegrityError("새 비밀번호로 백업을 열 수 없습니다.")
+        os.replace(staged, path)
+
+
 def _rewrap_backup(
     path: Path, record: BackupRecord, database_key: bytes, new_password: str,
 ) -> None:
     """Validate the historical database with the active key before replacement."""
+    if record.format_version == 2:
+        _rewrap_snapshot_backup(path, record, database_key, new_password)
+        return
     with tempfile.TemporaryDirectory(prefix=".mealrewrap-", dir=path.parent) as staging_value:
         staging = Path(staging_value)
         database_file = staging / _DATABASE_MEMBER
@@ -522,13 +697,21 @@ def _restore_backup(
                             key,
                             new_user_password,
                         )
-                    _extract_member(archive, _DATABASE_MEMBER, staged_database)
+                    if record.format_version == 1:
+                        _extract_member(archive, _DATABASE_MEMBER, staged_database)
                     _write_bytes(staged_credentials, credentials.to_bytes())
 
-                if _sha256_file(staged_database) != record.database_sha256:
+                if record.format_version == 2:
+                    snapshot = _reconstruct_snapshot(record, key)
+                    EncryptedDatabase.restore_snapshot(snapshot, staged_database, key)
+                elif _sha256_file(staged_database) != record.database_sha256:
                     raise BackupIntegrityError("복원 중 백업 DB 내용이 달라졌습니다.")
                 with EncryptedDatabase.open(staged_database, key) as restored:
                     restored.check_integrity()
+                    latest = restored.latest_revision()
+                    if ((None if latest is None else latest.metadata.revision_id) != record.latest_revision_id
+                            or restored.schema_version < record.schema_version):
+                        raise BackupIntegrityError("복원 DB 이력이 기록과 다릅니다.")
                 if destination.exists() or destination_credentials.exists():
                     raise BackupRestoreConflictError(
                         "복원할 위치에 DB 또는 비밀번호 정보 파일이 이미 있습니다."
@@ -557,7 +740,8 @@ def _parse_manifest(payload: bytes) -> dict[str, object]:
         document = json.loads(payload.decode("utf-8"))
         if not isinstance(document, dict):
             raise TypeError
-        if document.get("format") != _FORMAT or document.get("version") != _VERSION:
+        version = _required_int(document, "version")
+        if document.get("format") != _FORMAT or version not in (1, 2):
             raise ValueError
         created_at = datetime.fromisoformat(_required_text(document, "created_at"))
         if created_at.tzinfo is None:
@@ -583,9 +767,42 @@ def _parse_manifest(payload: bytes) -> dict[str, object]:
         credentials_size = _required_nonnegative_int(credentials, "size")
         database_sha256 = _required_sha256(database, "sha256")
         credentials_sha256 = _required_sha256(credentials, "sha256")
+        extra = {}
+        if version == 2:
+            backup_id = UUID(_required_text(document, "backup_id"))
+            kind = _required_text(document, "backup_kind")
+            parent_id = document.get("parent_backup_id")
+            parent_hash = document.get("parent_database_sha256")
+            full_id = UUID(_required_text(document, "full_backup_id"))
+            full_created_at = datetime.fromisoformat(_required_text(document, "full_created_at"))
+            if full_created_at.tzinfo is None or full_created_at > created_at:
+                raise ValueError
+            if kind == "full":
+                if parent_id is not None or parent_hash is not None or full_id != backup_id or full_created_at != created_at:
+                    raise ValueError
+            elif kind == "incremental":
+                parent_id = UUID(_required_text(document, "parent_backup_id"))
+                parent_hash = _required_sha256(document, "parent_database_sha256")
+                if parent_id == backup_id or full_id == backup_id:
+                    raise ValueError
+            else:
+                raise ValueError
+            snapshot = document["snapshot"]
+            if not isinstance(snapshot, dict):
+                raise TypeError
+            snapshot_size = _required_nonnegative_int(snapshot, "size")
+            if not 100 <= snapshot_size <= backup_snapshot.MAX_SNAPSHOT_BYTES or database_size < 28:
+                raise ValueError
+            extra = {"backup_kind": kind, "backup_id": backup_id,
+                     "parent_backup_id": parent_id, "parent_database_sha256": parent_hash,
+                     "full_backup_id": full_id, "full_created_at": full_created_at.astimezone(UTC),
+                     "snapshot_size": snapshot_size,
+                     "snapshot_sha256": _required_sha256(snapshot, "sha256")}
     except (KeyError, TypeError, ValueError, UnicodeError, json.JSONDecodeError) as error:
         raise BackupFormatError("백업 manifest 형식이 올바르지 않습니다.") from error
     return {
+        "version": version,
+        **extra,
         "created_at": created_at.astimezone(UTC),
         "source_database_name": source_name,
         "database_id": database_id,

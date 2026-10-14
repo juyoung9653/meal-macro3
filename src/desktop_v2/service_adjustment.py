@@ -13,7 +13,6 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
     QCheckBox,
-    QDateEdit,
     QDialog,
     QFrame,
     QGridLayout,
@@ -31,25 +30,34 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from src.domain import (
+from src.domain.service_adjustments import (
     SERVICE_ADJUSTMENT_SCHEDULE_ID,
     SERVICE_ADJUSTMENT_SCHEDULE_KIND,
-    InclusiveDateRange,
-    Meal,
-    PublicHolidayCandidate,
     ReplacementDeliveryOverride,
-    RevisionActor,
-    RosterSnapshot,
     ServiceAdjustmentSchedule,
     ServiceTreatment,
     build_public_holiday_review_revision,
     build_service_adjustment_revision,
     previous_common_operating_day,
     service_adjustment_schedule_from_state,
+)
+from src.domain.roster import (
+    InclusiveDateRange,
+    Meal,
+    RosterSnapshot,
+)
+from src.domain.public_holidays import (
+    PublicHolidayCandidate,
     south_korea_public_holiday_candidates,
 )
-from src.storage import AutomaticBackupResult, DatabaseSession
+from src.domain.revisions import RevisionActor
+from src.services.meal_service_availability import default_service_weekdays
+from src.storage.database_session import (
+    AutomaticBackupResult,
+    DatabaseSession,
+)
 
+from .date_edit import WheelSafeDateEdit
 from .import_controller import current_windows_actor
 from .theme import application_stylesheet, register_application_fonts
 
@@ -412,6 +420,8 @@ class PublicHolidayBatchDialog(QDialog):
         public_holidays: tuple[PublicHolidayCandidate, ...],
         calendar_holidays: tuple[PublicHolidayCandidate, ...],
         parent: QWidget | None = None,
+        *,
+        roster: RosterSnapshot | None = None,
     ) -> None:
         if not isinstance(schedule, ServiceAdjustmentSchedule):
             raise TypeError("schedule은 ServiceAdjustmentSchedule이어야 합니다.")
@@ -429,8 +439,11 @@ class PublicHolidayBatchDialog(QDialog):
         calendar_days = {candidate.day for candidate in calendar}
         if any(candidate.day not in calendar_days for candidate in selected):
             raise ValueError("선택한 공휴일이 표시된 달력에 없습니다.")
+        if roster is not None and not isinstance(roster, RosterSnapshot):
+            raise TypeError("roster는 RosterSnapshot이어야 합니다.")
         super().__init__(parent)
         self._schedule = schedule
+        self._roster = roster
         self._public_holidays = tuple(
             sorted(selected, key=lambda candidate: candidate.day)
         )
@@ -439,7 +452,7 @@ class PublicHolidayBatchDialog(QDialog):
         self._meal_cards: dict[Meal, QFrame] = {}
         self._treatment_cards: dict[ServiceTreatment, QFrame] = {}
         self._delivery_values: dict[tuple[date, Meal], date] = {}
-        self._delivery_editors: dict[tuple[date, Meal], QDateEdit] = {}
+        self._delivery_editors: dict[tuple[date, Meal], WheelSafeDateEdit] = {}
         self._rebuilding_deliveries = False
         register_application_fonts()
         self.setObjectName("publicHolidayBatchDialog")
@@ -475,11 +488,20 @@ class PublicHolidayBatchDialog(QDialog):
         return tuple(
             ReplacementDeliveryOverride(
                 meal,
-                candidate.day,
-                self._delivery_values[(candidate.day, meal)],
+                service_on,
+                self._delivery_values[(service_on, meal)],
             )
+            for service_on, meal in self.replacement_service_keys()
+        )
+
+    def replacement_service_keys(self) -> tuple[tuple[date, Meal], ...]:
+        meals = self.selected_meals()
+        return tuple(
+            (candidate.day, meal)
             for candidate in self._public_holidays
-            for meal in self.selected_meals()
+            for meal in meals
+            if self._roster is None
+            or _meal_is_scheduled(self._roster, meal, candidate.day)
         )
 
     def _build_ui(self) -> None:
@@ -695,7 +717,7 @@ class PublicHolidayBatchDialog(QDialog):
             )
             self._delivery_table.setRowCount(len(self._public_holidays))
             self._delivery_editors.clear()
-            suggestion_meals = meals or tuple(Meal)
+            service_keys = frozenset(self.replacement_service_keys())
             for row, candidate in enumerate(self._public_holidays):
                 day_item = QTableWidgetItem(
                     f"{candidate.day:%m.%d} ({_WEEKDAY_LABELS[candidate.day.weekday()]})"
@@ -707,14 +729,19 @@ class PublicHolidayBatchDialog(QDialog):
                     1,
                     QTableWidgetItem(candidate.name),
                 )
+                scheduled_meals = tuple(
+                    meal
+                    for meal in meals
+                    if (candidate.day, meal) in service_keys
+                )
                 suggestion = previous_common_operating_day(
                     self._schedule,
-                    suggestion_meals,
+                    scheduled_meals or meals or tuple(Meal),
                     candidate.day,
                     excluded_days=tuple(self._calendar_days),
                 )
                 for column, meal in enumerate(Meal, start=2):
-                    if meal not in meals:
+                    if (candidate.day, meal) not in service_keys:
                         empty = QTableWidgetItem("—")
                         empty.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                         self._delivery_table.setItem(row, column, empty)
@@ -771,6 +798,11 @@ class PublicHolidayBatchDialog(QDialog):
             return "적용할 식종을 한 개 이상 선택해주세요."
         if self._selected_treatment_or_none() is None:
             return "선택한 공휴일의 식사 처리 방법을 선택해주세요."
+        if (
+            self._selected_treatment_or_none() is ServiceTreatment.REPLACEMENT
+            and not self.replacement_service_keys()
+        ):
+            return "선택한 범위에 대체식을 제공할 예정 식사가 없습니다."
         return None
 
     def _summary_text(self) -> str:
@@ -829,7 +861,7 @@ class ServiceAdjustmentDialog(QDialog):
         self._meal_checks: dict[Meal, QCheckBox] = {}
         self._meal_cards: dict[Meal, QFrame] = {}
         self._treatment_cards: dict[ServiceTreatment, QFrame] = {}
-        self._mapping_editors: dict[tuple[date, Meal], QDateEdit] = {}
+        self._mapping_editors: dict[tuple[date, Meal], WheelSafeDateEdit] = {}
         self._mapping_values: dict[tuple[date, Meal], date] = {}
         self._rebuilding_mapping = False
         register_application_fonts()
@@ -1484,6 +1516,7 @@ class ServiceAdjustmentController:
                 request.public_holidays,
                 request.calendar_holidays,
                 parent,
+                roster=roster,
             )
         else:
             dialog = self._dialog_type(schedule, anchor_day, parent)
@@ -1505,6 +1538,11 @@ class ServiceAdjustmentController:
                     change_ids=tuple(
                         self._change_id_factory()
                         for _candidate in request.public_holidays
+                    ),
+                    replacement_targets=(
+                        dialog.replacement_service_keys()
+                        if treatment is ServiceTreatment.REPLACEMENT
+                        else None
                     ),
                 )
             else:
@@ -1555,15 +1593,15 @@ class ServiceAdjustmentController:
         )
 
 
-def _date_edit(value: QDate, object_name: str) -> QDateEdit:
-    editor = QDateEdit(value)
+def _date_edit(value: QDate, object_name: str) -> WheelSafeDateEdit:
+    editor = WheelSafeDateEdit(value)
     editor.setObjectName(object_name)
     editor.setCalendarPopup(True)
     editor.setDisplayFormat("yyyy.MM.dd")
     return editor
 
 
-def _python_date(editor: QDateEdit) -> date:
+def _python_date(editor: WheelSafeDateEdit) -> date:
     value = editor.date()
     return date(value.year(), value.month(), value.day())
 
@@ -1579,6 +1617,35 @@ def _period_text(starts_on: date, ends_on: date) -> str:
     if starts_on == ends_on:
         return starts_on.strftime("%Y.%m.%d")
     return f"{starts_on:%Y.%m.%d}~{ends_on:%m.%d}"
+
+
+def _meal_is_scheduled(
+    roster: RosterSnapshot,
+    meal: Meal,
+    service_on: date,
+) -> bool:
+    for person in roster.persons:
+        if meal not in roster.meals_for(person.person_id, on=service_on):
+            continue
+        setting = next(
+            (
+                item
+                for item in roster.delivery_settings_for(
+                    person.person_id,
+                    on=service_on,
+                )
+                if item.meal is meal
+            ),
+            None,
+        )
+        weekdays = (
+            setting.weekdays
+            if setting is not None and setting.weekdays is not None
+            else default_service_weekdays(meal, roster)
+        )
+        if service_on.weekday() in weekdays:
+            return True
+    return False
 
 
 def _holiday_batch_preview(

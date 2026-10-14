@@ -14,17 +14,19 @@ apsw = pytest.importorskip(
     reason="install requirements-sqlite-v2.txt for encrypted DB integration tests",
 )
 
-from src.domain import (
+from src.domain.revisions import (
     AuditChange,
     ChangeOperation,
-    DocumentKind,
-    DocumentRun,
     RevisionActor,
     RevisionMetadata,
     RevisionRecord,
     RevisionSource,
 )
-from src.storage import EncryptedDatabase
+from src.domain.documents import (
+    DocumentKind,
+    DocumentRun,
+)
+from src.storage.encrypted_database import EncryptedDatabase
 
 
 KEY = bytes.fromhex("55" * 32)

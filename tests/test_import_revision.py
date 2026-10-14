@@ -7,21 +7,26 @@ from uuid import UUID
 import openpyxl
 import pytest
 
-from src.domain import Meal, RevisionActor
-from src.importing import (
+from src.domain.roster import Meal
+from src.domain.revisions import RevisionActor
+from src.importing.households import (
     HouseholdMatchingRule,
-    IdentityResolution,
-    ImportMappingProfile,
-    ProfileField,
-    ReconciliationDecision,
-    build_import_revision,
     household_matching_rules_from_snapshot,
-    import_profiles_from_snapshot,
-    parse_workbook,
-    stage_reconciliation,
     stage_household_grouping,
 )
-from src.storage import DatabaseSession
+from src.importing.application import (
+    IdentityResolution,
+    ReconciliationDecision,
+)
+from src.importing.contracts import (
+    ImportMappingProfile,
+    ProfileField,
+)
+from src.importing.revision import build_import_revision
+from src.importing.profile_history import import_profiles_from_snapshot
+from src.importing.workbook import parse_workbook
+from src.importing.reconciliation import stage_reconciliation
+from src.storage.database_session import DatabaseSession
 from src.desktop_v2.inspector_history import InspectorMealHistory
 from src.desktop_v2.ledger_reader import load_revision_chain
 from src.services.database_export import build_database_workbook

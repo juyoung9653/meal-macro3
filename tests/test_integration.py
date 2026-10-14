@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 from datetime import date
 from pathlib import Path
-from typing import cast
 from unittest.mock import Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -23,20 +22,21 @@ from src.core.delivery_matrix import (
     RosterEntry,
 )
 from src.core.invoice_data import (
-    EnrichedPersonDict,
+    InvoiceData,
     MealPrices,
+    MonthlyDelivery,
     MonthlyDeliveryBatch,
-    legacy_recipient,
 )
 from src.core.models import FULL_ADDRESS_FIELD
 from src.excel.annual_workbook import TABLE_NAME, AnnualWorkbook
-from src.generators.confirm_generator import make_confirm
+from src.generators.confirm_generator import make_confirm_publication
 from src.services.invoice_controller import (
     InvoiceGenerationConfig,
     InvoiceResult,
     InvoiceService,
 )
 from src.templates.config import read_template_columns
+from src.widgets.confirm_tab import ConfirmTab
 from src.widgets.invoice_tab import InvoiceTab
 
 
@@ -301,17 +301,20 @@ def test_generate_invoice_creates_valid_workbook_from_annual_book(
     result = InvoiceService().generate(config)
 
     assert result.success, result.error
-    assert result.count == len(result.enriched) == 2
+    assert result.count == len(result.batch.deliveries) == 2
     assert len(book.roster) == 3
     assert [entry.source_row for entry in book.roster] == [2, 5, 8]
-    assert [person.get("성명") for person in result.enriched] == ["홍길동", "김철수"]
-    assert all("ID" not in person for person in result.enriched)
+    assert [person.roster.extra.get("성명") for person in result.batch.deliveries] == [
+        "홍길동",
+        "김철수",
+    ]
+    assert all("ID" not in person.roster.extra for person in result.batch.deliveries)
     assert output.is_file()
-    assert result.enriched[0]["_bf_cnt"] == 6
-    assert result.enriched[0]["_dn_cnt"] == 0
-    assert result.enriched[0]["배송담당"] == "김배송"
-    assert result.enriched[1]["_dn_cnt"] == 3
-    assert result.enriched[1]["배송담당"] == "이배송"
+    assert result.batch.deliveries[0].breakfast_count == 6
+    assert result.batch.deliveries[0].dinner_count == 0
+    assert result.batch.deliveries[0].delivery_staff == "김배송"
+    assert result.batch.deliveries[1].dinner_count == 3
+    assert result.batch.deliveries[1].delivery_staff == "이배송"
 
     wb = openpyxl.load_workbook(output, data_only=False)
     try:
@@ -383,7 +386,10 @@ def test_happy_lunch_maps_combined_address_into_invoice(
         tab.close()
 
     assert result.success, result.error
-    assert result.enriched[0].get(FULL_ADDRESS_FIELD) == "성남대로 1 101호"
+    assert (
+        result.batch.deliveries[0].roster.extra["도로명주소"],
+        result.batch.deliveries[0].roster.extra["상세주소"],
+    ) == ("성남대로 1", "101호")
     workbook = openpyxl.load_workbook(output, data_only=False)
     try:
         assert any(
@@ -396,9 +402,7 @@ def test_happy_lunch_maps_combined_address_into_invoice(
         workbook.close()
 
 
-def test_blank_only_month_is_rejected_as_unentered(
-    tmp_path: Path, template_path: str
-):
+def test_blank_only_month_is_rejected_as_unentered(tmp_path: Path, template_path: str):
     day = date(2026, 6, 1)
     dates = (day,)
     person = RosterEntry(source_row=2, extra={"성명": "배송중지"})
@@ -445,22 +449,15 @@ def test_invoice_tab_displays_and_forwards_only_output_people(
         "src.widgets.invoice_tab.read_template_columns",
         lambda *_args, **_kwargs: ["성명", "학교명"],
     )
-    active = cast(
-        EnrichedPersonDict,
-        {
-            "성명": "활성 대상",
-            "학교명": "분당초",
-            "_note": "",
-            "_total": 2,
-            "_amount": "19,000원",
-            "_bf_cnt": 2,
-            "_dn_cnt": 0,
-            "_lh_cnt": 0,
-            "weekly_meal_counts": [],
-            "배송순서": "001",
-            "배송담당": "기사A",
-            "연번": "001",
-        },
+    active = MonthlyDelivery(
+        roster=RosterEntry(2, {"성명": "활성 대상", "학교명": "분당초"}),
+        note="",
+        delivery_staff="기사A",
+        delivery_sequence="001",
+        breakfast_count=2,
+        lunch_count=0,
+        dinner_count=0,
+        weekly=(),
     )
 
     batch = MonthlyDeliveryBatch(
@@ -468,7 +465,7 @@ def test_invoice_tab_displays_and_forwards_only_output_people(
         month=6,
         prices=MealPrices(breakfast=9500, lunch=9500, dinner=9500),
         is_vacation_month=False,
-        deliveries=(legacy_recipient(active),),
+        deliveries=(active,),
     )
     service = Mock()
     service.generate.return_value = InvoiceResult(success=True, count=1, batch=batch)
@@ -560,27 +557,19 @@ def test_real_annual_xlsx_to_invoice_and_confirm_end_to_end(
     )
 
     assert result.success, result.error
-    assert result.count == len(result.enriched) == 1
+    assert result.count == len(result.batch.deliveries) == 1
     assert result.warnings == []
-    assert "ID" not in result.enriched[0]
+    assert "ID" not in result.batch.deliveries[0].roster.extra
     assert invoice_path.is_file()
-    assert result.enriched[0]["_bf_cnt"] == 2
-    assert result.enriched[0].get(FULL_ADDRESS_FIELD) == "성남대로 1 101호"
-    assert result.enriched[0]["배송담당"] == "기사A"
-    assert result.enriched[0]["연번"] == "003"
-    assert result.enriched[0]["weekly_meal_counts"][0]["조식"] == 1
-    assert result.enriched[0]["weekly_meal_counts"][1]["조식"] == 1
-    assert {
-        "_breakfast",
-        "_dinner",
-        "_lunch",
-        "_delivery_start",
-        "_delivery_end",
-        "_daily",
-        "_delivery_rows_raw",
-        "_reception_memo",
-        "excluded_dates",
-    }.isdisjoint(result.enriched[0])
+    assert result.batch.deliveries[0].breakfast_count == 2
+    assert (
+        result.batch.deliveries[0].roster.extra["도로명주소"],
+        result.batch.deliveries[0].roster.extra["상세주소"],
+    ) == ("성남대로 1", "101호")
+    assert result.batch.deliveries[0].delivery_staff == "기사A"
+    assert result.batch.deliveries[0].delivery_sequence == "003"
+    assert result.batch.deliveries[0].weekly[0].breakfast_count == 1
+    assert result.batch.deliveries[0].weekly[1].breakfast_count == 1
 
     invoice_wb = openpyxl.load_workbook(invoice_path, data_only=False)
     try:
@@ -592,13 +581,11 @@ def test_real_annual_xlsx_to_invoice_and_confirm_end_to_end(
         invoice_wb.close()
 
     assert result.batch is not None
-    created = make_confirm(
-        roster_data=result.batch,
+    created, _publication = make_confirm_publication(
+        batch=result.batch,
         col_mapping={},
-        output_dir=str(confirm_dir),
+        output_path=confirm_dir / "확인서_202606.xlsx",
         template_path=confirm_template_path,
-        year=2026,
-        month=6,
         meal_type="급식",
     )
     confirm_path = confirm_dir / created[0]["file"]
@@ -621,3 +608,57 @@ def test_real_annual_xlsx_to_invoice_and_confirm_end_to_end(
         )
     finally:
         confirm_wb.close()
+
+
+def test_confirmation_tab_preserves_configured_filename_and_batch(
+    qapp: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    batch = MonthlyDeliveryBatch(
+        2027,
+        3,
+        MealPrices(9500, 9500, 9500),
+        False,
+        (
+            MonthlyDelivery(
+                RosterEntry(2, {"성명": "대상자"}), "", "기사A", "003", 1, 0, 0, ()
+            ),
+        ),
+    )
+    filename = "배송확인_2027-03.xlsx"
+    created = [
+        {
+            "sheet_name": "정자동",
+            "file": filename,
+            "total_hh": 1,
+            "count_1": 1,
+            "count_2": 0,
+            "count_3": 0,
+            "count_4": 0,
+            "count_5": 0,
+        }
+    ]
+    writer = Mock(return_value=(created, None))
+    monkeypatch.setattr("src.widgets.confirm_tab.make_confirm_publication", writer)
+    tab = ConfirmTab()
+    try:
+        tab._s.set(
+            "confirm",
+            "output_filename_format",
+            value="배송확인_{year}-{month:02d}.xlsx",
+        )
+        tab._data = InvoiceData(batch=batch, col_mapping={"성명": "이름"})
+        tab.output_dir = str(tmp_path)
+        with (
+            patch("src.widgets.confirm_tab.QMessageBox.information"),
+            patch("src.widgets.confirm_tab.QMessageBox.critical") as critical,
+        ):
+            tab._generate_confirms()
+        critical.assert_not_called()
+        assert writer.call_args.kwargs["batch"] is batch
+        assert writer.call_args.kwargs["col_mapping"] == {"성명": "이름"}
+        assert Path(writer.call_args.kwargs["output_path"]) == tmp_path / filename
+        assert Path(tab._last_output_path) == tmp_path / filename
+        assert tab.open_file_btn.isEnabled()
+        assert tab.confirm_table.rowCount() == 1
+    finally:
+        tab.close()

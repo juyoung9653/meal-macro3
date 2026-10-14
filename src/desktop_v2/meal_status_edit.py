@@ -8,11 +8,10 @@ from datetime import UTC, date, datetime
 from enum import StrEnum
 from uuid import UUID, uuid4
 
-from PySide6.QtCore import QDate
+from PySide6.QtCore import QDate, QEvent, Qt
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
-    QDateEdit,
     QDialog,
     QFrame,
     QGridLayout,
@@ -26,22 +25,63 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from src.domain import (
+from src.domain.roster import (
     InclusiveDateRange,
     Meal,
-    MealStatus,
     Person,
-    RevisionActor,
     RosterSnapshot,
-    StatusHistory,
-    build_meal_status_revision,
 )
+from src.domain.status import (
+    MealStatus,
+    StatusHistory,
+)
+from src.domain.revisions import RevisionActor
+from src.domain.meal_status_changes import build_meal_status_revision
 from src.domain.meal_status_changes import build_batch_meal_status_revision
 from src.domain.intake import IntakeChannel
-from src.storage import AutomaticBackupResult, DatabaseSession
+
+from .date_edit import WheelSafeDateEdit
+from src.storage.database_session import (
+    AutomaticBackupResult,
+    DatabaseSession,
+)
 
 from .import_controller import current_windows_actor
 from .theme import application_stylesheet, register_application_fonts
+
+
+class _MealChoiceCard(QFrame):
+    """Let the card body toggle its checkbox without intercepting the checkbox."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._check: QCheckBox | None = None
+
+    def set_check(self, check: QCheckBox, *click_targets: QWidget) -> None:
+        self._check = check
+        for target in click_targets:
+            target.installEventFilter(self)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and self.isEnabled():
+            self._toggle_check()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def eventFilter(self, watched, event) -> bool:
+        if (
+            event.type() == QEvent.Type.MouseButtonRelease
+            and event.button() == Qt.MouseButton.LeftButton
+            and self.isEnabled()
+        ):
+            self._toggle_check()
+            return True
+        return super().eventFilter(watched, event)
+
+    def _toggle_check(self) -> None:
+        if self._check is not None and self._check.isEnabled():
+            self._check.toggle()
 
 
 class MealStatusChangeDialog(QDialog):
@@ -96,6 +136,7 @@ class MealStatusChangeDialog(QDialog):
         self._meal_cards: dict[Meal, QFrame] = {}
         self._current_labels: dict[Meal, QLabel] = {}
         self._status_buttons: dict[MealStatus, QPushButton] = {}
+        self._last_status: MealStatus | None = None
         register_application_fonts()
         self.setObjectName("mealStatusChangeDialog")
         self.setWindowTitle(
@@ -113,6 +154,7 @@ class MealStatusChangeDialog(QDialog):
             self._meal_checks[meal].setChecked(True)
         self._status_buttons[initial_status].setChecked(True)
         self._continue.setChecked(initial_status is not MealStatus.PAUSED)
+        self._last_status = initial_status
         self._refresh_state()
 
     def selected_meals(self) -> tuple[Meal, ...]:
@@ -167,7 +209,7 @@ class MealStatusChangeDialog(QDialog):
         self._same_household.toggled.connect(self._refresh_state)
         root.addWidget(self._same_household)
         scope_note = QLabel(
-            "일시중지·미배송 일괄 적용 시 이용하지 않는 식종은 제외합니다. 배송은 식종 이용을 함께 시작합니다."
+            "일시중지·중지 일괄 적용 시 이용하지 않는 식종은 제외합니다. 배송은 식종 이용을 함께 시작합니다."
         )
         scope_note.setWordWrap(True)
         scope_note.setObjectName("muted")
@@ -176,7 +218,7 @@ class MealStatusChangeDialog(QDialog):
         meal_row = QHBoxLayout()
         meal_row.setSpacing(8)
         for meal in (Meal.DINNER, Meal.BREAKFAST, Meal.LUNCH):
-            card = QFrame()
+            card = _MealChoiceCard()
             card.setObjectName("mealChoiceCard")
             card.setProperty("selected", False)
             card_layout = QVBoxLayout(card)
@@ -184,11 +226,12 @@ class MealStatusChangeDialog(QDialog):
             check = QCheckBox(meal.value)
             check.setObjectName("mealChoiceCheck")
             if self._seed_targets is not None:
-                check.setEnabled(any(m is meal for _, m in self._seed_targets))
+                card.setEnabled(any(m is meal for _, m in self._seed_targets))
             check.toggled.connect(self._refresh_state)
             current = QLabel()
             current.setObjectName("mealCurrentState")
             current.setWordWrap(True)
+            card.set_check(check, current)
             card_layout.addWidget(check)
             card_layout.addWidget(current)
             meal_row.addWidget(card, 1)
@@ -211,7 +254,9 @@ class MealStatusChangeDialog(QDialog):
             button.setObjectName("statusChoice")
             button.setCheckable(True)
             button.setProperty("statusKind", status.name.lower())
-            button.clicked.connect(self._refresh_state)
+            button.clicked.connect(
+                lambda _checked=False, selected=status: self._on_status_clicked(selected)
+            )
             status_group.addButton(button)
             status_row.addWidget(button, 1)
             self._status_buttons[status] = button
@@ -283,6 +328,15 @@ class MealStatusChangeDialog(QDialog):
 
     def _on_continue_toggled(self, checked: bool) -> None:
         self._ends_on.setEnabled(not checked)
+        self._refresh_state()
+
+    def _on_status_clicked(self, status: MealStatus) -> None:
+        if status is not self._last_status and status is MealStatus.STOPPED:
+            self._continue.blockSignals(True)
+            self._continue.setChecked(True)
+            self._continue.blockSignals(False)
+            self._ends_on.setEnabled(False)
+        self._last_status = status
         self._refresh_state()
 
     def _refresh_state(self, *_args) -> None:
@@ -605,7 +659,7 @@ class MealStatusChangeController:
 
 
 def _status_text(status: MealStatus) -> str:
-    return "미배송" if status is MealStatus.STOPPED else status.value
+    return "중지" if status is MealStatus.STOPPED else status.value
 
 
 def _current_state(
@@ -625,14 +679,14 @@ def _current_state(
     )
 
 
-def _date_edit(value: date) -> QDateEdit:
-    editor = QDateEdit(QDate(value.year, value.month, value.day))
+def _date_edit(value: date) -> WheelSafeDateEdit:
+    editor = WheelSafeDateEdit(QDate(value.year, value.month, value.day))
     editor.setCalendarPopup(True)
     editor.setDisplayFormat("yyyy.MM.dd")
     return editor
 
 
-def _python_date(editor: QDateEdit) -> date:
+def _python_date(editor: WheelSafeDateEdit) -> date:
     value = editor.date()
     return date(value.year(), value.month(), value.day())
 

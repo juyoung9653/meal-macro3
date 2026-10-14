@@ -5,21 +5,25 @@ from uuid import UUID
 
 import pytest
 
-from src.domain import (
+from src.domain.projections import (
     ENROLLMENT_KIND,
     STATUS_EVENT_KIND,
-    IntakeChannel,
+)
+from src.domain.intake import IntakeChannel
+from src.domain.roster import (
     InclusiveDateRange,
     Meal,
     MealEnrollment,
-    MealStatus,
     Person,
     PersonProfile,
+    RosterSnapshot,
+)
+from src.domain.status import MealStatus
+from src.domain.revisions import (
     RevisionActor,
     RevisionSource,
-    RosterSnapshot,
-    build_meal_status_revision,
 )
+from src.domain.meal_status_changes import build_meal_status_revision
 
 
 CURRENT_REVISION_ID = UUID("88000000-0000-0000-0000-000000000001")

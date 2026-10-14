@@ -5,9 +5,13 @@ from uuid import UUID
 
 import pytest
 
-from src.domain import (
-    PERSON_KIND,
+from src.domain.projections import PERSON_KIND
+from src.domain.revisions import (
     ChangeOperation,
+    RevisionActor,
+    RevisionSource,
+)
+from src.domain.roster import (
     CustomFieldDefinition,
     CustomFieldType,
     Household,
@@ -16,11 +20,9 @@ from src.domain import (
     MealEnrollment,
     Person,
     PersonProfile,
-    RevisionActor,
-    RevisionSource,
     RosterSnapshot,
-    build_person_profile_revision,
 )
+from src.domain.profile_edits import build_person_profile_revision
 
 CURRENT_REVISION_ID = UUID("85000000-0000-0000-0000-000000000001")
 NEW_REVISION_ID = UUID("85000000-0000-0000-0000-000000000002")

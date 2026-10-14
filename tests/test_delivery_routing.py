@@ -5,7 +5,7 @@ from uuid import uuid4
 
 import pytest
 
-from src.domain import (
+from src.domain.roster import (
     DeliveryAssignment,
     Household,
     HouseholdMembership,
@@ -14,13 +14,16 @@ from src.domain import (
     MealEnrollment,
     Person,
     PersonProfile,
+    RosterSnapshot,
+)
+from src.domain.revisions import (
     RevisionActor,
     RevisionMetadata,
     RevisionRecord,
     RevisionSource,
-    RosterSnapshot,
 )
 from src.domain.delivery_routing import (
+    ROUTING_EVENT_KIND,
     Driver,
     DriverReplacementTarget,
     RoutingEvent,
@@ -32,7 +35,9 @@ from src.domain.delivery_routing import (
     routing_state_from_snapshot,
 )
 from src.domain.projections import roster_audit_changes
-from src.storage import DatabaseSession, RevisionConflictError
+from src.domain.revisions import EntityRef, HistoricalSnapshot
+from src.storage.database_session import DatabaseSession
+from src.storage.encrypted_database import RevisionConflictError
 
 DAY = date(2026, 10, 1)
 BEFORE = date(2026, 9, 30)
@@ -41,7 +46,12 @@ BEFORE = date(2026, 9, 30)
 def base_roster():
     person = Person(
         uuid4(),
-        PersonProfile("김예시", road_address="이전 도로", detail_address="101호"),
+        PersonProfile(
+            "김예시",
+            jurisdiction="정자동",
+            road_address="이전 도로",
+            detail_address="101호",
+        ),
     )
     return RosterSnapshot(
         uuid4(),
@@ -123,6 +133,52 @@ def test_effective_date_component_precedence_and_unassignment():
     assert roster.person(person_id).profile.road_address == "이전 도로"
 
 
+def test_jurisdiction_follows_effective_dates_retains_and_can_be_cleared():
+    roster = base_roster()
+    person_id = roster.persons[0].person_id
+    move = RoutingEvent(
+        uuid4(), person_id, DAY, 1, {}, "새 도로", "202호", "  수내동  "
+    )
+    future_address_only = RoutingEvent(
+        uuid4(), person_id, date(2026, 11, 1), 2, {}, "다음 주소", None
+    )
+    clear = RoutingEvent(
+        uuid4(), person_id, date(2026, 12, 1), 3, {}, jurisdiction="   "
+    )
+    state = RoutingState(events=(move, future_address_only, clear))
+
+    assert state.resolve(roster, person_id, BEFORE).jurisdiction == "정자동"
+    assert state.resolve(roster, person_id, DAY).jurisdiction == "수내동"
+    assert (
+        state.resolve(roster, person_id, date(2026, 11, 1)).jurisdiction
+        == "수내동"
+    )
+    assert state.resolve(roster, person_id, date(2026, 12, 1)).jurisdiction == ""
+
+
+def test_legacy_routing_snapshot_without_jurisdiction_retains_profile_value():
+    roster = base_roster()
+    person_id = roster.persons[0].person_id
+    event_id = uuid4()
+    snapshot = HistoricalSnapshot(
+        roster.revision_id,
+        {
+            EntityRef(ROUTING_EVENT_KIND, event_id): {
+                "person_id": str(person_id),
+                "effective_on": DAY.isoformat(),
+                "position": 1,
+                "driver_ids": {},
+                "road_address": "새 주소",
+                "detail_address": None,
+            }
+        },
+    )
+
+    view = routing_state_from_snapshot(snapshot).resolve(roster, person_id, DAY)
+    assert view.road_address == "새 주소"
+    assert view.jurisdiction == "정자동"
+
+
 def test_registry_legacy_matching_only_for_unique_names():
     roster = base_roster()
     first = Driver(uuid4(), "기존 기사", "010-0000-0001")
@@ -192,6 +248,7 @@ def test_whole_household_move_uses_effective_date_membership_and_one_revision():
         effective_on=DAY,
         driver_ids={},
         road_address="새 주소",
+        jurisdiction="  야탑동 ",
         whole_household=True,
         event_id=uuid4(),
         event_id_factory=lambda: second_event_id,
@@ -206,6 +263,7 @@ def test_whole_household_move_uses_effective_date_membership_and_one_revision():
         str(current_member.person_id),
     )
     assert tuple(item["position"] for item in after) == (1, 2)
+    assert {item["jurisdiction"] for item in after} == {"야탑동"}
 
 
 def test_whole_household_move_requires_membership_on_effective_date():
@@ -260,6 +318,7 @@ def test_registry_move_and_meal_change_survive_reopen_and_keep_old_history(tmp_p
             },
             road_address="새 주소",
             detail_address="303호",
+            jurisdiction="수내동",
             event_id=uuid4(),
             **args(),
         )
@@ -296,6 +355,7 @@ def test_registry_move_and_meal_change_survive_reopen_and_keep_old_history(tmp_p
         assert state.resolve(current, person_id, BEFORE).road_address == "이전 도로"
         result = state.resolve(current, person_id, DAY)
         assert (result.road_address, result.detail_address) == ("새 주소", "303호")
+        assert result.jurisdiction == "수내동"
         assert result.driver_ids == {
             Meal.DINNER: first.driver_id,
             Meal.BREAKFAST: second.driver_id,

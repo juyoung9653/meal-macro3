@@ -16,31 +16,37 @@ from src.desktop_v2.school_calendar_edit import (
     SchoolCalendarEditDialog,
     SchoolCalendarEditStatus,
 )
-from src.domain import (
+from src.domain.revisions import (
     AuditChange,
     ChangeOperation,
-    InclusiveDateRange,
-    LunchDayRule,
-    Meal,
-    MealEnrollment,
-    Person,
-    PersonProfile,
     RevisionActor,
     RevisionMetadata,
     RevisionRecord,
     RevisionSource,
+)
+from src.domain.roster import (
+    InclusiveDateRange,
+    Meal,
+    MealEnrollment,
+    Person,
+    PersonProfile,
     RosterSnapshot,
+)
+from src.domain.entitlements import (
+    LunchDayRule,
+    SchoolLunchMark,
+)
+from src.domain.school_calendar import (
     SCHOOL_LUNCH_SCHEDULE_KIND,
     SchoolLunchCalendar,
     SchoolLunchDay,
-    SchoolLunchMark,
     SchoolLunchSchoolSchedule,
-    apply_school_lunch_rule_period,
-    roster_audit_changes,
     school_lunch_calendar_from_snapshot,
     school_lunch_school_schedule_state,
 )
-from src.storage import DatabaseSession
+from src.domain.school_calendar_edits import apply_school_lunch_rule_period
+from src.domain.projections import roster_audit_changes
+from src.storage.database_session import DatabaseSession
 
 
 BASE_REVISION_ID = UUID("93000000-0000-0000-0000-000000000001")

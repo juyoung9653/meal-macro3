@@ -15,7 +15,15 @@ from PySide6.QtWidgets import QApplication
 
 from src.desktop_v2.column_search import SequenceValuePicker, sequence_pair_token
 from src.desktop_v2.roster_window import RosterTableModel, RosterWindow
-from src.domain import Meal, MealEnrollment, Person, PersonProfile, RosterSnapshot, DeliveryAssignment, RevisionActor
+from src.domain.roster import (
+    Meal,
+    MealEnrollment,
+    Person,
+    PersonProfile,
+    RosterSnapshot,
+    DeliveryAssignment,
+)
+from src.domain.revisions import RevisionActor
 from src.domain.status import MealStatus
 from src.services.driver_households import DriverHouseholdRow
 

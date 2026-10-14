@@ -1,41 +1,9 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
-from typing import Any, NotRequired, TypedDict
 
 from .delivery_matrix import RosterEntry
-
-
-class WeeklyMealCount(TypedDict):
-    """Legacy confirmation payload for direct mapping-based generator callers."""
-
-    week: int
-    start_date: str  # YYYYMMDD
-    end_date: str  # YYYYMMDD
-    조식: int
-    중식: int
-    석식: int
-
-
-class EnrichedPersonDict(TypedDict):
-    """Deprecated legacy renderer payload; application code uses MonthlyDelivery."""
-
-    _note: str
-    _total: int
-    _amount: str
-    _bf_cnt: int
-    _dn_cnt: int
-    _lh_cnt: int
-    weekly_meal_counts: list[WeeklyMealCount]
-    배송순서: str
-    배송담당: str
-    연번: str
-
-    비고: NotRequired[Any]
-    핸드폰: NotRequired[Any]
-    전체주소: NotRequired[str]
 
 
 @dataclass(frozen=True)
@@ -110,52 +78,6 @@ class MonthlyDeliveryBatch:
     prices: MealPrices
     is_vacation_month: bool
     deliveries: tuple[MonthlyDelivery, ...]
-
-
-def _legacy_date(value: object) -> date:
-    text = str(value)
-    if len(text) != 8 or not text.isdigit():
-        raise ValueError("주차 날짜는 YYYYMMDD 형식이어야 합니다.")
-    return date(int(text[:4]), int(text[4:6]), int(text[6:]))
-
-
-def legacy_recipient(
-    source: Mapping[str, object], *, position: int = 1
-) -> MonthlyDelivery:
-    """Adapt a legacy direct-generator record at the public compatibility boundary."""
-    def count(key: str) -> int:
-        value = source.get(key, 0)
-        return value if isinstance(value, int) and not isinstance(value, bool) else 0
-
-    weekly: list[WeeklyDelivery] = []
-    raw_weekly = source.get("weekly_meal_counts", [])
-    if isinstance(raw_weekly, Sequence) and not isinstance(raw_weekly, (str, bytes)):
-        for item in raw_weekly:
-            if not isinstance(item, Mapping):
-                continue
-            try:
-                weekly.append(
-                    WeeklyDelivery(
-                        week=int(item.get("week", 0)),
-                        start_date=_legacy_date(item.get("start_date", "")),
-                        end_date=_legacy_date(item.get("end_date", "")),
-                        breakfast_count=int(item.get("조식", 0)),
-                        lunch_count=int(item.get("중식", 0)),
-                        dinner_count=int(item.get("석식", 0)),
-                    )
-                )
-            except (TypeError, ValueError):
-                continue
-    return MonthlyDelivery(
-        roster=RosterEntry(source_row=position + 1, extra=source),
-        note="" if source.get("_note") is None else str(source.get("_note", "")).strip(),
-        delivery_staff="" if source.get("배송담당") is None else str(source.get("배송담당", "")).strip(),
-        delivery_sequence="" if source.get("배송순서") is None else str(source.get("배송순서", "")).strip(),
-        breakfast_count=count("_bf_cnt"),
-        lunch_count=count("_lh_cnt"),
-        dinner_count=count("_dn_cnt"),
-        weekly=tuple(weekly),
-    )
 
 
 @dataclass

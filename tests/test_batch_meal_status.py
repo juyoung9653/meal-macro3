@@ -12,23 +12,23 @@ from src.desktop_v2.meal_status_edit import (
     MealStatusChangeController,
     MealStatusChangeDialog,
 )
-from src.domain import (
+from src.domain.roster import (
     Household,
     HouseholdMembership,
     InclusiveDateRange,
     Meal,
     MealEnrollment,
-    MealStatus,
-    IntakeChannel,
     Person,
     PersonProfile,
-    RevisionActor,
     RosterSnapshot,
 )
+from src.domain.status import MealStatus
+from src.domain.intake import IntakeChannel
+from src.domain.revisions import RevisionActor
 from src.domain.meal_status_changes import build_batch_meal_status_revision
 from src.domain.projections import roster_audit_changes
 from src.domain.revisions import RevisionMetadata, RevisionRecord, RevisionSource
-from src.storage import DatabaseSession
+from src.storage.database_session import DatabaseSession
 
 DAY = date(2026, 9, 9)
 ACTOR = RevisionActor("담당자", "batch-test-sid")
@@ -272,7 +272,7 @@ def test_application_routes_exact_batch_and_refreshes_after_save(monkeypatch):
             calls.append(args)
             return SimpleNamespace(completed=True, roster=updated)
 
-    controller = DesktopStartupController(meal_status_controller_type=Controller)
+    controller = DesktopStartupController(settings=SimpleNamespace(), meal_status_controller_type=Controller)
     refreshed = []
     monkeypatch.setattr(
         controller, "_replace_roster_if_changed", lambda *args: refreshed.append(args)

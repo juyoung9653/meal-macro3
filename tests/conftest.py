@@ -70,3 +70,21 @@ def _isolate_roster_column_settings(monkeypatch, tmp_path):
             str(tmp_path / 'roster-columns.ini'), settings_type.Format.IniFormat
         ),
     )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_roster_archive_settings(monkeypatch, tmp_path):
+    """Do not let the operator's archive threshold hide synthetic test rows."""
+    import sys
+
+    archive_module = sys.modules.get('src.desktop_v2.inactive_roster')
+    if archive_module is None:
+        return
+    settings_type = archive_module.QSettings
+    monkeypatch.setattr(
+        archive_module,
+        'QSettings',
+        lambda *args, **kwargs: settings_type(
+            str(tmp_path / 'roster-archive.ini'), settings_type.Format.IniFormat
+        ),
+    )

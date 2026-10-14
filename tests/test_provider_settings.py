@@ -19,7 +19,7 @@ from src.domain.revisions import (
     RevisionSource,
 )
 from src.domain.roster import Person, PersonProfile, RosterSnapshot
-from src.storage import DatabaseSession
+from src.storage.database_session import DatabaseSession
 
 CURRENT = UUID("d1000000-0000-0000-0000-000000000001")
 NEXT = UUID("d1000000-0000-0000-0000-000000000002")

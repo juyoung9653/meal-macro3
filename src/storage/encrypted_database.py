@@ -518,6 +518,76 @@ class EncryptedDatabase:
                 destination.close()
         return backup_path
 
+    def snapshot_bytes(self) -> bytes:
+        """Return a consistent SQLite image in memory; never write plaintext."""
+        connection = self._require_connection()
+        if not connection.get_autocommit():
+            raise RuntimeError("진행 중인 DB transaction은 백업할 수 없습니다.")
+        connection.execute("BEGIN")
+        try:
+            self.check_integrity()
+            payload = connection.serialize("main")
+            if payload is None:
+                raise DatabaseIntegrityError("DB snapshot을 읽을 수 없습니다.")
+            # sqlite3mc leaves per-page nonce/MAC bytes in SQLite's reserved
+            # space. They carry no database data and change after reopening.
+            # Clearing them makes logically untouched pages delta-stable.
+            image = bytearray(payload)
+            page_size = int.from_bytes(image[16:18], "big")
+            if page_size == 1:
+                page_size = 65536
+            reserved = image[20]
+            if reserved:
+                for end in range(page_size, len(image) + 1, page_size):
+                    image[end - reserved:end] = b"\x00" * reserved
+            return bytes(image)
+        finally:
+            connection.execute("ROLLBACK")
+
+    @classmethod
+    def restore_snapshot(cls, payload: bytes, path: str | Path, key: bytes) -> Path:
+        """Deserialize only in RAM, then write and validate an encrypted database."""
+        destination_path = _database_path(path)
+        _validate_key(key)
+        if destination_path.exists():
+            raise DatabaseAlreadyExistsError(f"DB 파일이 이미 있습니다: {destination_path}")
+        source = apsw.Connection(
+            ":memory:",
+            flags=apsw.SQLITE_OPEN_READWRITE | apsw.SQLITE_OPEN_CREATE | apsw.SQLITE_OPEN_URI,
+        )
+        try:
+            source.pragma("temp_store", 2)
+            # Serialized WAL databases must be opened as an in-memory rollback DB.
+            if len(payload) < 100 or payload[:16] != b"SQLite format 3\x00":
+                raise DatabaseFormatError("SQLite snapshot 형식이 올바르지 않습니다.")
+            image = bytearray(payload)
+            image[18:20] = b"\x01\x01"
+            source.deserialize("main", bytes(image))
+            if tuple(source.execute("PRAGMA integrity_check")) != (("ok",),):
+                raise DatabaseIntegrityError("복원 snapshot 무결성 검사 실패")
+            _upgrade_schema(source)
+            _validate_schema(source)
+            _validate_ledger(source)
+            _validate_typed_projection_integrity(source)
+            _validate_document_runs(source)
+            # sqlite3mc forbids online backup between plaintext memory and an
+            # encrypted connection. Its keyed VACUUM INTO URI writes encrypted
+            # pages directly, preserving tables, indexes, triggers and sequences.
+            destination_uri = destination_path.as_uri() + "?cipher=" + _CIPHER + "&hexkey=" + key.hex()
+            try:
+                source.execute("VACUUM INTO ?", (destination_uri,))
+            except apsw.Error:
+                # Never expose the key-bearing URI in SQLite diagnostics.
+                raise DatabaseIntegrityError("암호화 DB snapshot을 저장하지 못했습니다.") from None
+            with cls.open(destination_path, key) as database:
+                database.check_integrity()
+        except Exception:
+            _remove_incomplete_database(destination_path)
+            raise
+        finally:
+            source.close()
+        return destination_path
+
     def close(self) -> None:
         if self._connection is not None:
             self._connection.close()

@@ -12,7 +12,6 @@ from PySide6.QtCore import QDateTime
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
-    QDateTimeEdit,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
@@ -32,8 +31,9 @@ from src.domain.complaints import (
 from src.domain.intake import IntakeChannel
 from src.domain.revisions import RevisionActor
 from src.domain.roster import Meal, Person, RosterSnapshot
-from src.storage import DatabaseSession
+from src.storage.database_session import DatabaseSession
 
+from .date_edit import WheelSafeDateTimeEdit
 from .import_controller import current_windows_actor
 from .theme import application_stylesheet, register_application_fonts
 
@@ -67,7 +67,7 @@ class ComplaintDialog(QDialog):
         self._person = QLabel(person.profile.name)
         self._person.setObjectName("complaintPerson")
         form.addRow("대상자", self._person)
-        self._received_at = QDateTimeEdit()
+        self._received_at = WheelSafeDateTimeEdit()
         self._received_at.setObjectName("complaintReceivedAt")
         self._received_at.setCalendarPopup(True)
         self._received_at.setDisplayFormat("yyyy-MM-dd HH:mm")

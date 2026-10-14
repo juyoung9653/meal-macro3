@@ -22,16 +22,19 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from src.domain import (
+from src.domain.export_security import (
     EXPORT_PASSWORD_SETTING_ID,
     EXPORT_PASSWORD_SETTING_KIND,
     ExportPasswordSetting,
-    RevisionActor,
-    RosterSnapshot,
     build_export_password_revision,
     export_password_setting_from_state,
 )
-from src.storage import AutomaticBackupResult, DatabaseSession
+from src.domain.revisions import RevisionActor
+from src.domain.roster import RosterSnapshot
+from src.storage.database_session import (
+    AutomaticBackupResult,
+    DatabaseSession,
+)
 
 from .database_access import _DatabaseAccessDialog
 from .import_controller import current_windows_actor

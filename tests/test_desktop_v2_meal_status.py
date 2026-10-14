@@ -1,26 +1,30 @@
 """Offscreen multi-meal delivery-status editor checks."""
 
 import os
-from datetime import date
+from datetime import date, timedelta
 from uuid import UUID
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
+from PySide6.QtCore import QDate, Qt
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog
 
-from src.desktop_v2 import MealStatusChangeDialog
-from src.domain import (
+from src.desktop_v2.meal_status_edit import MealStatusChangeDialog
+from src.domain.roster import (
     InclusiveDateRange,
     Meal,
     MealEnrollment,
-    MealStatus,
-    IntakeChannel,
     Person,
     PersonProfile,
     RosterSnapshot,
+)
+from src.domain.status import (
+    MealStatus,
     resolve_status_history,
 )
+from src.domain.intake import IntakeChannel
 
 
 REVISION_ID = UUID("89000000-0000-0000-0000-000000000001")
@@ -124,7 +128,99 @@ def test_open_ended_stop_keeps_selected_meal_set(app: QApplication):
 
     assert dialog.selected_meals() == (Meal.BREAKFAST, Meal.DINNER)
     assert dialog.selected_period() == InclusiveDateRange(ANCHOR_DAY, None)
-    assert "미배송" in dialog._summary_text.text()
+    assert "중지" in dialog._summary_text.text()
+    dialog.close()
+
+
+def test_selecting_stop_after_pause_defaults_to_no_end_and_keeps_entered_date(
+    app: QApplication,
+):
+    roster = _roster()
+    dialog = MealStatusChangeDialog(
+        roster.person(PERSON_ID),
+        roster,
+        _histories(),
+        ANCHOR_DAY,
+        Meal.BREAKFAST,
+        MealStatus.PAUSED,
+    )
+    entered_end = ANCHOR_DAY + timedelta(days=6)
+    dialog._ends_on.setDate(
+        QDate(entered_end.year, entered_end.month, entered_end.day)
+    )
+
+    dialog._status_buttons[MealStatus.STOPPED].click()
+    app.processEvents()
+
+    assert dialog.selected_status() is MealStatus.STOPPED
+    assert dialog.selected_period() == InclusiveDateRange(ANCHOR_DAY, None)
+    assert dialog._ends_on.date() == QDate(
+        entered_end.year, entered_end.month, entered_end.day
+    )
+    assert not dialog._ends_on.isEnabled()
+
+    dialog._continue.click()
+    dialog._meal_checks[Meal.DINNER].setChecked(True)
+    app.processEvents()
+    assert dialog.selected_period() == InclusiveDateRange(ANCHOR_DAY, entered_end)
+    dialog.close()
+
+
+def test_meal_card_body_label_and_checkbox_each_toggle_once(app: QApplication):
+    roster = _roster()
+    dialog = MealStatusChangeDialog(
+        roster.person(PERSON_ID),
+        roster,
+        _histories(),
+        ANCHOR_DAY,
+        Meal.LUNCH,
+        MealStatus.DELIVERY,
+    )
+    dialog.show()
+    app.processEvents()
+
+    dinner = dialog._meal_checks[Meal.DINNER]
+    QTest.mouseClick(
+        dialog._meal_cards[Meal.DINNER],
+        Qt.MouseButton.LeftButton,
+        pos=dialog._meal_cards[Meal.DINNER].rect().bottomRight(),
+    )
+    assert dinner.isChecked()
+
+    QTest.mouseClick(
+        dialog._current_labels[Meal.DINNER],
+        Qt.MouseButton.LeftButton,
+    )
+    assert not dinner.isChecked()
+
+    breakfast = dialog._meal_checks[Meal.BREAKFAST]
+    QTest.mouseClick(breakfast, Qt.MouseButton.LeftButton)
+    assert breakfast.isChecked()
+    dialog.close()
+
+
+def test_disabled_batch_meal_card_does_not_toggle(app: QApplication):
+    roster = _roster()
+    dialog = MealStatusChangeDialog(
+        roster.person(PERSON_ID),
+        roster,
+        _histories(),
+        ANCHOR_DAY,
+        Meal.BREAKFAST,
+        MealStatus.DELIVERY,
+        targets=((PERSON_ID, Meal.BREAKFAST),),
+    )
+    dialog.show()
+    app.processEvents()
+
+    lunch_card = dialog._meal_cards[Meal.LUNCH]
+    lunch = dialog._meal_checks[Meal.LUNCH]
+    assert not lunch_card.isEnabled()
+    assert not lunch.isChecked()
+    QTest.mouseClick(lunch_card, Qt.MouseButton.LeftButton)
+    QTest.mouseClick(dialog._current_labels[Meal.LUNCH], Qt.MouseButton.LeftButton)
+    QTest.mouseClick(lunch, Qt.MouseButton.LeftButton)
+    assert not lunch.isChecked()
     dialog.close()
 
 

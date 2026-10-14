@@ -78,11 +78,14 @@ def _snapshot(*, event_specs=(), drivers: tuple[Driver, ...] = ()):
             "name": driver.name,
             "telephone": driver.telephone,
         }
-    for position, (effective_on, driver_ids, road, detail) in enumerate(event_specs, start=1):
+    for position, spec in enumerate(event_specs, start=1):
+        effective_on, driver_ids, road, detail = spec[:4]
+        jurisdiction = spec[4] if len(spec) > 4 else None
         event = RoutingEvent(
-            uuid4(), person_id, effective_on, position, driver_ids, road, detail
+            uuid4(), person_id, effective_on, position, driver_ids, road, detail,
+            jurisdiction,
         )
-        states[EntityRef(ROUTING_EVENT_KIND, event.event_id)] = {
+        event_state = {
             "person_id": str(event.person_id),
             "effective_on": event.effective_on.isoformat(),
             "position": event.position,
@@ -93,6 +96,9 @@ def _snapshot(*, event_specs=(), drivers: tuple[Driver, ...] = ()):
             "road_address": event.road_address,
             "detail_address": event.detail_address,
         }
+        if len(spec) > 4:
+            event_state["jurisdiction"] = event.jurisdiction
+        states[EntityRef(ROUTING_EVENT_KIND, event.event_id)] = event_state
     return HistoricalSnapshot(revision_id, states), person_id
 
 
@@ -117,8 +123,8 @@ def test_document_period_end_routing_changes_presentation_only(tmp_path):
     routed_snapshot, _ = _snapshot(
         drivers=(morning, evening),
         event_specs=(
-            (date(2026, 8, 15), {Meal.BREAKFAST: morning.driver_id, Meal.DINNER: evening.driver_id}, "변경 도로", ""),
-            (date(2026, 8, 21), {Meal.BREAKFAST: None}, "미래 도로", "999호"),
+            (date(2026, 8, 15), {Meal.BREAKFAST: morning.driver_id, Meal.DINNER: evening.driver_id}, "변경 도로", "", "수내동"),
+            (date(2026, 8, 21), {Meal.BREAKFAST: None}, "미래 도로", "999호", "판교동"),
         ),
     )
 
@@ -132,6 +138,8 @@ def test_document_period_end_routing_changes_presentation_only(tmp_path):
     assert delivery.delivery_staff == "등록 기사"
     assert delivery.roster.extra["도로명주소"] == "변경 도로"
     assert delivery.roster.extra["상세주소"] == ""
+    assert delivery.roster.extra["관할동"] == "수내동"
+    assert delivery.roster.extra["동"] == "수내동"
     assert delivery.roster.extra["주소"] == "변경 도로"
     assert routed.calculation_manifest["calculation_contract_version"] == 3
     assert routed.calculation_manifest["document_presentation"] == {
@@ -144,7 +152,7 @@ def test_document_period_end_routing_changes_presentation_only(tmp_path):
     if not __import__("os").path.exists(template):
         pytest.skip("급식 확인서 템플릿 없음")
     output = tmp_path / "routing-confirm.xlsx"
-    created, _ = make_confirm_publication(routed.batch, {}, output, template, 2026, 8)
+    created, _ = make_confirm_publication(routed.batch, {}, output, template)
     workbook = openpyxl.load_workbook(output, data_only=False)
     try:
         worksheet = workbook[created[0]["sheet_name"]]

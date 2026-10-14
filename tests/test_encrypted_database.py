@@ -21,8 +21,12 @@ from src.domain.revisions import (
     RevisionRecord,
     RevisionSource,
 )
-from src.domain import (
+from src.domain.projections import (
     PERSON_KIND,
+    roster_audit_changes,
+    status_event_audit_change,
+)
+from src.domain.roster import (
     CustomFieldDefinition,
     CustomFieldType,
     DeliveryAssignment,
@@ -31,15 +35,15 @@ from src.domain import (
     InclusiveDateRange,
     Meal,
     MealEnrollment,
-    MealStatus,
     Person,
     PersonProfile,
     RosterSnapshot,
-    StatusEvent,
-    roster_audit_changes,
-    status_event_audit_change,
 )
-from src.storage import (
+from src.domain.status import (
+    MealStatus,
+    StatusEvent,
+)
+from src.storage.encrypted_database import (
     DatabaseAlreadyExistsError,
     DatabaseEncryptionUnavailableError,
     DatabaseFormatError,

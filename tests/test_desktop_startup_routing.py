@@ -12,13 +12,13 @@ import pytest
 from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication
 
-from src.desktop_v2 import (
+from src.desktop_v2.database_access import (
     CreateDatabaseDialog,
-    DesktopStartupController,
-    DesktopStorageSettings,
     LoginDialog,
 )
-from src.storage import credential_path_for
+from src.desktop_v2.application import DesktopStartupController
+from src.desktop_v2.portable_settings import DesktopStorageSettings
+from src.storage.database_credentials import credential_path_for
 
 
 @pytest.fixture(scope="module")

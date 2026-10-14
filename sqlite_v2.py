@@ -4,7 +4,7 @@ from datetime import date
 import sys
 
 from src.desktop_v2.__main__ import main
-from src.domain import south_korea_public_holiday_candidates
+from src.domain.public_holidays import south_korea_public_holiday_candidates
 
 
 def packaging_smoke() -> int:

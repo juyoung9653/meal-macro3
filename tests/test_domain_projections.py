@@ -3,31 +3,37 @@
 from datetime import UTC, date, datetime
 from uuid import UUID
 
-from src.domain import (
+from src.domain.projections import (
     ASSIGNMENT_KIND,
     CUSTOM_FIELD_KIND,
     ENROLLMENT_KIND,
     PERSON_KIND,
     STATUS_EVENT_KIND,
+    roster_audit_changes,
+    roster_from_historical_snapshot,
+    status_event_audit_change,
+)
+from src.domain.revisions import (
     ChangeOperation,
+    EntityRef,
+    HistoricalSnapshot,
+)
+from src.domain.roster import (
     CustomFieldDefinition,
     CustomFieldType,
     DeliveryAssignment,
-    EntityRef,
-    HistoricalSnapshot,
     Household,
     HouseholdMembership,
     InclusiveDateRange,
     Meal,
     MealEnrollment,
-    MealStatus,
     Person,
     PersonProfile,
     RosterSnapshot,
+)
+from src.domain.status import (
+    MealStatus,
     StatusEvent,
-    roster_audit_changes,
-    roster_from_historical_snapshot,
-    status_event_audit_change,
 )
 
 

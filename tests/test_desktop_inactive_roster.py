@@ -111,9 +111,11 @@ def test_window_archive_switch_follows_view_day_and_restores_after_roster_refres
     window = RosterWindow(roster, histories, inactive_settings=settings)
 
     assert window._archive_action.isChecked() is False
+    assert window._archive_threshold_button.isHidden()
     assert window._roster_title.text() == "대상자 명단"
     assert _visible_ids(window) == {ACTIVE}
     window._archive_action.trigger()
+    assert not window._archive_threshold_button.isHidden()
     assert window._roster_title.text() == "장기 미배송 보관함 (1명)"
     assert _visible_ids(window) == {ARCHIVED}
     window._on_column_search_changed("name", "보관")
@@ -136,7 +138,7 @@ def test_window_archive_switch_follows_view_day_and_restores_after_roster_refres
         assert not settings.contains(InactiveRosterSettings.SETTINGS_KEY)
         dialog.findChild(QDialogButtonBox).button(QDialogButtonBox.StandardButton.Save).click()
     QTimer.singleShot(0, save_days)
-    window._archive_threshold_action.trigger()
+    window._archive_threshold_button.click()
     assert settings.value(InactiveRosterSettings.SETTINGS_KEY, type=int) == 36500
     assert window._roster_title.text() == "장기 미배송 보관함 (0명)"
     assert _visible_ids(window) == set()
@@ -148,6 +150,7 @@ def test_window_archive_switch_follows_view_day_and_restores_after_roster_refres
     assert window._roster_title.text() == "장기 미배송 보관함 (0명)"
     assert _visible_ids(window) == set()
     window._archive_action.trigger()
+    assert window._archive_threshold_button.isHidden()
     assert _visible_ids(window) == {ARCHIVED, ACTIVE}
     window.close()
 
@@ -232,7 +235,7 @@ def test_threshold_cancel_restores_filtered_roster(app, tmp_path, close_method):
             dialog.close()
 
     QTimer.singleShot(0, cancel)
-    window._archive_threshold_action.trigger()
+    window._archive_threshold_button.click()
     assert window._archive_settings.days == 365
     assert not settings.contains(InactiveRosterSettings.SETTINGS_KEY)
     assert window._search_input.text() == "보관"
@@ -249,6 +252,7 @@ def test_more_menu_click_and_global_search_combine_with_header_filter(app, tmp_p
     assert window._search_input.isVisible()
     assert window._search_input.placeholderText() == "성명, 학교, 전화, 주소 검색"
     menu = window._more_menu
+    assert "보관 기준 설정" not in {action.text() for action in menu.actions()}
     menu.popup(window._more_button.mapToGlobal(window._more_button.rect().bottomLeft()))
     app.processEvents()
     QTest.mouseClick(menu, Qt.MouseButton.LeftButton, pos=menu.actionGeometry(window._archive_action).center())

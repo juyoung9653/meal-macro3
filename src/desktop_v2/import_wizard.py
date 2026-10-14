@@ -24,7 +24,6 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QComboBox,
-    QDateEdit,
     QDialog,
     QFileDialog,
     QFormLayout,
@@ -46,18 +45,9 @@ from PySide6.QtWidgets import (
 )
 
 from src.domain.roster import Meal
-from src.importing import (
+from src.importing.workbook import (
     AutomaticSourceResolution,
-    DateNormalization,
-    HouseholdMatchCriterion,
-    HouseholdMatchingRule,
     ImportIssue,
-    ImportPurpose,
-    ImportMappingProfile,
-    PhoneNormalization,
-    ProfileField,
-    StoredImportProfile,
-    StoredHouseholdMatchingRule,
     WorkbookImportPasswordRequiredError,
     WorkbookImportPasswordError,
     WorkbookImportPreview,
@@ -68,7 +58,21 @@ from src.importing import (
     parse_workbook,
     proposed_profile,
 )
+from src.importing.contracts import (
+    DateNormalization,
+    ImportMappingProfile,
+    PhoneNormalization,
+    ProfileField,
+)
+from src.importing.households import (
+    HouseholdMatchCriterion,
+    HouseholdMatchingRule,
+    StoredHouseholdMatchingRule,
+)
+from src.importing.revision import ImportPurpose
+from src.importing.profile_history import StoredImportProfile
 
+from .date_edit import WheelSafeDateEdit
 from .theme import FOCUS, application_stylesheet, register_application_fonts
 from src.importing.workbook import custom_column_names, source_column_letter
 
@@ -432,7 +436,7 @@ class RosterImportWizard(QDialog):
         layout.addWidget(self.lunch_mode_note)
         effective_row = QHBoxLayout()
         effective_row.addWidget(QLabel("이 명단을 적용할 날짜 (당일 포함) *"))
-        self.effective_date_edit = QDateEdit(QDate.currentDate())
+        self.effective_date_edit = WheelSafeDateEdit(QDate.currentDate())
         self.effective_date_edit.setCalendarPopup(True)
         self.effective_date_edit.setDisplayFormat("yyyy-MM-dd")
         effective_row.addWidget(self.effective_date_edit)

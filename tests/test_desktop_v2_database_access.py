@@ -18,14 +18,19 @@ pytest.importorskip(
 from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication, QDialog, QLineEdit, QPushButton
 
-from src.desktop_v2 import (
+from src.desktop_v2.database_access import (
     CreateDatabaseDialog,
-    DesktopStorageSettings,
     LoginDialog,
     RestoreBackupDialog,
 )
+from src.desktop_v2.portable_settings import DesktopStorageSettings
 from src.desktop_v2.database_access import BackupDirectoryDialog, DatabaseLocationDialog, DatabasePasswordChangeDialog, relocate_database
-from src.storage import AutomaticBackupResult, DatabaseSession, credential_path_for, inspect_backup
+from src.storage.database_session import (
+    AutomaticBackupResult,
+    DatabaseSession,
+)
+from src.storage.database_credentials import credential_path_for
+from src.storage.database_backup import inspect_backup
 from src.storage.database_backup import DatabaseBackupService
 from tests.test_database_backup import REVISION_ID, _record
 

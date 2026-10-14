@@ -20,15 +20,19 @@ from PySide6.QtWidgets import (
 )
 
 from src.domain.roster import Meal, RosterSnapshot
-from src.importing import (
-    ImportPurpose,
+from src.importing.revision import ImportPurpose
+from src.importing.households import (
     ExistingHouseholdProposal,
     HouseholdGroupingDecision,
     HouseholdGroupingPlan,
     HouseholdMatchCriterion,
+)
+from src.importing.application import (
     IdentityResolution,
-    ProfileField,
     ReconciliationDecision,
+)
+from src.importing.contracts import ProfileField
+from src.importing.reconciliation import (
     ReconciliationDisposition,
     ReconciliationPlan,
     StagedPerson,

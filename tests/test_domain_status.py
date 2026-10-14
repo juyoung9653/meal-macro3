@@ -5,9 +5,11 @@ from uuid import UUID
 
 import pytest
 
-from src.domain import (
+from src.domain.roster import (
     InclusiveDateRange,
     Meal,
+)
+from src.domain.status import (
     MealStatus,
     StatusEvent,
     StatusHistory,

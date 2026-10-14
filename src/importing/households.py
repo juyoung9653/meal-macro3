@@ -673,6 +673,53 @@ def household_matching_rules_from_snapshot(
     return tuple(sorted(rules, key=lambda item: str(item.rule_id)))
 
 
+def match_existing_household_id(
+    profile: PersonProfile,
+    rule: HouseholdMatchingRule | None,
+    roster: RosterSnapshot,
+    *,
+    effective_on: date,
+) -> UUID | None:
+    """Return the one active household matching the saved import rule.
+
+    A missing rule keeps the established mobile-phone default. Blank criteria do
+    not match, and multiple household matches require the caller to stop rather
+    than selecting an arbitrary household.
+    """
+
+    if not isinstance(profile, PersonProfile):
+        raise TypeError("profile은 PersonProfile이어야 합니다.")
+    if rule is not None and not isinstance(rule, HouseholdMatchingRule):
+        raise TypeError("rule은 HouseholdMatchingRule 또는 None이어야 합니다.")
+    if not isinstance(roster, RosterSnapshot):
+        raise TypeError("roster는 RosterSnapshot이어야 합니다.")
+    _validate_date(effective_on, "가구 연결 적용일")
+    criteria = (
+        (HouseholdMatchCriterion.MOBILE_PHONE,)
+        if rule is None
+        else rule.criteria
+    )
+    key = tuple(_profile_criterion_key(profile, item) for item in criteria)
+    if any(not value for value in key):
+        return None
+
+    matches = {
+        membership.household_id
+        for membership in roster.memberships
+        if membership.period.contains(effective_on)
+        and tuple(
+            _profile_criterion_key(roster.person(membership.person_id).profile, item)
+            for item in criteria
+        ) == key
+    }
+    if len(matches) > 1:
+        raise ValueError(
+            "입력한 정보와 일치하는 기존 가구가 둘 이상입니다. "
+            "연락처와 주소를 확인한 뒤 다시 시도해주세요."
+        )
+    return next(iter(matches), None)
+
+
 def _criterion_key(
     observation: PersonObservation,
     criterion: HouseholdMatchCriterion,

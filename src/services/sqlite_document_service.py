@@ -340,6 +340,8 @@ def _roster_entry(
     if delivery_view is not None:
         road, detail = delivery_view.road_address, delivery_view.detail_address
         extra.update({
+            "관할동": delivery_view.jurisdiction or "",
+            "동": delivery_view.jurisdiction or "",
             "도로명주소": road or "",
             "상세주소": detail or "",
             "주소": combine_address(road, detail),

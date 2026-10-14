@@ -4,7 +4,7 @@ from datetime import date
 
 import pytest
 
-from src.domain import (
+from src.domain.public_holidays import (
     PUBLIC_HOLIDAY_PROVIDER_ID,
     PublicHolidayCandidate,
     south_korea_public_holiday_candidates,

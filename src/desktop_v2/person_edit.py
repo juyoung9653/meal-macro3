@@ -25,16 +25,19 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from src.domain import (
+from src.domain.roster import (
     Person,
     PersonProfile,
-    RevisionActor,
     RosterSnapshot,
-    build_person_profile_revision,
 )
+from src.domain.revisions import RevisionActor
+from src.domain.profile_edits import build_person_profile_revision
 from src.domain.profile_edits import profile_household_members
 from src.domain.roster import CustomFieldDefinition, CustomFieldType, HouseholdDeliverySetting, Meal
-from src.storage import AutomaticBackupResult, DatabaseSession
+from src.storage.database_session import (
+    AutomaticBackupResult,
+    DatabaseSession,
+)
 from src.services.meal_service_availability import default_delivery_weekdays, default_service_weekdays
 
 from .import_controller import current_windows_actor

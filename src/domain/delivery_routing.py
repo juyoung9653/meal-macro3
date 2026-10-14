@@ -50,6 +50,7 @@ class RoutingEvent:
     driver_ids: Mapping[Meal, UUID | None]
     road_address: str | None = None
     detail_address: str | None = None
+    jurisdiction: str | None = None
 
     def __post_init__(self):
         if not isinstance(self.event_id, UUID) or not isinstance(self.person_id, UUID):
@@ -69,10 +70,20 @@ class RoutingEvent:
             object.__setattr__(self, "road_address", self.road_address.strip())
         if self.detail_address is not None and not isinstance(self.detail_address, str):
             raise TypeError("상세주소는 문자열이어야 합니다.")
+        if self.jurisdiction is not None:
+            if not isinstance(self.jurisdiction, str):
+                raise TypeError("관할동은 문자열이어야 합니다.")
+            object.__setattr__(self, "jurisdiction", self.jurisdiction.strip())
         if self.road_address is None and self.detail_address is not None:
             raise ValueError("상세주소 변경에는 기본 주소가 필요합니다.")
-        if self.road_address is None and not self.driver_ids:
-            raise ValueError("변경할 주소 또는 배송담당을 선택해주세요.")
+        if (
+            self.road_address is None
+            and self.jurisdiction is None
+            and not self.driver_ids
+        ):
+            raise ValueError(
+                "변경할 주소·관할동 또는 배송담당을 선택해주세요."
+            )
         object.__setattr__(self, "driver_ids", MappingProxyType(dict(self.driver_ids)))
 
 
@@ -82,6 +93,7 @@ class PersonDeliveryView:
     detail_address: str | None
     drivers: Mapping[Meal, str]
     driver_ids: Mapping[Meal, UUID | None]
+    jurisdiction: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,18 +186,25 @@ class RoutingState:
         }
         ids = {meal: self._unique_names.get(name) for meal, name in names.items()}
         road, detail = profile.road_address, profile.detail_address
+        jurisdiction = profile.jurisdiction
         for event in self._events_by_person.get(person_id, ()):
             if event.effective_on > day:
                 break
             if event.road_address is not None:
                 road, detail = event.road_address, event.detail_address
+            if event.jurisdiction is not None:
+                jurisdiction = event.jurisdiction
             for meal, driver_id in event.driver_ids.items():
                 ids[meal] = driver_id
                 names[meal] = (
                     "" if driver_id is None else self._drivers_by_id[driver_id].name
                 )
         return PersonDeliveryView(
-            road, detail, MappingProxyType(names), MappingProxyType(ids)
+            road,
+            detail,
+            MappingProxyType(names),
+            MappingProxyType(ids),
+            jurisdiction,
         )
 
 
@@ -209,6 +228,7 @@ def routing_state_from_snapshot(snapshot: HistoricalSnapshot) -> RoutingState:
                     },
                     state["road_address"],
                     state["detail_address"],
+                    state.get("jurisdiction"),
                 )
             )
     return RoutingState(
@@ -294,6 +314,7 @@ def build_routing_revision(
     event_id: UUID,
     road_address: str | None = None,
     detail_address: str | None = None,
+    jurisdiction: str | None = None,
     whole_household: bool = False,
     event_id_factory: Callable[[], UUID] = uuid4,
 ) -> RevisionRecord:
@@ -342,6 +363,7 @@ def build_routing_revision(
             driver_ids,
             road_address,
             detail_address,
+            jurisdiction,
         )
         for offset, (target_person_id, target_event_id) in enumerate(
             zip(target_ids, event_ids), start=1
@@ -367,17 +389,73 @@ def build_routing_revision(
             actor=actor,
             reason=(
                 "가구 전체 이사 및 식종별 배송담당 변경"
-                if whole_household and road_address is not None
+                if whole_household
+                and (road_address is not None or jurisdiction is not None)
                 else "가구 전체 이사"
                 if whole_household
                 else "이사 및 식종별 배송담당 변경"
-                if road_address is not None
+                if road_address is not None or jurisdiction is not None
                 else "식종 배송담당 변경"
             ),
             source=RevisionSource.UI,
             rule_versions={"delivery_routing": 1},
         ),
         changes,
+    )
+
+
+def build_batch_assignment_revision(
+    roster: RosterSnapshot,
+    state: RoutingState,
+    *,
+    targets: tuple[tuple[UUID, Meal], ...],
+    driver_id: UUID | None,
+    effective_on: date,
+    actor: RevisionActor,
+    recorded_at: datetime,
+    revision_id: UUID,
+    event_id_factory: Callable[[], UUID] = uuid4,
+) -> RevisionRecord | None:
+    """Change only the selected person/meal pairs in one revision."""
+    if type(effective_on) is not date:
+        raise TypeError("적용일은 날짜여야 합니다.")
+    if driver_id is not None and (
+        not isinstance(driver_id, UUID) or driver_id not in state._drivers_by_id
+    ):
+        raise ValueError("등록되지 않은 배송기사입니다.")
+    if not targets:
+        raise ValueError("배송담당을 변경할 식종 셀을 선택해주세요.")
+    assignments: dict[UUID, dict[Meal, UUID | None]] = {}
+    for person_id, meal in targets:
+        roster.person(person_id)
+        if not isinstance(meal, Meal):
+            raise TypeError("변경할 식종이 올바르지 않습니다.")
+        view = state.resolve(roster, person_id, effective_on)
+        if view.driver_ids[meal] == driver_id and (
+            driver_id is not None or not view.drivers[meal]
+        ):
+            continue
+        assignments.setdefault(person_id, {})[meal] = driver_id
+    if not assignments:
+        return None
+    position = max((event.position for event in state.events), default=0)
+    events = tuple(
+        RoutingEvent(event_id_factory(), person_id, effective_on, position + offset, meals)
+        for offset, (person_id, meals) in enumerate(assignments.items(), start=1)
+    )
+    event_ids = {event.event_id for event in events}
+    if len(event_ids) != len(events) or event_ids.intersection(event.event_id for event in state.events):
+        raise ValueError("이미 사용한 이사·배정 기록 ID입니다.")
+    RoutingState(state.drivers, (*state.events, *events))
+    return RevisionRecord(
+        RevisionMetadata(
+            revision_id=revision_id, parent_revision_id=roster.revision_id,
+            recorded_at=recorded_at, effective_on=effective_on, actor=actor,
+            reason="선택한 식종 배송담당 일괄 변경", source=RevisionSource.UI,
+            rule_versions={"delivery_routing": 1},
+        ),
+        tuple(AuditChange(ROUTING_EVENT_KIND, event.event_id, ChangeOperation.INSERT,
+                          None, _routing_event_state(event)) for event in events),
     )
 
 
@@ -473,6 +551,7 @@ def _routing_event_state(event: RoutingEvent) -> dict[str, object]:
         },
         "road_address": event.road_address,
         "detail_address": event.detail_address,
+        "jurisdiction": event.jurisdiction,
     }
 
 

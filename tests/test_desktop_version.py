@@ -8,18 +8,26 @@ from PySide6.QtCore import QCoreApplication
 from PySide6.QtWidgets import QApplication
 
 from src.desktop_v2 import __main__ as entry
+from src.desktop_v2 import portable_settings
+from src.desktop_v2.application import DesktopStartupOutcome
 from src.version import APP_VERSION, WINDOWS_VERSION
 
 
 @pytest.mark.parametrize("status, expected", [(entry.StartupStatus.CANCELLED, 0), (entry.StartupStatus.FAILED, 1)])
-def test_entry_exposes_version_without_changing_settings_identity(monkeypatch, status, expected):
+def test_entry_exposes_version_without_changing_settings_identity(monkeypatch, tmp_path, status, expected):
     app = QApplication.instance() or QApplication([])
     old = (app.organizationName(), app.applicationName(), app.applicationVersion())
-    monkeypatch.setattr(entry, "DesktopStartupController", lambda: SimpleNamespace(
-        start=lambda: SimpleNamespace(ready=False, status=status)
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data/settings.ini").touch()
+    monkeypatch.setattr(portable_settings, "application_directory", lambda: tmp_path)
+    errors = []
+    monkeypatch.setattr(entry.QMessageBox, "critical", lambda *args: errors.append(args))
+    monkeypatch.setattr(entry, "DesktopStartupController", lambda *, settings: SimpleNamespace(
+        start=lambda: DesktopStartupOutcome(status)
     ))
     try:
         assert entry.main() == expected
+        assert errors == []
         assert app.applicationVersion() == APP_VERSION == "0.1.0"
         assert app.organizationName() == "분당구"
         assert app.applicationName() == "급식 배송 운영 SQLite v2"

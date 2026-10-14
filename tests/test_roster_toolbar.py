@@ -48,6 +48,17 @@ def test_header_only_exposes_frequent_actions(window):
     assert not header.findChildren(QComboBox)
 
 
+def test_archive_threshold_button_only_appears_in_archive_mode(window):
+    assert window._archive_threshold_button.isHidden()
+    assert "보관 기준 설정" not in {
+        action.text() for action in window._more_menu.actions()
+    }
+    window._archive_action.trigger()
+    assert window._archive_threshold_button.isVisible()
+    window._archive_action.trigger()
+    assert window._archive_threshold_button.isHidden()
+
+
 def test_row_actions_emit_selected_meal_and_person(window):
     from src.domain.roster import Meal
 
@@ -70,8 +81,8 @@ def test_column_settings_remains_reachable_from_more_menu(window, monkeypatch):
 
     original = window._column_layout.create_menu
 
-    def create_menu(parent):
-        menu = original(parent)
+    def create_menu(parent, **kwargs):
+        menu = original(parent, **kwargs)
         menus.append(menu)
         QTimer.singleShot(0, menu.close)
         return menu
@@ -89,7 +100,10 @@ def test_driver_view_uses_all_delivery_meals_and_current_date_despite_roster_fil
     from uuid import uuid4
 
     from src.desktop_v2 import driver_households
-    from src.domain import Meal, MealEnrollment
+    from src.domain.roster import (
+        Meal,
+        MealEnrollment,
+    )
     from src.domain.delivery_routing import Driver, RoutingEvent, RoutingState
     from tests.test_desktop_v2_roster import _calendar, _histories
 

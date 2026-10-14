@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from enum import StrEnum
@@ -18,6 +18,18 @@ class Meal(StrEnum):
     BREAKFAST = "조식"
     LUNCH = "중식"
     DINNER = "석식"
+
+
+def canonical_meals(meals: Sequence[Meal]) -> tuple[Meal, ...]:
+    """Validate a nonempty meal selection and order it for persisted changes."""
+    values = tuple(meals)
+    if not values:
+        raise ValueError("하나 이상의 식종을 선택해야 합니다.")
+    if any(not isinstance(meal, Meal) for meal in values):
+        raise TypeError("meals에는 Meal만 허용됩니다.")
+    if len(set(values)) != len(values):
+        raise ValueError("선택한 식종은 중복될 수 없습니다.")
+    return tuple(meal for meal in Meal if meal in values)
 
 
 _MEAL_ORDER = (Meal.BREAKFAST, Meal.LUNCH, Meal.DINNER)

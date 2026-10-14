@@ -11,7 +11,6 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
     QComboBox,
-    QDateEdit,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
@@ -30,6 +29,7 @@ from src.domain.delivery_routing import (
     MEAL_ORDER,
     Driver,
     RoutingState,
+    build_batch_assignment_revision,
     build_driver_replacement_revision,
     build_driver_revision,
     build_routing_revision,
@@ -37,6 +37,8 @@ from src.domain.delivery_routing import (
     routing_state_from_snapshot,
 )
 from src.domain.roster import Meal, RosterSnapshot
+
+from .date_edit import WheelSafeDateEdit
 
 from .import_controller import current_windows_actor
 from .theme import application_stylesheet, register_application_fonts
@@ -49,7 +51,7 @@ def _style(dialog, title):
 
 
 def _date_editor(day):
-    editor = QDateEdit(QDate(day.year, day.month, day.day))
+    editor = WheelSafeDateEdit(QDate(day.year, day.month, day.day))
     editor.setCalendarPopup(True)
     editor.setDisplayFormat("yyyy-MM-dd")
     return editor
@@ -163,6 +165,7 @@ class RoutingRequest:
     road_address: str | None = None
     detail_address: str | None = None
     whole_household: bool = False
+    jurisdiction: str | None = None
 
 
 class RoutingChangeDialog(QDialog):
@@ -179,7 +182,9 @@ class RoutingChangeDialog(QDialog):
         super().__init__(parent)
         self._meal = meal
         self._roster = roster
+        self._state = state
         self._person_id = person_id
+        self._display_day = day
         self._request = None
         person = roster.person(person_id)
         view = state.resolve(roster, person_id, day)
@@ -188,11 +193,11 @@ class RoutingChangeDialog(QDialog):
             f"{person.profile.name} · "
             + ("이사 등록" if meal is None else "배송담당 변경"),
         )
-        self.resize(540, 370 if meal is None else 230)
+        self.resize(540, 400 if meal is None else 230)
         layout = QVBoxLayout(self)
         layout.addWidget(
             QLabel(
-                "적용일 당일부터 변경됩니다. 이전 날짜의 주소와 담당자는 유지됩니다."
+                "적용일 당일부터 변경됩니다. 이전 날짜의 주소·관할동과 담당자는 유지됩니다."
             )
         )
         form = QFormLayout()
@@ -200,12 +205,15 @@ class RoutingChangeDialog(QDialog):
         form.addRow("적용일", self.day)
         self.road = QLineEdit(view.road_address or "")
         self.detail = QLineEdit(view.detail_address or "")
+        self.jurisdiction = QLineEdit(view.jurisdiction or "")
         if meal is None:
             form.addRow("이사할 주소", self.road)
             form.addRow("상세주소", self.detail)
+            form.addRow("관할동", self.jurisdiction)
         else:
             self.road.hide()
             self.detail.hide()
+            self.jurisdiction.hide()
         self.drivers = {}
         self.meal_checks = {}
         for selected_meal in MEAL_ORDER:
@@ -284,12 +292,74 @@ class RoutingChangeDialog(QDialog):
         except ValueError as error:
             self.error.setText(str(error))
             return
-        self._request = RoutingRequest(
-            self.day.date().toPython(), driver_ids, road,
-            self.detail.text().strip() or None if self._meal is None else None,
-            self.whole_household.isChecked() if self.whole_household is not None else False,
+        request = RoutingRequest(
+            effective_on=self.day.date().toPython(),
+            driver_ids=driver_ids,
+            road_address=road,
+            detail_address=(
+                self.detail.text().strip() or None
+                if self._meal is None
+                else None
+            ),
+            whole_household=(
+                self.whole_household.isChecked()
+                if self.whole_household is not None
+                else False
+            ),
+            jurisdiction=(
+                self.jurisdiction.text().strip()
+                if self._meal is None
+                else None
+            ),
         )
+        if (
+            request.effective_on == self._display_day
+            and not self._changes_effective_values(request)
+        ):
+            self.error.setText("변경된 내용이 없습니다.")
+            return
+        self._request = request
         self.accept()
+
+    def _changes_effective_values(self, request: RoutingRequest) -> bool:
+        target_ids = (self._person_id,)
+        if request.whole_household:
+            membership = next(
+                (
+                    item
+                    for item in self._roster.memberships
+                    if item.person_id == self._person_id
+                    and item.period.contains(request.effective_on)
+                ),
+                None,
+            )
+            if membership is not None:
+                target_ids = tuple(
+                    person.person_id
+                    for person in self._roster.household_members(
+                        membership.household_id, on=request.effective_on
+                    )
+                )
+        for target_id in target_ids:
+            view = self._state.resolve(
+                self._roster, target_id, request.effective_on
+            )
+            if request.road_address is not None and (
+                view.road_address != request.road_address
+                or (view.detail_address or None) != request.detail_address
+            ):
+                return True
+            if request.jurisdiction is not None and (
+                view.jurisdiction or ""
+            ) != request.jurisdiction:
+                return True
+            if any(
+                view.driver_ids[meal] != driver_id
+                or (driver_id is None and bool(view.drivers[meal]))
+                for meal, driver_id in request.driver_ids.items()
+            ):
+                return True
+        return False
 
     def _refresh_household_targets(self):
         if self.household_targets is None:
@@ -316,6 +386,69 @@ class RoutingChangeDialog(QDialog):
     def request(self):
         if self._request is None:
             raise RuntimeError("확정된 변경 내용이 없습니다.")
+        return self._request
+
+
+@dataclass(frozen=True)
+class BatchAssignmentRequest:
+    effective_on: date
+    driver_id: UUID | None
+
+
+class BatchRoutingChangeDialog(QDialog):
+    def __init__(self, roster, state, targets, day, parent=None):
+        super().__init__(parent)
+        _style(self, "선택한 식종 배송담당 변경")
+        self.resize(540, 360)
+        self._request = None
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(f"선택한 {len({person_id for person_id, _ in targets})}명 · 식종 {len(targets)}개에 적용합니다."))
+        selected = QTableWidget(len(targets), 2)
+        selected.setHorizontalHeaderLabels(["성명", "식종"])
+        selected.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        selected.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        for row, (person_id, meal) in enumerate(targets):
+            selected.setItem(row, 0, QTableWidgetItem(roster.person(person_id).profile.name))
+            selected.setItem(row, 1, QTableWidgetItem(meal.value))
+        layout.addWidget(selected)
+        form = QFormLayout()
+        self.day = _date_editor(day)
+        self.driver = _driver_combo(state, None)
+        self.driver.insertItem(0, "변경할 기사 선택", "__unchanged__")
+        self.driver.setCurrentIndex(0)
+        form.addRow("적용일", self.day)
+        form.addRow("배송담당", self.driver)
+        layout.addLayout(form)
+        note = QLabel("선택한 식종 셀에만 같은 기사를 지정합니다. 미지정을 선택하면 배정을 해제합니다. 이전 날짜와 이후 예약된 변경은 유지됩니다.")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        self.error = QLabel()
+        self.error.setObjectName("errorMessage")
+        self.error.setWordWrap(True)
+        self.error.hide()
+        layout.addWidget(self.error)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Save).setText("저장")
+        buttons.button(QDialogButtonBox.StandardButton.Save).setObjectName("primaryAction")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("취소")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setObjectName("quietAction")
+        buttons.accepted.connect(self._save)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _save(self):
+        try:
+            driver_id = _chosen_driver(self.driver)
+        except ValueError as error:
+            self.error.setText(str(error))
+            self.error.show()
+            return
+        self._request = BatchAssignmentRequest(self.day.date().toPython(), driver_id)
+        self.accept()
+
+    def request(self):
+        if self._request is None:
+            raise RuntimeError("확정된 배송담당 변경이 없습니다.")
         return self._request
 
 
@@ -468,6 +601,7 @@ class DeliveryRoutingController:
         *,
         registry_dialog_type=DriverRegistryDialog,
         change_dialog_type=RoutingChangeDialog,
+        batch_change_dialog_type=BatchRoutingChangeDialog,
         replacement_dialog_type=DriverReplacementDialog,
         message_box=QMessageBox,
         actor_provider=current_windows_actor,
@@ -475,6 +609,7 @@ class DeliveryRoutingController:
         self._session = session
         self._registry_dialog_type = registry_dialog_type
         self._change_dialog_type = change_dialog_type
+        self._batch_change_dialog_type = batch_change_dialog_type
         self._replacement_dialog_type = replacement_dialog_type
         self._message_box = message_box
         self._actor_provider = actor_provider
@@ -546,6 +681,26 @@ class DeliveryRoutingController:
     def run_assignment(self, person_id, meal, day, parent=None):
         return self._run_change(person_id, day, parent, meal=meal)
 
+    def run_batch_assignment(self, targets, day, parent=None):
+        try:
+            roster, state = self._load()
+            targets = tuple(dict.fromkeys(targets))
+            if not targets:
+                raise ValueError("배송담당을 변경할 식종 셀을 선택해주세요.")
+            dialog = self._batch_change_dialog_type(roster, state, targets, day, parent)
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return DeliveryRoutingOutcome()
+            request = dialog.request()
+            record = build_batch_assignment_revision(
+                roster, state, targets=targets, driver_id=request.driver_id,
+                effective_on=request.effective_on, actor=self._actor_provider(),
+                recorded_at=datetime.now(UTC), revision_id=uuid4(),
+            )
+            return self._commit(record, parent) if record is not None else DeliveryRoutingOutcome()
+        except Exception as error:
+            self._message_box.critical(parent, "배송담당을 저장하지 못했습니다", str(error))
+            return DeliveryRoutingOutcome()
+
     def run_relocation(self, person_id, day, parent=None):
         return self._run_change(person_id, day, parent)
 
@@ -566,6 +721,7 @@ class DeliveryRoutingController:
                 driver_ids=request.driver_ids,
                 road_address=request.road_address,
                 detail_address=request.detail_address,
+                jurisdiction=request.jurisdiction,
                 whole_household=request.whole_household,
                 actor=self._actor_provider(),
                 recorded_at=datetime.now(UTC),

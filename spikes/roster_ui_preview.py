@@ -13,8 +13,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from PySide6.QtWidgets import QApplication
 
-from src.desktop_v2 import RosterWindow
-from src.domain import (
+from src.desktop_v2.roster_window import RosterWindow
+from src.domain.roster import (
     CustomFieldDefinition,
     CustomFieldType,
     DeliveryAssignment,
@@ -23,10 +23,12 @@ from src.domain import (
     InclusiveDateRange,
     Meal,
     MealEnrollment,
-    MealStatus,
     Person,
     PersonProfile,
     RosterSnapshot,
+)
+from src.domain.status import (
+    MealStatus,
     StatusEvent,
     resolve_status_history,
 )

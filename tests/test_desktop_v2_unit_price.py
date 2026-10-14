@@ -13,25 +13,27 @@ import pytest
 from PySide6.QtCore import QDate
 from PySide6.QtWidgets import QApplication, QDialog
 
-from src.desktop_v2 import (
+from src.desktop_v2.unit_price_edit import (
     UnitPriceChangeController,
     UnitPriceChangeDialog,
 )
-from src.domain import (
+from src.domain.unit_pricing import (
     UNIT_PRICE_SCHEDULE_ID,
     UNIT_PRICE_SCHEDULE_KIND,
-    AuditChange,
-    ChangeOperation,
-    Meal,
-    RevisionActor,
-    RevisionMetadata,
-    RevisionRecord,
-    RevisionSource,
     UnitPriceChange,
     UnitPriceSchedule,
     unit_price_schedule_from_state,
 )
-from src.storage import DatabaseSession
+from src.domain.revisions import (
+    AuditChange,
+    ChangeOperation,
+    RevisionActor,
+    RevisionMetadata,
+    RevisionRecord,
+    RevisionSource,
+)
+from src.domain.roster import Meal
+from src.storage.database_session import DatabaseSession
 
 
 BASE_REVISION_ID = UUID("78000000-0000-0000-0000-000000000001")

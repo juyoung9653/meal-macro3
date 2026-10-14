@@ -2,6 +2,8 @@
 
 from datetime import date
 
+import pytest
+
 from src.core.date_utils import (
     FRI,
     MON,
@@ -16,41 +18,26 @@ from src.core.date_utils import (
 )
 
 
-class TestToBool:
-    def test_int_1(self):
-        assert to_bool(1) is True
-
-    def test_int_0(self):
-        assert to_bool(0) is False
-
-    def test_float_1_0(self):
-        assert to_bool(1.0) is True
-
-    def test_float_0_0(self):
-        assert to_bool(0.0) is False
-
-    def test_str_O(self):
-        assert to_bool("O") is True
-
-    def test_str_TRUE(self):
-        assert to_bool("TRUE") is True
-        assert to_bool("true") is True
-
-    def test_str_급식(self):
-        assert to_bool("급식") is True
-
-    def test_str_1(self):
-        assert to_bool("1") is True
-
-    def test_str_empty(self):
-        assert to_bool("") is False
-
-    def test_bool(self):
-        assert to_bool(True) is True
-        assert to_bool(False) is False
-
-    def test_none(self):
-        assert to_bool(None) is False
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        pytest.param(1, True, id="int-one"),
+        pytest.param(0, False, id="int-zero"),
+        pytest.param(1.0, True, id="float-one"),
+        pytest.param(0.0, False, id="float-zero"),
+        pytest.param("O", True, id="letter-o"),
+        pytest.param("TRUE", True, id="upper-true"),
+        pytest.param("true", True, id="lower-true"),
+        pytest.param("급식", True, id="meal-label"),
+        pytest.param("1", True, id="string-one"),
+        pytest.param("", False, id="empty"),
+        pytest.param(True, True, id="bool-true"),
+        pytest.param(False, False, id="bool-false"),
+        pytest.param(None, False, id="none"),
+    ],
+)
+def test_to_bool(value, expected):
+    assert to_bool(value) is expected
 
 
 class TestWeekRanges:
@@ -62,6 +49,7 @@ class TestWeekRanges:
         assert weeks[0][0] == 1
         assert weeks[0][1] == date(2026, 6, 1)
         assert weeks[0][2] == date(2026, 6, 6)
+        assert [number for number, _, _ in weeks] == [1, 2, 3, 4, 5]
 
     def test_31day_6weeks_merge(self):
         """31일 월 + 금요일 시작 → 마지막 2주 병합."""
@@ -78,16 +66,10 @@ class TestWeekRanges:
         assert weeks[0] == (1, date(2025, 11, 1), date(2025, 11, 8))
         assert weeks[-1] == (5, date(2025, 11, 30), date(2025, 11, 30))
 
-
     def test_feb_2026(self):
         """2026년 2월: 28일."""
         weeks = get_week_ranges(2026, 2)
         assert len(weeks) >= 4
-
-    def test_week_numbers_sequential(self):
-        weeks = get_week_ranges(2026, 6)
-        for i, (wn, _, _) in enumerate(weeks):
-            assert wn == i + 1
 
 
 class TestWeekDateStr:

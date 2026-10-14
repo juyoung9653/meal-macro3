@@ -1,6 +1,7 @@
 """Coverage for the all-meal roster summary in the date sidebar."""
 
 import os
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from uuid import UUID
 
@@ -11,16 +12,21 @@ pytest.importorskip("PySide6")
 
 from PySide6.QtWidgets import QApplication
 
-from src.desktop_v2 import RosterTableModel, RosterWindow
-from src.domain import (
+from src.desktop_v2.roster_window import (
+    RosterTableModel,
+    RosterWindow,
+)
+from src.domain.roster import (
     DeliveryAssignment,
     InclusiveDateRange,
     Meal,
     MealEnrollment,
-    MealStatus,
     Person,
     PersonProfile,
     RosterSnapshot,
+)
+from src.domain.status import (
+    MealStatus,
     StatusEvent,
     resolve_status_history,
 )
@@ -33,7 +39,7 @@ from src.domain.school_calendar import (
 )
 
 
-DAY = date(2026, 8, 17)
+DAY = date(2026, 8, 21)
 REVISION_ID = UUID("90000000-0000-0000-0000-000000000001")
 FIRST_ID = UUID("90000000-0000-0000-0000-000000000002")
 SECOND_ID = UUID("90000000-0000-0000-0000-000000000003")
@@ -87,18 +93,17 @@ def _histories():
 
 
 def _calendar() -> SchoolLunchCalendar:
-    covered = InclusiveDateRange(DAY, DAY + timedelta(days=1))
+    covered = InclusiveDateRange(DAY, DAY)
     return SchoolLunchCalendar((
         SchoolLunchSchoolSchedule(
-            "샘플초", (covered,), tuple(
-                SchoolLunchDay(day, LunchDayRule(SchoolLunchMark.VENDOR_REQUIRED))
-                for day in (DAY, DAY + timedelta(days=1))
+            "샘플초", (covered,), (
+                SchoolLunchDay(DAY, LunchDayRule(SchoolLunchMark.VENDOR_REQUIRED)),
             ),
         ),
     ))
 
 
-def test_meal_summary_counts_follow_day_filters_and_calendar(app):
+def test_meal_summary_uses_school_calendar_only_for_lunch_status(app):
     model = RosterTableModel(_roster(), _histories())
     model.set_context(DAY, Meal.LUNCH)
 
@@ -155,9 +160,70 @@ def test_meal_summary_sidebar_shows_all_meals_and_driver_filter_matches_any_meal
     assert "석식  배송 0 · 일시중지 0" == window._meal_summary_widgets[Meal.DINNER].text()
     assert "조식  배송 1 · 일시중지 1" == window._meal_summary_widgets[Meal.BREAKFAST].text()
     assert "중식  배송 1 · 일시중지 0" == window._meal_summary_widgets[Meal.LUNCH].text()
+    assert window._meal_summary_widgets[Meal.DINNER].isHidden()
+    assert window._meal_summary_widgets[Meal.BREAKFAST].isVisible()
+    assert window._meal_summary_widgets[Meal.LUNCH].isVisible()
     assert "비대상은 집계에서 제외" in window._meal_summary_widgets[Meal.LUNCH].toolTip()
     assert window._birth_month_filter.geometry().top() > max(
-        summary.geometry().bottom() for summary in window._meal_summary_widgets.values()
+        summary.geometry().bottom()
+        for summary in window._meal_summary_widgets.values()
+        if summary.isVisible()
     )
+    window.replace_roster(_roster(), {})
+    assert window._meal_summary_widgets[Meal.DINNER].isVisible()
+    window.replace_roster(_roster(), _histories())
+    assert window._meal_summary_widgets[Meal.DINNER].isHidden()
     assert window._count_metric.geometry().bottom() < window.height()
     window.close()
+
+
+def test_sidebar_only_shows_default_delivery_days_without_changing_columns(app):
+    window = RosterWindow(_roster(), {}, school_calendar=_calendar())
+    window.show()
+    try:
+        for day, visible in (
+            (DAY, {Meal.DINNER, Meal.BREAKFAST, Meal.LUNCH}),
+            (DAY + timedelta(days=1), set()),
+            (DAY + timedelta(days=2), set()),
+            (DAY + timedelta(days=3), {Meal.DINNER}),
+        ):
+            window._set_day(day)
+            app.processEvents()
+            assert {
+                meal for meal, widget in window._meal_summary_widgets.items()
+                if widget.isVisible()
+            } == visible
+            for meal in (Meal.DINNER, Meal.BREAKFAST):
+                column = next(
+                    index for index, item in enumerate(window.table_model.columns)
+                    if item.meal is meal
+                )
+                assert window.table_model.index(0, column).data().endswith("\n배송")
+    finally:
+        window.close()
+
+
+def test_sidebar_refreshes_default_delivery_mapping_and_filtered_counts(app):
+    roster = _roster()
+    window = RosterWindow(roster, {}, school_calendar=_calendar())
+    window._set_day(DAY)
+    window.show()
+    try:
+        assert window._meal_summary_widgets[Meal.BREAKFAST].isVisible()
+        changed = replace(roster, delivery_defaults=tuple(
+            replace(setting, delivery_weekdays=(0, 1, 2, 3, 3, 3, 3))
+            if setting.meal is Meal.BREAKFAST else setting
+            for setting in roster.delivery_defaults
+        ))
+        window.replace_roster(changed, {})
+        assert window._meal_summary_widgets[Meal.BREAKFAST].isHidden()
+        window._set_day(DAY - timedelta(days=1))
+        assert window._meal_summary_widgets[Meal.BREAKFAST].isVisible()
+        window._search_input.setText("일치하지않는성명")
+        assert window._meal_summary_widgets[Meal.BREAKFAST].isHidden()
+        window._search_input.clear()
+        assert window._meal_summary_widgets[Meal.BREAKFAST].isVisible()
+        window.replace_roster(roster, {})
+        assert window._meal_summary_widgets[Meal.BREAKFAST].isHidden()
+    finally:
+        window.close()

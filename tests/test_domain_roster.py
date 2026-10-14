@@ -5,7 +5,7 @@ from uuid import UUID
 
 import pytest
 
-from src.domain import (
+from src.domain.roster import (
     CustomFieldDefinition,
     CustomFieldType,
     DeliveryAssignment,
@@ -193,3 +193,19 @@ def test_snapshot_rejects_unknown_or_wrong_typed_custom_value():
 
     with pytest.raises(ValueError, match="정의되지 않은"):
         RosterSnapshot(REVISION_ID, persons=(wrong_type,))
+
+
+def test_meal_selection_orders_without_modifying_the_input():
+    from src.domain.roster import canonical_meals
+
+    selected = [Meal.DINNER, Meal.BREAKFAST]
+    assert canonical_meals(selected) == (Meal.BREAKFAST, Meal.DINNER)
+    assert selected == [Meal.DINNER, Meal.BREAKFAST]
+
+
+@pytest.mark.parametrize("selected,error", [([], ValueError), ([Meal.LUNCH, Meal.LUNCH], ValueError), (["조식"], TypeError)])
+def test_meal_selection_rejects_empty_duplicate_or_untyped_values(selected, error):
+    from src.domain.roster import canonical_meals
+
+    with pytest.raises(error):
+        canonical_meals(selected)

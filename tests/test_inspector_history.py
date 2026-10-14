@@ -3,11 +3,21 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 from src.desktop_v2.inspector_history import InspectorMealHistory
-from src.domain import (
-    AuditChange, ChangeOperation, HistoricalSnapshot, Person, PersonProfile,
-    RevisionActor, RevisionMetadata, RevisionRecord, RevisionSource, RosterSnapshot,
-    STATUS_EVENT_KIND,
+from src.domain.revisions import (
+    AuditChange,
+    ChangeOperation,
+    HistoricalSnapshot,
+    RevisionActor,
+    RevisionMetadata,
+    RevisionRecord,
+    RevisionSource,
 )
+from src.domain.roster import (
+    Person,
+    PersonProfile,
+    RosterSnapshot,
+)
+from src.domain.projections import STATUS_EVENT_KIND
 
 
 def test_inspector_history_keeps_all_rows_filters_people_and_refreshes_revision():

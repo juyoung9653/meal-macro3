@@ -15,23 +15,27 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import openpyxl
 from openpyxl.worksheet.table import Table
 import pytest
-from PySide6.QtCore import QDate, QPoint, QPointF, Qt, QTimer
+from PySide6.QtCore import QCoreApplication, QDate, QEvent, QPoint, QPointF, Qt, QTimer
 from PySide6.QtGui import QWheelEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog
 
 import src.desktop_v2.import_wizard as import_wizard_module
 import src.importing.workbook as workbook_module
-from src.domain import Meal
-from src.desktop_v2 import RosterImportWizard
-from src.importing import (
-    ImportPurpose,
+from src.domain.roster import Meal
+from src.desktop_v2.import_wizard import RosterImportWizard
+from src.importing.revision import ImportPurpose
+from src.importing.households import (
     HouseholdMatchCriterion,
     HouseholdMatchingRule,
+    StoredHouseholdMatchingRule,
+)
+from src.importing.contracts import (
     ImportMappingProfile,
     ProfileField,
-    StoredHouseholdMatchingRule,
-    StoredImportProfile,
+)
+from src.importing.profile_history import StoredImportProfile
+from src.importing.workbook import (
     WorkbookImportPasswordRequiredError,
     inspect_workbook,
     parse_workbook,
@@ -63,7 +67,7 @@ def test_vacation_lunch_wizard_accepts_source_without_meal_column(app, tmp_path)
         wizard.purpose_combo.findData(ImportPurpose.VACATION_LUNCH)
     )
     wizard.path_edit.setText(str(path))
-    assert wizard._inspect_source()
+    assert wizard._inspect_source(), wizard.error_label.text()
     wizard._go_next()
     wizard._go_next()
     assert wizard.preview is not None and wizard.preview.can_continue, wizard.error_label.text()
@@ -77,6 +81,21 @@ def test_vacation_lunch_wizard_accepts_source_without_meal_column(app, tmp_path)
 @pytest.fixture(scope="module")
 def app():
     return QApplication.instance() or QApplication([])
+
+
+@pytest.fixture(autouse=True)
+def _dispose_wizards_on_gui_thread(app):
+    """Close does not destroy a dialog; release its Qt children before app teardown."""
+    yield
+    wizards = tuple(widget for widget in app.topLevelWidgets() if isinstance(widget, RosterImportWizard))
+    for wizard in wizards:
+        wizard.close()
+    # Correction dialogs queue zero-delay open/resize callbacks. Drain them
+    # while their tables still exist, then destroy the dialogs on the GUI thread.
+    QTest.qWait(10)
+    for wizard in wizards:
+        wizard.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
 
 def _combined(path: Path, meal: str = "조식 / 중식") -> Path:
@@ -94,7 +113,7 @@ def test_unchecked_additional_column_survives_saved_profile(app, tmp_path):
     path = _combined(tmp_path / "additional.xlsx")
     wizard = RosterImportWizard()
     wizard.path_edit.setText(str(path))
-    assert wizard._inspect_source()
+    assert wizard._inspect_source(), wizard.error_label.text()
     extra = wizard.ignored_columns_list.item(4)
     assert extra.checkState() == Qt.CheckState.Checked
     extra.setCheckState(Qt.CheckState.Unchecked)
@@ -123,7 +142,7 @@ def test_only_active_meal_controls_reserve_source_columns(app, tmp_path):
     path = _combined(tmp_path / "dormant.xlsx")
     wizard = RosterImportWizard(allow_vacation_lunch=True)
     wizard.path_edit.setText(str(path))
-    assert wizard._inspect_source()
+    assert wizard._inspect_source(), wizard.error_label.text()
     # A remembered flag control is inactive while combined mode is selected.
     wizard._set_combo(wizard.breakfast_combo, "E")
     extra = wizard.ignored_columns_list.item(4)
@@ -214,7 +233,7 @@ def test_wizard_requires_table_and_clears_old_preview_on_file_change(app, tmp_pa
     wizard = RosterImportWizard()
     assert wizard.purpose_combo.parent() is None
     wizard.path_edit.setText(str(table_path))
-    assert wizard._inspect_source()
+    assert wizard._inspect_source(), wizard.error_label.text()
     assert wizard.raw_table.rowCount() == 1
     wizard.path_edit.setText(str(plain_path))
     assert wizard.inspection is None
@@ -247,7 +266,7 @@ def test_wizard_lists_tables_across_sheets_and_clears_corrections_on_switch(app,
 
     wizard = RosterImportWizard()
     wizard.path_edit.setText(str(path))
-    assert wizard._inspect_source()
+    assert wizard._inspect_source(), wizard.error_label.text()
     assert wizard.table_combo.count() == 2
     assert wizard.table_combo.currentData() == "명단"
     assert wizard.table_combo.currentText() == "명단"
@@ -337,7 +356,7 @@ def test_clean_import_validates_and_accepts_without_preview(
     wizard = RosterImportWizard()
     wizard.path_edit.setText(str(path))
 
-    assert wizard._inspect_source()
+    assert wizard._inspect_source(), wizard.error_label.text()
     assert wizard.inspection is not None
     assert wizard.next_button.isEnabled()
     assert wizard._mapping_combos[ProfileField.NAME].currentData() == "A"
@@ -399,7 +418,7 @@ def test_preview_error_can_be_fixed_and_rechecked_inside_the_wizard(
     path = _combined(tmp_path / "invalid.xlsx", meal="야식")
     wizard = RosterImportWizard()
     wizard.path_edit.setText(str(path))
-    assert wizard._inspect_source()
+    assert wizard._inspect_source(), wizard.error_label.text()
     wizard._go_next()
     wizard._go_next()
 
@@ -449,7 +468,7 @@ def test_correction_dialog_fits_a_compact_screen_without_clipping_actions(
     wizard.show()
     wizard.path_edit.setText(str(path))
 
-    assert wizard._inspect_source()
+    assert wizard._inspect_source(), wizard.error_label.text()
     wizard._go_next()
     wizard._go_next()
     app.processEvents()
@@ -492,7 +511,7 @@ def test_correction_value_column_expands_for_long_values(
     wizard.show()
     wizard.path_edit.setText(str(path))
 
-    assert wizard._inspect_source()
+    assert wizard._inspect_source(), wizard.error_label.text()
     wizard._go_next()
     wizard._go_next()
     app.processEvents()
@@ -520,7 +539,7 @@ def test_unmapped_optional_birth_date_does_not_show_preview(
     wizard = RosterImportWizard()
     wizard.path_edit.setText(str(path))
 
-    assert wizard._inspect_source()
+    assert wizard._inspect_source(), wizard.error_label.text()
     assert wizard._mapping_combos[ProfileField.BIRTH_DATE].currentData() is None
     wizard._go_next()
     wizard._go_next()
@@ -596,7 +615,7 @@ def test_excluded_blank_name_blocks_only_vacation_until_corrected(
     wizard.purpose_combo.setCurrentIndex(wizard.purpose_combo.findData(purpose))
     wizard.path_edit.setText(str(path))
 
-    assert wizard._inspect_source()
+    assert wizard._inspect_source(), wizard.error_label.text()
     wizard._go_next()
     wizard._go_next()
 
@@ -633,7 +652,7 @@ def test_government_headers_get_reviewable_defaults_and_private_columns_ignored(
     wizard = RosterImportWizard()
     wizard.path_edit.setText(str(path))
 
-    assert wizard._inspect_source()
+    assert wizard._inspect_source(), wizard.error_label.text()
     assert wizard._build_profile().source_kind == "survey-xlsx"
     assert wizard.profile_name_edit.text() == "정부 조사표"
     assert wizard._mapping_combos[ProfileField.ROAD_ADDRESS].currentData() == "N"
@@ -774,7 +793,7 @@ def test_back_from_preview_reuses_password_for_the_same_workbook(
     wizard.path_edit.setText(str(path))
     wizard.password_edit.setText(password)
 
-    assert wizard._inspect_source()
+    assert wizard._inspect_source(), wizard.error_label.text()
     wizard._go_next()
     wizard._go_next()
     assert wizard.page_stack.currentIndex() == 2
@@ -813,7 +832,7 @@ def test_editing_a_proposed_profile_creates_next_version(
         existing_profiles=(StoredImportProfile(original, inspection.header_fingerprint),)
     )
     wizard.path_edit.setText(str(path))
-    assert wizard._inspect_source()
+    assert wizard._inspect_source(), wizard.error_label.text()
 
     assert wizard.profile_name_edit.text() == "저장된 설정"
     assert wizard._build_profile().version == 4
@@ -922,7 +941,7 @@ def test_workbook_loading_banner_keeps_the_window_responsive(
 
     QTimer.singleShot(50, observe_and_release)
 
-    assert wizard._inspect_source()
+    assert wizard._inspect_source(), wizard.error_label.text()
     assert observed == [(True, True, "Excel 파일을 여는 중입니다", False)]
     assert wizard.busy_panel.isHidden()
     assert wizard.page_stack.isEnabled()
@@ -937,7 +956,7 @@ def test_preview_loading_uses_its_own_clear_busy_message(
     path = _combined(tmp_path / "slow-preview.xlsx")
     wizard = RosterImportWizard()
     wizard.path_edit.setText(str(path))
-    assert wizard._inspect_source()
+    assert wizard._inspect_source(), wizard.error_label.text()
     wizard._go_next()
     assert wizard.page_stack.currentIndex() == 1
 

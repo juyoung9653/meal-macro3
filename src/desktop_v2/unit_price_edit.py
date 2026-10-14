@@ -12,7 +12,6 @@ from PySide6.QtCore import QDate
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
-    QDateEdit,
     QDialog,
     QFrame,
     QGridLayout,
@@ -28,19 +27,25 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from src.domain import (
+from src.domain.unit_pricing import (
     DEFAULT_MEAL_UNIT_PRICE,
     UNIT_PRICE_SCHEDULE_ID,
     UNIT_PRICE_SCHEDULE_KIND,
-    Meal,
-    RevisionActor,
-    RosterSnapshot,
     UnitPriceSchedule,
     build_unit_price_revision,
     unit_price_schedule_from_state,
 )
-from src.storage import AutomaticBackupResult, DatabaseSession
+from src.domain.roster import (
+    Meal,
+    RosterSnapshot,
+)
+from src.domain.revisions import RevisionActor
+from src.storage.database_session import (
+    AutomaticBackupResult,
+    DatabaseSession,
+)
 
+from .date_edit import WheelSafeDateEdit
 from .import_controller import current_windows_actor
 from .theme import application_stylesheet, register_application_fonts
 
@@ -146,7 +151,7 @@ class UnitPriceChangeDialog(QDialog):
         self._price.setSuffix(" 원")
         self._price.setValue(DEFAULT_MEAL_UNIT_PRICE)
         self._price.valueChanged.connect(self._refresh_state)
-        self._effective_on = QDateEdit(
+        self._effective_on = WheelSafeDateEdit(
             QDate(anchor_day.year, anchor_day.month, anchor_day.day)
         )
         self._effective_on.setObjectName("unitPriceDate")

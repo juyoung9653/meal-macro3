@@ -23,7 +23,7 @@ from src.domain.revisions import (
     RevisionRecord,
     RevisionSource,
 )
-from src.storage import DatabaseSession
+from src.storage.database_session import DatabaseSession
 from tests.test_desktop_v2_roster import SERVICE_DAY, _roster
 
 
@@ -148,7 +148,7 @@ def test_real_startup_menu_saves_complaint_then_history_and_export(app, session,
 
     from src.desktop_v2.application import DesktopStartupController
     from src.desktop_v2.complaints import ComplaintController, ComplaintDialog
-    from src.domain import Meal
+    from src.domain.roster import Meal
     from src.domain.complaints import complaints_from_snapshot
 
     notices = messages()

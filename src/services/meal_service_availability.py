@@ -31,10 +31,6 @@ def physical_delivery_on(roster: RosterSnapshot, person: Person, meal: Meal, ser
     return service_on - timedelta(days=(service_on.weekday() - delivery_weekday) % 7)
 
 
-def has_custom_delivery_weekdays(roster: RosterSnapshot, person: Person, meal: Meal, service_on: date) -> bool:
-    return any(item.meal is meal and item.delivery_weekdays is not None for item in roster.delivery_settings_for(person.person_id, on=service_on))
-
-
 def regular_service_available(
     roster: RosterSnapshot,
     person: Person,

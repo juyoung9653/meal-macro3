@@ -14,12 +14,16 @@ from src.desktop_v2.document_column_mapping import (
     DocumentColumnMappingController, DocumentColumnMappingDialog,
     DocumentColumnMappingStatus,
 )
-from src.domain import (
-    AuditChange, ChangeOperation, RevisionActor, RevisionMetadata,
-    RevisionRecord, RevisionSource,
+from src.domain.revisions import (
+    AuditChange,
+    ChangeOperation,
+    RevisionActor,
+    RevisionMetadata,
+    RevisionRecord,
+    RevisionSource,
 )
 from src.services.document_column_mappings import MappingEditorSpec, load_mapping_overrides, mapping_editor_spec
-from src.storage import DatabaseSession
+from src.storage.database_session import DatabaseSession
 
 
 BASE_ID = UUID("7c000000-0000-0000-0000-000000000001")

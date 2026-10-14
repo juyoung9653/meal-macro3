@@ -1,7 +1,6 @@
 """청구 서비스가 준비한 데이터를 기존 확인서 템플릿에 렌더링한다."""
 
 import logging
-import os
 from collections.abc import Mapping, Sequence
 from copy import copy
 from pathlib import Path
@@ -13,7 +12,6 @@ from ..core.invoice_data import (
     MonthlyDelivery,
     MonthlyDeliveryBatch,
     WeeklyDelivery,
-    legacy_recipient,
 )
 from ..core.models import combine_address
 from ..core.settings import get_settings
@@ -22,9 +20,6 @@ from ..excel.publication import WorkbookPublicationResult, publish_workbook
 from ..templates.template_scanner import scan_placeholders, validate_placeholders
 
 log = logging.getLogger(__name__)
-
-_ROSTER_POSITION_KEY = "__confirm_roster_position__"
-
 
 def _blank_text(value: object) -> str:
     if value is None:
@@ -72,7 +67,7 @@ def _pre_build_anchor_maps(wb, tpl_sheet_names: list[str]) -> dict[str, dict]:
 
 
 def _prepared_weekly_counts(
-    person: MonthlyDelivery, name_col: str = "성명"
+    person: MonthlyDelivery,
 ) -> dict[int, WeeklyDelivery]:
     """Index immutable service-prepared weekly delivery facts by week."""
     indexed: dict[int, WeeklyDelivery] = {}
@@ -113,7 +108,7 @@ def _validated_household_groups(
     dong_col: str,
     name_col: str,
 ) -> dict[str, dict[str, list[MonthlyDelivery]]]:
-    """Use stable DB household keys, retaining address fallback for legacy callers."""
+    """Use stable DB household keys, using addresses for annual-workbook recipients."""
     groups: dict[str, dict[str, list[MonthlyDelivery]]] = {}
     blank_addresses: list[str] = []
     stable_facts: dict[str, tuple[str, str, str]] = {}
@@ -186,12 +181,11 @@ def _validated_household_groups(
 
 
 def make_confirm_publication(
-    roster_data: MonthlyDeliveryBatch | Sequence[Mapping[str, object]],
+    batch: MonthlyDeliveryBatch,
     col_mapping: Mapping[str, str],
     output_path: str | Path,
     template_path: str,
-    year: int,
-    month: int,
+    *,
     title_prefix: str = "",
     meal_type: str = "급식",
     output_password: str | None = None,
@@ -211,18 +205,9 @@ def make_confirm_publication(
     phone_col = _mapped_source_column(col_mapping, "핸드폰", "전화번호")
     dong_col = _mapped_source_column(col_mapping, "관할동", "동")
 
-    if isinstance(roster_data, MonthlyDeliveryBatch):
-        recipients = roster_data.deliveries
-        year, month = roster_data.year, roster_data.month
-    else:
-        recipients = tuple(
-            legacy_recipient(person, position=index)
-            for index, person in enumerate(roster_data, start=1)
-        )
-
     # 1. 도로명·상세주소를 정규화하고 관할동+전체주소 가구를 검증한다.
     dong_households = _validated_household_groups(
-        recipients,
+        batch.deliveries,
         road_address_col,
         detail_address_col,
         dong_col,
@@ -230,7 +215,7 @@ def make_confirm_publication(
     )
 
     if not title_prefix:
-        title_prefix = f"{year}년 {month}월"
+        title_prefix = f"{batch.year}년 {batch.month}월"
 
     created = []
 
@@ -427,7 +412,7 @@ def make_confirm_publication(
                 )
 
                 # 청구 서비스가 계산한 주차별 건수만 렌더링한다.
-                weekly_counts = _prepared_weekly_counts(person, name_col)
+                weekly_counts = _prepared_weekly_counts(person)
                 for week in range(1, 6):
                     prepared = weekly_counts.get(week)
                     _set_ph(
@@ -485,33 +470,3 @@ def make_confirm_publication(
         item["file"] = fname
 
     return created, publication
-
-
-def make_confirm(
-    roster_data: MonthlyDeliveryBatch | Sequence[Mapping[str, object]],
-    col_mapping: Mapping[str, str],
-    output_dir: str,
-    template_path: str,
-    year: int,
-    month: int,
-    title_prefix: str = "",
-    meal_type: str = "급식",
-    output_password: str | None = None,
-) -> list[dict]:
-    """Legacy-compatible writer that keeps its historical automatic filename."""
-
-    settings = get_settings()
-    filename_format = settings.get("confirm", "output_filename_format")
-    filename = filename_format.format(year=year, month=month)
-    created, _publication = make_confirm_publication(
-        roster_data,
-        col_mapping,
-        os.path.join(output_dir, filename),
-        template_path,
-        year,
-        month,
-        title_prefix=title_prefix,
-        meal_type=meal_type,
-        output_password=output_password,
-    )
-    return created

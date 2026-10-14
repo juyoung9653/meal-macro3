@@ -189,7 +189,6 @@ class PhysicalDeliveryCalendar:
 
 class ClosedFridayMode(StrEnum):
     THURSDAY_WEEKEND_ONLY = "목요일_토일배송"
-    SKIP_FRIDAY_WEEKEND = "금토일_미배송"
 
 
 @dataclass(frozen=True, slots=True)
@@ -299,7 +298,7 @@ def plan_breakfast_shipments(
         items,
         key=lambda item: (str(item.person_id), item.service_on),
     ):
-        delivery_on, reason = _breakfast_delivery_date(entitlement.service_on, calendar, rule)
+        delivery_on, reason = _breakfast_delivery_date(entitlement.service_on, calendar)
         if delivery_on is None:
             assert reason is not None
             unassigned.append(UnassignedEntitlement(entitlement, reason))
@@ -326,7 +325,6 @@ def plan_breakfast_shipments(
 def _breakfast_delivery_date(
     service_on: date,
     calendar: PhysicalDeliveryCalendar,
-    rule: BreakfastDeliveryRule,
 ) -> tuple[date | None, UnassignedReason | None]:
     weekday = service_on.weekday()
     if weekday <= 3:
@@ -338,8 +336,6 @@ def _breakfast_delivery_date(
     if calendar.is_open(friday):
         return friday, None
     if weekday == 4:
-        return None, UnassignedReason.CLOSED_FRIDAY_POLICY
-    if rule.closed_friday_mode is ClosedFridayMode.SKIP_FRIDAY_WEEKEND:
         return None, UnassignedReason.CLOSED_FRIDAY_POLICY
 
     thursday = friday - timedelta(days=1)

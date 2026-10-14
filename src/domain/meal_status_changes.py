@@ -10,7 +10,7 @@ from uuid import UUID
 from .intake import IntakeChannel
 from .projections import roster_audit_changes, status_event_audit_change
 from .revisions import RevisionActor, RevisionMetadata, RevisionRecord, RevisionSource
-from .roster import InclusiveDateRange, Meal, MealEnrollment, RosterSnapshot
+from .roster import InclusiveDateRange, Meal, MealEnrollment, RosterSnapshot, canonical_meals
 from .status import MealStatus, StatusEvent
 
 MEAL_STATUS_CHANGE_POLICY_VERSION = 1
@@ -45,7 +45,7 @@ def build_meal_status_revision(
     if not isinstance(person_id, UUID):
         raise TypeError("person ID는 UUID여야 합니다.")
     current_roster.person(person_id)
-    selected_meals = _canonical_meals(meals)
+    selected_meals = canonical_meals(meals)
     if not isinstance(status, MealStatus):
         raise TypeError("status는 MealStatus여야 합니다.")
     if intake_channel is not None and not isinstance(intake_channel, IntakeChannel):
@@ -250,17 +250,6 @@ def build_batch_meal_status_revision(
     return PreparedBatchMealStatusRevision(
         working, tuple(events), RevisionRecord(metadata, changes), tuple(enrolled)
     )
-
-
-def _canonical_meals(meals: tuple[Meal, ...]) -> tuple[Meal, ...]:
-    values = tuple(meals)
-    if not values:
-        raise ValueError("하나 이상의 식종을 선택해야 합니다.")
-    if any(not isinstance(meal, Meal) for meal in values):
-        raise TypeError("meals에는 Meal만 허용됩니다.")
-    if len(set(values)) != len(values):
-        raise ValueError("선택한 식종은 중복될 수 없습니다.")
-    return tuple(meal for meal in Meal if meal in values)
 
 
 def _cover_delivery_period(

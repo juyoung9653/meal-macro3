@@ -133,22 +133,55 @@ def build_person_profile_revision(
         raise ValueError("가구 구성원에게 적용하려면 배송 설정과 가구 소속이 필요합니다.")
     delivery_members = (
         profile_household_members(current_roster, person_id, effective_on)
-        if delivery_settings_to_household else (current_person,)
+        if delivery_settings_to_household
+        else (current_person,)
     )
     delivery_member_ids = {member.person_id for member in delivery_members}
-    members = profile_household_members(current_roster, person_id, effective_on) if household_mobile_phone else (current_person,)
-    member_ids = {member.person_id for member in members}
-    persons = tuple(
-        replace(person, profile=updated_profile,
-                delivery_settings=person_delivery_settings if person_delivery_settings is not None and person.person_id in delivery_member_ids else person.delivery_settings)
-        if person.person_id == person_id
-        else replace(person,
-                     profile=replace(person.profile, mobile_phone=updated_profile.mobile_phone) if household_mobile_phone and person.person_id in member_ids else person.profile,
-                     delivery_settings=person_delivery_settings if person_delivery_settings is not None and person.person_id in delivery_member_ids else person.delivery_settings)
-        if (household_mobile_phone and person.person_id in member_ids) or (person_delivery_settings is not None and person.person_id in delivery_member_ids)
-        else person
-        for person in current_roster.persons
+    members = (
+        profile_household_members(current_roster, person_id, effective_on)
+        if household_mobile_phone
+        else (current_person,)
     )
+    member_ids = {member.person_id for member in members}
+    updated_persons = []
+    for person in current_roster.persons:
+        is_subject = person.person_id == person_id
+        shares_household_phone = (
+            household_mobile_phone and person.person_id in member_ids
+        )
+        receives_delivery_settings = (
+            person_delivery_settings is not None
+            and person.person_id in delivery_member_ids
+        )
+        if not (
+            is_subject
+            or shares_household_phone
+            or receives_delivery_settings
+        ):
+            updated_persons.append(person)
+            continue
+
+        profile = person.profile
+        if is_subject:
+            profile = updated_profile
+        elif shares_household_phone:
+            profile = replace(
+                person.profile,
+                mobile_phone=updated_profile.mobile_phone,
+            )
+        delivery_settings = (
+            person_delivery_settings
+            if receives_delivery_settings
+            else person.delivery_settings
+        )
+        updated_persons.append(
+            replace(
+                person,
+                profile=profile,
+                delivery_settings=delivery_settings,
+            )
+        )
+    persons = tuple(updated_persons)
     if household_delivery_settings is not None and household_id is None:
         raise ValueError("배송 설정을 저장할 가구가 연결되지 않았습니다.")
     households = tuple(
@@ -157,15 +190,11 @@ def build_person_profile_revision(
         else household
         for household in current_roster.households
     )
-    snapshot = RosterSnapshot(
-        revision_id,
+    snapshot = replace(
+        current_roster,
+        revision_id=revision_id,
         persons=persons,
         households=households,
-        memberships=current_roster.memberships,
-        enrollments=current_roster.enrollments,
-        assignments=current_roster.assignments,
-        custom_fields=current_roster.custom_fields,
-        delivery_defaults=current_roster.delivery_defaults,
     )
     changes = roster_audit_changes(current_roster, snapshot)
     if not changes:

@@ -15,7 +15,11 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from src.desktop_v2.roster_window import RosterTableModel, RosterWindow
-from src.domain import Person, PersonProfile, RosterSnapshot
+from src.domain.roster import (
+    Person,
+    PersonProfile,
+    RosterSnapshot,
+)
 import src.desktop_v2.inactive_roster as inactive_roster_module
 from tests.test_desktop_v2_roster import CUSTOM_FIELD_ID, _histories, _roster
 

@@ -13,7 +13,7 @@ import src.desktop_v2.inactive_roster as inactive_roster_module
 from tests.test_desktop_v2_roster import (
     _roster, CUSTOM_FIELD_ID, FIRST_PERSON_ID, SERVICE_DAY,
 )
-from src.domain import Meal
+from src.domain.roster import Meal
 
 
 @pytest.fixture(autouse=True)

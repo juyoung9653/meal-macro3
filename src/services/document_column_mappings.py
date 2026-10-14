@@ -28,6 +28,7 @@ _CONFIRM_DEFAULTS = {
     "세대주 성명": "세대주 성명", "핸드폰": "핸드폰", "관할동": "관할동",
 }
 _CONFIRM_LOCKED = ("도로명주소", "상세주소", "관할동")
+_INVOICE_AUTOMATIC_TARGETS = ("연번", "제공기관")
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,11 +82,17 @@ def mapping_editor_spec(
         if profile == "행복도시락":
             defaults.update(invoice_default_mapping(path, profile, True))
         columns = _template_invoice_columns(path, profile)
-        calculated = {value for key, value in defaults.items() if key.startswith("__calc_")}
+        calculated = {
+            value
+            for key, value in defaults.items()
+            if key.startswith("__calc_") and value in columns
+        }
         targets = tuple(columns)
         for target in targets:
             defaults.setdefault(target, "")
-        locked = tuple(sorted(calculated | ({"연번"} & set(columns))))
+        locked = tuple(
+            sorted(calculated | (set(_INVOICE_AUTOMATIC_TARGETS) & set(columns)))
+        )
     else:
         defaults = confirmation_default_mapping()
         targets = tuple(_CONFIRM_DEFAULTS)
@@ -103,7 +110,12 @@ def mapping_editor_spec(
     target_labels = {key: key for key in targets}
     for key in locked:
         if key in target_labels:
-            reason = "자동 계산" if document_kind == "invoice" else "가구 묶음 기준"
+            if document_kind == "confirmation":
+                reason = "가구 묶음 기준"
+            elif key == "제공기관":
+                reason = "공통 설정 자동 적용"
+            else:
+                reason = "자동 계산"
             target_labels[key] = f"{key} ({reason})"
     return MappingEditorSpec(defaults, targets, tuple(source_options), locked, target_labels, labels)
 
@@ -119,8 +131,14 @@ def _template_invoice_columns(path: Path, profile: str) -> tuple[str, ...]:
 
 def effective_mapping(defaults: Mapping[str, str], overrides: Mapping[str, str]) -> dict[str, str]:
     result = dict(defaults)
+    protected_targets = {
+        value
+        for key, value in defaults.items()
+        if key.startswith("__calc_") and value
+    }
+    protected_targets.update(_INVOICE_AUTOMATIC_TARGETS)
     for target, source in overrides.items():
-        if not target.startswith("__calc_") and target != "연번":
+        if not target.startswith("__calc_") and target not in protected_targets:
             result[target] = source
     return result
 

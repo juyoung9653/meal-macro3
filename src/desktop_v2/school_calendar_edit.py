@@ -14,7 +14,6 @@ from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
-    QDateEdit,
     QDialog,
     QFrame,
     QGridLayout,
@@ -33,24 +32,34 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from src.domain import (
+from src.domain.roster import (
     InclusiveDateRange,
-    LunchDayRule,
-    RevisionActor,
     RosterSnapshot,
-    SchoolLunchCalendar,
+)
+from src.domain.entitlements import (
+    LunchDayRule,
     SchoolLunchMark,
-    SchoolLunchRuleSegment,
+)
+from src.domain.revisions import RevisionActor
+from src.domain.school_calendar import (
+    SchoolLunchCalendar,
     SchoolLunchSchoolSchedule,
+    normalize_grade,
+    school_lunch_calendar_from_snapshot,
+)
+from src.domain.school_calendar_edits import (
+    SchoolLunchRuleSegment,
     apply_school_lunch_rule_period,
     build_school_calendar_edit_revision,
-    normalize_grade,
     replace_school_lunch_rule_segment,
-    school_lunch_calendar_from_snapshot,
     school_lunch_rule_segments,
 )
-from src.storage import AutomaticBackupResult, DatabaseSession
+from src.storage.database_session import (
+    AutomaticBackupResult,
+    DatabaseSession,
+)
 
+from .date_edit import WheelSafeDateEdit
 from .import_controller import current_windows_actor
 from .theme import application_stylesheet, register_application_fonts
 
@@ -664,15 +673,15 @@ def _field_label(text: str) -> QLabel:
     return label
 
 
-def _date_edit(value: date) -> QDateEdit:
-    editor = QDateEdit(QDate(value.year, value.month, value.day))
+def _date_edit(value: date) -> WheelSafeDateEdit:
+    editor = WheelSafeDateEdit(QDate(value.year, value.month, value.day))
     editor.setCalendarPopup(True)
     editor.setDisplayFormat("yyyy.MM.dd")
     editor.setObjectName("schoolCalendarDate")
     return editor
 
 
-def _python_date(editor: QDateEdit) -> date:
+def _python_date(editor: WheelSafeDateEdit) -> date:
     value = editor.date()
     return date(value.year(), value.month(), value.day())
 

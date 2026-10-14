@@ -9,15 +9,23 @@ import pytest
 from PySide6.QtCore import Qt
 
 from src.desktop_v2.roster_window import RosterTableModel
-from src.domain import RevisionActor
+from src.domain.revisions import RevisionActor
 from src.domain.roster import CustomFieldDefinition, CustomFieldType, Person, PersonProfile, RosterSnapshot
-from src.importing import (
-    IdentityResolution, ImportMappingProfile, ProfileField, ReconciliationDecision,
-    apply_reconciliation, build_import_revision, import_profiles_from_snapshot,
-    parse_workbook, stage_reconciliation,
+from src.importing.application import (
+    IdentityResolution,
+    ReconciliationDecision,
+    apply_reconciliation,
 )
+from src.importing.contracts import (
+    ImportMappingProfile,
+    ProfileField,
+)
+from src.importing.revision import build_import_revision
+from src.importing.profile_history import import_profiles_from_snapshot
+from src.importing.workbook import parse_workbook
+from src.importing.reconciliation import stage_reconciliation
 from src.importing.workbook import SourceColumn, WorkbookStructureError, custom_column_names, source_column_letter
-from src.storage import DatabaseSession
+from src.storage.database_session import DatabaseSession
 
 
 DAY = date(2026, 10, 13)

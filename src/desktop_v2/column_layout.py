@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from PySide6.QtCore import QObject, QSettings
-from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QMenu, QTableView, QWidget
 
 
@@ -64,22 +63,39 @@ class RosterColumnLayout(QObject):
     def columns(self) -> tuple[object, ...]:
         return self._columns
 
-    def create_menu(self, parent: QWidget | None = None) -> QMenu:
+    def create_menu(
+        self,
+        parent: QWidget | None = None,
+        *,
+        column_key: str | None = None,
+        rename_callback: Callable[[str], None] | None = None,
+    ) -> QMenu:
         menu = QMenu(parent or self._table)
-        for column in self._columns:
+        target = self._column_for_key(column_key) if column_key is not None else None
+        if target is not None and rename_callback is not None:
+            rename_action = menu.addAction("칼럼 이름 바꾸기")
+            rename_action.triggered.connect(
+                lambda _checked=False, key=column_key: rename_callback(key)
+            )
+        if target is not None and column_key not in self._mandatory_keys:
+            hide_action = menu.addAction("숨기기")
+            hide_action.setEnabled(not self._is_hidden(column_key))
+            hide_action.triggered.connect(
+                lambda _checked=False, key=column_key: self._set_hidden(key, True)
+            )
+
+        hidden_menu = QMenu("숨기기 해제", menu)
+        menu.addMenu(hidden_menu)
+        hidden_columns = tuple(
+            column for column in self._columns if self._is_hidden(self._key(column))
+        )
+        hidden_menu.setEnabled(bool(hidden_columns))
+        for column in hidden_columns:
             key = self._key(column)
-            action = QAction(self._label(column), menu)
-            action.setCheckable(True)
-            required = key in self._mandatory_keys
-            action.setChecked(required or not self._is_hidden(key))
-            if required:
-                action.setText(f"{self._label(column)} (필수)")
-                action.setEnabled(False)
-            else:
-                action.toggled.connect(
-                    lambda checked, column_key=key: self._set_hidden(column_key, not checked)
-                )
-            menu.addAction(action)
+            action = hidden_menu.addAction(self._label(column))
+            action.triggered.connect(
+                lambda _checked=False, column_key=key: self._set_hidden(column_key, False)
+            )
         menu.addSeparator()
         reset_action = menu.addAction("기본 열 구성으로 되돌리기")
         reset_action.triggered.connect(self.reset)
@@ -317,6 +333,11 @@ class RosterColumnLayout(QObject):
             return self._keys().index(key)
         except ValueError:
             return None
+
+    def _column_for_key(self, key: str | None) -> object | None:
+        if key is None:
+            return None
+        return next((column for column in self._columns if self._key(column) == key), None)
 
     @staticmethod
     def _key(column: object) -> str:

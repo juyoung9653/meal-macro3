@@ -8,7 +8,7 @@ from uuid import uuid4
 
 import pytest
 from PySide6.QtCore import QDate
-from PySide6.QtWidgets import QApplication, QDialog
+from PySide6.QtWidgets import QApplication, QDialog, QLineEdit
 
 from src.desktop_v2.application import DesktopStartupController
 from src.desktop_v2.delivery_routing import (
@@ -20,7 +20,7 @@ from src.desktop_v2.delivery_routing import (
 )
 from src.domain.delivery_routing import Driver, RoutingState
 from src.domain.roster import Meal
-from src.storage import DatabaseSession
+from src.storage.database_session import DatabaseSession
 from tests.test_delivery_routing import BEFORE, DAY, base_roster, initialize, loaded
 
 
@@ -66,8 +66,11 @@ def test_actual_relocation_form_uses_date_and_registered_uuid_for_each_meal(app)
         roster, RoutingState((driver,)), roster.persons[0].person_id, BEFORE
     )
     dialog.day.setDate(QDate(DAY.year, DAY.month, DAY.day))
+    assert isinstance(dialog.jurisdiction, QLineEdit)
+    assert dialog.jurisdiction.text() == "정자동"
     dialog.road.setText("이사 후 도로")
     dialog.detail.setText("505호")
+    dialog.jurisdiction.setText("  야탑동  ")
     assert tuple(dialog.drivers) == (Meal.DINNER, Meal.BREAKFAST, Meal.LUNCH)
     for combo in dialog.drivers.values():
         combo.setCurrentIndex(1)
@@ -76,12 +79,20 @@ def test_actual_relocation_form_uses_date_and_registered_uuid_for_each_meal(app)
     result = dialog.request()
     assert result.effective_on == DAY
     assert result.road_address == "이사 후 도로"
+    assert result.jurisdiction == "야탑동"
     assert result.driver_ids == {meal: driver.driver_id for meal in Meal}
     dialog.close()
 
 
 def test_relocation_form_shows_effective_date_household_targets(app):
-    from src.domain import Household, HouseholdMembership, InclusiveDateRange, Person, PersonProfile, RosterSnapshot
+    from src.domain.roster import (
+        Household,
+        HouseholdMembership,
+        InclusiveDateRange,
+        Person,
+        PersonProfile,
+        RosterSnapshot,
+    )
 
     selected = Person(uuid4(), PersonProfile("선택", road_address="이전 주소"))
     member = Person(uuid4(), PersonProfile("구성원", road_address="이전 주소"))
@@ -102,8 +113,10 @@ def test_relocation_form_shows_effective_date_household_targets(app):
     assert "선택, 구성원" in dialog.household_targets.text()
     dialog.whole_household.setChecked(True)
     dialog.road.setText("새 주소")
+    dialog.jurisdiction.setText("판교동")
     dialog._save()
     assert dialog.request().whole_household is True
+    assert dialog.request().jurisdiction == "판교동"
     dialog.close()
 
 
@@ -121,6 +134,7 @@ def test_assignment_form_changes_only_clicked_meal_and_can_unassign(app):
     assert result.driver_ids == {Meal.DINNER: None}
     assert result.road_address is None
     assert result.detail_address is None
+    assert result.jurisdiction is None
     dialog.close()
 
 
@@ -243,7 +257,7 @@ def test_application_routing_actions_use_selected_day_and_refresh(monkeypatch):
             calls.append((person, day))
             return DeliveryRoutingOutcome()
 
-    app_controller = DesktopStartupController(routing_controller_type=Controller)
+    app_controller = DesktopStartupController(settings=SimpleNamespace(), routing_controller_type=Controller)
     refreshed = []
     window = SimpleNamespace(
         table_model=SimpleNamespace(service_day=DAY),
@@ -421,7 +435,7 @@ def test_roster_button_requests_bulk_replacement_on_selected_day(app, monkeypatc
             calls.append((day, parent))
             return DeliveryRoutingOutcome()
 
-    controller = DesktopStartupController(routing_controller_type=Routing)
+    controller = DesktopStartupController(settings=SimpleNamespace(), routing_controller_type=Routing)
     window.driver_replacement_requested.connect(
         lambda: controller._run_driver_replacement(object(), window)
     )
@@ -473,3 +487,40 @@ def test_relocation_retains_legacy_assignments_when_only_address_changes(app):
     assert dialog.result() == QDialog.DialogCode.Accepted
     assert dialog.request().driver_ids == {}
     assert dialog.request().road_address == "변경할 주소"
+
+
+def test_relocation_prefills_resolved_jurisdiction_for_displayed_day(app):
+    from src.domain.delivery_routing import RoutingEvent
+
+    roster = base_roster()
+    person_id = roster.persons[0].person_id
+    state = RoutingState(
+        events=(
+            RoutingEvent(
+                uuid4(), person_id, DAY, 1, {}, "새 주소", None, "수내동"
+            ),
+        )
+    )
+
+    dialog = RoutingChangeDialog(roster, state, person_id, DAY)
+    assert dialog.jurisdiction.text() == "수내동"
+    dialog.close()
+
+
+def test_unchanged_relocation_save_does_not_append_revision(app, tmp_path):
+    roster = base_roster()
+
+    class Unchanged(RoutingChangeDialog):
+        def exec(self):
+            self._save()
+            return self.result()
+
+    path = tmp_path / "unchanged-relocation.sqlite3"
+    with DatabaseSession.create(path, "password", "recovery") as session:
+        initialize(session, roster)
+        count = len(session.database.revision_summaries())
+        result = DeliveryRoutingController(
+            session, change_dialog_type=Unchanged
+        ).run_relocation(roster.persons[0].person_id, DAY)
+        assert result.roster is None
+        assert len(session.database.revision_summaries()) == count
