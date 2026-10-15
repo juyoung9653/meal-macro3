@@ -49,7 +49,7 @@ def test_source_labels_match_roster_and_keep_field_ids(kind):
     assert spec.source_labels["학교명"] == "학교"
     assert spec.source_labels["핸드폰"] == "핸드폰1"
     assert spec.source_labels["전화번호"] == "전화번호1"
-    assert spec.source_labels[FULL_ADDRESS_FIELD] == "주소"
+    assert spec.source_labels[FULL_ADDRESS_FIELD] == "전체 주소 (도로명주소 + 상세주소)"
     assert spec.source_labels["성명"] == "성명 (기본 항목 · 성명)"
     custom_key = f"custom:{roster.custom_fields[0].definition_id}"
     assert spec.source_labels[custom_key] == "성명 (추가 항목)"
@@ -92,11 +92,11 @@ def test_new_choices_only_include_roster_columns_and_clear_missing_binding(profi
     column_labels = {column.key: column.label for column in model.columns}
     scopes = tuple((p, k) for p in ("급식", "행복도시락") for k in ("invoice", "confirmation"))
     specs = {scope: mapping_editor_spec(*scope, roster=roster, column_labels=column_labels) for scope in scopes}
-    overrides = {scope: {"성명": "도로명주소"} for scope in scopes}
+    overrides = {scope: {"성명": "반"} for scope in scopes}
     view = DocumentColumnMappingDialog(specs, overrides)
     view._profile_combo.setCurrentIndex(view._profile_combo.findData(profile))
     view._document_combo.setCurrentIndex(view._document_combo.findData(kind))
-    expected = {"", "성명", "생년월일", "학교명", "학년", "전화번호", "핸드폰", "관할동", FULL_ADDRESS_FIELD, "비고", "세대주 성명"}
+    expected = {"", "성명", "생년월일", "학교명", "학년", "전화번호", "핸드폰", "관할동", FULL_ADDRESS_FIELD, "도로명주소", "상세주소", "비고", "세대주 성명"}
     expected.update(f"custom:{field.definition_id}" for field in roster.custom_fields)
     try:
         assert set(specs[(profile, kind)].selectable_source_options) == expected
@@ -105,13 +105,13 @@ def test_new_choices_only_include_roster_columns_and_clear_missing_binding(profi
             assert enabled == expected
         combo = view._combos["성명"]
         assert combo.currentData() == ""
-        assert combo.findData("도로명주소") == -1
+        assert combo.findData("반") == -1
         assert all("기존 연결" not in combo.itemText(i) for i in range(combo.count()))
         assert not view._dirty()
         saved_id = uuid4()
         old_setting = {
             "policy_version": 1, "version": 1, "profile": profile, "document_kind": kind,
-            "overrides": {"성명": "도로명주소"}, "changed_in_revision_id": str(saved_id),
+            "overrides": {"성명": "반"}, "changed_in_revision_id": str(saved_id),
         }
         saved = HistoricalSnapshot(saved_id, {EntityRef(MAPPING_ENTITY_KIND, mapping_entity_id(profile, kind)): old_setting})
         cleared = build_mapping_revision(

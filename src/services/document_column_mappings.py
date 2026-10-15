@@ -30,7 +30,8 @@ _STANDARD_SOURCES = (
 _SOURCE_COLUMN_KEYS = {
     "성명": "name", "생년월일": "birth_date", "학교명": "school", "학년": "grade",
     "전화번호": "telephone", "핸드폰": "mobile", "관할동": "jurisdiction",
-    FULL_ADDRESS_FIELD: "address", "비고": "note",
+    FULL_ADDRESS_FIELD: "address", "도로명주소": "address",
+    "상세주소": "detail_address", "비고": "note",
     "취학유형": "school_type", "세대주 성명": "household_head_name",
     "아동과의 관계": "relationship_to_child",
 }
@@ -113,7 +114,7 @@ def mapping_editor_spec(
     source_options = list(_STANDARD_SOURCES)
     labels = {key: key for key in source_options}
     labels["학교명"] = "학교"
-    labels[FULL_ADDRESS_FIELD] = "주소"
+    labels[FULL_ADDRESS_FIELD] = "전체 주소 (도로명주소 + 상세주소)"
     if roster is not None:
         text_fields = tuple(field for field in roster.custom_fields if field.field_type is CustomFieldType.TEXT)
         if any(additional_telephone_field_ordinal(field.name) is not None for field in text_fields):
@@ -125,7 +126,7 @@ def mapping_editor_spec(
             source_options.append(key)
             labels[key] = definition.name
     for source, column_key in _SOURCE_COLUMN_KEYS.items():
-        if column_labels and column_key in column_labels:
+        if source != FULL_ADDRESS_FIELD and column_labels and column_key in column_labels:
             labels[source] = column_labels[column_key]
     # Display names may collide; the saved field identity must stay unambiguous.
     label_counts = Counter(labels.values())

@@ -311,7 +311,7 @@ def test_double_click_routes_special_columns_and_keeps_meals_read_only(app):
         index for index in range(window.table_model.rowCount())
         if window.table_model.person_at(index).person_id == PERSON_A
     )
-    for key in ("address", "jurisdiction"):
+    for key in ("address", "detail_address", "jurisdiction"):
         index = window.table_model.index(row, _column(window, key))
         window._table.doubleClicked.emit(index)
     sequence_index = window.table_model.index(row, _column(window, "sequence"))
@@ -319,7 +319,7 @@ def test_double_click_routes_special_columns_and_keeps_meals_read_only(app):
     meal_index = window.table_model.index(row, _column(window, "status:lunch"))
     assert not (window.table_model.flags(meal_index) & Qt.ItemFlag.ItemIsEditable)
     window._table.doubleClicked.emit(meal_index)
-    assert relocation == [PERSON_A, PERSON_A]
+    assert relocation == [PERSON_A, PERSON_A, PERSON_A]
     assert sequence == [PERSON_A]
     assert delivery == [] and cell == []
     window.close()

@@ -34,7 +34,8 @@ _PROFILE_COLUMNS = {
     "name": ("name", "성명"), "birth_date": ("birth_date", "생년월일"),
     "school": ("school_name", "학교"), "grade": ("grade", "학년"),
     "telephone": ("telephone", "전화번호"), "mobile": ("mobile_phone", "핸드폰"),
-    "jurisdiction": ("jurisdiction", "관할동"), "address": ("address", "주소"),
+    "jurisdiction": ("jurisdiction", "관할동"), "address": ("address", "도로명주소"),
+    "detail_address": ("detail_address", "상세주소"),
     "note": ("note", "비고"),
     "school_type": ("school_type", "학교 유형"),
     "household_head_name": ("household_head_name", "세대주 성명"),
@@ -197,6 +198,7 @@ class RosterRowCreateDialog(QDialog):
                     "relationship_to_child", "jurisdiction", "telephone", "mobile_phone", "note",
                 )},
                 road_address=value("address") or None,
+                detail_address=value("detail_address") or None,
                 custom_values=custom_values,
             )
             meals = tuple(meal for meal, check in self._meal_checks.items() if check.isChecked())

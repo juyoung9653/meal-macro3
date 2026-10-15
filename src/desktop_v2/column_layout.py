@@ -227,10 +227,15 @@ class RosterColumnLayout(QObject):
         keys = self._keys()
         saved_order = [key for key in layout["order"] if key in keys]
         order = saved_order + [key for key in keys if key not in saved_order]
+        if "detail_address" in keys and "detail_address" not in saved_order and "address" in order:
+            order.remove("detail_address")
+            order.insert(order.index("address") + 1, "detail_address")
         if "delivery_settings" in keys and "delivery_settings" not in saved_order and "name" in order:
             order.remove("delivery_settings")
             order.insert(order.index("name") + 1, "delivery_settings")
         hidden = set(layout["hidden"]) - self._mandatory_keys
+        if "detail_address" not in saved_order and "address" in hidden:
+            hidden.add("detail_address")
         if self._hide_new_custom_columns:
             hidden.update(key for key in keys if key.startswith("custom:") and key not in saved_order)
         widths = layout["widths"]

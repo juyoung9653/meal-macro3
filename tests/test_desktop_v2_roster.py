@@ -678,7 +678,9 @@ def test_routing_state_updates_effective_delivery_view_and_model_driver_filter(a
     model.set_context(SERVICE_DAY, Meal.LUNCH)
 
     assert model.data(model.index(0, lunch_column)) == "기사변경\n일시중지"
-    assert model.data(model.index(0, address_column)) == "새 주소로 2 101호"
+    assert model.data(model.index(0, address_column)) == "새 주소로 2"
+    detail_column = next(index for index, column in enumerate(model.columns) if column.key == "detail_address")
+    assert model.data(model.index(0, detail_column)) == "101호"
     assert model.data(model.index(0, jurisdiction_column)) == "수내동"
     model.set_search("수내동")
     assert model.rowCount() == 1

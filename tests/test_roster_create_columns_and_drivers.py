@@ -81,9 +81,10 @@ def test_actual_dialog_controller_saves_profile_household_and_dated_drivers_atom
     def accept_actual(view):
         labels = {label.text() for label in view.findChildren(QLabel)}
         assert {"학교 이름", "연락처"} <= labels
-        assert not {"road_address", "detail_address", "school_type", "household_head_name"} & set(view._editors)
+        assert not {"road_address", "school_type", "household_head_name"} & set(view._editors)
         view._editors["name"].setText("신규 대상")
-        view._editors["address"].setText("가상로 1 101호")
+        view._editors["address"].setText("가상로 1")
+        view._editors["detail_address"].setText("101호")
         view._editors[f"custom:{custom.definition_id}"].setText("010-2222-2222")
         view._meal_checks[Meal.LUNCH].setChecked(True)
         view._driver_combos[Meal.DINNER].setCurrentIndex(1)
@@ -109,8 +110,8 @@ def test_actual_dialog_controller_saves_profile_household_and_dated_drivers_atom
         with DatabaseSession.open(path, "password") as session:
             updated = session.database.current_roster()
             profile = updated.person(new_person).profile
-            assert profile.road_address == "가상로 1 101호"
-            assert profile.detail_address is None
+            assert profile.road_address == "가상로 1"
+            assert profile.detail_address == "101호"
             assert profile.custom_values[custom.definition_id] == "010-2222-2222"
             assert updated.household_for(new_person, on=starts_on).household_id == household.household_id
             state = routing_state_from_snapshot(session.database.snapshot(updated.revision_id))

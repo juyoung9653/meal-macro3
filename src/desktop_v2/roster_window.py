@@ -563,7 +563,7 @@ class RosterTableModel(QAbstractTableModel):
             value = self._display_value(person, column, context)
             if column.key == "sequence":
                 return f"{value or '순서 미지정'}\n더블클릭 → 순서 수정"
-            if column.key in {"address", "jurisdiction"}:
+            if column.key in {"address", "detail_address", "jurisdiction"}:
                 return f"{value or '미등록'}\n더블클릭 → 이사 등록"
             if column.key == "delivery_settings":
                 return f"{value or '기본값 사용'}\n더블클릭 → 배송 설정"
@@ -585,7 +585,8 @@ class RosterTableModel(QAbstractTableModel):
         role: int = Qt.ItemDataRole.DisplayRole,
     ):
         if orientation == Qt.Orientation.Horizontal and 0 <= section < len(self._columns):
-            shared = self._columns[section].key in self._household_shared_columns
+            key = self._columns[section].key
+            shared = ("address" if key == "detail_address" else key) in self._household_shared_columns
             if role == Qt.ItemDataRole.ToolTipRole and shared:
                 return self._columns[section].label + " · 가구 공용: 같은 가구의 수정값을 함께 적용합니다."
             if role == Qt.ItemDataRole.DecorationRole and shared:
@@ -660,7 +661,8 @@ class RosterTableModel(QAbstractTableModel):
         base_after_contacts = (
             *(column for column in optional_columns if column.key != "school_type"),
             _Column("jurisdiction", "관할동", 82),
-            _Column("address", "주소", 220),
+            _Column("address", "도로명주소", 220),
+            _Column("detail_address", "상세주소", 150),
             _Column("sequence", "순서", 104),
             _Column("note", "비고", 200),
         )
@@ -1103,9 +1105,9 @@ class RosterTableModel(QAbstractTableModel):
         if column.key == "jurisdiction":
             return context.jurisdiction or ""
         if column.key == "address":
-            return " ".join(
-                value for value in (context.road_address, context.detail_address) if value
-            )
+            return context.road_address or ""
+        if column.key == "detail_address":
+            return context.detail_address or ""
         if column.key == "sequence":
             return context.sequence
         if column.key == "note":
@@ -2041,11 +2043,12 @@ class RosterWindow(QMainWindow):
 
     def _add_household_shared_column_actions(self, menu, column=None) -> None:
         if column is not None:
-            action = menu.addAction("가구 공용 설정")
+            key = "address" if column.key == "detail_address" else column.key
+            action = menu.addAction("가구 공용 설정 (도로명주소·상세주소)" if key == "address" else "가구 공용 설정")
             action.setCheckable(True)
-            action.setChecked(column.key in self._model._household_shared_columns)
+            action.setChecked(key in self._model._household_shared_columns)
             action.setToolTip("체크하면 가구 공용으로 사용하고, 체크를 해제하면 현재 값을 유지하며 공용 사용을 끝냅니다.")
-            action.triggered.connect(lambda checked=False, key=column.key, target=action: self._request_household_shared_toggle(key, target))
+            action.triggered.connect(lambda checked=False, key=key, target=action: self._request_household_shared_toggle(key, target))
             return
         shared_menu = menu.addMenu("가구 공용 설정")
         menu._household_shared_submenu = shared_menu
@@ -2054,7 +2057,9 @@ class RosterWindow(QMainWindow):
         if not any(item.key == "delivery_settings" for item in columns):
             columns.append(_Column("delivery_settings", self._column_aliases.get("delivery_settings", "배송 설정"), 240))
         for item in columns:
-            action = shared_menu.addAction(item.label)
+            if item.key == "detail_address":
+                continue
+            action = shared_menu.addAction("도로명주소·상세주소" if item.key == "address" else item.label)
             action.setCheckable(True)
             action.setChecked(item.key in self._model._household_shared_columns)
             action.setToolTip("체크하면 가구 공용으로 사용하고, 체크를 해제하면 현재 값을 유지하며 공용 사용을 끝냅니다.")
@@ -2417,7 +2422,7 @@ class RosterWindow(QMainWindow):
                 edit = QAction("정보 수정", menu)
                 edit.triggered.connect(lambda: self.person_edit_requested.emit(person.person_id))
             menu.addAction(edit)
-            if column_key == "address":
+            if column_key in {"address", "detail_address"}:
                 relocation = QAction("이사 등록", menu)
                 relocation.triggered.connect(lambda: self.relocation_requested.emit(person.person_id))
                 menu.addAction(relocation)
@@ -2507,7 +2512,7 @@ class RosterWindow(QMainWindow):
         column = self._model.columns[index.column()]
         if column.meal is not None or is_roster_cell_editable(column.key):
             return
-        if column.key in {"address", "jurisdiction"}:
+        if column.key in {"address", "detail_address", "jurisdiction"}:
             self.relocation_requested.emit(person.person_id)
         elif column.key == "sequence":
             self.sequence_edit_requested.emit(person.person_id)
@@ -2626,6 +2631,7 @@ class RosterWindow(QMainWindow):
         if self._restoring_search or not self._remember_view:
             return
         state = {
+            "address_columns_version": 2,
             "global": self._search_input.text(),
             "include_hidden": self._include_hidden_filter.isChecked(),
             "special_only": self._special_only_filter.isChecked(),
@@ -2661,6 +2667,10 @@ class RosterWindow(QMainWindow):
             if type(state.get("special_only")) is bool:
                 self._special_only_filter.setChecked(state["special_only"])
                 keys = {column.key for column in self._model.columns}
+            # Old address filters matched the joined road/detail string. They
+            # cannot safely be interpreted as a road-only filter.
+            if state.get("address_columns_version") != 2:
+                keys.discard("address")
             global_search = state.get("global")
             if isinstance(global_search, str):
                 self._search_input.setText(global_search)
@@ -2682,6 +2692,7 @@ class RosterWindow(QMainWindow):
             self._restoring_search = False
         self._column_search_header.refresh_buttons()
         self._after_model_reset()
+        self._save_search_filters()
 
     def _set_active_only(self, active_only: bool) -> None:
         self._model.set_active_only(active_only)
