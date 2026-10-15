@@ -48,43 +48,87 @@ class CurrentSheetSnapshot:
             raise ValueError("현재 시트 행과 칼럼 수가 맞지 않습니다.")
 
 
+@dataclass(frozen=True, slots=True)
+class TextWorkbookSnapshot:
+    """Immutable text-only worksheets sharing one suggested output filename."""
+
+    sheet_name: str
+    sheets: tuple[CurrentSheetSnapshot, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.sheet_name, str) or not self.sheet_name.strip():
+            raise ValueError("Excel 파일 이름이 없습니다.")
+        if not self.sheets or not all(
+            isinstance(sheet, CurrentSheetSnapshot) for sheet in self.sheets
+        ):
+            raise ValueError("Excel에 저장할 시트가 없습니다.")
+        titles = tuple(_excel_sheet_name(sheet.sheet_name).casefold() for sheet in self.sheets)
+        if len(set(titles)) != len(titles):
+            raise ValueError("Excel 시트 이름이 중복됩니다.")
+
+
 def build_current_sheet_workbook(
-    snapshot: CurrentSheetSnapshot,
+    snapshot: CurrentSheetSnapshot | TextWorkbookSnapshot,
     *,
     progress: Callable[[str, int, int], None] | None = None,
 ) -> Workbook:
-    """Build one worksheet while preserving every captured value as literal text."""
+    """Build captured worksheets while preserving every value as literal text."""
 
     progress = progress or (lambda _stage, _completed, _total: None)
     workbook = Workbook()
-    worksheet = workbook.active
-    if worksheet is None:  # pragma: no cover - openpyxl contract guard
+    first_worksheet = workbook.active
+    if first_worksheet is None:  # pragma: no cover - openpyxl contract guard
         workbook.close()
         raise RuntimeError("Excel 시트를 만들지 못했습니다.")
-    worksheet.title = _excel_sheet_name(snapshot.sheet_name)
-    total = len(snapshot.rows)
+    sheets = snapshot.sheets if isinstance(snapshot, TextWorkbookSnapshot) else (snapshot,)
+    total = sum(len(sheet.rows) for sheet in sheets)
+    completed = 0
+    stage = (
+        "기사·식종별 Excel 준비 중"
+        if isinstance(snapshot, TextWorkbookSnapshot)
+        else "현재 시트 Excel 준비 중"
+    )
     header_fill = PatternFill("solid", fgColor="17313D")
-    for column, value in enumerate(snapshot.headers, 1):
-        cell = worksheet.cell(1, column)
-        _set_literal_text(cell, value)
-        cell.font = Font(bold=True, color="FFFFFF")
-        cell.fill = header_fill
-        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
     try:
-        for row_number, values in enumerate(snapshot.rows, 2):
-            for column, value in enumerate(values, 1):
-                cell = worksheet.cell(row_number, column)
-                _set_literal_text(cell, value)
-                cell.alignment = Alignment(vertical="top", wrap_text=True)
-            progress("현재 시트 Excel 준비 중", row_number - 1, total)
-        for column, header in enumerate(snapshot.headers, 1):
-            longest = max(
-                (len(line) for value in (header, *(row[column - 1] for row in snapshot.rows)) for line in value.splitlines() or ("",)),
-                default=0,
+        for sheet_index, sheet in enumerate(sheets):
+            worksheet = (
+                first_worksheet
+                if sheet_index == 0
+                else workbook.create_sheet()
             )
-            worksheet.column_dimensions[get_column_letter(column)].width = min(max(longest + 2, 10), 50)
-        worksheet.freeze_panes = "A2"
-        worksheet.auto_filter.ref = worksheet.dimensions
+            worksheet.title = _excel_sheet_name(sheet.sheet_name)
+            for column, value in enumerate(sheet.headers, 1):
+                cell = worksheet.cell(1, column)
+                _set_literal_text(cell, value)
+                cell.font = Font(bold=True, color="FFFFFF")
+                cell.fill = header_fill
+                cell.alignment = Alignment(
+                    horizontal="center", vertical="center", wrap_text=True
+                )
+            for row_number, values in enumerate(sheet.rows, 2):
+                for column, value in enumerate(values, 1):
+                    cell = worksheet.cell(row_number, column)
+                    _set_literal_text(cell, value)
+                    cell.alignment = Alignment(vertical="top", wrap_text=True)
+                completed += 1
+                progress(stage, completed, total)
+            for column, header in enumerate(sheet.headers, 1):
+                longest = max(
+                    (
+                        len(line)
+                        for value in (
+                            header,
+                            *(row[column - 1] for row in sheet.rows),
+                        )
+                        for line in value.splitlines() or ("",)
+                    ),
+                    default=0,
+                )
+                worksheet.column_dimensions[get_column_letter(column)].width = min(
+                    max(longest + 2, 10), 50
+                )
+            worksheet.freeze_panes = "A2"
+            worksheet.auto_filter.ref = worksheet.dimensions
         return workbook
     except BaseException:
         workbook.close()
@@ -205,13 +249,19 @@ class CurrentSheetExportController:
 
     def run(
         self,
-        snapshot: CurrentSheetSnapshot,
+        snapshot: CurrentSheetSnapshot | TextWorkbookSnapshot,
         password: str,
         parent=None,
         *,
         directory: str | Path | None = None,
     ):
         try:
+            multi_sheet = isinstance(snapshot, TextWorkbookSnapshot)
+            export_title = (
+                f"{snapshot.sheet_name} Excel 내보내기"
+                if multi_sheet
+                else "현재 시트 Excel 내보내기"
+            )
             if not isinstance(password, str) or not password or not password.strip():
                 raise ValueError("설정에서 생성 Excel 공통 비밀번호를 먼저 지정해주세요.")
             if password != password.strip():
@@ -219,7 +269,7 @@ class CurrentSheetExportController:
             filename = Path(directory or Path.home()) / f"{_safe_filename(snapshot.sheet_name)}.xlsx"
             chosen, _ = self._file_dialog.getSaveFileName(
                 parent,
-                "현재 시트 Excel 내보내기",
+                export_title,
                 str(filename),
                 "Excel 통합 문서 (*.xlsx)",
                 options=QFileDialog.Option.DontConfirmOverwrite,
@@ -241,6 +291,8 @@ class CurrentSheetExportController:
                 snapshot, password, target, self._builder, self._publisher
             )
             progress = self._progress_dialog_type(worker, parent)
+            if multi_sheet:
+                progress.setWindowTitle(export_title)
             QTimer.singleShot(0, worker.start)
             progress.exec()
             worker.wait()
@@ -248,7 +300,12 @@ class CurrentSheetExportController:
                 raise worker.error
             result = worker.result
         except Exception as error:  # noqa: BLE001 - output failure is reported at the UI boundary
-            self._messages.critical(parent, "현재 시트를 내보내지 못했습니다", str(error))
+            failure_title = (
+                "기사·식종별 Excel을 내보내지 못했습니다"
+                if isinstance(snapshot, TextWorkbookSnapshot)
+                else "현재 시트를 내보내지 못했습니다"
+            )
+            self._messages.critical(parent, failure_title, str(error))
             return None
         self._messages.information(parent, "Excel 내보내기 완료", f"저장했습니다: {result.output_path}")
         return result

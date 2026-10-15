@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from src.storage.database_session import committed_roster_after_save
+
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -392,7 +394,7 @@ class RosterRowEditController:
             return self._failure(parent, error)
         if backup.error is not None:
             self._message_box.warning(parent, "명단은 저장됐지만 자동 백업에 실패했습니다", str(backup.error))
-        return RosterRowEditOutcome(RosterRowEditStatus.COMPLETED, prepared.snapshot, backup)
+        return RosterRowEditOutcome(RosterRowEditStatus.COMPLETED, committed_roster_after_save(self._session, prepared.snapshot), backup)
 
     def _failure(self, parent: QWidget | None, error: Exception) -> RosterRowEditOutcome:
         self._message_box.critical(parent, "명단 행을 저장하지 못했습니다", "운영 데이터에는 반영하지 않았습니다.\n\n" + str(error))

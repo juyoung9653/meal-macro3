@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from src.storage.database_session import committed_roster_after_save
+
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 from enum import StrEnum
 from uuid import UUID, uuid4
@@ -31,7 +33,7 @@ from src.domain.roster import (
     RosterSnapshot,
 )
 from src.domain.revisions import RevisionActor
-from src.domain.profile_edits import build_person_profile_revision
+from src.domain.household_shared import profile_with_shared_routing, build_profile_revision_with_shared_routing
 from src.domain.profile_edits import profile_household_members
 from src.domain.roster import CustomFieldDefinition, CustomFieldType, HouseholdDeliverySetting, Meal
 from src.storage.database_session import (
@@ -751,11 +753,18 @@ class PersonProfileEditController:
             )
             return PersonProfileEditOutcome(PersonProfileEditStatus.FAILED)
         effective_on = service_day if delivery_only and service_day is not None else self._effective_date_provider()
+        snapshot_reader = getattr(self._session.database, "snapshot", None)
+        try:
+            snapshot = snapshot_reader(roster.revision_id) if snapshot_reader is not None else None
+            editing_person = replace(person, profile=profile_with_shared_routing(roster, person_id, effective_on, snapshot))
+        except Exception as error:
+            self._message_box.critical(parent, "사람 정보를 수정하지 못했습니다", str(error))
+            return PersonProfileEditOutcome(PersonProfileEditStatus.FAILED)
         household_members = profile_household_members(roster, person_id, effective_on)
         effective_delivery_settings = roster.delivery_settings_for(person_id, on=effective_on)
         if self._dialog_type is PersonProfileEditDialog:
             dialog = self._dialog_type(
-                person,
+                editing_person,
                 parent,
                 message_box=self._message_box,
                 custom_fields=roster.custom_fields,
@@ -769,7 +778,7 @@ class PersonProfileEditController:
                 defaults_roster=roster,
             )
         else:
-            dialog = self._dialog_type(person, parent, message_box=self._message_box)
+            dialog = self._dialog_type(editing_person, parent, message_box=self._message_box)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return PersonProfileEditOutcome(PersonProfileEditStatus.CANCELLED)
         try:
@@ -779,16 +788,17 @@ class PersonProfileEditController:
             if copy_delivery and updated_delivery_settings is None:
                 updated_delivery_settings = effective_delivery_settings
             if (
-                updated_profile == person.profile
+                updated_profile == editing_person.profile
                 and not getattr(dialog, "apply_mobile_to_household", lambda: False)()
                 and updated_delivery_settings == person.delivery_settings
                 and not copy_delivery
             ):
                 return PersonProfileEditOutcome(PersonProfileEditStatus.CANCELLED)
-            prepared = build_person_profile_revision(
+            prepared = build_profile_revision_with_shared_routing(
                 roster,
                 person_id,
                 updated_profile,
+                snapshot=snapshot,
                 actor=self._actor_provider(),
                 recorded_at=self._recorded_at_provider(),
                 effective_on=effective_on,
@@ -816,7 +826,7 @@ class PersonProfileEditController:
             )
         return PersonProfileEditOutcome(
             PersonProfileEditStatus.COMPLETED,
-            prepared.snapshot,
+            committed_roster_after_save(self._session, prepared.snapshot),
             backup_result,
         )
 

@@ -22,6 +22,7 @@ from src.domain.projections import (
 )
 from src.domain.provider_settings import PROVIDER_SETTING_KIND
 from src.domain.sequence_settings import SEQUENCE_MODE_SETTING_KIND
+from src.domain.household_shared import HOUSEHOLD_SHARED_KIND, shared_columns_from_state
 from src.domain.revisions import (
     AuditChange,
     ChangeOperation,
@@ -48,6 +49,7 @@ _KIND_LABELS = {
     DELIVERY_DEFAULTS_KIND: "식종별 배송 기본값",
     PROVIDER_SETTING_KIND: "공통 제공기관",
     SEQUENCE_MODE_SETTING_KIND: "배송순서 입력 방식",
+    HOUSEHOLD_SHARED_KIND: "가구 공용 칼럼",
     EXPORT_PASSWORD_SETTING_KIND: "Excel 비밀번호",
     MAPPING_ENTITY_KIND: "출력 칼럼 연결",
     DOCUMENT_TEMPLATE_SETTING_KIND: "문서 양식",
@@ -166,7 +168,7 @@ def build_revision_change_rows(
             _target_text(change, snapshot, previous_snapshot),
             _meal_text(change),
             _KIND_LABELS.get(change.entity_kind, change.entity_kind),
-            _change_text(change),
+            _change_text(change, snapshot, previous_snapshot),
         )
         for change in record.changes
     )
@@ -245,7 +247,27 @@ def _meal_text(change: AuditChange) -> str:
     return ""
 
 
-def _change_text(change: AuditChange) -> str:
+def _change_text(change: AuditChange, snapshot=None, previous_snapshot=None) -> str:
+    if change.entity_kind == HOUSEHOLD_SHARED_KIND:
+        before = shared_columns_from_state(change.before)
+        after = shared_columns_from_state(change.after)
+        def label(key):
+            if key.startswith("custom:"):
+                field_id = _uuid(key[7:])
+                for source in (snapshot, previous_snapshot):
+                    state = source.entity(CUSTOM_FIELD_KIND, field_id) if source is not None and field_id is not None else None
+                    if state is not None:
+                        return str(state.get("name", "사용자 정의 항목"))
+                return "사용자 정의 항목"
+            aliases = {"mobile": "핸드폰", "school": "학교명", "delivery_settings": "배송 설정", "status:dinner": "석식 상태", "status:breakfast": "조식 상태", "status:lunch": "중식 상태"}
+            return aliases.get(key, _FIELD_LABELS.get(key, key))
+        details = []
+        if after - before:
+            details.append("가구 공용 지정: " + ", ".join(label(key) for key in sorted(after - before)))
+        if before - after:
+            details.append("가구 공용 해제: " + ", ".join(label(key) for key in sorted(before - after)))
+        return " · ".join(details) or "가구 공용 설정 변경"
+
     if change.entity_kind == EXPORT_PASSWORD_SETTING_KIND:
         return "비밀번호 설정 변경"
     if change.entity_kind not in _KNOWN_KINDS:

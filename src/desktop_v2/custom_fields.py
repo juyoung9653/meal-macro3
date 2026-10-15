@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from src.storage.database_session import committed_roster_after_save
+
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -243,7 +245,7 @@ class CustomFieldController:
                         revision_id=self._revision_id_factory(),
                     )
                 backup_result = self._session.append_revision(prepared.record)
-                roster = prepared.snapshot
+                roster = committed_roster_after_save(self._session, prepared.snapshot)
                 changed = True
                 if backup_result.error is not None:
                     self._message_box.warning(

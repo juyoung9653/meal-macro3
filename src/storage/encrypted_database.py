@@ -132,7 +132,7 @@ class EncryptedDatabase:
     def schema_version(self) -> int:
         return int(self._require_connection().pragma("user_version"))
 
-    def append_revision(self, record: RevisionRecord) -> None:
+    def append_revision(self, record: RevisionRecord) -> RosterSnapshot | None:
         if not isinstance(record, RevisionRecord):
             raise TypeError("record는 RevisionRecord여야 합니다.")
         if record.metadata.display_code is not None:
@@ -151,6 +151,24 @@ class EncryptedDatabase:
                     f"expected={expected_parent}, actual={actual_parent}"
                 )
             _validate_changes_against_current(connection, record.changes)
+            from src.domain.household_shared import (
+                HOUSEHOLD_SHARED_KIND, HOUSEHOLD_SHARED_ID,
+                shared_columns_from_state, expand_household_shared_revision,
+            )
+            setting = connection.execute(
+                """SELECT change.after_json FROM audit_change AS change
+                   JOIN revision ON revision.revision_id = change.revision_id
+                   WHERE change.entity_kind = ? AND change.entity_id = ?
+                   ORDER BY revision.sequence DESC LIMIT 1""",
+                (HOUSEHOLD_SHARED_KIND, str(HOUSEHOLD_SHARED_ID)),
+            ).fetchone()
+            shared = shared_columns_from_state(
+                None if setting is None or setting[0] is None else json.loads(str(setting[0]))
+            )
+            shared_setting_changed = any(change.entity_kind == HOUSEHOLD_SHARED_KIND for change in record.changes)
+            if shared and actual_parent is not None:
+                record = expand_household_shared_revision(self._current_entity_snapshot(actual_parent), record)
+                _validate_changes_against_current(connection, record.changes)
             _insert_revision(connection, record.metadata)
             _insert_revision_display_code(connection, record.metadata)
             for ordinal, change in enumerate(record.changes, start=1):
@@ -176,10 +194,34 @@ class EncryptedDatabase:
                     int(record.import_batch is not None),
                 ),
             )
+            committed_roster = (
+                load_current_roster(connection, record.metadata.revision_id)
+                if shared or shared_setting_changed else None
+            )
             connection.execute("COMMIT")
+            return committed_roster
         except Exception:
             connection.execute("ROLLBACK")
             raise
+
+    def _current_entity_snapshot(self, revision_id: UUID) -> HistoricalSnapshot:
+        """Read only latest states, avoiding JSON replay of every old revision."""
+        rows = self._require_connection().execute(
+            """SELECT entity_kind, entity_id, after_json FROM (
+                SELECT change.entity_kind, change.entity_id, change.after_json,
+                       change.operation,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY change.entity_kind, change.entity_id
+                           ORDER BY revision.sequence DESC
+                       ) AS state_rank
+                FROM audit_change AS change
+                JOIN revision ON revision.revision_id = change.revision_id
+            ) WHERE state_rank = 1 AND operation != 'delete'"""
+        )
+        return HistoricalSnapshot(revision_id, {
+            EntityRef(str(row[0]), UUID(str(row[1]))): json.loads(str(row[2]))
+            for row in rows
+        })
 
     def latest_revision(self) -> RevisionRecord | None:
         connection = self._require_connection()

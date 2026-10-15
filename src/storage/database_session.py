@@ -80,6 +80,7 @@ class DatabaseSession:
             else DatabaseBackupService(backup_directory)
         )
         self._closed = False
+        self.last_committed_roster = None
         self._locks = [] if _lock is None else [_lock]
 
     @classmethod
@@ -297,7 +298,7 @@ class DatabaseSession:
         """Commit first, then report backup failure without implying data loss."""
 
         self._require_open()
-        self._database.append_revision(record)
+        self.last_committed_roster = self._database.append_revision(record)
         return self.try_backup_now()
 
     def append_document_run(self, run: DocumentRun) -> AutomaticBackupResult:
@@ -413,3 +414,8 @@ def _remove_created_database(path: Path) -> None:
         Path(f"{path}-shm"),
     ):
         candidate.unlink(missing_ok=True)
+
+
+def committed_roster_after_save(session, prepared_roster):
+    """Use the expanded snapshot captured before commit, with no fallible reread."""
+    return getattr(session, "last_committed_roster", None) or prepared_roster

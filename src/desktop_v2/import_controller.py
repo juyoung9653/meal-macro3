@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from src.storage.database_session import committed_roster_after_save
+
 import csv
 import getpass
 import subprocess
@@ -209,7 +211,7 @@ class GuidedRosterImportController:
             )
         return GuidedImportOutcome(
             GuidedImportStatus.COMPLETED,
-            prepared.result.snapshot,
+            committed_roster_after_save(self._session, prepared.result.snapshot),
             backup_result,
         )
 

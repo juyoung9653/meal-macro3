@@ -56,6 +56,7 @@ from .delivery_defaults import DeliveryDefaultsController
 from .roster_window import RosterWindow
 from .sequence_edit import SequenceEditController, SequenceSaveStatus
 from .sequence_settings import SequenceModeController
+from .household_shared_columns import HouseholdSharedColumnController
 from .school_calendar_edit import (
     SchoolCalendarEditController,
     SchoolCalendarEditStatus,
@@ -116,6 +117,7 @@ class DesktopStartupController:
         provider_settings_controller_type=ProviderSettingsController,
         delivery_defaults_controller_type=DeliveryDefaultsController,
         sequence_mode_controller_type=SequenceModeController,
+        household_shared_column_controller_type=HouseholdSharedColumnController,
         meal_status_controller_type=MealStatusChangeController,
         service_adjustment_controller_type=ServiceAdjustmentController,
         school_calendar_controller_type=SchoolCalendarImportController,
@@ -156,6 +158,7 @@ class DesktopStartupController:
         self._provider_settings_controller_type = provider_settings_controller_type
         self._delivery_defaults_controller_type = delivery_defaults_controller_type
         self._sequence_mode_controller_type = sequence_mode_controller_type
+        self._household_shared_column_controller_type = household_shared_column_controller_type
         self._meal_status_controller_type = meal_status_controller_type
         self._service_adjustment_controller_type = (
             service_adjustment_controller_type
@@ -254,6 +257,7 @@ class DesktopStartupController:
             imported_profile_fields=self._imported_profile_fields(session, roster),
         )
         self._refresh_school_calendar(session, window, roster)
+        self._refresh_household_shared_columns(session, window, roster)
         routing_setter = getattr(window, "set_routing_state", None)
         if callable(routing_setter):
             routing_setter(routing_state_from_snapshot(session.database.snapshot(roster.revision_id)))
@@ -274,6 +278,7 @@ class DesktopStartupController:
             ("complaint_requested", lambda person_id, meal: self._run_complaint(session, window, person_id, meal)),
             ("database_export_requested", lambda: self._run_database_export(session, window)),
             ("current_sheet_export_requested", lambda snapshot: self._run_current_sheet_export(session, window, snapshot)),
+            ("driver_households_export_requested", lambda snapshot, dialog: self._run_current_sheet_export(session, window, snapshot, parent=dialog)),
             ("revision_history_requested", lambda: self._run_revision_history(session, window)),
             ("driver_replacement_requested", lambda: self._run_driver_replacement(session, window)),
             ("drivers_requested", lambda: self._run_driver_registry(session, window)),
@@ -285,6 +290,7 @@ class DesktopStartupController:
             ("person_delete_requested", lambda person_id: self._run_roster_row_delete(session, window, person_id)),
             ("relocation_requested", lambda person_id: self._run_relocation(session, window, person_id)),
             ("cell_edit_requested", lambda person_id, column_key, text: self._run_roster_cell_edit(session, window, person_id, column_key, text)),
+            ("household_shared_column_requested", lambda column_key: self._run_household_shared_column(session, window, column_key)),
         ):
             signal = getattr(window, signal_name, None)
             if signal is not None and hasattr(signal, "connect"):
@@ -463,8 +469,9 @@ class DesktopStartupController:
             directory=self._settings.document_output_directory,
         )
 
-    def _run_current_sheet_export(self, session, window, snapshot) -> None:
-        password = self._export_password_controller_type(session).ensure_configured(window)
+    def _run_current_sheet_export(self, session, window, snapshot, *, parent=None) -> None:
+        export_parent = window if parent is None else parent
+        password = self._export_password_controller_type(session).ensure_configured(export_parent)
         if not password.completed or password.setting is None:
             return
         if password.roster is not None:
@@ -472,7 +479,7 @@ class DesktopStartupController:
         self._current_sheet_export_controller_type().run(
             snapshot,
             password.setting.password,
-            window,
+            export_parent,
             directory=self._settings.document_output_directory,
         )
 
@@ -491,6 +498,15 @@ class DesktopStartupController:
 
     def _run_custom_fields(self, session: DatabaseSession, window) -> None:
         outcome = self._custom_field_controller_type(session).run(parent=window)
+        if outcome.roster is not None:
+            self._replace_roster_if_changed(session, window, outcome.roster)
+
+    def _run_household_shared_column(self, session, window, column_key) -> None:
+        column = next((item for item in window.table_model.columns if item.key == column_key), None)
+        label = column.label if column is not None else window._column_aliases.get(column_key, "배송 설정")
+        outcome = self._household_shared_column_controller_type(session).run(
+            column_key, label, window.table_model.service_day, parent=window,
+        )
         if outcome.roster is not None:
             self._replace_roster_if_changed(session, window, outcome.roster)
 
@@ -954,9 +970,21 @@ class DesktopStartupController:
             revision_display_code=self._revision_display_code(session, roster),
         )
         self._refresh_school_calendar(session, window, roster)
+        self._refresh_household_shared_columns(session, window, roster)
+        routing_setter = getattr(window, "set_routing_state", None)
+        if callable(routing_setter):
+            routing_setter(routing_state_from_snapshot(session.database.snapshot(roster.revision_id)))
         setter = getattr(window, "set_imported_profile_fields", None)
         if callable(setter):
             setter(self._imported_profile_fields(session, roster))
+
+    @staticmethod
+    def _refresh_household_shared_columns(session, window, roster) -> None:
+        setter = getattr(window, "set_household_shared_columns", None)
+        if callable(setter):
+            from src.domain.household_shared import HOUSEHOLD_SHARED_KIND, HOUSEHOLD_SHARED_ID, shared_columns_from_state
+            stored = session.database.snapshot(roster.revision_id).entity(HOUSEHOLD_SHARED_KIND, HOUSEHOLD_SHARED_ID)
+            setter(shared_columns_from_state(stored))
 
     @staticmethod
     def _imported_profile_fields(session, roster) -> frozenset[str]:

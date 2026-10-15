@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from src.storage.database_session import committed_roster_after_save
+
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -653,7 +655,7 @@ class MealStatusChangeController:
             )
         return MealStatusChangeOutcome(
             MealStatusChangeStatus.COMPLETED,
-            prepared.snapshot,
+            committed_roster_after_save(self._session, prepared.snapshot),
             backup_result,
         )
 

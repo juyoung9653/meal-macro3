@@ -21,7 +21,7 @@ from PySide6.QtCore import (
     QVariantAnimation,
     QEasingCurve,
 )
-from PySide6.QtGui import QAction, QColor, QFont, QGuiApplication
+from PySide6.QtGui import QAction, QColor, QFont, QGuiApplication, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -203,6 +203,8 @@ class RosterTableModel(QAbstractTableModel):
         )
         self._column_aliases = dict(column_aliases or {})
         self._imported_profile_fields = frozenset(imported_profile_fields)
+        self._household_shared_columns: frozenset[str] = frozenset()
+        self._shared_column_icon = None
         self._day = date.today()
         self._meal = Meal.LUNCH
         self._search = ""
@@ -582,6 +584,21 @@ class RosterTableModel(QAbstractTableModel):
         orientation: Qt.Orientation,
         role: int = Qt.ItemDataRole.DisplayRole,
     ):
+        if orientation == Qt.Orientation.Horizontal and 0 <= section < len(self._columns):
+            shared = self._columns[section].key in self._household_shared_columns
+            if role == Qt.ItemDataRole.ToolTipRole and shared:
+                return self._columns[section].label + " · 가구 공용: 같은 가구의 수정값을 함께 적용합니다."
+            if role == Qt.ItemDataRole.DecorationRole and shared:
+                if self._shared_column_icon is None:
+                    pixmap = QPixmap(20, 20)
+                    pixmap.fill(Qt.GlobalColor.transparent)
+                    painter = QPainter(pixmap)
+                    painter.setPen(QColor("#16788A"))
+                    painter.setFont(QFont("맑은 고딕", 9, QFont.Weight.Bold))
+                    painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "공")
+                    painter.end()
+                    self._shared_column_icon = QIcon(pixmap)
+                return self._shared_column_icon
         if role != Qt.ItemDataRole.DisplayRole:
             return None
         if orientation == Qt.Orientation.Horizontal:
@@ -1248,6 +1265,7 @@ class RosterWindow(QMainWindow):
     complaint_requested = Signal(object, object)
     database_export_requested = Signal()
     current_sheet_export_requested = Signal(object)
+    driver_households_export_requested = Signal(object, object)
     revision_history_requested = Signal()
     import_review_requested = Signal()
     person_edit_requested = Signal(object)
@@ -1263,6 +1281,7 @@ class RosterWindow(QMainWindow):
     document_generated = Signal(object)
     settings_requested = Signal()
     custom_fields_requested = Signal()
+    household_shared_column_requested = Signal(str)
 
     def __init__(
         self,
@@ -1292,6 +1311,9 @@ class RosterWindow(QMainWindow):
             self._SEARCH_SETTINGS_KEY
             if view_settings_scope is None
             else f"{self._SEARCH_SETTINGS_KEY}/{sha256(view_settings_scope.encode('utf-8')).hexdigest()}"
+        )
+        self._driver_household_search_settings_key = self._search_settings_key.replace(
+            self._SEARCH_SETTINGS_KEY, "driver_households/search_v1", 1
         )
         self._sheet_settings_key = (
             "roster/sheets_v1" if view_settings_scope is None
@@ -1429,6 +1451,11 @@ class RosterWindow(QMainWindow):
             revision_display_code=self._revision_display_code,
             imported_profile_fields=fields,
         )
+
+    def set_household_shared_columns(self, columns: frozenset[str]) -> None:
+        self._model._household_shared_columns = frozenset(columns)
+        if self._model.columnCount():
+            self._model.headerDataChanged.emit(Qt.Orientation.Horizontal, 0, self._model.columnCount() - 1)
 
     def set_routing_state(self, state: RoutingState) -> None:
         if not isinstance(state, RoutingState):
@@ -1860,10 +1887,17 @@ class RosterWindow(QMainWindow):
             rows_provider=lambda include_hidden: self.driver_household_rows(
                 include_hidden=include_hidden
             ),
+            settings=self._search_settings if self._remember_view else None,
+            settings_key=self._driver_household_search_settings_key,
         )
         dialog.sequence_save_requested.connect(
             lambda targets, value: self.household_sequence_save_requested.emit(targets, value, dialog)
         )
+        export_signal = getattr(dialog, "export_requested", None)
+        if export_signal is not None and hasattr(export_signal, "connect"):
+            export_signal.connect(
+                lambda snapshot: self.driver_households_export_requested.emit(snapshot, dialog)
+            )
         dialog.exec()
         dialog.deleteLater()
 
@@ -1988,11 +2022,38 @@ class RosterWindow(QMainWindow):
             )
         )
         menu.addSeparator()
+        self._add_household_shared_column_actions(menu, column)
         manage = menu.addAction("사용자 항목 추가·삭제")
         manage.triggered.connect(self.custom_fields_requested.emit)
         if position is None or isinstance(position, bool):
             position = self._more_button.mapToGlobal(self._more_button.rect().bottomLeft())
         menu.exec(position)
+
+    def _add_household_shared_column_actions(self, menu, column=None) -> None:
+        if column is not None:
+            action = menu.addAction("가구 공용 설정")
+            action.setCheckable(True)
+            action.setChecked(column.key in self._model._household_shared_columns)
+            action.setToolTip("체크하면 가구 공용으로 사용하고, 체크를 해제하면 현재 값을 유지하며 공용 사용을 끝냅니다.")
+            action.triggered.connect(lambda checked=False, key=column.key, target=action: self._request_household_shared_toggle(key, target))
+            return
+        shared_menu = menu.addMenu("가구 공용 설정")
+        menu._household_shared_submenu = shared_menu
+        menu._household_shared_action = shared_menu.menuAction()
+        columns = list(self._model.columns)
+        if not any(item.key == "delivery_settings" for item in columns):
+            columns.append(_Column("delivery_settings", self._column_aliases.get("delivery_settings", "배송 설정"), 240))
+        for item in columns:
+            action = shared_menu.addAction(item.label)
+            action.setCheckable(True)
+            action.setChecked(item.key in self._model._household_shared_columns)
+            action.setToolTip("체크하면 가구 공용으로 사용하고, 체크를 해제하면 현재 값을 유지하며 공용 사용을 끝냅니다.")
+            action.triggered.connect(lambda checked=False, key=item.key, target=action: self._request_household_shared_toggle(key, target))
+
+    def _request_household_shared_toggle(self, key, action) -> None:
+        self.household_shared_column_requested.emit(key)
+        # A cancelled conflict review must not leave a checked menu item behind.
+        action.setChecked(key in self._model._household_shared_columns)
 
     def _load_column_aliases(self) -> dict[str, str]:
         if not self._remember_view or not self._search_settings.contains(
@@ -2300,7 +2361,7 @@ class RosterWindow(QMainWindow):
         layout.addWidget(household_label)
         self._household_list = QListWidget()
         self._household_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._household_list.setMaximumHeight(72)
+        self._household_list.setFixedHeight(32)
         layout.addWidget(self._household_list)
         history_heading = QHBoxLayout()
         history_label = QLabel("식종 변경 이력")
@@ -2703,6 +2764,14 @@ class RosterWindow(QMainWindow):
         self._delivery_settings_button.setEnabled(True)
         if not members:
             self._household_list.addItem("연결된 가구가 없습니다")
+        # Fit complete rows at the current font size while leaving room for history.
+        self._household_list.doItemsLayout()
+        visible_rows = min(self._household_list.count(), 5)
+        self._household_list.setFixedHeight(
+            sum(self._household_list.sizeHintForRow(row) for row in range(visible_rows))
+            + 2 * self._household_list.frameWidth()
+        )
+        self._household_list.scrollToTop()
         self._populate_meal_history(person)
 
     def _request_selected_person_edit(self) -> None:
@@ -2738,6 +2807,7 @@ class RosterWindow(QMainWindow):
         self._meal_history_all_button.setEnabled(False)
         self._inspector_name.setText("명단에서 한 사람을 선택하세요")
         self._household_list.clear()
+        self._household_list.setFixedHeight(32)
         self._meal_history_list.clear()
 
     def _populate_meal_history(self, person: Person) -> None:

@@ -174,7 +174,7 @@ class PersonProfile:
             object.__setattr__(
                 self,
                 attribute,
-                _optional_text(getattr(self, attribute), label),
+                _optional_text(getattr(self, attribute), label, collapse=attribute != "note"),
             )
 
         custom_values = dict(self.custom_values)

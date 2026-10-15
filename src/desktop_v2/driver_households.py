@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from PySide6.QtCore import QEvent, Qt, Signal
+from PySide6.QtCore import QEvent, QSettings, Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemDelegate,
     QAbstractItemView,
@@ -29,6 +30,8 @@ from PySide6.QtWidgets import (
 from src.domain.delivery_routing import Driver
 
 from .column_search import ColumnSearchHeader
+from .current_sheet_export import CurrentSheetSnapshot
+from .driver_households_export import build_driver_households_template_snapshot
 from .theme import application_stylesheet, register_application_fonts
 
 if TYPE_CHECKING:
@@ -141,6 +144,7 @@ class DriverHouseholdsDialog(QDialog):
     """
 
     sequence_save_requested = Signal(object, str)
+    export_requested = Signal(object)
 
     def __init__(
         self,
@@ -150,6 +154,8 @@ class DriverHouseholdsDialog(QDialog):
         drivers: tuple[Driver, ...],
         selected_driver_id: UUID | None = None,
         rows_provider: Callable[[bool], tuple[DriverHouseholdRow, ...]] | None = None,
+        settings: QSettings | None = None,
+        settings_key: str | None = None,
         parent=None,
     ):
         super().__init__(parent)
@@ -166,6 +172,8 @@ class DriverHouseholdsDialog(QDialog):
         self._selected_driver_id = selected_driver_id if isinstance(selected_driver_id, UUID) else None
         self._column_searches: dict[str, str] = {}
         self._column_values: dict[str, frozenset[str]] = {}
+        self._filter_settings = settings if settings_key else None
+        self._filter_settings_key = settings_key
         layout = QVBoxLayout(self)
 
         title = QLabel("기사 담당가구")
@@ -184,6 +192,11 @@ class DriverHouseholdsDialog(QDialog):
 
         filters = QHBoxLayout()
         filters.addStretch(1)
+        self.clear_filters_button = QPushButton("전체 필터 해제")
+        self.clear_filters_button.setObjectName("quietAction")
+        self.clear_filters_button.setToolTip("열 검색과 값 선택 필터를 모두 해제")
+        self.clear_filters_button.clicked.connect(self._clear_all_filters)
+        filters.addWidget(self.clear_filters_button)
         self.include_hidden_checkbox = QCheckBox("숨긴 명단 포함")
         self.include_hidden_checkbox.setObjectName("includeHiddenHouseholds")
         self.include_hidden_checkbox.setToolTip("장기 미배송으로 숨긴 대상자를 기사별 가구에 포함")
@@ -195,6 +208,18 @@ class DriverHouseholdsDialog(QDialog):
         self.split_button.setToolTip("가구 행을 식종별 배송 행으로 표시")
         self.split_button.clicked.connect(self._toggle_meal_rows)
         filters.addWidget(self.split_button)
+        self.export_button = QPushButton("Excel 내보내기")
+        self.export_button.setObjectName("quietAction")
+        self.export_button.setToolTip("현재 필터와 정렬이 적용된 표시 내용을 Excel로 저장")
+        self.export_button.clicked.connect(self._request_export)
+        filters.addWidget(self.export_button)
+        self.template_export_button = QPushButton("기사·식종별 Excel 내보내기")
+        self.template_export_button.setObjectName("quietAction")
+        self.template_export_button.setToolTip(
+            "열 필터와 화면 정렬을 제외하고 기사·식종별 시트로 저장"
+        )
+        self.template_export_button.clicked.connect(self._request_template_export)
+        filters.addWidget(self.template_export_button)
         layout.addLayout(filters)
 
         self.table = QTableWidget(0, len(_COLUMNS))
@@ -263,7 +288,9 @@ class DriverHouseholdsDialog(QDialog):
         buttons.accepted.connect(self.accept)
         layout.addWidget(buttons)
 
+        self._restore_filter_settings()
         self._refresh()
+        self._update_filter_controls()
 
     @property
     def include_hidden(self) -> bool:
@@ -279,6 +306,42 @@ class DriverHouseholdsDialog(QDialog):
         problem = result.status is SequenceSaveStatus.FAILED or result.backup_warning
         self.sequence_status.setStyleSheet("color: #B42318;" if problem else "")
         self.sequence_status.setText(result.message)
+
+    def current_view_snapshot(self) -> CurrentSheetSnapshot:
+        """Freeze displayed strings in current visual column and sorted row order."""
+
+        header = self.table.horizontalHeader()
+        logical_columns = tuple(
+            logical
+            for visual in range(header.count())
+            if (logical := header.logicalIndex(visual)) >= 0
+            and not self.table.isColumnHidden(logical)
+        )
+        if not logical_columns:
+            raise ValueError("기사별 가구에 표시된 칼럼이 없어 내보낼 수 없습니다.")
+        headers = tuple(
+            self.table.horizontalHeaderItem(logical).text()
+            for logical in logical_columns
+        )
+        rows = tuple(
+            tuple(
+                self.table.item(row, logical).text()
+                if self.table.item(row, logical) is not None else ""
+                for logical in logical_columns
+            )
+            for row in range(self.table.rowCount())
+        )
+        return CurrentSheetSnapshot("기사별 가구", headers, rows)
+
+    def _request_export(self) -> None:
+        self.export_requested.emit(self.current_view_snapshot())
+
+    def _request_template_export(self) -> None:
+        snapshot = build_driver_households_template_snapshot(
+            self._rows,
+            selected_driver_id=self._selected_driver_id,
+        )
+        self.export_requested.emit(snapshot)
 
     def _set_include_hidden(self, include_hidden: bool) -> None:
         if self._rows_provider is None:
@@ -331,7 +394,8 @@ class DriverHouseholdsDialog(QDialog):
             else:
                 self._column_values.pop(key)
         self._refresh()
-        self._column_search_header.refresh_buttons()
+        self._update_filter_controls()
+        self._save_filter_settings()
 
     @staticmethod
     def _display_values(row):
@@ -358,6 +422,8 @@ class DriverHouseholdsDialog(QDialog):
         else:
             self._column_searches.pop(key, None)
         self._refresh()
+        self._update_filter_controls()
+        self._save_filter_settings()
 
     def _set_column_values(self, key, values):
         values = None if values is None else frozenset(values)
@@ -368,6 +434,83 @@ class DriverHouseholdsDialog(QDialog):
         else:
             self._column_values[key] = frozenset(values)
         self._refresh()
+        self._update_filter_controls()
+        self._save_filter_settings()
+
+    def _clear_all_filters(self) -> None:
+        if not self._column_searches and not self._column_values:
+            return
+        self._column_searches.clear()
+        self._column_values.clear()
+        self._refresh()
+        self._update_filter_controls()
+        self._save_filter_settings()
+
+    def _update_filter_controls(self) -> None:
+        self._column_search_header.refresh_buttons()
+        self.clear_filters_button.setEnabled(
+            bool(self._column_searches) or bool(self._column_values)
+        )
+
+    def _save_filter_settings(self) -> None:
+        if self._filter_settings is None or self._filter_settings_key is None:
+            return
+        state = {
+            "split_by_meal": self._split_by_meal,
+            "columns": dict(self._column_searches),
+            "values": {
+                key: sorted(values) for key, values in self._column_values.items()
+            },
+        }
+        if not self._split_by_meal and not self._column_searches and not self._column_values:
+            self._filter_settings.remove(self._filter_settings_key)
+        else:
+            self._filter_settings.setValue(
+                self._filter_settings_key, json.dumps(state, ensure_ascii=False)
+            )
+        self._filter_settings.sync()
+
+    def _restore_filter_settings(self) -> None:
+        if self._filter_settings is None or self._filter_settings_key is None:
+            return
+        raw = self._filter_settings.value(self._filter_settings_key)
+        if not isinstance(raw, str):
+            return
+        try:
+            state = json.loads(raw)
+        except (TypeError, ValueError):
+            return
+        if not isinstance(state, dict):
+            return
+
+        if type(state.get("split_by_meal")) is bool:
+            self._split_by_meal = state["split_by_meal"]
+            self.split_button.setText(
+                "분리 해제" if self._split_by_meal else "식종별 분리"
+            )
+            self.split_button.setToolTip(
+                "가구별로 합쳐 표시"
+                if self._split_by_meal
+                else "가구 행을 식종별 배송 행으로 표시"
+            )
+
+        searches = state.get("columns")
+        if isinstance(searches, dict):
+            for key, search in searches.items():
+                if key in _COLUMN_KEYS and isinstance(search, str):
+                    normalized = " ".join(search.split()).casefold()
+                    if normalized:
+                        self._column_searches[key] = normalized
+
+        selections = state.get("values")
+        if isinstance(selections, dict):
+            for key, values in selections.items():
+                if (
+                    key in _COLUMN_KEYS
+                    and isinstance(values, list)
+                    and all(isinstance(value, str) for value in values)
+                ):
+                    self._column_values[key] = frozenset(values)
 
     def _refresh(self) -> None:
         rows = self._visible_rows()

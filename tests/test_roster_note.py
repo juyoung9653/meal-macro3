@@ -30,7 +30,7 @@ def _roster():
 def test_standard_note_and_custom_note_display_and_filter_independently(app):
     model = RosterTableModel(_roster())
     columns = {column.label: index for index, column in enumerate(model.columns)}
-    assert model.data(model.index(0, columns["비고"])) == "기본 메모 둘째 줄"
+    assert model.data(model.index(0, columns["비고"])) == "기본 메모\n둘째 줄"
     assert model.data(model.index(0, columns["비고2"])) == "추가 메모"
     model.set_search("둘째 줄")
     assert model.rowCount() == 1

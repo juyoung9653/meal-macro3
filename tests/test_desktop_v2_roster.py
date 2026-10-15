@@ -445,6 +445,191 @@ def test_same_household_lists_only_meals_delivered_on_selected_day(app):
     window.close()
 
 
+
+def _three_member_household_roster():
+    from dataclasses import replace
+
+    roster = _roster()
+    third = Person(
+        UUID("80000000-0000-0000-0000-000000000071"),
+        PersonProfile("합성가구원3", school_name="샘플초"),
+    )
+    persons = tuple(
+        replace(person, profile=replace(person.profile, school_name="샘플초"))
+        for person in (*roster.persons, third)
+    )
+    return replace(
+        roster,
+        persons=persons,
+        memberships=(*roster.memberships, HouseholdMembership(third.person_id, HOUSEHOLD_ID)),
+        enrollments=tuple(
+            MealEnrollment(person.person_id, meal)
+            for person in persons
+            for meal in Meal
+        ),
+    )
+
+
+def _assert_household_matches_roster_cells(window, app):
+    model = window.table_model
+    assert model.rowCount() == 3
+    expected = set()
+    for row in range(model.rowCount()):
+        person = model.person_at(row)
+        meals = " · ".join(
+            meal.value
+            for meal in Meal
+            for column, definition in enumerate(model.columns)
+            if definition.meal is meal
+            and model.data(model.index(row, column)).split("\n")[-1] == "배송"
+        )
+        expected.add(f"{person.profile.name}   {meals or '-'}")
+    window._table.selectRow(0)
+    app.processEvents()
+    actual = {
+        window._household_list.item(row).text()
+        for row in range(window._household_list.count())
+    }
+    assert actual == expected
+    return expected
+
+
+def test_three_household_members_share_roster_status_after_filters_and_refreshes(app):
+    roster = _three_member_household_roster()
+    window = RosterWindow(roster, {}, school_calendar=_calendar())
+    window._set_day(SERVICE_DAY)
+    window.show()
+    expected = _assert_household_matches_roster_cells(window, app)
+    assert expected == {
+        f"{person.profile.name}   조식 · 중식 · 석식" for person in roster.persons
+    }
+
+    # Hidden household members still use the same complete roster projection.
+    for apply_filter, clear_filter in (
+        (lambda: window._on_search_changed("홍길동"), lambda: window._on_search_changed("")),
+        (
+            lambda: window._on_column_values_changed("name", frozenset({"홍길동"})),
+            lambda: window._on_column_values_changed("name", None),
+        ),
+    ):
+        apply_filter()
+        assert window.table_model.rowCount() == 1
+        window._table.selectRow(0)
+        app.processEvents()
+        assert {
+            window._household_list.item(row).text()
+            for row in range(window._household_list.count())
+        } == expected
+        clear_filter()
+        _assert_household_matches_roster_cells(window, app)
+
+    # Date and school coverage changes must refresh all three members together.
+    window._set_day(SERVICE_DAY + timedelta(days=2))
+    assert _assert_household_matches_roster_cells(window, app) == {
+        f"{person.profile.name}   조식 · 석식" for person in roster.persons
+    }
+    window._set_day(SERVICE_DAY)
+    window.set_school_calendar(SchoolLunchCalendar())
+    assert _assert_household_matches_roster_cells(window, app) == {
+        f"{person.profile.name}   조식 · 석식" for person in roster.persons
+    }
+    window.set_school_calendar(_calendar())
+    _assert_household_matches_roster_cells(window, app)
+
+    # Replacing status histories excludes paused/stopped meals; enrollment is
+    # checked independently, including a member with no remaining delivery.
+    from dataclasses import replace
+
+    histories = {}
+    for person, status in zip(roster.persons[1:], (MealStatus.PAUSED, MealStatus.STOPPED)):
+        event = StatusEvent(
+            person.person_id, REVISION_ID, person.person_id, Meal.DINNER, status,
+            InclusiveDateRange(SERVICE_DAY, SERVICE_DAY),
+            datetime(2026, 8, 17, 0, 0, tzinfo=UTC),
+        )
+        histories[(person.person_id, Meal.DINNER)] = resolve_status_history(
+            person.person_id, Meal.DINNER, (event,),
+        )
+    updated = replace(roster, enrollments=tuple(
+        enrollment for enrollment in roster.enrollments
+        if enrollment.person_id != roster.persons[2].person_id
+        or enrollment.meal is Meal.DINNER
+    ))
+    window.replace_roster(updated, histories)
+    assert _assert_household_matches_roster_cells(window, app) == {
+        "홍길동   조식 · 중식 · 석식", "김아침   조식 · 중식", "합성가구원3   -",
+    }
+    window._set_day(SERVICE_DAY + timedelta(days=1))
+    assert _assert_household_matches_roster_cells(window, app) == {
+        "홍길동   조식 · 중식 · 석식", "김아침   조식 · 중식 · 석식", "합성가구원3   석식",
+    }
+    window.close()
+
+
+
+@pytest.mark.parametrize("window_size", [(1440, 860), (1080, 680)])
+def test_three_household_rows_are_fully_visible_with_larger_font(app, window_size):
+    window = RosterWindow(_three_member_household_roster(), {}, school_calendar=_calendar())
+    window._set_day(SERVICE_DAY)
+    window.resize(*window_size)
+    # The old fixed 72px list clips the third member at larger system fonts.
+    window._household_list.setStyleSheet("QListWidget { font-size: 18px; }")
+    window.show()
+    _assert_household_matches_roster_cells(window, app)
+    household = window._household_list
+    assert household.verticalScrollBar().maximum() == 0
+    assert all(
+        household.viewport().rect().contains(household.visualItemRect(household.item(row)))
+        for row in range(household.count())
+    )
+    assert window._meal_history_list.height() >= window._meal_history_list.minimumHeight()
+    assert window._inspector.rect().contains(window._meal_history_list.geometry())
+    window.close()
+
+
+
+def test_larger_household_keeps_history_and_scrolls_from_top_after_selection(app):
+    from dataclasses import replace
+
+    roster = _three_member_household_roster()
+    extra = tuple(
+        Person(UUID(int=1000 + index), PersonProfile(f"합성{index}")) for index in range(7)
+    )
+    roster = replace(
+        roster,
+        persons=(*roster.persons, *extra),
+        memberships=(*roster.memberships, *(
+            HouseholdMembership(person.person_id, HOUSEHOLD_ID) for person in extra
+        )),
+        enrollments=(*roster.enrollments, *(
+            MealEnrollment(person.person_id, Meal.BREAKFAST) for person in extra
+        )),
+    )
+    window = RosterWindow(roster, {}, school_calendar=_calendar())
+    window._set_day(SERVICE_DAY)
+    window.resize(1080, 680)
+    window.show()
+    window._table.selectRow(0)
+    app.processEvents()
+    household = window._household_list
+    assert household.count() == 10
+    assert household.verticalScrollBar().maximum() > 0
+    assert all(
+        household.viewport().rect().contains(household.visualItemRect(household.item(row)))
+        for row in range(5)
+    )
+    household.scrollToBottom()
+    app.processEvents()
+    assert household.viewport().rect().contains(household.visualItemRect(household.item(9)))
+    window._table.selectRow(1)
+    app.processEvents()
+    assert household.verticalScrollBar().value() == 0
+    assert household.viewport().rect().contains(household.visualItemRect(household.item(0)))
+    assert window._inspector.rect().contains(window._meal_history_list.geometry())
+    assert window._meal_history_list.height() >= window._meal_history_list.minimumHeight()
+    window.close()
+
+
 def test_routing_state_updates_effective_delivery_view_and_model_driver_filter(app):
     from dataclasses import replace
 

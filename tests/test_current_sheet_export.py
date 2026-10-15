@@ -58,7 +58,7 @@ def test_capture_active_sheet_visible_order_aliases_filters_and_freezes(app, tmp
         assert snapshot.sheet_name == "연락처"
         assert snapshot.headers == ("비고", "수령인", "순서")
         assert [row[1] for row in snapshot.rows] == ["홍길동", "김아침"]
-        assert snapshot.rows[0][0] == "메모 여러 줄"
+        assert snapshot.rows[0][0] == "메모\n여러 줄"
         assert "001" in snapshot.rows[0][2]
         model.set_search("김아침")
         filtered = window.current_sheet_snapshot()

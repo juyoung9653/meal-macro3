@@ -65,8 +65,8 @@ class RoutingEvent:
             ):
                 raise TypeError("식종별 기사 지정 값이 올바르지 않습니다.")
         if self.road_address is not None:
-            if not isinstance(self.road_address, str) or not self.road_address.strip():
-                raise ValueError("이사할 주소를 입력해주세요.")
+            if not isinstance(self.road_address, str):
+                raise ValueError("주소는 문자열이어야 합니다.")
             object.__setattr__(self, "road_address", self.road_address.strip())
         if self.detail_address is not None and not isinstance(self.detail_address, str):
             raise TypeError("상세주소는 문자열이어야 합니다.")
@@ -319,6 +319,8 @@ def build_routing_revision(
     event_id_factory: Callable[[], UUID] = uuid4,
 ) -> RevisionRecord:
     roster.person(person_id)
+    if road_address is not None and (not isinstance(road_address, str) or not road_address.strip()):
+        raise ValueError("이사할 주소를 입력해주세요.")
     if not isinstance(whole_household, bool):
         raise TypeError("가구 전체 이사 여부는 bool이어야 합니다.")
     if not callable(event_id_factory):

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from src.storage.database_session import committed_roster_after_save
+
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
@@ -233,7 +235,7 @@ class SequenceEditController:
         # revision. Do not turn that result into a failed save or reread error.
         if backup.error is not None:
             return SequenceSaveResult(
-                SequenceSaveStatus.SAVED, prepared.snapshot,
+                SequenceSaveStatus.SAVED, committed_roster_after_save(self._session, prepared.snapshot),
                 f"배송순서는 저장됐지만 자동 백업에 실패했습니다: {backup.error}", True,
             )
-        return SequenceSaveResult(SequenceSaveStatus.SAVED, prepared.snapshot, "배송순서를 저장했습니다.")
+        return SequenceSaveResult(SequenceSaveStatus.SAVED, committed_roster_after_save(self._session, prepared.snapshot), "배송순서를 저장했습니다.")

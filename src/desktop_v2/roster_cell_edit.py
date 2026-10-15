@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from src.storage.database_session import committed_roster_after_save
+
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
@@ -295,6 +297,6 @@ class RosterCellEditController:
             )
         return RosterCellEditOutcome(
             RosterCellEditStatus.COMPLETED,
-            prepared.snapshot,
+            committed_roster_after_save(self._session, prepared.snapshot),
             backup_result,
         )
