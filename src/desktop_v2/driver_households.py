@@ -182,7 +182,7 @@ class DriverHouseholdsDialog(QDialog):
         self.day_label = QLabel(f"선택일: {service_day:%Y-%m-%d}")
         self.day_label.setObjectName("fieldLabel")
         layout.addWidget(self.day_label)
-        self.scope_label = QLabel("가입·배정된 모든 식종 · 일시중지·중지 포함")
+        self.scope_label = QLabel()
         self.scope_label.setObjectName("driverHouseholdsScope")
         layout.addWidget(self.scope_label)
         guide = QLabel("배송순서를 더블클릭해 입력하면 이 행의 가구원 식종에 함께 적용됩니다.")
@@ -199,7 +199,7 @@ class DriverHouseholdsDialog(QDialog):
         filters.addWidget(self.clear_filters_button)
         self.include_hidden_checkbox = QCheckBox("숨긴 명단 포함")
         self.include_hidden_checkbox.setObjectName("includeHiddenHouseholds")
-        self.include_hidden_checkbox.setToolTip("장기 미배송으로 숨긴 대상자를 기사별 가구에 포함")
+        self.include_hidden_checkbox.setToolTip("중지·현재 상태가 없는 식종과 장기 미배송으로 숨긴 대상자를 포함")
         self.include_hidden_checkbox.setEnabled(rows_provider is not None)
         self.include_hidden_checkbox.toggled.connect(self._set_include_hidden)
         filters.addWidget(self.include_hidden_checkbox)
@@ -513,6 +513,11 @@ class DriverHouseholdsDialog(QDialog):
                     self._column_values[key] = frozenset(values)
 
     def _refresh(self) -> None:
+        self.scope_label.setText(
+            "가입·배정된 모든 식종 · 중지·현재 상태 없음 포함"
+            if self.include_hidden
+            else "선택일 기준 배송·일시중지 식종"
+        )
         rows = self._visible_rows()
         current = self.table.currentItem()
         selected_identity = (

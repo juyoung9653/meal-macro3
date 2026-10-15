@@ -1870,8 +1870,18 @@ class RosterWindow(QMainWindow):
     def driver_household_rows(self, *, include_hidden: bool = False):
         from src.services.driver_households import build_driver_household_rows
 
+        day = self._model.service_day
+        included_meals = None if include_hidden else {
+            person.person_id: tuple(
+                meal for meal in Meal
+                if self._model.effective_status_on(person.person_id, meal, day)
+                in (MealStatus.DELIVERY, MealStatus.PAUSED)
+            )
+            for person in self._roster.persons
+        }
         return build_driver_household_rows(
-            self._roster, self._routing_state, self._model.service_day,
+            self._roster, self._routing_state, day,
+            included_meals=included_meals,
             browse_all_meals=True,
             excluded_person_ids=() if include_hidden else self._model._archive_ids,
         )

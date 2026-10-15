@@ -232,6 +232,87 @@ def test_checkbox_without_rows_provider_stays_unchecked_and_disabled(app):
     assert not dialog.include_hidden_checkbox.isEnabled()
     assert dialog.table.textElideMode() == Qt.TextElideMode.ElideNone
     assert dialog.table.wordWrap() is True
-    assert dialog.scope_label.text() == "가입·배정된 모든 식종 · 일시중지·중지 포함"
+    assert dialog.scope_label.text() == "선택일 기준 배송·일시중지 식종"
     assert dialog.empty.text() == "표시할 가입·배정 가구가 없습니다."
     dialog.close()
+
+
+def test_roster_provider_filters_meal_status_before_grouping_and_export(app):
+    from dataclasses import replace
+    from datetime import UTC, datetime
+
+    from src.desktop_v2.roster_window import RosterWindow
+    from src.domain.roster import InclusiveDateRange
+    from src.domain.status import MealStatus, StatusEvent, resolve_status_history
+
+    roster, state, driver, visible, hidden = _household_fixture()
+    assignment_only = person(12, "가입 기록 없음", phone="010-8888")
+    roster = replace(
+        roster,
+        persons=(*roster.persons, assignment_only),
+        memberships=(*roster.memberships, HouseholdMembership(
+            assignment_only.person_id, roster.households[0].household_id,
+        )),
+        enrollments=(*roster.enrollments,
+            MealEnrollment(visible.person_id, Meal.BREAKFAST),
+            MealEnrollment(visible.person_id, Meal.LUNCH),
+        ),
+        assignments=(*roster.assignments,
+            DeliveryAssignment(visible.person_id, Meal.BREAKFAST, "기사", "2"),
+            DeliveryAssignment(visible.person_id, Meal.LUNCH, "기사", "3"),
+            DeliveryAssignment(assignment_only.person_id, Meal.LUNCH, "기사", "8"),
+        ),
+    )
+    histories = {}
+    for index, (target, meal, status) in enumerate((
+        (visible, Meal.BREAKFAST, MealStatus.PAUSED),
+        (hidden, Meal.DINNER, MealStatus.STOPPED),
+    )):
+        event = StatusEvent(
+            uid(200 + index), roster.revision_id, target.person_id, meal, status,
+            InclusiveDateRange(DAY, DAY), datetime(2026, 10, 14, tzinfo=UTC),
+        )
+        histories[(target.person_id, meal)] = resolve_status_history(
+            target.person_id, meal, (event,),
+        )
+    window = RosterWindow(roster, histories, routing_state=state)
+    window._set_day(DAY)
+    dialog = DriverHouseholdsDialog(
+        window.driver_household_rows(), service_day=DAY, drivers=(driver,),
+        rows_provider=lambda include_hidden: window.driver_household_rows(
+            include_hidden=include_hidden,
+        ),
+    )
+    exported = []
+    dialog.export_requested.connect(exported.append)
+    try:
+        # A recent stop must be excluded even before long-term archiving applies.
+        assert hidden.person_id not in window.table_model._archive_ids
+        (row,) = dialog._rows
+        assert row.member_ids == (visible.person_id,)
+        assert row.meals == (Meal.DINNER, Meal.BREAKFAST)
+        assert row.contacts == ("010-1111",)
+        assert row.sequences == ("1", "2")
+        assert all(projection.member_ids == (visible.person_id,) for projection in row.meal_rows)
+        dialog.template_export_button.click()
+        assert [sheet.sheet_name for sheet in exported[-1].sheets] == ["기사-석식", "기사-조식"]
+        assert dialog.current_view_snapshot().rows[0][1:4] == ("보이는 사람", "석식, 조식", "1, 2")
+
+        dialog.include_hidden_checkbox.click()
+        (row,) = dialog._rows
+        assert set(row.member_ids) == {visible.person_id, hidden.person_id, assignment_only.person_id}
+        assert row.meals == (Meal.DINNER, Meal.BREAKFAST, Meal.LUNCH)
+        assert "중지·현재 상태 없음 포함" in dialog.scope_label.text()
+        dialog.template_export_button.click()
+        sheets = {sheet.sheet_name: sheet for sheet in exported[-1].sheets}
+        assert set(sheets) == {"기사-석식", "기사-조식", "기사-중식"}
+        assert sheets["기사-석식"].rows[0][1] == "보이는 사람, 숨긴 사람"
+        assert sheets["기사-중식"].rows[0][1] == "보이는 사람, 가입 기록 없음"
+
+        dialog.include_hidden_checkbox.click()
+        dialog.template_export_button.click()
+        assert [sheet.sheet_name for sheet in exported[-1].sheets] == ["기사-석식", "기사-조식"]
+        assert dialog._rows[0].contacts == ("010-1111",)
+    finally:
+        dialog.close()
+        window.close()
