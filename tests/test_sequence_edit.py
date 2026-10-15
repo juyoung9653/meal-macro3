@@ -16,6 +16,10 @@ from src.desktop_v2.sequence_edit import SequenceEditController, SequenceEditDia
 from src.domain.roster import DeliveryAssignment, Meal
 from src.domain.revisions import RevisionActor
 from src.domain.sequence_edits import build_sequence_revision
+from src.domain.sequence_settings import (
+    SequenceMode,
+    build_sequence_mode_revision,
+)
 from src.storage.database_session import DatabaseSession
 from tests.test_delivery_routing import base_roster, initialize
 
@@ -105,6 +109,66 @@ def test_sequence_dialog_validates_changed_empty_and_controller_skips_cancel_noo
         assert saved.resolve_assignment(person_id, Meal.LUNCH).sequence == "055"
         assert saved.resolve_assignment(person_id, Meal.BREAKFAST).sequence == "010"
         assert session.database.current_roster().revision_id == saved.revision_id
+
+
+def test_unified_dialog_keeps_mixed_values_distinguishable_until_explicit_input(app):
+    roster = _mixed_roster()
+    person_id = roster.persons[0].person_id
+    dialog = SequenceEditDialog(roster, person_id, mode=SequenceMode.UNIFIED)
+    assert dialog.fields[Meal.DINNER] is dialog.fields[Meal.LUNCH]
+    assert dialog.fields[Meal.DINNER].text() == ""
+    assert dialog.values() == {}
+    assert "석식: 001" in dialog.findChild(type(dialog.error), "sequenceMixedValues").text()
+    assert "조식: 010" in dialog.findChild(type(dialog.error), "sequenceMixedValues").text()
+    dialog._save()
+    assert dialog.result() == QDialog.DialogCode.Accepted
+
+    dialog = SequenceEditDialog(roster, person_id, mode=SequenceMode.UNIFIED)
+    dialog.fields[Meal.DINNER].setText("007")
+    assert dialog.values() == {meal: "007" for meal in (Meal.DINNER, Meal.BREAKFAST, Meal.LUNCH)}
+    dialog.close()
+
+
+def test_unified_controller_saves_all_meals_once_and_preserves_drivers(tmp_path):
+    roster = _mixed_roster()
+    person_id = roster.persons[0].person_id
+    actor = RevisionActor("tester", "test-sid")
+    path = tmp_path / "unified.sqlite3"
+    with DatabaseSession.create(path, "password", "recovery") as session:
+        initialize(session, roster)
+        current = session.database.current_roster()
+        mode_revision = build_sequence_mode_revision(
+            current.revision_id,
+            None,
+            SequenceMode.UNIFIED,
+            actor=actor,
+            recorded_at=datetime.now(UTC),
+            revision_id=uuid4(),
+        )
+        session.append_revision(mode_revision.record)
+        before = session.database.current_roster().revision_id
+
+        class Dialog:
+            def __init__(self, _roster, _person_id, _parent, *, mode):
+                assert mode is SequenceMode.UNIFIED
+
+            def exec(self):
+                return QDialog.DialogCode.Accepted
+
+            def values(self):
+                return {meal: "0007" for meal in (Meal.DINNER, Meal.BREAKFAST, Meal.LUNCH)}
+
+        saved = SequenceEditController(
+            session,
+            dialog_type=Dialog,
+            actor_provider=lambda: actor,
+        ).run(person_id)
+        assert saved is not None and saved.revision_id != before
+        assert {
+            saved.resolve_assignment(person_id, meal).sequence for meal in Meal
+        } == {"0007"}
+        assert saved.resolve_assignment(person_id, Meal.BREAKFAST).driver == "조식 기사"
+        assert saved.resolve_assignment(person_id, Meal.LUNCH).driver == "기존 기사"
 
 
 def test_sequence_display_and_context_menu_signal(app):

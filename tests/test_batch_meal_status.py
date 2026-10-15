@@ -1,6 +1,7 @@
 """Batch changes are previewed by exact cells and committed atomically."""
 
 from datetime import UTC, date, datetime
+from dataclasses import replace
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -25,7 +26,10 @@ from src.domain.roster import (
 from src.domain.status import MealStatus
 from src.domain.intake import IntakeChannel
 from src.domain.revisions import RevisionActor
-from src.domain.meal_status_changes import build_batch_meal_status_revision
+from src.domain.meal_status_changes import (
+    build_batch_meal_status_revision,
+    build_meal_status_revision,
+)
 from src.domain.projections import roster_audit_changes
 from src.domain.revisions import RevisionMetadata, RevisionRecord, RevisionSource
 from src.storage.database_session import DatabaseSession
@@ -171,6 +175,112 @@ def test_batch_change_records_selected_intake_channel_in_revision_metadata(roste
     )
 
     assert result.record.metadata.decisions["batch_meal_status_change"]["intake_channel"] == "메일"
+
+
+@pytest.mark.parametrize(
+    ("status", "targets", "period"),
+    [
+        (
+            MealStatus.DELIVERY,
+            (Meal.DINNER, Meal.BREAKFAST),
+            InclusiveDateRange(DAY, date(2026, 9, 10)),
+        ),
+        (MealStatus.PAUSED, (Meal.DINNER,), InclusiveDateRange(DAY, DAY)),
+        (MealStatus.STOPPED, (Meal.DINNER,), InclusiveDateRange(DAY, None)),
+    ],
+)
+def test_batch_matches_single_change_semantics_and_diffs_once(
+    monkeypatch, roster, status, targets, period
+):
+    first, second = roster.persons[:2]
+    if status is MealStatus.DELIVERY:
+        roster = replace(
+            roster,
+            enrollments=(
+                *roster.enrollments,
+                MealEnrollment(
+                    first.person_id,
+                    Meal.BREAKFAST,
+                    InclusiveDateRange(date(2026, 9, 11), None),
+                ),
+            ),
+        )
+    selected = tuple(
+        (person.person_id, meal)
+        for meal in targets
+        for person in (second, first)
+    )
+    ids = {target: uuid4() for target in selected}
+    revision_id = uuid4()
+    expected_roster = roster
+    expected_events = []
+    expected_enrolled = []
+    for person in (second, first):
+        meals = tuple(meal for pid, meal in selected if pid == person.person_id)
+        single = build_meal_status_revision(
+            replace(expected_roster, revision_id=roster.revision_id),
+            person.person_id,
+            meals,
+            status,
+            period,
+            actor=ACTOR,
+            recorded_at=NOW,
+            revision_id=revision_id,
+            event_ids={meal: ids[(person.person_id, meal)] for meal in meals},
+        )
+        expected_roster = single.snapshot
+        expected_events.extend(single.events)
+        expected_enrolled.extend(
+            (person.person_id, meal) for meal in single.auto_enrolled_meals
+        )
+
+    import src.domain.meal_status_changes as changes_module
+
+    original_diff = changes_module.roster_audit_changes
+    calls = []
+
+    def counted_diff(before, after):
+        calls.append((before, after))
+        return original_diff(before, after)
+
+    monkeypatch.setattr(changes_module, "roster_audit_changes", counted_diff)
+    result = build_batch_meal_status_revision(
+        roster,
+        selected,
+        status,
+        period,
+        actor=ACTOR,
+        recorded_at=NOW,
+        revision_id=revision_id,
+        event_ids=ids,
+    )
+
+    assert result.snapshot == expected_roster
+    assert result.events == tuple(expected_events)
+    assert result.auto_enrolled_targets == tuple(expected_enrolled)
+    assert len(calls) == 1
+    assert calls[0] == (roster, result.snapshot)
+    assert result.record.changes == (
+        *original_diff(roster, expected_roster),
+        *(changes_module.status_event_audit_change(event) for event in expected_events),
+    )
+
+
+def test_batch_invalid_late_target_leaves_roster_unchanged(monkeypatch, roster):
+    import src.domain.meal_status_changes as changes_module
+
+    before = roster.enrollments
+    valid = (roster.persons[0].person_id, Meal.BREAKFAST)
+    invalid = (uuid4(), Meal.BREAKFAST)
+    monkeypatch.setattr(
+        changes_module,
+        "roster_audit_changes",
+        lambda *_args: pytest.fail("invalid batch must not build a diff"),
+    )
+
+    with pytest.raises(KeyError, match="snapshot에 없는 사람"):
+        prepare(roster, (valid, invalid))
+    assert roster.enrollments == before
 
 
 @pytest.mark.parametrize("cancel", [False, True])

@@ -40,6 +40,7 @@ def test_settings_hub_has_db_and_computer_local_jobs(app):
         "청구서·확인서 양식",
         "출력 칼럼 연결",
         "식종별 배송 기본값",
+        "배송순서 입력 방식",
         "문서 저장 폴더",
         "운영 데이터 위치",
         "자동 백업 폴더",
@@ -64,6 +65,7 @@ def test_settings_hub_groups_equal_half_width_cards_at_minimum_size(app):
         "공통 운영": (
             SettingsAction.PROVIDER,
             SettingsAction.DELIVERY_DEFAULTS,
+            SettingsAction.SEQUENCE_MODE,
         ),
         "문서 출력": (
             SettingsAction.DOCUMENT_TEMPLATE,
@@ -395,3 +397,37 @@ def test_output_mapping_setting_routes_without_reimport_and_refreshes_on_save(co
     controller._replace_roster_if_changed = lambda s, w, r: calls.append((s, w, r))
     controller._run_settings_hub(session, window)
     assert calls == (["mapping", (session, window, roster)] if completed else ["mapping"])
+
+
+def test_sequence_mode_setting_routes_and_refreshes_after_save():
+    session = object()
+    window = object()
+    roster = object()
+    calls = []
+
+    class Hub:
+        selected_action = SettingsAction.SEQUENCE_MODE
+
+        def __init__(self, parent=None):
+            assert parent is window
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+    class ModeController:
+        def __init__(self, current_session):
+            assert current_session is session
+
+        def run(self, parent):
+            assert parent is window
+            calls.append("mode")
+            return SimpleNamespace(completed=True, roster=roster)
+
+    controller = DesktopStartupController(
+        settings=SimpleNamespace(),
+        settings_hub_dialog_type=Hub,
+        sequence_mode_controller_type=ModeController,
+    )
+    controller._replace_roster_if_changed = lambda s, w, r: calls.append((s, w, r))
+    controller._run_settings_hub(session, window)
+    assert calls == ["mode", (session, window, roster)]

@@ -6,6 +6,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from enum import StrEnum
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QDialog, QMessageBox, QWidget
 
 from src.domain.delivery_routing import routing_state_from_snapshot
@@ -14,12 +15,15 @@ from src.domain.status import resolve_status_history
 from src.domain.revisions import format_revision_timestamp
 from src.domain.school_calendar import school_lunch_calendar_from_snapshot
 from src.storage.database_session import DatabaseSession
+from src.importing.profile_history import import_profiles_from_snapshot
 
 from .custom_fields import CustomFieldController
 from .complaints import ComplaintController
 from .database_export import DatabaseExportController
+from .current_sheet_export import CurrentSheetExportController
 from .person_history import create_person_history_dialog
 from .inspector_history import InspectorMealHistory
+from .revision_history import GlobalRevisionHistoryDialog
 from .database_access import BackupDirectoryDialog, CreateDatabaseDialog, DatabaseLocationDialog, DatabasePasswordChangeDialog, DesktopStorageSettings, LoginDialog
 from .delivery_routing import DeliveryRoutingController
 from .document_completion import (
@@ -51,6 +55,7 @@ from .provider_settings import ProviderSettingsController
 from .delivery_defaults import DeliveryDefaultsController
 from .roster_window import RosterWindow
 from .sequence_edit import SequenceEditController, SequenceSaveStatus
+from .sequence_settings import SequenceModeController
 from .school_calendar_edit import (
     SchoolCalendarEditController,
     SchoolCalendarEditStatus,
@@ -107,8 +112,10 @@ class DesktopStartupController:
         routing_controller_type=DeliveryRoutingController,
         complaint_controller_type=ComplaintController,
         database_export_controller_type=DatabaseExportController,
+        current_sheet_export_controller_type=CurrentSheetExportController,
         provider_settings_controller_type=ProviderSettingsController,
         delivery_defaults_controller_type=DeliveryDefaultsController,
+        sequence_mode_controller_type=SequenceModeController,
         meal_status_controller_type=MealStatusChangeController,
         service_adjustment_controller_type=ServiceAdjustmentController,
         school_calendar_controller_type=SchoolCalendarImportController,
@@ -128,6 +135,7 @@ class DesktopStartupController:
         database_location_dialog_type=DatabaseLocationDialog,
         backup_directory_dialog_type=BackupDirectoryDialog,
         database_password_dialog_type=DatabasePasswordChangeDialog,
+        revision_history_dialog_type=GlobalRevisionHistoryDialog,
         document_directory_dialog_type=DefaultDocumentDirectoryDialog,
         roster_window_type=RosterWindow,
         message_box=QMessageBox,
@@ -144,8 +152,10 @@ class DesktopStartupController:
         self._routing_controller_type = routing_controller_type
         self._complaint_controller_type = complaint_controller_type
         self._database_export_controller_type = database_export_controller_type
+        self._current_sheet_export_controller_type = current_sheet_export_controller_type
         self._provider_settings_controller_type = provider_settings_controller_type
         self._delivery_defaults_controller_type = delivery_defaults_controller_type
+        self._sequence_mode_controller_type = sequence_mode_controller_type
         self._meal_status_controller_type = meal_status_controller_type
         self._service_adjustment_controller_type = (
             service_adjustment_controller_type
@@ -169,6 +179,7 @@ class DesktopStartupController:
         self._database_location_dialog_type = database_location_dialog_type
         self._backup_directory_dialog_type = backup_directory_dialog_type
         self._database_password_dialog_type = database_password_dialog_type
+        self._revision_history_dialog_type = revision_history_dialog_type
         self._document_directory_dialog_type = document_directory_dialog_type
         self._roster_window_type = roster_window_type
         self._message_box = message_box
@@ -240,6 +251,7 @@ class DesktopStartupController:
             histories,
             revision_display_code=self._revision_display_code(session, roster),
             view_settings_scope=str(session.credentials.database_id),
+            imported_profile_fields=self._imported_profile_fields(session, roster),
         )
         self._refresh_school_calendar(session, window, roster)
         routing_setter = getattr(window, "set_routing_state", None)
@@ -261,6 +273,8 @@ class DesktopStartupController:
         for signal_name, handler in (
             ("complaint_requested", lambda person_id, meal: self._run_complaint(session, window, person_id, meal)),
             ("database_export_requested", lambda: self._run_database_export(session, window)),
+            ("current_sheet_export_requested", lambda snapshot: self._run_current_sheet_export(session, window, snapshot)),
+            ("revision_history_requested", lambda: self._run_revision_history(session, window)),
             ("driver_replacement_requested", lambda: self._run_driver_replacement(session, window)),
             ("drivers_requested", lambda: self._run_driver_registry(session, window)),
             ("driver_assignment_requested", lambda person_id, meal: self._run_driver_assignment(session, window, person_id, meal)),
@@ -373,6 +387,19 @@ class DesktopStartupController:
             )
         return DesktopStartupOutcome(StartupStatus.READY, session, window)
 
+    def _run_revision_history(self, session: DatabaseSession, window) -> None:
+        try:
+            dialog = self._revision_history_dialog_type(session.database, window)
+        except Exception:  # noqa: BLE001 - keep history payloads out of error UI
+            self._message_box.critical(
+                window,
+                "전체 변경 이력을 열지 못했습니다",
+                "변경 이력을 읽지 못했습니다. 창을 다시 열어주세요.",
+            )
+            return
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dialog.show()
+
     def _apply_routing_outcome(self, session, window, outcome) -> None:
         if outcome.roster is not None:
             self._replace_roster_if_changed(session, window, outcome.roster)
@@ -409,7 +436,13 @@ class DesktopStartupController:
         result = SequenceEditController(session).save_value(targets, value)
         if result.status is SequenceSaveStatus.SAVED:
             self._replace_roster_if_changed(session, window, result.roster)
-            dialog.replace_rows(window.driver_household_rows())
+            if hasattr(dialog, "include_hidden"):
+                rows = window.driver_household_rows(
+                    include_hidden=dialog.include_hidden
+                )
+            else:
+                rows = window.driver_household_rows()
+            dialog.replace_rows(rows)
         dialog.show_sequence_result(result)
 
     def _run_complaint(self, session, window, person_id, meal) -> None:
@@ -427,6 +460,19 @@ class DesktopStartupController:
             self._replace_roster_if_changed(session, window, password.roster)
         self._database_export_controller_type(session).run(
             window.table_model.service_day, window,
+            directory=self._settings.document_output_directory,
+        )
+
+    def _run_current_sheet_export(self, session, window, snapshot) -> None:
+        password = self._export_password_controller_type(session).ensure_configured(window)
+        if not password.completed or password.setting is None:
+            return
+        if password.roster is not None:
+            self._replace_roster_if_changed(session, window, password.roster)
+        self._current_sheet_export_controller_type().run(
+            snapshot,
+            password.setting.password,
+            window,
             directory=self._settings.document_output_directory,
         )
 
@@ -601,6 +647,11 @@ class DesktopStartupController:
             return
         if hub.selected_action is SettingsAction.DELIVERY_DEFAULTS:
             outcome = self._delivery_defaults_controller_type(session).run(parent=window)
+            if outcome.completed and outcome.roster is not None:
+                self._replace_roster_if_changed(session, window, outcome.roster)
+            return
+        if hub.selected_action is SettingsAction.SEQUENCE_MODE:
+            outcome = self._sequence_mode_controller_type(session).run(parent=window)
             if outcome.completed and outcome.roster is not None:
                 self._replace_roster_if_changed(session, window, outcome.roster)
             return
@@ -903,6 +954,14 @@ class DesktopStartupController:
             revision_display_code=self._revision_display_code(session, roster),
         )
         self._refresh_school_calendar(session, window, roster)
+        setter = getattr(window, "set_imported_profile_fields", None)
+        if callable(setter):
+            setter(self._imported_profile_fields(session, roster))
+
+    @staticmethod
+    def _imported_profile_fields(session, roster) -> frozenset[str]:
+        profiles = import_profiles_from_snapshot(session.database.snapshot(roster.revision_id))
+        return frozenset(field.value for stored in profiles for field in stored.profile.profile_columns)
 
     @staticmethod
     def _refresh_school_calendar(session, window, roster) -> None:

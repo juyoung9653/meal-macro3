@@ -142,7 +142,7 @@ def test_split_reconciles_exact_values_and_empty_state(app):
     empty = DriverHouseholdsDialog((), service_day=date(2026, 9, 22), drivers=())
     empty.split_button.click()
     assert empty.count.text() == "가구 0건 · 표시 0행"
-    assert "배송 상태" in empty.empty.text()
+    assert "가입·배정" in empty.empty.text()
     empty.close()
 
 
@@ -157,7 +157,7 @@ def test_legacy_name_selection_is_not_mistaken_for_unassigned(app):
 def test_no_rows_explains_that_the_selected_day_has_no_delivery_households(app):
     dialog = DriverHouseholdsDialog((), service_day=date(2026, 9, 22), drivers=())
     assert dialog.table.rowCount() == 0
-    assert "배송 상태" in dialog.empty.text()
+    assert "가입·배정" in dialog.empty.text()
     assert dialog.count.text() == "가구 0건 · 표시 0행"
     dialog.close()
 

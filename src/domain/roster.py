@@ -260,11 +260,16 @@ class HouseholdDeliverySetting:
 
 
 def standard_delivery_defaults() -> tuple[HouseholdDeliverySetting, ...]:
-    """Original operating defaults used by databases without a saved setting."""
+    """Operating defaults used by databases without a saved setting."""
+    weekdays = {
+        Meal.BREAKFAST: (4, 5, 6),
+        Meal.LUNCH: (0, 1, 2, 3, 4),
+        Meal.DINNER: (0, 1, 2, 3),
+    }
     return tuple(
         HouseholdDeliverySetting(
             meal,
-            (4, 5, 6) if meal is Meal.BREAKFAST else (0, 1, 2, 3, 4),
+            weekdays[meal],
             delivery_weekdays=(0, 1, 2, 3, 4, 4, 4) if meal is Meal.BREAKFAST else tuple(range(7)),
         )
         for meal in Meal

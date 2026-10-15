@@ -2,13 +2,27 @@
 
 import json
 
-from PySide6.QtCore import QPoint, Qt, Signal
+from PySide6.QtCore import QPoint, QSize, Qt, Signal
 from PySide6.QtGui import QPolygon
 from PySide6.QtWidgets import (
-    QHeaderView, QLineEdit, QMenu, QWidget, QWidgetAction, QVBoxLayout,
-    QHBoxLayout, QPushButton, QListWidget, QListWidgetItem, QLabel, QStyle,
-    QStyleOptionHeader, QTreeWidget, QTreeWidgetItem,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
+    QMenu,
+    QPushButton,
+    QStyle,
+    QStyleOptionHeader,
+    QTreeWidget,
+    QTreeWidgetItem,
+    QVBoxLayout,
+    QWidget,
+    QWidgetAction,
 )
+
+from src.domain.roster import Meal
 
 
 class ColumnValuePicker(QWidget):
@@ -89,6 +103,10 @@ class ColumnValuePicker(QWidget):
 
 
 _SEQUENCE_PREFIX = "sequence-pair:v1:"
+_SEQUENCE_PRESENT_PREFIX = "sequence-present:v1:"
+_SEQUENCE_EXCLUSIVE_PREFIX = "sequence-exclusive:v1:"
+_SEQUENCE_MEALS = (Meal.DINNER, Meal.BREAKFAST, Meal.LUNCH)
+_SEQUENCE_PRESENT_MEALS = frozenset(meal.value for meal in Meal)
 ALL_SEQUENCES_EMPTY = "sequence-aggregate:v1:all-empty"
 
 
@@ -106,46 +124,205 @@ def sequence_pair_value(token):
     return tuple(value) if isinstance(value, list) and len(value) == 2 and all(isinstance(x, str) for x in value) else None
 
 
+def sequence_present_token(meal_label: str) -> str:
+    """Return the semantic token for a supported meal having any sequence."""
+    if meal_label not in _SEQUENCE_PRESENT_MEALS:
+        raise ValueError(f"지원하지 않는 식종입니다: {meal_label}")
+    return f"{_SEQUENCE_PRESENT_PREFIX}{meal_label}"
+
+
+def sequence_present_meal(token: str) -> str | None:
+    """Decode a valid sequence-present token without accepting literal values."""
+    if not token.startswith(_SEQUENCE_PRESENT_PREFIX):
+        return None
+    meal_label = token[len(_SEQUENCE_PRESENT_PREFIX):]
+    return meal_label if meal_label in _SEQUENCE_PRESENT_MEALS else None
+
+
+def sequence_exclusive_token(meal_label: str) -> str:
+    """Match a sequence on this meal with no sequence on any other meal."""
+    if meal_label not in _SEQUENCE_PRESENT_MEALS:
+        raise ValueError(f"지원하지 않는 식종입니다: {meal_label}")
+    return f"{_SEQUENCE_EXCLUSIVE_PREFIX}{meal_label}"
+
+
+def sequence_exclusive_meal(token: str) -> str | None:
+    if not token.startswith(_SEQUENCE_EXCLUSIVE_PREFIX):
+        return None
+    meal_label = token[len(_SEQUENCE_EXCLUSIVE_PREFIX):]
+    return meal_label if meal_label in _SEQUENCE_PRESENT_MEALS else None
+
+
 class SequenceValuePicker(ColumnValuePicker):
-    """Meal parents select exact sequence leaves; legacy whole-row values stay exact."""
+    """Select alternatives within meals; meal groups combine with AND."""
+
+    def __init__(self, values, selected, search_text="", parent=None):
+        QWidget.__init__(self, parent)
+        self._initial_selected = None if selected is None else frozenset(selected)
+        self._selection_edited = False
+        self._updating_tree = False
+        blanks = tuple(sequence_pair_token(meal.value, "") for meal in _SEQUENCE_MEALS)
+        self._values = tuple(dict.fromkeys((*values, *sorted(selected or ()), *blanks)))
+
+        layout = QVBoxLayout(self)
+        self.search = QLineEdit(search_text)
+        self.search.setPlaceholderText("이 열에서 검색")
+        self.search.setAccessibleName("열 검색어")
+        self.search.setToolTip("입력한 글자가 포함된 행을 표시합니다. 아래 값 목록도 좁혀집니다.")
+        self.search.setClearButtonEnabled(True)
+        layout.addWidget(self.search)
+        controls = QHBoxLayout()
+        self.select_all = QPushButton("전체 선택")
+        self.select_none = QPushButton("전체 해제")
+        controls.addWidget(self.select_all)
+        controls.addWidget(self.select_none)
+        layout.addLayout(controls)
+        self.list = self._make_value_list(self._initial_selected)
+        layout.addWidget(self.list)
+        hint = QLabel("식종별 조건을 모두 만족해야 합니다. 선택하지 않은 식종은 순서 없음입니다.")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        buttons = QHBoxLayout()
+        self.reset = QPushButton("필터 해제")
+        self.apply = QPushButton("적용")
+        self.cancel = QPushButton("취소")
+        self.apply.setObjectName("primaryAction")
+        for button in (self.select_all, self.select_none, self.reset, self.cancel):
+            button.setObjectName("quietAction")
+        for button in (self.reset, self.apply, self.cancel):
+            buttons.addWidget(button)
+        layout.addLayout(buttons)
+
+        self._search_values(search_text)
+        self.search.textChanged.connect(self._search_values)
+        self.list.itemChanged.connect(self._item_changed)
+        self.select_all.clicked.connect(lambda: self._check_all(Qt.CheckState.Checked))
+        self.select_none.clicked.connect(lambda: self._check_all(Qt.CheckState.Unchecked))
+        self.apply.clicked.connect(self._apply)
+        self.reset.clicked.connect(lambda: self.applied.emit("", None))
+
+    def preferred_focus_widget(self):
+        return self.search
+
+    @staticmethod
+    def _implied_blank_meals(selected):
+        if selected is None:
+            return frozenset()
+        if not selected:
+            return frozenset()
+        active = set()
+        force_blank = set()
+        structured = False
+        for token in selected:
+            pair = sequence_pair_value(token)
+            if pair is not None:
+                structured = True
+                if pair[0] in _SEQUENCE_PRESENT_MEALS:
+                    active.add(pair[0])
+            elif meal := sequence_present_meal(token):
+                structured = True
+                active.add(meal)
+            elif meal := sequence_exclusive_meal(token):
+                structured = True
+                active.add(meal)
+                force_blank.update(item.value for item in _SEQUENCE_MEALS if item.value != meal)
+            elif token == ALL_SEQUENCES_EMPTY:
+                structured = True
+                force_blank.update(item.value for item in _SEQUENCE_MEALS)
+        if not structured:
+            return frozenset()
+        return frozenset(force_blank | (_SEQUENCE_PRESENT_MEALS - active))
 
     def _make_value_list(self, selected):
         tree = QTreeWidget()
         tree.setHeaderHidden(True)
-        tree.setMinimumSize(280, 250)
+        tree.setMinimumSize(300, 300)
         tree.setAccessibleName("식종별 배송순서 선택")
         self._leaves = []
-        groups = {}
+        self._meal_parents = {}
+        groups = {meal.value: [] for meal in _SEQUENCE_MEALS}
+        extra_groups = {}
+        compatibility = []
+        implied_blanks = self._implied_blank_meals(selected)
         for token in self._values:
-            if token == ALL_SEQUENCES_EMPTY:
-                item = QTreeWidgetItem(tree, ["전체 빈 값"])
-                item.setData(0, Qt.ItemDataRole.UserRole, token)
-                item.setToolTip(0, "모든 식종의 배송순서가 비어 있는 행")
-                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-                item.setCheckState(0, Qt.CheckState.Checked if selected is None or token in selected else Qt.CheckState.Unchecked)
-                self._leaves.append(item)
-                continue
             pair = sequence_pair_value(token)
-            meal, sequence = pair if pair is not None else ("이전 필터 (행 전체 일치)", token)
-            groups.setdefault(meal, []).append((sequence, token))
-        order = ("석식", "조식", "중식", "공통/식종 미지정", "(빈 값)")
-        for meal in sorted(groups, key=lambda x: (order.index(x) if x in order else len(order), x)):
-            parent = QTreeWidgetItem(tree, [meal])
-            parent.setFlags(parent.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsAutoTristate)
-            for sequence, token in sorted(groups[meal], key=lambda x: (0, int(x[0]), x[0]) if x[0].isdigit() else (1, 0, x[0].casefold())):
+            if pair is not None and pair[0] in groups:
+                groups[pair[0]].append((pair[1], token))
+            elif pair is not None:
+                extra_groups.setdefault(pair[0], []).append((pair[1], token))
+            elif selected is not None and token in selected:
+                compatibility.append((self._compatibility_label(token), token))
+
+        for meal in _SEQUENCE_MEALS:
+            label = meal.value
+            parent = QTreeWidgetItem(tree, [label])
+            self._meal_parents[label] = parent
+            values = groups[label]
+            for sequence, token in sorted(
+                values,
+                key=lambda item: (
+                    (0, int(item[0]), item[0]) if item[0].isdigit()
+                    else (1, 0, item[0].casefold())
+                ),
+            ):
                 item = QTreeWidgetItem(parent, [sequence.replace("\n", " · ") or "(빈 값)"])
                 item.setData(0, Qt.ItemDataRole.UserRole, token)
-                item.setToolTip(0, f"{meal}: {sequence}" if sequence else meal)
+                tooltip = (f"{label} 배송순서가 '{sequence}'와 정확히 일치하는 사람"
+                           if sequence else f"{label} 배송순서가 비어 있는 사람")
+                item.setToolTip(0, tooltip)
                 item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-                item.setCheckState(0, Qt.CheckState.Checked if selected is None or token in selected else Qt.CheckState.Unchecked)
+                checked = selected is None or (selected is not None and token in selected)
+                if not sequence and label in implied_blanks:
+                    checked = True
+                item.setCheckState(0, Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+                self._leaves.append(item)
+            if any(sequence for sequence, _token in values):
+                parent.setFlags(parent.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            self._sync_parent_state(parent)
+            parent.setExpanded(True)
+
+        for label in sorted(extra_groups, key=str.casefold):
+            parent = QTreeWidgetItem(tree, [label])
+            for sequence, token in sorted(extra_groups[label], key=lambda item: item[0].casefold()):
+                item = QTreeWidgetItem(parent, [sequence.replace("\n", " · ") or "(빈 값)"])
+                item.setData(0, Qt.ItemDataRole.UserRole, token)
+                item.setToolTip(0, f"{label}: {sequence}" if sequence else label)
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                checked = selected is None or (selected is not None and token in selected)
+                item.setCheckState(0, Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+                self._leaves.append(item)
+            parent.setExpanded(True)
+
+        if compatibility:
+            parent = QTreeWidgetItem(tree, ["기존 저장 조건"])
+            for label, token in sorted(compatibility, key=lambda item: item[0].casefold()):
+                item = QTreeWidgetItem(parent, [label])
+                item.setData(0, Qt.ItemDataRole.UserRole, token)
+                item.setToolTip(0, "이전 버전에서 저장한 조건입니다. 체크를 해제해 제거할 수 있습니다.")
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                item.setCheckState(0, Qt.CheckState.Checked)
                 self._leaves.append(item)
             parent.setExpanded(True)
         return tree
 
+    @staticmethod
+    def _compatibility_label(token):
+        if meal := sequence_present_meal(token):
+            return f"{meal}: 순서 있음"
+        if meal := sequence_exclusive_meal(token):
+            return f"{meal}: 다른 식종 순서 없음"
+        if token == ALL_SEQUENCES_EMPTY:
+            return "전체 식종 순서 없음"
+        if pair := sequence_pair_value(token):
+            return f"{pair[0]}: {pair[1] or '(빈 값)'}"
+        return f"이전 행 전체 일치: {token.replace(chr(10), ' · ') or '(빈 값)'}"
+
     def _search_values(self, text):
         query = " ".join(text.split()).casefold()
         for item in self._leaves:
-            pair = sequence_pair_value(item.data(0, Qt.ItemDataRole.UserRole))
+            token = item.data(0, Qt.ItemDataRole.UserRole)
+            pair = sequence_pair_value(token)
             value = f"{pair[0]}: {pair[1]}" if pair else item.text(0)
             item.setHidden(query not in " ".join(value.split()).casefold())
         for index in range(self.list.topLevelItemCount()):
@@ -153,14 +330,68 @@ class SequenceValuePicker(ColumnValuePicker):
             if parent.childCount():
                 parent.setHidden(all(parent.child(i).isHidden() for i in range(parent.childCount())))
 
+    def _item_changed(self, item, _column):
+        if self._updating_tree:
+            return
+        self._selection_edited = True
+        if item in self._meal_parents.values():
+            state = item.checkState(0)
+            self._updating_tree = True
+            try:
+                for index in range(item.childCount()):
+                    child = item.child(index)
+                    pair = sequence_pair_value(child.data(0, Qt.ItemDataRole.UserRole))
+                    if pair is not None and pair[1]:
+                        child.setCheckState(0, state)
+            finally:
+                self._updating_tree = False
+            self._sync_parent_state(item)
+            return
+        parent = item.parent()
+        if parent in self._meal_parents.values():
+            self._sync_parent_state(parent)
+
+    def _sync_parent_state(self, parent):
+        nonempty = []
+        for index in range(parent.childCount()):
+            child = parent.child(index)
+            pair = sequence_pair_value(child.data(0, Qt.ItemDataRole.UserRole))
+            if pair is not None and pair[1]:
+                nonempty.append(child)
+        checked = sum(item.checkState(0) == Qt.CheckState.Checked for item in nonempty)
+        state = (Qt.CheckState.Checked if nonempty and checked == len(nonempty)
+                 else Qt.CheckState.PartiallyChecked if checked
+                 else Qt.CheckState.Unchecked)
+        self._updating_tree = True
+        try:
+            parent.setCheckState(0, state)
+        finally:
+            self._updating_tree = False
+
+    def _set_all_items(self, state):
+        self._updating_tree = True
+        try:
+            for item in self._leaves:
+                item.setCheckState(0, state)
+        finally:
+            self._updating_tree = False
+
     def _check_all(self, state):
-        for item in self._leaves:
-            item.setCheckState(0, state)
+        self._set_all_items(state)
+        for parent in self._meal_parents.values():
+            self._sync_parent_state(parent)
+        self._selection_edited = True
 
     def _apply(self):
-        selected = frozenset(item.data(0, Qt.ItemDataRole.UserRole) for item in self._leaves
-                             if item.checkState(0) == Qt.CheckState.Checked)
-        self.applied.emit(self.search.text(), None if selected and selected == frozenset(self._values) else selected)
+        if not self._selection_edited:
+            self.applied.emit(self.search.text(), self._initial_selected)
+            return
+        selected = frozenset(
+            item.data(0, Qt.ItemDataRole.UserRole)
+            for item in self._leaves
+            if item.checkState(0) == Qt.CheckState.Checked
+        )
+        self.applied.emit(self.search.text(), selected)
 
 
 class ColumnSearchHeader(QHeaderView):
@@ -275,11 +506,51 @@ class ColumnSearchHeader(QHeaderView):
         picker.applied.connect(
             lambda search, values: self._apply_filter(key, search, values, menu)
         )
+        if hasattr(picker, "layout_changed"):
+            picker.layout_changed.connect(
+                lambda: self._resize_filter_menu(menu, self.buttons[key], picker, action)
+            )
         picker.cancel.clicked.connect(menu.close)
         button = self.buttons[key]
         menu.popup(button.mapToGlobal(button.rect().bottomLeft()))
         menu.activateWindow()
-        picker.search.setFocus()
+        self._resize_filter_menu(menu, button, picker, action)
+        focus = picker.preferred_focus_widget() if hasattr(picker, "preferred_focus_widget") else picker.search
+        focus.setFocus()
+
+    @staticmethod
+    def _resize_filter_menu(menu, button, picker, action):
+        action.changed.emit()
+        picker.ensurePolished()
+        if picker.layout() is not None:
+            picker.layout().invalidate()
+            picker.layout().activate()
+        picker.updateGeometry()
+        menu.ensurePolished()
+        if menu.layout() is not None:
+            menu.layout().invalidate()
+            menu.layout().activate()
+        menu.updateGeometry()
+        menu.adjustSize()
+        screen = button.screen()
+        if screen is None:
+            return
+        available = screen.availableGeometry()
+        widget_hint = picker.sizeHint()
+        margins = menu.contentsMargins()
+        panel = menu.style().pixelMetric(QStyle.PixelMetric.PM_MenuPanelWidth, None, menu)
+        hint = QSize(
+            widget_hint.width() + margins.left() + margins.right() + panel * 2,
+            widget_hint.height() + margins.top() + margins.bottom() + panel * 2,
+        )
+        size = QSize(min(hint.width(), available.width()), min(hint.height(), available.height()))
+        menu.resize(size)
+        anchor = button.mapToGlobal(button.rect().bottomLeft())
+        x = max(available.left(), min(anchor.x(), available.right() - size.width() + 1))
+        below = anchor.y()
+        above = button.mapToGlobal(button.rect().topLeft()).y() - size.height()
+        y = below if below + size.height() <= available.bottom() + 1 else max(available.top(), above)
+        menu.move(x, y)
 
     def _apply_filter(self, key, search, values, menu):
         self.search_changed.emit(key, search)

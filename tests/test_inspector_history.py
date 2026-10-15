@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 from src.desktop_v2.inspector_history import InspectorMealHistory
+from src.domain.projections import STATUS_EVENT_KIND
 from src.domain.revisions import (
     AuditChange,
     ChangeOperation,
@@ -17,7 +18,6 @@ from src.domain.roster import (
     PersonProfile,
     RosterSnapshot,
 )
-from src.domain.projections import STATUS_EVENT_KIND
 
 
 def test_inspector_history_keeps_all_rows_filters_people_and_refreshes_revision():
@@ -53,14 +53,15 @@ def test_inspector_history_keeps_all_rows_filters_people_and_refreshes_revision(
     database = Database()
     history = InspectorMealHistory(database)
     rows = history.rows_for(roster, first.person_id)
-    assert len(rows) == 14  # More than five must remain available to scroll.
-    assert "석식" in rows[0][0] and "배송 → 일시중지" in rows[0][0]
-    assert "종료일 미지정" in rows[1].text
-    assert "종료일=" not in rows[1].text and "ends_on" not in rows[1].tooltip
-    assert rows[0].applied == "지정 안 함"
+    assert len(rows) == 7  # One row per status event; all remain available to scroll.
+    assert "석식" in rows[0].text
+    assert rows[0].text == "석식 · 배송 → 일시중지"
+    assert "종료일=" not in rows[0].text and "ends_on" not in rows[0].tooltip
+    assert rows[0].applied == "시작일·종료일 미지정"
+    assert rows[0].reason == "변경 6"
     assert rows[0].recorded.startswith("2026-09-22")
     assert "변경 6" in rows[0][1] and "변경 0" in rows[-1][1]
-    assert len(history.rows_for(roster, second.person_id)) == 2
+    assert len(history.rows_for(roster, second.person_id)) == 1
     assert history.rows_for(roster, uuid4()) == ()
     assert database.reads == 1
 

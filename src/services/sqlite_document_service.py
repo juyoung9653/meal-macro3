@@ -334,7 +334,9 @@ def _roster_entry(
     for definition_id, value in profile.custom_values.items():
         definition = definitions.get(definition_id)
         if definition is not None:
-            extra[definition.name] = value
+            # A same-named custom field is selected by ID, never by replacing
+            # the standard field the user selected in output column mappings.
+            extra.setdefault(definition.name, value)
             extra[f"custom:{definition_id}"] = value
     # Dated presentation fields take precedence over legacy custom columns.
     if delivery_view is not None:

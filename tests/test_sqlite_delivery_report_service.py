@@ -145,6 +145,17 @@ def _snapshot(
     return HistoricalSnapshot(revision_id, states), person_ids
 
 
+def test_default_dinner_week_delivers_only_monday_through_thursday():
+    snapshot, _person_ids = _snapshot(meals=(Meal.DINNER,))
+    prepared = prepare_delivery_report_data(
+        snapshot, date(2026, 8, 17), date(2026, 8, 23), (Meal.DINNER,),
+    )
+    assert len(prepared.shipments) == 4
+    assert {shipment.delivery_on for shipment in prepared.shipments} == {
+        date(2026, 8, day) for day in (17, 18, 19, 20)
+    }
+
+
 def test_breakfast_report_uses_physical_friday_and_keeps_three_entitlements():
     snapshot, _person_ids = _snapshot()
     friday = date(2026, 8, 21)
@@ -170,7 +181,7 @@ def test_breakfast_report_uses_physical_friday_and_keeps_three_entitlements():
     )
     assert prepared.calculation_manifest["target_entitlement_count"] == 3
     assert prepared.calculation_manifest["calculation_contract_version"] == 3
-    assert prepared.calculation_manifest["recurring_service_policy"]["version"] == 4
+    assert prepared.calculation_manifest["recurring_service_policy"]["version"] == 5
     assert prepared.calculation_manifest["household_grouping"]["policy_version"] == 2
     assert prepared.calculation_manifest["report_period"]["basis"] == (
         "physical_delivery_day"

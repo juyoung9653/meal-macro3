@@ -23,6 +23,7 @@ def window():
 @pytest.mark.parametrize("action_name,signal_name", (
     ("_import_action", "import_review_requested"),
     ("_database_export_action", "database_export_requested"),
+    ("_revision_history_action", "revision_history_requested"),
     ("_drivers_action", "drivers_requested"),
     ("_driver_replacement_action", "driver_replacement_requested"),
     ("_school_calendar_action", "school_calendar_requested"),
@@ -37,6 +38,16 @@ def test_more_menu_actions_keep_their_original_workflows(window, action_name, si
     assert action in window._more_menu.actions()
     action.trigger()
     assert called == [True]
+
+
+def test_current_sheet_export_action_emits_frozen_snapshot(window):
+    snapshots = []
+    window.current_sheet_export_requested.connect(snapshots.append)
+    window._current_sheet_export_action.trigger()
+    assert len(snapshots) == 1
+    assert snapshots[0].sheet_name == "명단"
+    assert snapshots[0].headers
+    assert len(snapshots[0].rows) == window.table_model.rowCount()
 
 
 def test_header_only_exposes_frequent_actions(window):
@@ -156,15 +167,15 @@ def test_driver_view_uses_all_delivery_meals_and_current_date_despite_roster_fil
     assert settings["drivers"] == state.drivers
     assert len(rows) == 2
     assert {row.driver_id: row.meals for row in rows} == {
-        driver_a.driver_id: (Meal.BREAKFAST,), driver_b.driver_id: (Meal.DINNER,),
-    }  # Friday's lunch is unavailable; other meals remain despite the main lunch filter.
+        driver_a.driver_id: (Meal.BREAKFAST, Meal.LUNCH), driver_b.driver_id: (Meal.DINNER,),
+    }  # All assigned meals remain regardless of service days and main-table filters.
     assert len(next(row for row in rows if row.driver_id == driver_a.driver_id).member_ids) == 2
 
     window._set_day(service_day + timedelta(days=1))
     window._driver_households_button.click()
     rows, settings = opened[-1]
     assert settings["service_day"] == service_day + timedelta(days=1)
-    assert next(row for row in rows if row.driver_id == driver_a.driver_id).meals == (Meal.BREAKFAST,)
+    assert next(row for row in rows if row.driver_id == driver_a.driver_id).meals == (Meal.BREAKFAST, Meal.LUNCH)
 
 
 def test_driver_households_button_opens_real_dialog_and_can_close(window):
@@ -182,4 +193,57 @@ def test_driver_households_button_opens_real_dialog_and_can_close(window):
 
     QTimer.singleShot(0, close_dialog)
     window._driver_households_button.click()
-    assert seen == [(True, 1)]
+    assert seen == [(True, 2)]
+
+@pytest.mark.parametrize("size", [(1080, 680), (1440, 860)])
+def test_archive_controls_share_filter_row_and_exit_preserves_conditions(tmp_path, size):
+    from PySide6.QtCore import QSettings, Qt
+
+    app = QApplication.instance() or QApplication([])
+    settings = QSettings(str(tmp_path / "toolbar.ini"), QSettings.Format.IniFormat)
+    view = RosterWindow(_roster(), column_settings=settings, inactive_settings=settings)
+    try:
+        view.resize(*size)
+        view._set_day(date(2026, 8, 21))
+        view._search_input.setText("김")
+        model = view.table_model
+        name_column = next(i for i, column in enumerate(model.columns) if column.key == "name")
+        model.sort(name_column, Qt.SortOrder.DescendingOrder)
+        before = (view.roster.revision_id, model.service_day, model.sort_criteria, model.rowCount())
+        view.show()
+        app.processEvents()
+        assert view._archive_exit_button.isHidden()
+        assert view._database_export_action.text() == "DB 전체 Excel로 내보내기"
+        assert view._current_sheet_export_action.text() == "현재 시트 Excel 내보내기"
+        for with_filter in (False, True):
+            view._on_column_search_changed("name", "김" if with_filter else "")
+            view._archive_action.setChecked(True)
+            app.processEvents()
+            assert view._column_filter_strip.isVisible()
+            assert view._clear_column_filters_button.isVisible() is with_filter
+            controls = [view._archive_threshold_button, view._archive_exit_button]
+            if with_filter:
+                controls.insert(0, view._clear_column_filters_button)
+            assert all(button.isVisible() for button in controls)
+            assert all(button.parentWidget() is view._column_filter_strip for button in controls)
+            assert len({button.height() for button in controls}) == 1
+            assert len({button.geometry().top() for button in controls}) == 1
+            assert all(left.geometry().right() < right.geometry().left()
+                       for left, right in zip(controls, controls[1:]))
+            view._archive_exit_button.click()
+            app.processEvents()
+            assert not view._archive_action.isChecked()
+            assert view._archive_threshold_button.isHidden()
+            assert view._archive_exit_button.isHidden()
+            assert view._column_filter_strip.isVisible() is with_filter
+            assert view._search_input.text() == "김"
+            assert model._column_searches == ({"name": "김"} if with_filter else {})
+            assert (view.roster.revision_id, model.service_day, model.sort_criteria, model.rowCount()) == before
+        view._archive_action.setChecked(True)
+        view._clear_column_filters_button.click()
+        assert view._column_filter_strip.isVisible()
+        assert view._clear_column_filters_button.isHidden()
+        assert view._column_filter_label.text() == ""
+        assert view._archive_exit_button.isVisible()
+    finally:
+        view.close()

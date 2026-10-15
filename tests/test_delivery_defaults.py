@@ -10,7 +10,25 @@ from src.domain.roster_row_changes import build_roster_row_revision
 from src.domain.revisions import HistoricalSnapshot, RevisionActor, RevisionMetadata, RevisionRecord, RevisionSource
 from src.domain.roster import Household, HouseholdDeliverySetting, HouseholdMembership, Meal, Person, PersonProfile, RosterSnapshot, standard_delivery_defaults
 from src.domain.school_calendar import SchoolLunchCalendar
-from src.services.meal_service_availability import physical_delivery_on, regular_service_available
+from src.services.meal_service_availability import default_service_weekdays, physical_delivery_on, regular_service_available
+
+
+def test_dinner_defaults_to_four_days_and_explicit_friday_is_preserved():
+    defaults = delivery_defaults_from_state(None)
+    assert {item.meal: item.weekdays for item in defaults} == {
+        Meal.BREAKFAST: (4, 5, 6), Meal.LUNCH: (0, 1, 2, 3, 4), Meal.DINNER: (0, 1, 2, 3),
+    }
+    person = Person(uuid4(), PersonProfile("기본 석식"))
+    roster = RosterSnapshot(uuid4(), persons=(person,))
+    assert default_service_weekdays(Meal.DINNER) == (0, 1, 2, 3)
+    assert regular_service_available(roster, person, Meal.DINNER, date(2026, 10, 15), SchoolLunchCalendar())
+    assert not regular_service_available(roster, person, Meal.DINNER, date(2026, 10, 16), SchoolLunchCalendar())
+    explicit = tuple(replace(item, weekdays=(0, 1, 2, 3, 4)) if item.meal is Meal.DINNER else item for item in defaults)
+    restored = delivery_defaults_from_state(delivery_defaults_state(explicit))
+    assert restored == explicit
+    configured = replace(roster, delivery_defaults=restored)
+    assert default_service_weekdays(Meal.DINNER, configured) == (0, 1, 2, 3, 4)
+    assert regular_service_available(configured, person, Meal.DINNER, date(2026, 10, 16), SchoolLunchCalendar())
 from src.storage.database_session import DatabaseSession
 
 

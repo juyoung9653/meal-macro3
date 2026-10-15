@@ -606,7 +606,8 @@ class RosterImportWizard(QDialog):
         normalization_form.addRow("전화번호 정리", self.phone_normalization_combo)
         body_layout.addLayout(normalization_form)
         ignored_copy = QLabel(
-            "체크한 열은 제외됩니다. 연결하지 않은 열의 체크를 해제하면 원래 열 이름의 추가 항목으로 가져옵니다."
+            "체크한 열은 제외됩니다. 연결하지 않은 열의 체크를 해제하면 원래 열 이름의 추가 항목으로 가져옵니다. "
+            "위에서 연결한 열은 이미 가져올 항목이므로 여기서 선택을 바꿀 수 없습니다."
         )
         ignored_copy.setObjectName("muted")
         ignored_copy.setWordWrap(True)

@@ -11,13 +11,7 @@ from datetime import datetime
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from src.domain.revisions import (
-    HistoricalSnapshot,
-    RevisionRecord,
-)
-from src.domain.roster import RosterSnapshot
 from src.domain.delivery_routing import ROUTING_EVENT_KIND, routing_state_from_snapshot
-from src.domain.revisions import RevisionSource, format_revision_timestamp
 from src.domain.projections import (
     ASSIGNMENT_KIND,
     CUSTOM_FIELD_KIND,
@@ -25,6 +19,13 @@ from src.domain.projections import (
     PERSON_KIND,
     STATUS_EVENT_KIND,
 )
+from src.domain.revisions import (
+    HistoricalSnapshot,
+    RevisionRecord,
+    RevisionSource,
+    format_revision_timestamp,
+)
+from src.domain.roster import RosterSnapshot
 
 _KST = ZoneInfo("Asia/Seoul")
 _INFO_HEADINGS = ("기록 시각(KST)", "적용일", "변경번호", "사람 UUID", "성명", "대상", "항목", "이전 값", "변경 값", "사유", "변경자")
@@ -101,9 +102,25 @@ def build_history_tables(
                         target_rows.append((stamp, applied, code, str(target), name, "식종별", "배송담당", _driver_text(old, drivers), _driver_text(new, drivers), intake, metadata.reason, metadata.actor.username))
                     else:
                         target_rows.append((stamp, applied, code, str(target), name, "배송·주소", f"{_label(field)} 등록" if not before else _label(field), _text(old), _text(new), metadata.reason, metadata.actor.username))
-            elif change.entity_kind in {ENROLLMENT_KIND, STATUS_EVENT_KIND, ASSIGNMENT_KIND}:
+            elif change.entity_kind == STATUS_EVENT_KIND:
                 meal = after.get("meal", before.get("meal", "공통"))
-                category = {ENROLLMENT_KIND: "가입기간", STATUS_EVENT_KIND: "상태", ASSIGNMENT_KIND: "배송배정"}[change.entity_kind]
+                meals.append((
+                    stamp,
+                    applied,
+                    code,
+                    str(target),
+                    name,
+                    _text(meal),
+                    "상태 변경",
+                    _status_event_text(before) if change.before is not None else "",
+                    _status_event_text(after) if change.after is not None else "",
+                    intake,
+                    metadata.reason,
+                    metadata.actor.username,
+                ))
+            elif change.entity_kind in {ENROLLMENT_KIND, ASSIGNMENT_KIND}:
+                meal = after.get("meal", before.get("meal", "공통"))
+                category = {ENROLLMENT_KIND: "가입기간", ASSIGNMENT_KIND: "배송배정"}[change.entity_kind]
                 diffs = _differences(before, after)
                 if not diffs:
                     diffs = (("기록", before, after),)
@@ -198,6 +215,41 @@ def _period_text(value: object) -> str:
     if end:
         return f"시작일 미지정 · {end}까지"
     return "시작일·종료일 미지정"
+
+
+def _status_event_text(state: Mapping) -> str:
+    """Render one status event as one readable, atomic history value."""
+    parts = []
+    if "status" in state:
+        parts.append(f"상태: {_text(state.get('status')) or '미지정'}")
+    if "starts_on" in state or "ends_on" in state:
+        parts.append(
+            "기간: "
+            + _period_text(
+                {
+                    "starts_on": state.get("starts_on"),
+                    "ends_on": state.get("ends_on"),
+                }
+            )
+        )
+    source_text = state.get("source_text")
+    if "source_text" in state and not _is_generated_status_source(state, source_text):
+        parts.append(f"사유: {_text(source_text) or '미지정'}")
+    if parts:
+        return "\n".join(parts)
+    return _meal_text("기록", state)
+
+
+def _is_generated_status_source(state: Mapping, source_text: object) -> bool:
+    if not isinstance(source_text, str):
+        return False
+    meal = state.get("meal")
+    status = state.get("status")
+    if not isinstance(meal, str) or not isinstance(status, str):
+        return False
+    starts = state.get("starts_on") or "이전부터"
+    ends = state.get("ends_on") or "계속"
+    return source_text == f"{meal} {status} · {starts} ~ {ends}"
 
 
 def _driver_text(value: object, names: Mapping[str, str]) -> str:

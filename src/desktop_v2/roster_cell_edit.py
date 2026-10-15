@@ -41,6 +41,9 @@ from .person_edit import _custom_value, _optional_text, _parse_optional_date
 _PROFILE_FIELDS = {
     "name": "name",
     "school": "school_name",
+    "school_type": "school_type",
+    "household_head_name": "household_head_name",
+    "relationship_to_child": "relationship_to_child",
     "grade": "grade",
     "telephone": "telephone",
     "mobile": "mobile_phone",

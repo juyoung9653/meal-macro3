@@ -344,8 +344,7 @@ def test_numbered_contact_columns_are_adjacent_searchable_and_inspected(app):
     window.show()
     window._table.selectRow(0)
     app.processEvents()
-    assert "핸드폰 010-1234-5678\n핸드폰 010-9876-5432" in window._inspector_detail.text()
-    assert "전화 031-123-4567\n전화 031-987-6543" in window._inspector_detail.text()
+    assert not any("010-1234-5678" in label.text() for label in window._inspector.findChildren(QLabel))
     window.close()
 
 
@@ -422,7 +421,10 @@ def test_same_household_lists_only_meals_delivered_on_selected_day(app):
         window._household_list.item(row).text()
         for row in range(window._household_list.count())
     } == {"홍길동   -", "김아침   조식"}
-    assert window.driver_household_rows() == ()
+    assert {row.member_names: row.meals for row in window.driver_household_rows()} == {
+        ("홍길동",): (Meal.LUNCH,),
+        ("김아침",): (Meal.BREAKFAST,),
+    }
 
     window._set_day(SERVICE_DAY + timedelta(days=1))
     selected_row = next(
@@ -436,9 +438,10 @@ def test_same_household_lists_only_meals_delivered_on_selected_day(app):
         window._household_list.item(row).text()
         for row in range(window._household_list.count())
     } == {"홍길동   중식", "김아침   조식"}
-    (driver_row,) = window.driver_household_rows()
-    assert driver_row.member_names == ("홍길동",)
-    assert driver_row.meals == (Meal.LUNCH,)
+    assert {row.member_names: row.meals for row in window.driver_household_rows()} == {
+        ("홍길동",): (Meal.LUNCH,),
+        ("김아침",): (Meal.BREAKFAST,),
+    }
     window.close()
 
 
@@ -512,8 +515,7 @@ def test_routing_state_updates_effective_delivery_view_and_model_driver_filter(a
     window.show()
     window._table.selectRow(0)
     app.processEvents()
-    assert "기사변경" not in window._inspector_detail.text()
-    assert "새 주소로 2 101호" in window._inspector_detail.text()
+    assert not any("새 주소로 2 101호" in label.text() for label in window._inspector.findChildren(QLabel))
     relocation_requests = []
     window.relocation_requested.connect(relocation_requests.append)
     person = window.table_model.person_at(0)
@@ -845,8 +847,9 @@ def test_row_selection_populates_household_inspector(app):
 
     assert window._inspector_name.text() == "홍길동"
     assert window.findChild(QLabel, "statusBadge") is None
-    assert window._inspector_detail.text() == (
-        "[연락처]\n핸드폰 010-1234-5678\n[주소]\n성남대로 1"
+    assert not any(
+        "[연락처]" in label.text() or "[주소]" in label.text()
+        for label in window._inspector.findChildren(QLabel)
     )
     assert window._household_list.count() == 2
     assert "김아침" in window._household_list.item(1).text()
@@ -883,7 +886,7 @@ def test_inspector_uses_meal_history_provider_in_a_scrollable_list(app):
                 f"{person.profile.name}의 아주 긴 식종 변경 이력 {index}",
                 f"전체 이력 {index}",
             )
-            for index in range(6, 0, -1)
+            for index in range(30, 0, -1)
         )
 
     window = RosterWindow(_roster(), _histories(), school_calendar=_calendar())
@@ -896,23 +899,23 @@ def test_inspector_uses_meal_history_provider_in_a_scrollable_list(app):
     window.set_meal_change_history_provider(provider)
     app.processEvents()
 
-    assert window._meal_history_list.count() == 6
-    assert window._meal_history_list.item(0).text() == "홍길동의 아주 긴 식종 변경 이력 6"
-    assert window._meal_history_list.item(0).toolTip() == "전체 이력 6"
+    assert window._meal_history_list.count() == 30
+    assert window._meal_history_list.item(0).text() == "홍길동의 아주 긴 식종 변경 이력 30"
+    assert window._meal_history_list.item(0).toolTip() == "전체 이력 30"
     assert window._meal_history_list.textElideMode() is Qt.TextElideMode.ElideNone
     assert window._meal_history_list.wordWrap()
     assert window._meal_history_all_button.isEnabled()
     assert window._household_list.height() <= 92
     assert (
         window._meal_history_list.visualItemRect(
-            window._meal_history_list.item(5),
+            window._meal_history_list.item(29),
         ).bottom()
         > window._meal_history_list.viewport().rect().bottom()
     )
     assert window._meal_history_list.verticalScrollBar().maximum() > 0
     window._table.selectRow(1)
     app.processEvents()
-    assert window._meal_history_list.item(0).text() == "김아침의 아주 긴 식종 변경 이력 6"
+    assert window._meal_history_list.item(0).text() == "김아침의 아주 긴 식종 변경 이력 30"
     assert calls == [FIRST_PERSON_ID, SECOND_PERSON_ID]
     opened = []
     window.set_history_provider(lambda person, meal, parent: opened.append((person.person_id, meal)) or None)

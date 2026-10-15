@@ -170,6 +170,13 @@ def test_meal_summary_sidebar_shows_all_meals_and_driver_filter_matches_any_meal
         if summary.isVisible()
     )
     window.replace_roster(_roster(), {})
+    assert window._meal_summary_widgets[Meal.DINNER].isHidden()
+    friday_dinner = replace(_roster(), delivery_defaults=tuple(
+        replace(setting, weekdays=(0, 1, 2, 3, 4))
+        if setting.meal is Meal.DINNER else setting
+        for setting in _roster().delivery_defaults
+    ))
+    window.replace_roster(friday_dinner, {})
     assert window._meal_summary_widgets[Meal.DINNER].isVisible()
     window.replace_roster(_roster(), _histories())
     assert window._meal_summary_widgets[Meal.DINNER].isHidden()
@@ -182,7 +189,8 @@ def test_sidebar_only_shows_default_delivery_days_without_changing_columns(app):
     window.show()
     try:
         for day, visible in (
-            (DAY, {Meal.DINNER, Meal.BREAKFAST, Meal.LUNCH}),
+            (DAY - timedelta(days=1), {Meal.DINNER}),
+            (DAY, {Meal.BREAKFAST, Meal.LUNCH}),
             (DAY + timedelta(days=1), set()),
             (DAY + timedelta(days=2), set()),
             (DAY + timedelta(days=3), {Meal.DINNER}),

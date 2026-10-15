@@ -41,7 +41,17 @@ class HistoryRowsModel(QAbstractTableModel):
             return value.strftime("%Y-%m-%d %H:%M")
         if isinstance(value, date):
             return value.isoformat()
-        return "" if value is None else str(value)
+        text = "" if value is None else str(value)
+        if self._is_grouped_status_value(index):
+            return text.replace(" · ", "\n")
+        return text
+
+    def _is_grouped_status_value(self, index: QModelIndex) -> bool:
+        heading = self.headings[index.column()]
+        if heading not in {"이전 값", "변경 값"} or "구분" not in self.headings:
+            return False
+        category = self.rows[index.row()][self.headings.index("구분")]
+        return category == "상태 변경"
 
     def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
         if role == Qt.ItemDataRole.DisplayRole:
@@ -80,8 +90,18 @@ class PersonHistoryDialog(QDialog):
             for index, heading in enumerate(headings):
                 if heading in hidden_headings:
                     view.setColumnHidden(index, True)
+            if name == "식종 변경":
+                view.setWordWrap(True)
+                view.setTextElideMode(Qt.TextElideMode.ElideNone)
+                view.verticalHeader().setSectionResizeMode(
+                    QHeaderView.ResizeMode.ResizeToContents
+                )
+                if "성명" in headings:
+                    view.setColumnHidden(headings.index("성명"), True)
+                self._prioritize_meal_history_columns(view, headings, rows)
             page_layout.addWidget(view, 1)
             details = QPlainTextEdit()
+            details.setObjectName(f"historyDetails_{name}")
             details.setReadOnly(True)
             details.setPlaceholderText("기록을 선택하면 전체 내용을 확인할 수 있습니다.")
             details.setMaximumHeight(145)
@@ -112,12 +132,55 @@ class PersonHistoryDialog(QDialog):
     @staticmethod
     def _show_row_details(table, target, index):
         model = table.model()
+        header = table.horizontalHeader()
         lines = [
-            f"{heading}: {model.data(model.index(index.row(), column))}"
-            for column, heading in enumerate(model.headings)
-            if not table.isColumnHidden(column)
+            f"{model.headings[logical]}: {model.data(model.index(index.row(), logical))}"
+            for visual in range(header.count())
+            if not table.isColumnHidden(logical := header.logicalIndex(visual))
         ] if index.isValid() else []
         target.setPlainText(chr(10).join(lines))
+
+    @staticmethod
+    def _prioritize_meal_history_columns(view, headings, rows) -> None:
+        primary = (
+            "식종",
+            "구분",
+            "변경 값",
+            "사유",
+            "기록 시각(KST)",
+            "이전 값",
+            "적용일",
+            "변경번호",
+            "접수 채널",
+            "변경자",
+            "사람 UUID",
+            "성명",
+        )
+        header = view.horizontalHeader()
+        for target, heading in enumerate(primary):
+            if heading not in headings:
+                continue
+            logical = headings.index(heading)
+            header.moveSection(header.visualIndex(logical), target)
+        widths = {
+            "식종": 75,
+            "구분": 135,
+            "변경 값": 320,
+            "이전 값": 260,
+            "적용일": 110,
+            "기록 시각(KST)": 145,
+            "변경번호": 145,
+            "접수 채널": 110,
+            "사유": 220,
+            "변경자": 110,
+        }
+        for heading, width in widths.items():
+            if heading in headings:
+                view.setColumnWidth(headings.index(heading), width)
+        if "이전 값" in headings:
+            previous = headings.index("이전 값")
+            if all(not str(row[previous] or "").strip() for row in rows):
+                view.setColumnHidden(previous, True)
 
 
 def create_person_history_dialog(session, person, meal, parent=None):

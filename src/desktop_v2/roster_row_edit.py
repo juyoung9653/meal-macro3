@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from enum import StrEnum
@@ -24,8 +24,20 @@ from src.storage.database_session import (
 
 from .date_edit import WheelSafeDateEdit
 from .import_controller import current_windows_actor
-from .person_edit import _FIELD_LABELS, _custom_value, _parse_optional_date
+from .person_edit import _custom_value, _parse_optional_date
 from .theme import application_stylesheet, register_application_fonts
+
+
+_PROFILE_COLUMNS = {
+    "name": ("name", "성명"), "birth_date": ("birth_date", "생년월일"),
+    "school": ("school_name", "학교"), "grade": ("grade", "학년"),
+    "telephone": ("telephone", "전화번호"), "mobile": ("mobile_phone", "핸드폰"),
+    "jurisdiction": ("jurisdiction", "관할동"), "address": ("address", "주소"),
+    "note": ("note", "비고"),
+    "school_type": ("school_type", "학교 유형"),
+    "household_head_name": ("household_head_name", "세대주 성명"),
+    "relationship_to_child": ("relationship_to_child", "아동과의 관계"),
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,14 +53,21 @@ class RosterRowCreateRequest:
 class RosterRowCreateDialog(QDialog):
     """Collect a new person's profile and at least one enrolled meal."""
 
-    def __init__(self, selected_meal: Meal = Meal.LUNCH, start_date: date | None = None, parent: QWidget | None = None, *, custom_fields: tuple[CustomFieldDefinition, ...] = (), household_matcher: Callable[[PersonProfile, date], UUID | None] | None = None) -> None:
+    def __init__(self, selected_meal: Meal = Meal.LUNCH, start_date: date | None = None, parent: QWidget | None = None, *, custom_fields: tuple[CustomFieldDefinition, ...] = (), household_matcher: Callable[[PersonProfile, date], UUID | None] | None = None, column_labels: Mapping[str, str] | None = None, routing_state: RoutingState | None = None) -> None:
         super().__init__(parent)
         register_application_fonts()
         self.setStyleSheet(application_stylesheet())
         self.setWindowTitle("명단 행 추가")
         self.resize(760, 640)
         self.setMinimumSize(650, 580)
-        self._custom_fields = custom_fields
+        if column_labels is None:
+            column_labels = {
+                key: label for key, (_, label) in _PROFILE_COLUMNS.items()
+                if key not in {"school_type", "household_head_name", "relationship_to_child"}
+            }
+            column_labels.update({f"custom:{field.definition_id}": field.name for field in sorted(custom_fields, key=lambda item: item.display_order)})
+        self._custom_fields = tuple(field for field in custom_fields if f"custom:{field.definition_id}" in column_labels)
+        custom_by_key = {f"custom:{field.definition_id}": field for field in self._custom_fields}
         self._household_matcher = household_matcher
         self._editors: dict[str, QLineEdit | QPlainTextEdit | QComboBox] = {}
         root = QVBoxLayout(self)
@@ -65,61 +84,37 @@ class RosterRowCreateDialog(QDialog):
         body = QWidget()
         body_layout = QVBoxLayout(body)
         body_layout.setContentsMargins(0, 0, 0, 0)
-        for title_text, keys in (
-            ("기본·학교", ("name", "birth_date", "school_type", "school_name", "grade")),
-            ("가구", ("household_head_name", "relationship_to_child", "jurisdiction")),
-            ("연락처·주소", ("mobile_phone", "telephone", "road_address", "detail_address")),
-        ):
-            frame = QFrame()
-            frame.setObjectName("editSection")
-            section = QVBoxLayout(frame)
-            label = QLabel(title_text)
-            label.setObjectName("sectionLabel")
-            section.addWidget(label)
-            grid = QGridLayout()
-            for index, key in enumerate(keys):
-                field_label = QLabel(_FIELD_LABELS.get(key, key) + (" *" if key == "name" else ""))
+        frame = QFrame()
+        frame.setObjectName("editSection")
+        grid = QGridLayout(frame)
+        for column_key, label in column_labels.items():
+            definition = custom_by_key.get(column_key)
+            if column_key not in _PROFILE_COLUMNS and definition is None:
+                continue
+            key = _PROFILE_COLUMNS[column_key][0] if definition is None else column_key
+            if key == "note":
+                editor = QPlainTextEdit()
+                editor.setMaximumHeight(90)
+            elif definition is not None and definition.field_type is CustomFieldType.CHOICE:
+                editor = QComboBox()
+                editor.addItem("미입력", "")
+                for choice in definition.choices:
+                    editor.addItem(choice, choice)
+            else:
                 editor = QLineEdit()
-                editor.setObjectName(f"newPerson_{key}")
                 editor.setClearButtonEnabled(True)
-                if key == "birth_date":
+                if key == "birth_date" or (definition is not None and definition.field_type is CustomFieldType.DATE):
                     editor.setPlaceholderText("YYYY-MM-DD 또는 YYYYMMDD")
-                self._editors[key] = editor
-                row, column = divmod(index, 2)
-                grid.addWidget(field_label, row * 2, column)
-                grid.addWidget(editor, row * 2 + 1, column)
-            section.addLayout(grid)
-            body_layout.addWidget(frame)
-        note_frame = QFrame()
-        note_frame.setObjectName("editSection")
-        note_layout = QVBoxLayout(note_frame)
-        note_layout.addWidget(QLabel("비고"))
-        note = QPlainTextEdit()
-        note.setObjectName("newPerson_note")
-        note.setMaximumHeight(100)
-        self._editors["note"] = note
-        note_layout.addWidget(note)
-        body_layout.addWidget(note_frame)
-        if custom_fields:
-            custom_frame = QFrame()
-            custom_frame.setObjectName("editSection")
-            custom_form = QFormLayout(custom_frame)
-            custom_form.addRow(QLabel("추가 항목"))
-            for definition in sorted(custom_fields, key=lambda item: item.display_order):
-                key = f"custom:{definition.definition_id}"
-                if definition.field_type is CustomFieldType.CHOICE:
-                    editor = QComboBox()
-                    editor.addItem("미입력", "")
-                    for choice in definition.choices:
-                        editor.addItem(choice, choice)
-                else:
-                    editor = QLineEdit()
-                    if definition.field_type is CustomFieldType.DATE:
-                        editor.setPlaceholderText("YYYY-MM-DD")
-                editor.setObjectName(f"newPerson_{key}")
-                self._editors[key] = editor
-                custom_form.addRow(definition.name, editor)
-            body_layout.addWidget(custom_frame)
+            editor.setObjectName(f"newPerson_{key}")
+            row, column = divmod(len(self._editors), 2)
+            field_label = QLabel(label + (" *" if key == "name" else ""))
+            field_label.setWordWrap(True)
+            grid.addWidget(field_label, row * 2, column)
+            grid.addWidget(editor, row * 2 + 1, column)
+            self._editors[key] = editor
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+        body_layout.addWidget(frame)
         delivery_frame = QFrame()
         delivery_frame.setObjectName("editSection")
         delivery_form = QFormLayout(delivery_frame)
@@ -138,6 +133,22 @@ class RosterRowCreateDialog(QDialog):
         self.start_date_edit.setCalendarPopup(True)
         self.start_date_edit.setDisplayFormat("yyyy-MM-dd")
         delivery_form.addRow("배송 시작일 *", self.start_date_edit)
+        self._driver_combos: dict[Meal, QComboBox] = {}
+        state = routing_state or RoutingState()
+        for meal, check in self._meal_checks.items():
+            combo = QComboBox()
+            combo.setObjectName(f"newPerson_driver_{meal.name}")
+            combo.addItem("미지정", None)
+            for driver in state.drivers:
+                label = driver.name + (f" · {driver.telephone}" if driver.telephone else "")
+                combo.addItem(label, driver.driver_id)
+            combo.setEnabled(check.isChecked())
+            check.toggled.connect(combo.setEnabled)
+            self._driver_combos[meal] = combo
+            delivery_form.addRow(f"{meal.value} 배송 담당", combo)
+        delivery_hint = QLabel("선택한 식종의 배송 시작일부터 담당 기사를 적용합니다." if state.drivers else "등록된 기사가 없습니다. 미지정으로 추가한 뒤 배송기사 관리에서 기사를 등록할 수 있습니다.")
+        delivery_hint.setWordWrap(True)
+        delivery_form.addRow(delivery_hint)
         body_layout.addWidget(delivery_frame)
         scroll.setWidget(body)
         root.addWidget(scroll, 1)
@@ -165,7 +176,9 @@ class RosterRowCreateDialog(QDialog):
     def _accept_valid(self) -> None:
         try:
             def value(key: str) -> str:
-                editor = self._editors[key]
+                editor = self._editors.get(key)
+                if editor is None:
+                    return ""
                 return editor.toPlainText() if isinstance(editor, QPlainTextEdit) else editor.text()
 
             custom_values = {}
@@ -177,7 +190,11 @@ class RosterRowCreateDialog(QDialog):
                     custom_values[definition.definition_id] = parsed
             profile = PersonProfile(
                 name=value("name"), birth_date=_parse_optional_date(value("birth_date")),
-                **{key: value(key) or None for key in ("school_type", "school_name", "grade", "household_head_name", "relationship_to_child", "jurisdiction", "road_address", "detail_address", "telephone", "mobile_phone", "note")},
+                **{key: value(key) or None for key in (
+                    "school_name", "school_type", "grade", "household_head_name",
+                    "relationship_to_child", "jurisdiction", "telephone", "mobile_phone", "note",
+                )},
+                road_address=value("address") or None,
                 custom_values=custom_values,
             )
             meals = tuple(meal for meal, check in self._meal_checks.items() if check.isChecked())
@@ -195,7 +212,8 @@ class RosterRowCreateDialog(QDialog):
             return
         self._profile, self._meals = profile, meals
         self._start_date = starts_on
-        self._request = RosterRowCreateRequest(profile, meals, starts_on, {}, household_id, {})
+        assignments = {meal: (self._driver_combos[meal].currentData(), None) for meal in meals if self._driver_combos[meal].currentData() is not None}
+        self._request = RosterRowCreateRequest(profile, meals, starts_on, assignments, household_id, {})
         self.accept()
 
     def values(self) -> tuple[PersonProfile, tuple[Meal, ...], date]:
@@ -293,6 +311,11 @@ class RosterRowEditController:
                 on,
                 parent,
                 custom_fields=roster.custom_fields,
+                column_labels=(
+                    {column.key: column.label for column in parent.table_model.columns}
+                    if getattr(parent, "table_model", None) is not None else None
+                ),
+                routing_state=routing_state_from_snapshot(snapshot) if snapshot is not None else RoutingState(),
                 household_matcher=lambda profile, starts_on: match_existing_household_id(
                     profile, household_rule, roster, effective_on=starts_on,
                 ),

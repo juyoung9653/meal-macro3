@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
+from inspect import Parameter, signature
 from uuid import uuid4
 
 from PySide6.QtWidgets import (
@@ -14,6 +15,7 @@ from PySide6.QtWidgets import (
 
 from src.domain.roster import Meal, RosterSnapshot
 from src.domain.sequence_edits import build_sequence_revision, build_scoped_sequence_revision
+from src.domain.sequence_settings import SequenceMode, sequence_mode_from_snapshot
 
 from .import_controller import current_windows_actor
 from .theme import application_stylesheet, register_application_fonts
@@ -22,9 +24,17 @@ MEALS = (Meal.DINNER, Meal.BREAKFAST, Meal.LUNCH)
 
 
 class SequenceEditDialog(QDialog):
-    def __init__(self, roster: RosterSnapshot, person_id, parent=None):
+    def __init__(
+        self,
+        roster: RosterSnapshot,
+        person_id,
+        parent=None,
+        *,
+        mode: SequenceMode = SequenceMode.SEPARATE,
+    ):
         super().__init__(parent)
         keys = MEALS
+        self._mode = mode
         self._initial = {meal: roster.resolve_assignment(person_id, meal).sequence or "" for meal in keys}
         self._labels = {meal: meal.value for meal in keys}
         name = roster.person(person_id).profile.name
@@ -38,18 +48,48 @@ class SequenceEditDialog(QDialog):
         title = QLabel(f"{name} · 배송순서")
         title.setObjectName("workspaceTitle")
         layout.addWidget(title)
-        note = QLabel("식종별 배송순서를 수정합니다. 변경 내용은 모든 날짜에 적용됩니다.")
+        note = QLabel(
+            "배송순서 하나를 입력하면 석식·조식·중식 모두에 적용합니다. 변경 내용은 모든 날짜에 적용됩니다."
+            if mode is SequenceMode.UNIFIED
+            else "식종별 배송순서를 수정합니다. 변경 내용은 모든 날짜에 적용됩니다."
+        )
         note.setWordWrap(True)
         layout.addWidget(note)
         form = QFormLayout()
         form.setSpacing(10)
         self.fields = {}
-        for meal in keys:
-            field = QLineEdit(self._initial[meal])
-            field.setAccessibleName(f"{self._labels[meal]} 배송순서")
-            field.setToolTip(f"{self._labels[meal]} 배송순서")
-            self.fields[meal] = field
-            form.addRow(self._labels[meal], field)
+        self._unified_mixed = False
+        if mode is SequenceMode.UNIFIED:
+            distinct = set(self._initial.values())
+            self._unified_mixed = len(distinct) > 1
+            if self._unified_mixed:
+                current = QLabel(
+                    "현재 값이 서로 다릅니다.\n"
+                    + "\n".join(
+                        f"{self._labels[meal]}: {self._initial[meal] or '미지정'}"
+                        for meal in keys
+                    )
+                )
+                current.setObjectName("sequenceMixedValues")
+                current.setWordWrap(True)
+                form.addRow("현재 순서", current)
+            field = QLineEdit("" if self._unified_mixed else self._initial[keys[0]])
+            field.setObjectName("unifiedSequence")
+            field.setAccessibleName("모든 식종 배송순서")
+            field.setToolTip("새 값을 입력해 저장한 경우에만 세 식종에 함께 적용합니다")
+            field.setPlaceholderText(
+                "새 순서를 입력하면 모든 식종에 적용"
+                if self._unified_mixed else "모든 식종 배송순서"
+            )
+            self.fields = {meal: field for meal in keys}
+            form.addRow("모든 식종", field)
+        else:
+            for meal in keys:
+                field = QLineEdit(self._initial[meal])
+                field.setAccessibleName(f"{self._labels[meal]} 배송순서")
+                field.setToolTip(f"{self._labels[meal]} 배송순서")
+                self.fields[meal] = field
+                form.addRow(self._labels[meal], field)
         form_widget = QWidget()
         form_widget.setLayout(form)
         scroll = QScrollArea()
@@ -73,10 +113,18 @@ class SequenceEditDialog(QDialog):
         layout.addWidget(buttons)
 
     def values(self):
+        if self._mode is SequenceMode.UNIFIED:
+            value = self.fields[MEALS[0]].text().strip()
+            if self._unified_mixed and not value:
+                return {}
+            return {meal: value for meal in MEALS}
         return {meal: field.text().strip() for meal, field in self.fields.items()}
 
     def _save(self):
         values = self.values()
+        if not values:
+            self.accept()
+            return
         for meal, value in values.items():
             if value == self._initial[meal]:
                 continue
@@ -120,13 +168,27 @@ class SequenceEditController:
             roster = self._session.database.current_roster()
             if roster is None:
                 raise ValueError("현재 명단이 없습니다.")
-            dialog = self._dialog_type(roster, person_id, parent)
+            snapshot = self._session.database.snapshot(roster.revision_id)
+            mode = sequence_mode_from_snapshot(snapshot)
+            parameters = signature(self._dialog_type).parameters.values()
+            accepts_mode = any(
+                parameter.name == "mode"
+                or parameter.kind is Parameter.VAR_KEYWORD
+                for parameter in parameters
+            )
+            if accepts_mode:
+                dialog = self._dialog_type(roster, person_id, parent, mode=mode)
+            else:
+                # Keep older injected test/dialog factories compatible.
+                dialog = self._dialog_type(roster, person_id, parent)
             if dialog.exec() != QDialog.DialogCode.Accepted:
                 return None
             values = dialog.values()
+            if not values:
+                return None
             if all(
-                values[meal] == (roster.resolve_assignment(person_id, meal).sequence or "")
-                for meal in MEALS
+                value == (roster.resolve_assignment(person_id, meal).sequence or "")
+                for meal, value in values.items()
             ):
                 return None
             prepared = build_sequence_revision(

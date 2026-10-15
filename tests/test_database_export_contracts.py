@@ -18,12 +18,15 @@ from src.domain.meal_status_changes import (
 )
 from src.domain.profile_edits import build_person_profile_revision
 from src.domain.projections import (
+    ENROLLMENT_KIND,
+    STATUS_EVENT_KIND,
     roster_audit_changes,
     roster_entity_states,
     roster_from_historical_snapshot,
 )
 from src.domain.revisions import (
-    AuditChange, ChangeOperation,
+    AuditChange,
+    ChangeOperation,
     HistoricalSnapshot,
     ImportBatch,
     RevisionActor,
@@ -46,7 +49,6 @@ from src.domain.roster import (
 from src.domain.status import MealStatus
 from src.services.database_export import build_database_workbook
 from src.services.person_history import build_history_tables
-from src.domain.projections import ENROLLMENT_KIND, STATUS_EVENT_KIND
 
 DAY = date(2026, 9, 21)
 STAMP = datetime(2026, 9, 21, 1, 30, tzinfo=UTC)
@@ -235,7 +237,12 @@ def test_status_history_has_intake_for_canonical_single_and_batch(base, batch, c
     table = [dict(zip(headings, row, strict=True)) for row in data]
     assert all(row["성명"] == "첫째" for row in table)
     assert {row["접수 채널"] for row in table} == {"" if channel is None else channel.value}
-    assert any(row["변경 값"] == "일시중지" for row in table)
+    status_rows = [row for row in table if row["구분"] == "상태 변경"]
+    assert len(status_rows) == 1
+    assert status_rows[0]["이전 값"] == ""
+    assert "상태: 일시중지" in status_rows[0]["변경 값"]
+    assert "기간: 2026-09-21 ~ 2026-09-21" in status_rows[0]["변경 값"]
+    assert "조식 일시중지" not in status_rows[0]["변경 값"]
 
 
 def test_meal_history_formats_open_periods_and_missing_end_date(base):
@@ -263,7 +270,9 @@ def test_meal_history_formats_open_periods_and_missing_end_date(base):
     assert periods["변경 값"] == (
         "2026-10-01부터 · 종료일 미지정 · 시작일 미지정 · 2026-10-05까지 · 시작일·종료일 미지정"
     )
-    assert rows_by_field["상태: 종료일"]["변경 값"] == "종료일 미지정"
+    status = rows_by_field["상태 변경"]
+    assert "2026-10-05까지" in status["이전 값"]
+    assert "시작일·종료일 미지정" in status["변경 값"]
     assert all("ends_on" not in str(value) and "종료일=" not in str(value) for row in values for value in row)
 
 
@@ -277,8 +286,9 @@ def test_meal_history_record_fallback_keeps_meaningful_state(base):
     headings, values = build_history_tables(base, HistoricalSnapshot(base.revision_id, {}),
                                              (record,), person_id=person.person_id)["식종 변경"]
     row = dict(zip(headings, values[0], strict=True))
-    assert row["구분"] == "상태: 기록"
-    assert row["이전 값"] == row["변경 값"] == "상태: 일시중지 · 종료일: 미지정"
+    assert row["구분"] == "상태 변경"
+    assert row["이전 값"] == row["변경 값"]
+    assert row["변경 값"] == "상태: 일시중지\n기간: 시작일·종료일 미지정"
 
 
 def test_complaint_records_received_and_saved_time_and_keeps_deleted_person_name(base):
@@ -333,10 +343,14 @@ def test_export_information_is_once_and_last_for_each_selection(base, sections):
 
 
 def test_global_history_localizes_all_supported_kinds_and_operations(base):
-    from src.domain.projections import (
-        ASSIGNMENT_KIND, CUSTOM_FIELD_KIND, HOUSEHOLD_KIND, MEMBERSHIP_KIND, PERSON_KIND,
-    )
     from src.domain.delivery_routing import DRIVER_KIND, ROUTING_EVENT_KIND
+    from src.domain.projections import (
+        ASSIGNMENT_KIND,
+        CUSTOM_FIELD_KIND,
+        HOUSEHOLD_KIND,
+        MEMBERSHIP_KIND,
+        PERSON_KIND,
+    )
 
     labels = {
         PERSON_KIND: "사람", HOUSEHOLD_KIND: "가구", MEMBERSHIP_KIND: "가구원",

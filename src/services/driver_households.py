@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import date
 from uuid import UUID
@@ -40,6 +40,8 @@ def build_driver_household_rows(
     on: date,
     *,
     included_meals: Mapping[UUID, tuple[Meal, ...]] | None = None,
+    browse_all_meals: bool = False,
+    excluded_person_ids: Collection[UUID] = (),
 ) -> tuple[DriverHouseholdRow, ...]:
     """Return one row for each effective household, driver, and address combination.
 
@@ -51,10 +53,12 @@ def build_driver_household_rows(
     if type(on) is not date:
         raise TypeError("조회일은 날짜여야 합니다.")
 
+    excluded = frozenset(excluded_person_ids)
     household_by_person = {
         membership.person_id: membership.household_id
         for membership in roster.memberships
         if membership.period.contains(on)
+        and membership.person_id not in excluded
     }
     groups: dict[tuple[UUID, tuple[str, UUID | str | None], str], _RowParts] = {}
     meal_groups: dict[
@@ -63,14 +67,21 @@ def build_driver_household_rows(
     additional_contact_fields = _additional_contact_fields(roster)
 
     for person in roster.persons:
+        if person.person_id in excluded:
+            continue
         active_meals = roster.meals_for(person.person_id, on=on)
+        available_meals = (
+            _browsable_meals(roster, routing_state, person.person_id, on, active_meals)
+            if browse_all_meals
+            else active_meals
+        )
         selected_meals = (
-            active_meals
+            available_meals
             if included_meals is None
             else tuple(
                 meal
                 for meal in MEAL_ORDER
-                if meal in active_meals
+                if meal in available_meals
                 and meal in included_meals.get(person.person_id, ())
             )
         )
@@ -126,6 +137,28 @@ def build_driver_household_rows(
         for key, parts in groups.items()
     )
     return tuple(sorted(rows, key=_row_sort_key))
+
+
+def _browsable_meals(
+    roster: RosterSnapshot,
+    routing_state: RoutingState,
+    person_id: UUID,
+    on: date,
+    active_meals: tuple[Meal, ...],
+) -> tuple[Meal, ...]:
+    meals = set(active_meals)
+    meals.update(
+        assignment.meal
+        for assignment in roster.assignments
+        if assignment.person_id == person_id and assignment.meal is not None
+    )
+    meals.update(
+        meal
+        for event in routing_state.events
+        if event.person_id == person_id and event.effective_on <= on
+        for meal in event.driver_ids
+    )
+    return tuple(meal for meal in MEAL_ORDER if meal in meals)
 
 
 @dataclass(slots=True)

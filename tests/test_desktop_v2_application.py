@@ -866,11 +866,12 @@ def test_startup_builds_roster_window_only_after_guided_import_completes(
             return self._controller.run(parent)
 
     class Window:
-        def __init__(self, roster, histories, *, revision_display_code, view_settings_scope):
+        def __init__(self, roster, histories, *, revision_display_code, view_settings_scope, imported_profile_fields):
             self.roster = roster
             self.histories = histories
             self.revision_display_code = revision_display_code
             assert view_settings_scope == str(session.credentials.database_id)
+            assert "name" in imported_profile_fields
             self.closed = False
             self.replaced = False
             self.replace_count = 0

@@ -31,6 +31,7 @@ class SettingsAction(StrEnum):
     DOCUMENT_TEMPLATE = "document_template"
     DOCUMENT_COLUMN_MAPPING = "document_column_mapping"
     DELIVERY_DEFAULTS = "delivery_defaults"
+    SEQUENCE_MODE = "sequence_mode"
     DOCUMENT_DIRECTORY = "document_directory"
     DATABASE_LOCATION = "database_location"
     BACKUP_DIRECTORY = "backup_directory"
@@ -53,6 +54,11 @@ _SETTINGS_COPY = {
     SettingsAction.DELIVERY_DEFAULTS: (
         "식종별 배송 기본값",
         "별도 설정이 없는 기존·신규 대상자의 제공 요일과 배송요일을 설정합니다.",
+        "변경 이력에 기록",
+    ),
+    SettingsAction.SEQUENCE_MODE: (
+        "배송순서 입력 방식",
+        "식종별로 따로 입력하거나 한 번 입력해 세 식종에 같이 적용하도록 설정합니다.",
         "변경 이력에 기록",
     ),
     SettingsAction.PROVIDER: (
@@ -103,6 +109,7 @@ _SETTINGS_STAMPS = {
     SettingsAction.DOCUMENT_TEMPLATE: "양식",
     SettingsAction.DOCUMENT_COLUMN_MAPPING: "연결",
     SettingsAction.DELIVERY_DEFAULTS: "배송",
+    SettingsAction.SEQUENCE_MODE: "순서",
     SettingsAction.DOCUMENT_DIRECTORY: "폴더",
     SettingsAction.DATABASE_LOCATION: "DB",
     SettingsAction.BACKUP_DIRECTORY: "백업",
@@ -112,7 +119,11 @@ _SETTINGS_STAMPS = {
 _SETTINGS_GROUPS = (
     (
         "공통 운영",
-        (SettingsAction.PROVIDER, SettingsAction.DELIVERY_DEFAULTS),
+        (
+            SettingsAction.PROVIDER,
+            SettingsAction.DELIVERY_DEFAULTS,
+            SettingsAction.SEQUENCE_MODE,
+        ),
     ),
     (
         "문서 출력",

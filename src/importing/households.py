@@ -699,7 +699,17 @@ def match_existing_household_id(
         if rule is None
         else rule.criteria
     )
-    key = tuple(_profile_criterion_key(profile, item) for item in criteria)
+    def row_key(candidate: PersonProfile) -> tuple[str, ...]:
+        # Row creation has one address field, like the roster. Match it to
+        # imported profiles whose displayed address still has two stored parts.
+        return tuple(
+            _normalized_text(" ".join((candidate.road_address or "", candidate.detail_address or "")))
+            if item is HouseholdMatchCriterion.ADDRESS
+            else _profile_criterion_key(candidate, item)
+            for item in criteria
+        )
+
+    key = row_key(profile)
     if any(not value for value in key):
         return None
 
@@ -707,10 +717,7 @@ def match_existing_household_id(
         membership.household_id
         for membership in roster.memberships
         if membership.period.contains(effective_on)
-        and tuple(
-            _profile_criterion_key(roster.person(membership.person_id).profile, item)
-            for item in criteria
-        ) == key
+        and row_key(roster.person(membership.person_id).profile) == key
     }
     if len(matches) > 1:
         raise ValueError(

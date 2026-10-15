@@ -61,9 +61,8 @@ def test_create_dialog_collects_simplified_profile_custom_fields_and_meals(app):
     )
     dialog = RosterRowCreateDialog(Meal.LUNCH, date(2026, 10, 5), custom_fields=definitions)
     for key, value in {
-        "name": "새 대상", "birth_date": "20150302", "school_type": "초등", "school_name": "학교",
-        "grade": "3", "household_head_name": "세대주", "relationship_to_child": "모",
-        "jurisdiction": "정자동", "road_address": "도로 1", "detail_address": "101호",
+        "name": "새 대상", "birth_date": "20150302", "school_name": "학교",
+        "grade": "3", "jurisdiction": "정자동", "address": "도로 1 101호",
         "telephone": "031-123", "mobile_phone": "010-123", "note": "메모",
     }.items():
         editor = dialog._editors[key]
@@ -78,6 +77,8 @@ def test_create_dialog_collects_simplified_profile_custom_fields_and_meals(app):
     request = dialog.request()
     assert request.profile.class_name is None and request.profile.provider is None
     assert request.profile.birth_date == date(2015, 3, 2)
+    assert request.profile.road_address == "도로 1 101호"
+    assert request.profile.detail_address is None
     assert request.profile.custom_values == {definitions[0].definition_id: "010-456", definitions[1].definition_id: 2.5, definitions[2].definition_id: date(2026, 10, 5), definitions[3].definition_id: "B"}
     assert request.meals == (Meal.DINNER, Meal.LUNCH)
     assert request.assignments == {}
@@ -85,15 +86,17 @@ def test_create_dialog_collects_simplified_profile_custom_fields_and_meals(app):
     assert request.statuses == {}
 
 
-def test_create_dialog_removes_manual_household_routing_status_and_excluded_profile_fields(app):
+def test_create_dialog_excludes_internal_profile_fields_and_keeps_driver_selection(app):
     dialog = RosterRowCreateDialog(Meal.LUNCH, date(2026, 10, 5))
     removed_names = {
         "newPerson_class_name", "newPerson_provider", "newPerson_household",
-        *(f"newPerson_driver_{meal.name}" for meal in Meal),
+        "newPerson_road_address", "newPerson_detail_address", "newPerson_school_type",
+        "newPerson_household_head_name", "newPerson_relationship_to_child",
         *(f"newPerson_sequence_{meal.name}" for meal in Meal),
         *(f"newPerson_status_{meal.name}" for meal in Meal),
     }
     assert all(dialog.findChild(QWidget, name) is None for name in removed_names)
+    assert all(dialog.findChild(QWidget, f"newPerson_driver_{meal.name}") is not None for meal in Meal)
 
 
 def test_start_date_ignores_wheel_but_keeps_keyboard_and_calendar(app):

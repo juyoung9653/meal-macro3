@@ -43,24 +43,21 @@ def settings(monkeypatch, tmp_path):
     return settings
 
 
-def test_aggregate_empty_is_independent_of_per_meal_blank_and_preserves_or(app, settings):
+def test_aggregate_empty_combines_with_meal_values_using_and(app, settings):
     roster = roster_fixture()
     # Nonempty common/explicit sequence prevents aggregate blank even without
     # enrollment. Completely unassigned and all-enrolled-empty both match.
     unassigned = Person(uuid4(), PersonProfile("완전 미지정"))
     roster = replace(roster, persons=(*roster.persons, unassigned))
     model = RosterTableModel(roster)
-    assert ALL_SEQUENCES_EMPTY in model.column_filter_values("sequence")
+    assert ALL_SEQUENCES_EMPTY not in model.column_filter_values("sequence")
     model.set_column_values("sequence", {ALL_SEQUENCES_EMPTY})
     assert {model.person_at(i).profile.name for i in range(model.rowCount())} == {"빈값", "완전 미지정"}
     pair = sequence_pair_token("조식", "2")
     model.set_column_values("sequence", {ALL_SEQUENCES_EMPTY, pair})
-    assert {model.person_at(i).profile.name for i in range(model.rowCount())} == {"빈값", "완전 미지정", "둘", "혼합"}
-    model.set_column_search("name", "완전")
-    assert model.rowCount() == 1
-    model.set_column_search("name", "")
-    model.set_column_values("sequence", set())
     assert model.rowCount() == 0
+    model.set_column_values("sequence", set())
+    assert {model.person_at(i).profile.name for i in range(model.rowCount())} == {"빈값", "완전 미지정"}
     window = RosterWindow(roster, column_settings=settings, inactive_settings=settings)
     window._include_hidden_filter.setChecked(True)
     window._on_column_values_changed("sequence", {ALL_SEQUENCES_EMPTY, pair})
@@ -70,9 +67,10 @@ def test_aggregate_empty_is_independent_of_per_meal_blank_and_preserves_or(app, 
     window._column_search_header.open_value_filter("sequence")
     picker = window._column_search_header._menu.findChild(SequenceValuePicker)
     aggregate = next(item for item in picker._leaves if item.data(0, Qt.UserRole) == ALL_SEQUENCES_EMPTY)
-    assert aggregate.parent() is None and aggregate.text(0) == "전체 빈 값"
+    assert aggregate.parent().text(0) == "기존 저장 조건"
+    assert aggregate.text(0) == "전체 식종 순서 없음"
     assert aggregate.checkState(0) == Qt.Checked
-    picker.search.setText("전체 빈")
+    picker.search.setText("전체 식종")
     assert not aggregate.isHidden()
     picker.select_none.click()
     aggregate.setCheckState(0, Qt.Checked)
@@ -91,7 +89,7 @@ def test_aggregate_rejects_mixed_blank_and_nonempty_common_with_meal_driver_only
                      *(DeliveryAssignment(second.person_id, meal, driver="기사") for meal in Meal)))
     model = RosterTableModel(roster)
     model.set_column_values("sequence", {sequence_pair_token("조식", "")})
-    assert model.rowCount() >= 1
+    assert model.rowCount() == 0
     model.set_column_values("sequence", {ALL_SEQUENCES_EMPTY})
     assert model.rowCount() == 0
 

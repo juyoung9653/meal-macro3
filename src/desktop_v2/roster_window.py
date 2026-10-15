@@ -68,8 +68,17 @@ from src.services.meal_service_availability import default_service_weekdays, reg
 from src.version import APP_VERSION
 
 from .column_layout import RosterColumnLayout
-from .column_search import (ColumnSearchHeader, ColumnValuePicker, SequenceValuePicker,
-                            sequence_pair_token, ALL_SEQUENCES_EMPTY)
+from .column_search import (
+    ALL_SEQUENCES_EMPTY,
+    ColumnSearchHeader,
+    ColumnValuePicker,
+    SequenceValuePicker,
+    sequence_exclusive_meal,
+    sequence_pair_token,
+    sequence_pair_value,
+    sequence_present_meal,
+)
+from .current_sheet_export import CurrentSheetSnapshot
 from .date_edit import WheelSafeDateEdit
 from .inactive_roster import InactiveRosterSettings, InactiveThresholdDialog
 from .inspector_history import MealHistoryRow
@@ -158,37 +167,12 @@ def _additional_phone_definitions(
     )
 
 
-def _inspector_contact_lines(roster: RosterSnapshot, person: Person) -> tuple[str, ...]:
-    profile = person.profile
-    mobile_phones = _phone_values(
-        profile.mobile_phone,
-        profile.custom_values,
-        _additional_mobile_phone_definitions(roster.custom_fields),
-    )
-    telephones = _phone_values(
-        profile.telephone,
-        profile.custom_values,
-        _additional_telephone_definitions(roster.custom_fields),
-    )
-    return (
-        *(f"핸드폰 {number}" for number in mobile_phones),
-        *(f"전화 {number}" for number in telephones),
-    ) or ("미등록",)
-
-
-def _phone_values(
-    primary_phone: str | None,
-    custom_values: Mapping[UUID, object],
-    definitions: tuple[CustomFieldDefinition, ...],
-) -> tuple[str, ...]:
-    phones = [primary_phone] if primary_phone else []
-    phones.extend(
-        str(value)
-        for definition in definitions
-        if (value := custom_values.get(definition.definition_id)) is not None
-        and str(value).strip()
-    )
-    return tuple(phones)
+# These standard import fields were previously saved without roster columns.
+_OPTIONAL_PROFILE_COLUMNS = (
+    _Column("school_type", "학교 유형", 100),
+    _Column("household_head_name", "세대주 성명", 110),
+    _Column("relationship_to_child", "아동과의 관계", 110),
+)
 
 
 class RosterTableModel(QAbstractTableModel):
@@ -206,6 +190,7 @@ class RosterTableModel(QAbstractTableModel):
         routing_state: RoutingState | None = None,
         school_calendar: SchoolLunchCalendar | None = None,
         column_aliases: Mapping[str, str] | None = None,
+        imported_profile_fields: frozenset[str] = frozenset(),
     ) -> None:
         super().__init__(parent)
         if not isinstance(roster, RosterSnapshot):
@@ -217,6 +202,7 @@ class RosterTableModel(QAbstractTableModel):
             SchoolLunchCalendar() if school_calendar is None else school_calendar
         )
         self._column_aliases = dict(column_aliases or {})
+        self._imported_profile_fields = frozenset(imported_profile_fields)
         self._day = date.today()
         self._meal = Meal.LUNCH
         self._search = ""
@@ -359,7 +345,9 @@ class RosterTableModel(QAbstractTableModel):
         """Offer all current values, including values hidden by active filters."""
         column = next(column for column in self._columns if column.key == key)
         if key == "sequence":
-            return tuple(sorted({ALL_SEQUENCES_EMPTY} | {
+            return tuple(sorted({
+                sequence_pair_token(meal.value, "") for meal in Meal
+            } | {
                 sequence_pair_token(*pair)
                 for person in self._roster.persons if self._matches_archive_filter(person)
                 for pair in self._contexts[person.person_id].sequence_pairs
@@ -438,12 +426,16 @@ class RosterTableModel(QAbstractTableModel):
         self,
         roster: RosterSnapshot,
         histories: Mapping[tuple[UUID, Meal], StatusHistory] | None = None,
+        *,
+        imported_profile_fields: frozenset[str] | None = None,
     ) -> None:
         if not isinstance(roster, RosterSnapshot):
             raise TypeError("roster는 RosterSnapshot이어야 합니다.")
         self.beginResetModel()
         self._roster = roster
         self._histories = dict(histories or {})
+        if imported_profile_fields is not None:
+            self._imported_profile_fields = frozenset(imported_profile_fields)
         self._columns = self._build_columns()
         keys = {column.key for column in self._columns}
         self._column_searches = {
@@ -597,6 +589,11 @@ class RosterTableModel(QAbstractTableModel):
         return section + 1
 
     def _build_columns(self) -> tuple[_Column, ...]:
+        optional_columns = tuple(
+            column for column in _OPTIONAL_PROFILE_COLUMNS
+            if column.key in self._imported_profile_fields
+            or any(getattr(person.profile, column.key) is not None for person in self._roster.persons)
+        )
         additional_telephone_definitions = _additional_telephone_definitions(
             self._roster.custom_fields
         )
@@ -609,6 +606,7 @@ class RosterTableModel(QAbstractTableModel):
             _Column("status:dinner", "석식", 112, meal=Meal.DINNER),
             _Column("status:breakfast", "조식", 112, meal=Meal.BREAKFAST),
             _Column("status:lunch", "중식", 112, meal=Meal.LUNCH),
+            *(column for column in optional_columns if column.key == "school_type"),
             _Column("school", "학교", 120),
             _Column("grade", "학년", 82),
         )
@@ -643,6 +641,7 @@ class RosterTableModel(QAbstractTableModel):
             ),
         )
         base_after_contacts = (
+            *(column for column in optional_columns if column.key != "school_type"),
             _Column("jurisdiction", "관할동", 82),
             _Column("address", "주소", 220),
             _Column("sequence", "순서", 104),
@@ -723,8 +722,15 @@ class RosterTableModel(QAbstractTableModel):
         people: list[Person] = []
         filters = [(column, self._column_searches[column.key])
                    for column in self._columns if column.key in self._column_searches]
-        value_filters = [(column, self._column_values[column.key])
-                         for column in self._columns if column.key in self._column_values]
+        value_filters = [
+            (
+                column,
+                self._column_values[column.key],
+                self._compile_sequence_values(self._column_values[column.key])
+                if column.key == "sequence" else None,
+            )
+            for column in self._columns if column.key in self._column_values
+        ]
         birth_month = date.today().month if self._birth_month == 0 else self._birth_month
         for person in self._roster.persons:
             if self._special_only and not self._delivery_setting_text(person):
@@ -754,8 +760,8 @@ class RosterTableModel(QAbstractTableModel):
             ):
                 continue
             if any(
-                not self._matches_column_values(person, column, context, selected)
-                for column, selected in value_filters
+                not self._matches_column_values(person, column, context, selected, compiled)
+                for column, selected, compiled in value_filters
             ):
                 continue
             people.append(person)
@@ -768,12 +774,117 @@ class RosterTableModel(QAbstractTableModel):
             )
         self._people = tuple(people)
 
-    def _matches_column_values(self, person, column, context, selected):
+    def _matches_column_values(self, person, column, context, selected, compiled=None):
         if column.key == "sequence":
-            return (ALL_SEQUENCES_EMPTY in selected and context.all_sequences_empty) or context.legacy_sequence in selected or any(
-                sequence_pair_token(*pair) in selected for pair in context.sequence_pairs
-            )
+            return self._matches_sequence_values(context, selected, compiled)
         return str(self._display_value(person, column, context)) in selected
+
+    @staticmethod
+    def _compile_sequence_values(selected):
+        meal_labels = {meal.value for meal in Meal}
+        allowed_by_meal = {}
+        present_meals = set()
+        exclusive_meals = set()
+        special_by_label = {}
+        legacy_values = set()
+        structured = False
+        require_all_empty = False
+        for token in selected:
+            if pair := sequence_pair_value(token):
+                structured = True
+                if pair[0] in meal_labels:
+                    allowed_by_meal.setdefault(pair[0], set()).add(pair[1])
+                else:
+                    special_by_label.setdefault(pair[0], set()).add(pair[1])
+            elif meal := sequence_present_meal(token):
+                structured = True
+                present_meals.add(meal)
+            elif meal := sequence_exclusive_meal(token):
+                structured = True
+                present_meals.add(meal)
+                exclusive_meals.add(meal)
+            elif token == ALL_SEQUENCES_EMPTY:
+                structured = True
+                require_all_empty = True
+            else:
+                legacy_values.add(token)
+        return (
+            {label: frozenset(values) for label, values in allowed_by_meal.items()},
+            frozenset(present_meals),
+            frozenset(exclusive_meals),
+            {label: frozenset(values) for label, values in special_by_label.items()},
+            frozenset(legacy_values),
+            structured,
+            require_all_empty,
+        )
+
+    @staticmethod
+    def _matches_sequence_values(context, selected, compiled=None):
+        if not selected:
+            return context.all_sequences_empty
+
+        meal_labels = {meal.value for meal in Meal}
+        values_by_meal = {label: "" for label in meal_labels}
+        context_pairs = set(context.sequence_pairs)
+        unmapped_nonempty = set()
+        for label, value in context.sequence_pairs:
+            if label in meal_labels:
+                values_by_meal[label] = value
+            elif value.strip():
+                unmapped_nonempty.add((label, value))
+
+        if compiled is None:
+            compiled = RosterTableModel._compile_sequence_values(selected)
+        (
+            allowed_by_meal,
+            present_meals,
+            exclusive_meals,
+            special_by_label,
+            legacy_values,
+            structured,
+            require_all_empty,
+        ) = compiled
+
+        if legacy_values and context.legacy_sequence not in legacy_values:
+            return False
+        if not structured:
+            return bool(legacy_values)
+
+        active_meals = set(allowed_by_meal) | present_meals
+        for label, value in values_by_meal.items():
+            if label in allowed_by_meal:
+                if value not in allowed_by_meal[label]:
+                    return False
+            elif label not in active_meals and value.strip():
+                return False
+        if any(not values_by_meal[label].strip() for label in present_meals):
+            return False
+        if any(
+            values_by_meal[label].strip()
+            for exclusive in exclusive_meals
+            for label in meal_labels
+            if label != exclusive
+        ):
+            return False
+        if require_all_empty and not context.all_sequences_empty:
+            return False
+        if any(
+            not any((label, value) in context_pairs for value in allowed)
+            for label, allowed in special_by_label.items()
+        ):
+            return False
+        allowed_special = {
+            (label, value)
+            for label, allowed in special_by_label.items()
+            for value in allowed
+        }
+        if unmapped_nonempty and not unmapped_nonempty <= allowed_special:
+            return False
+        return not (
+            not any(value.strip() for value in values_by_meal.values())
+            and not context.all_sequences_empty
+            and not (unmapped_nonempty & allowed_special)
+        )
 
     def _rebuild_context_projection(self) -> None:
         """Resolve day-and-meal lookups once, outside the table paint path."""
@@ -930,6 +1041,7 @@ class RosterTableModel(QAbstractTableModel):
             for value in (
                 profile.name,
                 profile.school_name or "",
+                *(getattr(profile, column.key) or "" for column in _OPTIONAL_PROFILE_COLUMNS),
                 profile.telephone or "",
                 profile.mobile_phone or "",
                 context.road_address or "",
@@ -961,6 +1073,8 @@ class RosterTableModel(QAbstractTableModel):
             return profile.name
         if column.key == "birth_date":
             return "" if profile.birth_date is None else profile.birth_date.isoformat()
+        if column.key in {item.key for item in _OPTIONAL_PROFILE_COLUMNS}:
+            return getattr(profile, column.key) or ""
         if column.key == "school":
             return profile.school_name or ""
         if column.key == "grade":
@@ -1133,6 +1247,8 @@ class RosterWindow(QMainWindow):
     relocation_requested = Signal(object)
     complaint_requested = Signal(object, object)
     database_export_requested = Signal()
+    current_sheet_export_requested = Signal(object)
+    revision_history_requested = Signal()
     import_review_requested = Signal()
     person_edit_requested = Signal(object)
     cell_edit_requested = Signal(object, str, str)
@@ -1161,6 +1277,7 @@ class RosterWindow(QMainWindow):
         routing_state: RoutingState | None = None,
         school_calendar: SchoolLunchCalendar | None = None,
         cell_edit_callback: Callable[[UUID, str, str], object] | None = None,
+        imported_profile_fields: frozenset[str] = frozenset(),
     ) -> None:
         super().__init__(parent)
         self._column_settings = column_settings
@@ -1209,6 +1326,7 @@ class RosterWindow(QMainWindow):
             routing_state=self._routing_state,
             school_calendar=self._school_calendar,
             column_aliases=self._column_aliases,
+            imported_profile_fields=imported_profile_fields,
         )
         self._meal = Meal.LUNCH
         self._history_dialogs: list[QDialog] = []
@@ -1238,12 +1356,56 @@ class RosterWindow(QMainWindow):
 
         return self._roster
 
+    def current_sheet_snapshot(self) -> CurrentSheetSnapshot:
+        """Freeze the active table exactly as displayed, on the UI thread."""
+
+        header = self._table.horizontalHeader()
+        logical_columns = tuple(
+            logical
+            for visual in range(header.count())
+            if (logical := header.logicalIndex(visual)) >= 0
+            and not self._table.isColumnHidden(logical)
+        )
+        if not logical_columns:
+            raise ValueError("현재 시트에 표시된 칼럼이 없어 내보낼 수 없습니다.")
+        headers = tuple(
+            str(
+                self._model.headerData(
+                    logical,
+                    Qt.Orientation.Horizontal,
+                    Qt.ItemDataRole.DisplayRole,
+                )
+                or ""
+            )
+            for logical in logical_columns
+        )
+        rows = tuple(
+            tuple(
+                "" if (value := self._model.data(
+                    self._model.index(row, logical), Qt.ItemDataRole.DisplayRole
+                )) is None else str(value)
+                for logical in logical_columns
+            )
+            for row in range(self._model.rowCount())
+        )
+        sheet_name = self._sheets[self._sheet_index(self._active_sheet_id)][1]
+        return CurrentSheetSnapshot(sheet_name, headers, rows)
+
+    def _request_current_sheet_export(self) -> None:
+        try:
+            snapshot = self.current_sheet_snapshot()
+        except ValueError as error:
+            QMessageBox.warning(self, "현재 시트를 내보낼 수 없습니다", str(error))
+            return
+        self.current_sheet_export_requested.emit(snapshot)
+
     def replace_roster(
         self,
         roster: RosterSnapshot,
         histories: Mapping[tuple[UUID, Meal], StatusHistory] | None = None,
         *,
         revision_display_code: str | None = None,
+        imported_profile_fields: frozenset[str] | None = None,
     ) -> None:
         if not isinstance(roster, RosterSnapshot):
             raise TypeError("roster는 RosterSnapshot이어야 합니다.")
@@ -1252,12 +1414,21 @@ class RosterWindow(QMainWindow):
         self._meal_change_history_rows.clear()
         self._revision_display_code = revision_display_code
         self._column_layout.save()
-        self._model.replace_roster(roster, self._histories)
+        self._model.replace_roster(roster, self._histories, imported_profile_fields=imported_profile_fields)
         self._refresh_archive()
         self._revision_label.setText(self._revision_label_text())
         self._column_layout.replace_columns(self._model.columns)
         self._column_search_header.replace_columns(self._model.columns)
         self._after_model_reset()
+
+    def set_imported_profile_fields(self, fields: frozenset[str]) -> None:
+        if fields == self._model._imported_profile_fields:
+            return
+        self.replace_roster(
+            self._roster, self._histories,
+            revision_display_code=self._revision_display_code,
+            imported_profile_fields=fields,
+        )
 
     def set_routing_state(self, state: RoutingState) -> None:
         if not isinstance(state, RoutingState):
@@ -1445,12 +1616,6 @@ class RosterWindow(QMainWindow):
         self._more_menu = self._build_more_menu()
         self._more_button.setMenu(self._more_menu)
         heading.addWidget(self._more_button)
-        self._archive_threshold_button = QPushButton("보관 기준 설정")
-        self._archive_threshold_button.setObjectName("quietAction")
-        self._archive_threshold_button.setToolTip("장기 미배송 보관 기준 일수를 변경합니다")
-        self._archive_threshold_button.clicked.connect(self._show_archive_threshold)
-        self._archive_threshold_button.hide()
-        heading.addWidget(self._archive_threshold_button)
         layout.addLayout(heading)
 
         filters = QHBoxLayout()
@@ -1493,6 +1658,18 @@ class RosterWindow(QMainWindow):
         self._clear_column_filters_button.setObjectName("quietAction")
         self._clear_column_filters_button.clicked.connect(self._clear_column_filters)
         filter_notice.addWidget(self._clear_column_filters_button)
+        self._archive_threshold_button = QPushButton("보관 기준 설정")
+        self._archive_threshold_button.setObjectName("quietAction")
+        self._archive_threshold_button.setToolTip("장기 미배송 보관 기준 일수를 변경합니다")
+        self._archive_threshold_button.clicked.connect(self._show_archive_threshold)
+        self._archive_threshold_button.hide()
+        filter_notice.addWidget(self._archive_threshold_button)
+        self._archive_exit_button = QPushButton("나가기")
+        self._archive_exit_button.setObjectName("quietAction")
+        self._archive_exit_button.setToolTip("보관함을 나가 일반 명단으로 돌아갑니다")
+        self._archive_exit_button.clicked.connect(lambda: self._archive_action.setChecked(False))
+        self._archive_exit_button.hide()
+        filter_notice.addWidget(self._archive_exit_button)
         layout.addWidget(self._column_filter_strip)
         self._column_filter_strip.hide()
         return frame
@@ -1511,7 +1688,6 @@ class RosterWindow(QMainWindow):
             has_visible_history=has_visible_history,
         )
         self._model.set_archive_filter(ids, self._archive_action.isChecked())
-        self._archive_threshold_button.setVisible(self._archive_action.isChecked())
         self._roster_title.setText(
             f"장기 미배송 보관함 ({len(ids)}명)" if self._archive_action.isChecked()
             else "대상자 명단"
@@ -1623,8 +1799,12 @@ class RosterWindow(QMainWindow):
                  "신규 명단을 가져오거나 기존 명단을 업데이트합니다"),
                 ("_add_person_action", "명단 행 추가", lambda: self.person_add_requested.emit(self._model.meal),
                  "새 대상자와 가입 식종을 명단에 추가합니다"),
-                ("_database_export_action", "Excel 내보내기", self.database_export_requested.emit,
+                ("_database_export_action", "DB 전체 Excel로 내보내기", self.database_export_requested.emit,
                  "전체 명단·민원·정보 및 식종 변경 이력을 Excel로 저장합니다"),
+                ("_current_sheet_export_action", "현재 시트 Excel 내보내기", self._request_current_sheet_export,
+                 "현재 시트에 보이는 칼럼과 행을 표시 순서 그대로 Excel로 저장합니다"),
+                ("_revision_history_action", "전체 변경 이력", self.revision_history_requested.emit,
+                 "저장된 모든 변경번호와 변경 내용을 읽기 전용으로 확인합니다"),
             )),
             ("기사", (
                 ("_drivers_action", "기사 관리", self.drivers_requested.emit,
@@ -1660,25 +1840,13 @@ class RosterWindow(QMainWindow):
                 self._archive_action.toggled.connect(lambda _checked: self._refresh_archive())
         return menu
 
-    def driver_household_rows(self):
+    def driver_household_rows(self, *, include_hidden: bool = False):
         from src.services.driver_households import build_driver_household_rows
 
-        included_meals = {
-            person.person_id: tuple(
-                meal
-                for meal in Meal
-                if self._model.scheduled_status_on(
-                    person.person_id,
-                    meal,
-                    self._model.service_day,
-                )
-                is MealStatus.DELIVERY
-            )
-            for person in self._roster.persons
-        }
         return build_driver_household_rows(
             self._roster, self._routing_state, self._model.service_day,
-            included_meals=included_meals,
+            browse_all_meals=True,
+            excluded_person_ids=() if include_hidden else self._model._archive_ids,
         )
 
     def _show_driver_households(self) -> None:
@@ -1689,6 +1857,9 @@ class RosterWindow(QMainWindow):
             service_day=self._model.service_day,
             drivers=self._routing_state.drivers,
             parent=self,
+            rows_provider=lambda include_hidden: self.driver_household_rows(
+                include_hidden=include_hidden
+            ),
         )
         dialog.sequence_save_requested.connect(
             lambda targets, value: self.household_sequence_save_requested.emit(targets, value, dialog)
@@ -2123,10 +2294,6 @@ class RosterWindow(QMainWindow):
         self._inspector_name.setObjectName("personName")
         self._inspector_name.setWordWrap(True)
         layout.addWidget(self._inspector_name)
-        self._inspector_detail = QLabel("연락처와 주소, 변경 이력이 여기에 표시됩니다.")
-        self._inspector_detail.setObjectName("muted")
-        self._inspector_detail.setWordWrap(True)
-        layout.addWidget(self._inspector_detail)
         layout.addSpacing(10)
         household_label = QLabel("같은 가구")
         household_label.setObjectName("sectionLabel")
@@ -2155,7 +2322,6 @@ class RosterWindow(QMainWindow):
         self._meal_history_list.setWordWrap(True)
         self._meal_history_list.setTextElideMode(Qt.TextElideMode.ElideNone)
         self._meal_history_list.setMinimumHeight(168)
-        self._meal_history_list.setMaximumHeight(220)
         layout.addWidget(self._meal_history_list, 1)
         guide = QLabel("우클릭: 이력보기·민원·상태 변경")
         guide.setObjectName("muted")
@@ -2482,7 +2648,12 @@ class RosterWindow(QMainWindow):
             if column.key in self._model._column_searches
             or column.key in self._model._column_values
         ]
-        self._column_filter_strip.setVisible(bool(active_columns))
+        archive_visible = self._archive_action.isChecked()
+        self._column_filter_strip.setVisible(bool(active_columns) or archive_visible)
+        self._clear_column_filters_button.setVisible(bool(active_columns))
+        self._archive_threshold_button.setVisible(archive_visible)
+        self._archive_exit_button.setVisible(archive_visible)
+        self._column_filter_label.clear()
         if active_columns:
             label = f"칼럼 필터 적용 중: {', '.join(active_columns)}"
             if self._model.rowCount() == 0:
@@ -2497,20 +2668,7 @@ class RosterWindow(QMainWindow):
         person = self._model.person_at(index.row())
         self._edit_person_button.setEnabled(True)
         profile = person.profile
-        delivery_view = self._model.person_delivery_view(person)
         self._inspector_name.setText(profile.name)
-        address = " ".join(
-            value
-            for value in (delivery_view.road_address, delivery_view.detail_address)
-            if value
-        )
-        details = [
-            "[연락처]",
-            *_inspector_contact_lines(self._roster, person),
-            "[주소]",
-            address or "미등록",
-        ]
-        self._inspector_detail.setText("\n".join(details))
         self._household_list.clear()
         household_ids = {
             membership.household_id
@@ -2579,7 +2737,6 @@ class RosterWindow(QMainWindow):
         self._delivery_settings_button.setEnabled(False)
         self._meal_history_all_button.setEnabled(False)
         self._inspector_name.setText("명단에서 한 사람을 선택하세요")
-        self._inspector_detail.setText("연락처와 주소, 변경 이력이 여기에 표시됩니다.")
         self._household_list.clear()
         self._meal_history_list.clear()
 
@@ -2596,6 +2753,7 @@ class RosterWindow(QMainWindow):
                 title, tooltip = row.text, row.tooltip
                 applied = f"적용 {row.applied}"
                 recorded = f"기록 {row.recorded[:16]}" if row.recorded else ""
+                reason = f"사유 {row.reason}" if row.reason else ""
                 detail = " · ".join(part for part in (applied, recorded) if part)
             else:
                 title, tooltip = row
@@ -2613,12 +2771,12 @@ class RosterWindow(QMainWindow):
                 title_label.setWordWrap(True)
                 title_label.setStyleSheet("font-weight: 700;")
                 entry_layout.addWidget(title_label)
-                for line in (applied, recorded):
+                for line in (applied, reason, recorded):
                     if not line:
                         continue
                     detail_label = QLabel(line)
                     detail_label.setWordWrap(True)
-                    detail_label.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+                    detail_label.setStyleSheet(f"color: {MUTED}; font-size: 11px;" if line == recorded else "font-size: 12px;")
                     entry_layout.addWidget(detail_label)
                 entry.setToolTip(tooltip)
                 entry.setAccessibleName(f"{title}, {detail}")

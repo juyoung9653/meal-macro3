@@ -4,17 +4,16 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
-from src.domain.roster import Meal, Person, RosterSnapshot
+from src.domain.roster import Meal, Person, RosterSnapshot, standard_delivery_defaults
 from src.domain.school_calendar import SchoolLunchCalendar
 
 
-RECURRING_MEAL_SERVICE_POLICY_VERSION = 4
+RECURRING_MEAL_SERVICE_POLICY_VERSION = 5
 
 
 def default_service_weekdays(meal: Meal, roster: RosterSnapshot | None = None) -> tuple[int, ...]:
-    if roster is not None:
-        return next(item.weekdays for item in roster.delivery_defaults if item.meal is meal)
-    return (4, 5, 6) if meal is Meal.BREAKFAST else (0, 1, 2, 3, 4)
+    defaults = roster.delivery_defaults if roster is not None else standard_delivery_defaults()
+    return next(item.weekdays for item in defaults if item.meal is meal)
 
 
 def default_delivery_weekdays(meal: Meal, roster: RosterSnapshot | None = None) -> tuple[int, ...]:

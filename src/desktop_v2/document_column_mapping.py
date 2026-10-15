@@ -77,9 +77,11 @@ class DocumentColumnMappingDialog(QDialog):
     def _initial_mapping(self, scope: tuple[str, str]) -> dict[str, str]:
         spec = self._specs[scope]
         overrides = self._overrides[scope]
+        selectable = spec.source_options if spec.selectable_source_options is None else spec.selectable_source_options
         return {
-            key: overrides.get(key, spec.defaults.get(key, ""))
+            key: source if source in selectable else ""
             for key in spec.targets if key not in spec.locked_targets
+            for source in (overrides.get(key, spec.defaults.get(key, "")),)
         }
 
     def _dirty(self) -> bool:
@@ -209,15 +211,11 @@ class DocumentColumnMappingDialog(QDialog):
             field = QComboBox()
             field.setMinimumWidth(220)
             field.addItem("비움", "")
-            for source in spec.source_options:
+            selectable = spec.source_options if spec.selectable_source_options is None else spec.selectable_source_options
+            for source in selectable:
                 if source:
                     field.addItem(spec.source_labels[source], source)
-            index = field.findData(values[target])
-            if index < 0:
-                # Preserve a historical custom field even if it is unavailable now.
-                field.addItem(spec.source_labels.get(values[target], "사용할 수 없는 이전 항목"), values[target])
-                index = field.count() - 1
-            field.setCurrentIndex(index)
+            field.setCurrentIndex(field.findData(values[target]))
             field.currentIndexChanged.connect(self._refresh_indicators)
             self._combos[target] = field
             indicator = QLabel()
@@ -290,8 +288,10 @@ class DocumentColumnMappingController:
                 self._message_box.critical(parent, "출력 칼럼을 열지 못했습니다", "현재 명단이 없습니다. 명단을 먼저 가져와주세요.")
                 return DocumentColumnMappingOutcome(DocumentColumnMappingStatus.FAILED)
             snapshot = self._session.database.snapshot(roster.revision_id)
+            model = getattr(parent, "table_model", None)
+            column_labels = None if model is None else {column.key: column.label for column in model.columns}
             specs = {
-                scope: mapping_editor_spec(*scope, roster=roster)
+                scope: mapping_editor_spec(*scope, roster=roster, column_labels=column_labels)
                 for scope in _SCOPES
             }
             overrides = {

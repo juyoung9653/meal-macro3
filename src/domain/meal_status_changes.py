@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from uuid import UUID
 
@@ -179,6 +179,8 @@ def build_batch_meal_status_revision(
     intake_channel: IntakeChannel | None = None,
 ) -> PreparedBatchMealStatusRevision:
     """Validate every target and prepare one atomic revision for the whole batch."""
+    if not isinstance(current_roster, RosterSnapshot):
+        raise TypeError("current roster는 RosterSnapshot이어야 합니다.")
     if not targets:
         raise ValueError("적용할 사람과 식종을 한 개 이상 선택해주세요.")
     if len(set(targets)) != len(targets):
@@ -187,33 +189,76 @@ def build_batch_meal_status_revision(
         raise ValueError("적용할 항목마다 변경 기록 번호가 필요합니다.")
     if len(set(event_ids.values())) != len(event_ids):
         raise ValueError("변경 기록 번호는 중복될 수 없습니다.")
+    if any(not isinstance(event_id, UUID) for event_id in event_ids.values()):
+        raise TypeError("상태 사건 ID는 UUID여야 합니다.")
+    if not isinstance(status, MealStatus):
+        raise TypeError("status는 MealStatus여야 합니다.")
     if intake_channel is not None and not isinstance(intake_channel, IntakeChannel):
         raise TypeError("접수 경로는 IntakeChannel이어야 합니다.")
+    if not isinstance(period, InclusiveDateRange):
+        raise TypeError("period는 InclusiveDateRange여야 합니다.")
+    if period.starts_on is None:
+        raise ValueError("배송 상태 변경에는 시작일이 필요합니다.")
+    if status is MealStatus.PAUSED and period.ends_on is None:
+        raise ValueError("일시중지는 종료일이 필요합니다.")
+    if not isinstance(actor, RevisionActor):
+        raise TypeError("actor는 RevisionActor여야 합니다.")
+    if not isinstance(recorded_at, datetime):
+        raise TypeError("recorded_at은 datetime이어야 합니다.")
+    if recorded_at.tzinfo is None or recorded_at.utcoffset() is None:
+        raise ValueError("recorded_at에는 시간대가 있어야 합니다.")
+    if not isinstance(revision_id, UUID):
+        raise TypeError("revision ID는 UUID여야 합니다.")
+    if revision_id == current_roster.revision_id:
+        raise ValueError("새 revision ID는 현재 revision과 달라야 합니다.")
     grouped: dict[UUID, list[Meal]] = {}
     for person_id, meal in targets:
         current_roster.person(person_id)
         if not isinstance(meal, Meal):
             raise TypeError("적용할 식종을 확인해주세요.")
         grouped.setdefault(person_id, []).append(meal)
-    working = current_roster
+    enrollments = current_roster.enrollments
     events: list[StatusEvent] = []
     enrolled: list[tuple[UUID, Meal]] = []
     for person_id, meals in grouped.items():
-        prepared = build_meal_status_revision(
-            replace(working, revision_id=current_roster.revision_id),
-            person_id,
-            tuple(meals),
-            status,
-            period,
-            actor=actor,
-            recorded_at=recorded_at,
-            revision_id=revision_id,
-            event_ids={meal: event_ids[(person_id, meal)] for meal in meals},
-            intake_channel=intake_channel,
+        selected_meals = canonical_meals(meals)
+        active_meals = set(current_roster.meals_for(person_id, on=period.starts_on))
+        not_enrolled = tuple(meal for meal in selected_meals if meal not in active_meals)
+        if status is not MealStatus.DELIVERY and not_enrolled:
+            labels = " · ".join(meal.value for meal in not_enrolled)
+            raise ValueError(
+                f"시작일에 미가입인 식종에는 {status.value}을 적용할 수 없습니다: {labels}"
+            )
+        if status is MealStatus.DELIVERY:
+            for meal in selected_meals:
+                updated = _cover_delivery_period(enrollments, person_id, meal, period)
+                if updated != enrollments:
+                    enrolled.append((person_id, meal))
+                    enrollments = updated
+        period_text = _period_text(period)
+        events.extend(
+            StatusEvent(
+                event_id=event_ids[(person_id, meal)],
+                revision_id=revision_id,
+                person_id=person_id,
+                meal=meal,
+                status=status,
+                period=period,
+                recorded_at=recorded_at,
+                source_text=f"{meal.value} {status.value} · {period_text}",
+            )
+            for meal in selected_meals
         )
-        working = prepared.snapshot
-        events.extend(prepared.events)
-        enrolled.extend((person_id, meal) for meal in prepared.auto_enrolled_meals)
+    working = RosterSnapshot(
+        revision_id,
+        persons=current_roster.persons,
+        households=current_roster.households,
+        memberships=current_roster.memberships,
+        enrollments=enrollments,
+        assignments=current_roster.assignments,
+        custom_fields=current_roster.custom_fields,
+        delivery_defaults=current_roster.delivery_defaults,
+    )
     changes = (
         *roster_audit_changes(current_roster, working),
         *(status_event_audit_change(event) for event in events),

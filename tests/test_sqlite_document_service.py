@@ -180,12 +180,12 @@ def test_calculates_shared_invoice_and_confirmation_facts_from_source_revision()
         delivery.breakfast_count,
         delivery.lunch_count,
         delivery.dinner_count,
-    ) == (13, 1, 18)
-    assert delivery.billing_amount == 327_000
-    assert delivery.amount(prepared.batch.prices) == 327_000
+    ) == (13, 1, 14)
+    assert delivery.billing_amount == 287_000
+    assert delivery.amount(prepared.batch.prices) == 287_000
     assert sum(item.breakfast_count for item in delivery.weekly) == 13
     assert sum(item.lunch_count for item in delivery.weekly) == 1
-    assert sum(item.dinner_count for item in delivery.weekly) == 18
+    assert sum(item.dinner_count for item in delivery.weekly) == 14
     assert prepared.global_note == (
         "조식 단가: 1~15일 10,000원 / 16~31일 11,000원"
     )
@@ -194,9 +194,26 @@ def test_calculates_shared_invoice_and_confirmation_facts_from_source_revision()
         "중식",
         "석식",
     )
-    assert prepared.calculation_manifest["billing"]["total_amount"] == 327_000
+    assert prepared.calculation_manifest["billing"]["total_amount"] == 287_000
     assert prepared.calculation_manifest["calculation_contract_version"] == 3
-    assert prepared.calculation_manifest["recurring_service_policy"]["version"] == 4
+    assert prepared.calculation_manifest["recurring_service_policy"]["version"] == 5
+
+
+@pytest.mark.parametrize("stored_defaults", (True, False))
+def test_default_dinner_week_has_four_billed_meals(stored_defaults):
+    snapshot = _source_snapshot(include_school=False)
+    if not stored_defaults:
+        from src.domain.delivery_defaults import DELIVERY_DEFAULTS_KIND
+        snapshot = HistoricalSnapshot(snapshot.revision_id, {
+            ref: state for ref, state in snapshot.entities.items()
+            if ref.entity_kind != DELIVERY_DEFAULTS_KIND
+        })
+    prepared = prepare_monthly_document_data(
+        snapshot,
+        date(2026, 8, 17), date(2026, 8, 23), (Meal.DINNER,),
+    )
+    assert prepared.batch.deliveries[0].dinner_count == 4
+    assert prepared.batch.deliveries[0].billing_amount == 40_000
 
 
 def test_blocks_enrolled_lunch_when_reviewed_school_period_is_missing():
@@ -233,8 +250,15 @@ def test_household_weekdays_change_billing_but_custom_form_does_not():
         _source_snapshot(delivery_settings=(weekdays,)),
         date(2026, 8, 1), date(2026, 8, 31), (Meal.DINNER,)
     )
-    assert len(default.entitlements) == len(custom.entitlements) == 18
-    assert default.billing.total_amount == custom.billing.total_amount
+    assert len(default.entitlements) == 14
+    assert len(custom.entitlements) == 18
+    assert custom.billing.total_amount - default.billing.total_amount == 40_000
+    form_only = prepare_monthly_document_data(
+        _source_snapshot(delivery_settings=(HouseholdDeliverySetting(Meal.DINNER, form="식재료 박스"),)),
+        date(2026, 8, 1), date(2026, 8, 31), (Meal.DINNER,),
+    )
+    assert len(form_only.entitlements) == len(default.entitlements)
+    assert form_only.billing.total_amount == default.billing.total_amount
 
     mondays = prepare_monthly_document_data(
         _source_snapshot(delivery_settings=(

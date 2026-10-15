@@ -13,7 +13,13 @@ from PySide6.QtGui import QContextMenuEvent, QInputMethodEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
-from src.desktop_v2.column_search import SequenceValuePicker, sequence_pair_token
+from src.desktop_v2.column_search import (
+    SequenceValuePicker,
+    sequence_exclusive_token,
+    sequence_pair_token,
+    sequence_present_meal,
+    sequence_present_token,
+)
 from src.desktop_v2.roster_window import RosterTableModel, RosterWindow
 from src.domain.roster import (
     Meal,
@@ -68,7 +74,7 @@ def test_projection_single_common_retained_blank_raw_sort_and_exact_pairs():
     assert [model.person_at(i).profile.name for i in range(7)] == ["하나", "혼합", "둘", "보존", "열", "공통", "빈값"]
     token = sequence_pair_token
     model.set_column_values("sequence", {token("석식", "001"), token("조식", "2")})
-    assert {model.person_at(i).profile.name for i in range(model.rowCount())} == {"하나", "둘", "혼합"}
+    assert {model.person_at(i).profile.name for i in range(model.rowCount())} == {"혼합"}
     model.set_column_search("name", "혼합")
     assert model.rowCount() == 1
     model.set_column_search("name", "")
@@ -77,7 +83,7 @@ def test_projection_single_common_retained_blank_raw_sort_and_exact_pairs():
     model.set_column_values("sequence", {token("석식", "")})
     assert model.rowCount() == 1 and model.person_at(0).profile.name == "빈값"
     model.set_column_values("sequence", set())
-    assert model.rowCount() == 0
+    assert model.rowCount() == 1 and model.person_at(0).profile.name == "빈값"
     # Old composite selections retain exact whole-row semantics.
     model.set_column_values("sequence", {"석식: 001\n조식: 2"})
     assert model.rowCount() == 1 and model.person_at(0).profile.name == "혼합"
@@ -120,10 +126,112 @@ def test_tree_parent_children_ime_empty_and_unavailable_selection(app):
     empty.close()
 
 
+def test_sequence_present_tokens_and_picker_do_not_broaden_literal_selection(app):
+    literal = sequence_pair_token("석식", "순서 있음")
+    present = sequence_present_token("석식")
+    assert present != literal != "순서 있음"
+    assert sequence_present_meal(present) == "석식"
+    assert sequence_present_meal(literal) is None
+    assert sequence_present_meal("순서 있음") is None
+    assert sequence_present_meal("sequence-present:v1:야식") is None
+    with pytest.raises(ValueError, match="지원하지 않는 식종"):
+        sequence_present_token("야식")
+
+    values = (literal, present, sequence_present_token("조식"), sequence_present_token("중식"))
+    picker = SequenceValuePicker(values, {literal})
+    dinner = next(
+        picker.list.topLevelItem(i)
+        for i in range(picker.list.topLevelItemCount())
+        if picker.list.topLevelItem(i).text(0) == "석식"
+    )
+    literal_item = next(
+        dinner.child(i) for i in range(dinner.childCount())
+        if dinner.child(i).data(0, Qt.ItemDataRole.UserRole) == literal
+    )
+    assert literal_item.checkState(0) == Qt.CheckState.Checked
+    assert "정확히 일치" in literal_item.toolTip(0)
+    assert all(item.data(0, Qt.ItemDataRole.UserRole) != present for item in picker._leaves)
+
+    result = []
+    picker.applied.connect(lambda *args: result.append(args))
+    picker.apply.click()
+    assert result[-1] == ("", frozenset({literal}))
+    picker.close()
+
+    restored = SequenceValuePicker(values, {present})
+    restored_result = []
+    restored.applied.connect(lambda *args: restored_result.append(args))
+    assert any(item.data(0, Qt.ItemDataRole.UserRole) == present for item in restored._leaves)
+    restored.apply.click()
+    assert restored_result[-1] == ("", frozenset({present}))
+    restored.close()
+
+
+def test_sequence_present_model_filters_all_meals_and_survives_new_values():
+    roster = roster_fixture()
+    model = RosterTableModel(roster)
+    semantic_tokens = {sequence_present_token(meal.value) for meal in Meal}
+    assert semantic_tokens.isdisjoint(model.column_filter_values("sequence"))
+
+    expected_by_meal = {
+        Meal.DINNER: {"하나", "열"},
+        Meal.BREAKFAST: {"둘", "보존"},
+        Meal.LUNCH: set(),
+    }
+    for meal, expected in expected_by_meal.items():
+        model.set_column_values("sequence", {sequence_present_token(meal.value)})
+        assert {model.person_at(i).profile.name for i in range(model.rowCount())} == expected
+
+    target = roster.persons[4]
+    model.set_column_values("sequence", {sequence_present_token(Meal.LUNCH.value)})
+    assert model.rowCount() == 0
+    updated = replace(
+        roster,
+        assignments=(*roster.assignments, DeliveryAssignment(
+            target.person_id, Meal.LUNCH, "기사", "새 순서",
+        )),
+    )
+    model.replace_roster(updated)
+    assert model.selected_column_values("sequence") == frozenset({sequence_present_token("중식")})
+    assert model.rowCount() == 1
+    assert model.person_at(0).person_id == target.person_id
+
+
+def test_sequence_present_filter_does_not_collide_with_literal_value():
+    literal_person, other_person = (
+        Person(uuid4(), PersonProfile(name)) for name in ("문자 그대로", "다른 순서")
+    )
+    roster = RosterSnapshot(
+        uuid4(),
+        persons=(literal_person, other_person),
+        enrollments=tuple(
+            MealEnrollment(person.person_id, Meal.DINNER)
+            for person in (literal_person, other_person)
+        ),
+        assignments=(
+            DeliveryAssignment(literal_person.person_id, Meal.DINNER, sequence="순서 있음"),
+            DeliveryAssignment(other_person.person_id, Meal.DINNER, sequence="2"),
+        ),
+    )
+    model = RosterTableModel(roster)
+    model.set_column_values("sequence", {sequence_pair_token("석식", "순서 있음")})
+    assert [model.person_at(i).profile.name for i in range(model.rowCount())] == ["문자 그대로"]
+    model.set_column_values("sequence", {sequence_present_token("석식")})
+    assert {model.person_at(i).profile.name for i in range(model.rowCount())} == {
+        "문자 그대로", "다른 순서",
+    }
+
+
 def test_sequence_pair_and_legacy_filters_restore_without_broadening(app, tmp_path):
     roster = roster_fixture()
     settings = QSettings(str(tmp_path / "view.ini"), QSettings.IniFormat)
-    for selected in ({sequence_pair_token("조식", "2"), sequence_pair_token("중식", "missing")}, {"석식: 001\n조식: 2"}, set()):
+    for selected in (
+        {sequence_pair_token("조식", "2"), sequence_pair_token("중식", "missing")},
+        {sequence_present_token("조식")},
+        {sequence_exclusive_token("조식")},
+        {"석식: 001\n조식: 2"},
+        set(),
+    ):
         window = RosterWindow(roster, column_settings=settings, inactive_settings=settings, view_settings_scope="sequence-test")
         window._on_column_values_changed("sequence", selected)
         expected = window.table_model.rowCount()
@@ -203,9 +311,13 @@ def test_applicable_blank_meal_pairs_filter_restore_and_keep_legacy_display(app,
     assert model.person_at(0).person_id == mixed.person_id
     selected = {sequence_pair_token("조식", "")}
     model.set_column_values("sequence", selected)
-    assert {model.person_at(i).person_id for i in range(model.rowCount())} == {mixed.person_id, blank.person_id}
+    assert {model.person_at(i).person_id for i in range(model.rowCount())} == {
+        blank.person_id, unspecified.person_id,
+    }
     model.set_column_values("sequence", {sequence_pair_token("석식", "")})
-    assert model.rowCount() == 1 and model.person_at(0).person_id == blank.person_id
+    assert {model.person_at(i).person_id for i in range(model.rowCount())} == {
+        blank.person_id, unspecified.person_id,
+    }
     model.set_column_values("sequence", {sequence_pair_token("(빈 값)", "")})
     assert model.rowCount() == 1 and model.person_at(0).person_id == unspecified.person_id
     # Old whole-row empty values continue to match every previously empty row.
@@ -226,8 +338,12 @@ def test_applicable_blank_meal_pairs_filter_restore_and_keep_legacy_display(app,
     picker = reopened._column_search_header._menu.findChild(SequenceValuePicker)
     breakfast_parent = next(picker.list.topLevelItem(i) for i in range(picker.list.topLevelItemCount())
                             if picker.list.topLevelItem(i).text(0) == "조식")
-    assert breakfast_parent.childCount() == 1
-    assert breakfast_parent.child(0).text(0) == "(빈 값)"
-    assert breakfast_parent.child(0).checkState(0) == Qt.Checked
+    blank_item = next(
+        breakfast_parent.child(i) for i in range(breakfast_parent.childCount())
+        if breakfast_parent.child(i).data(0, Qt.ItemDataRole.UserRole)
+        == sequence_pair_token("조식", "")
+    )
+    assert blank_item.text(0) == "(빈 값)"
+    assert blank_item.checkState(0) == Qt.Checked
     picker.cancel.click()
     reopened.close()

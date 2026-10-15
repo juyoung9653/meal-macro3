@@ -249,6 +249,44 @@ def test_publish_failure_preserves_existing_file_and_reports_no_success(app, ses
     assert not list(tmp_path.glob(".kept.xlsx.*"))
 
 
+def test_application_current_sheet_export_uses_password_gate_and_configured_directory(tmp_path):
+    from src.desktop_v2.application import DesktopStartupController
+    from src.desktop_v2.current_sheet_export import CurrentSheetSnapshot
+
+    session = object()
+    window = object()
+    snapshot = CurrentSheetSnapshot("연락", ("성명",), (("아동",),))
+    calls = []
+
+    class PasswordController:
+        def __init__(self, current_session):
+            assert current_session is session
+
+        def ensure_configured(self, parent):
+            assert parent is window
+            calls.append("password")
+            return SimpleNamespace(
+                completed=True,
+                roster=None,
+                setting=SimpleNamespace(password="xlsx-password"),
+            )
+
+    class SheetController:
+        def run(self, *args, **kwargs):
+            calls.append((args, kwargs))
+
+    controller = DesktopStartupController(
+        settings=SimpleNamespace(document_output_directory=tmp_path),
+        export_password_controller_type=PasswordController,
+        current_sheet_export_controller_type=SheetController,
+    )
+    controller._run_current_sheet_export(session, window, snapshot)
+    assert calls == [
+        "password",
+        ((snapshot, "xlsx-password", window), {"directory": tmp_path}),
+    ]
+
+
 @pytest.mark.parametrize("fail", [False, True])
 def test_export_keeps_ui_responsive_and_worker_alive_until_finished(app, session, tmp_path, fail):
     from threading import Event, get_ident

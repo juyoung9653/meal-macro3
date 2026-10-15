@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
-from datetime import date
+from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import date
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from PySide6.QtCore import Qt, Signal, QEvent
+from PySide6.QtCore import QEvent, Qt, Signal
 from PySide6.QtWidgets import (
+    QAbstractItemDelegate,
     QAbstractItemView,
+    QCheckBox,
     QDialog,
     QDialogButtonBox,
     QHBoxLayout,
@@ -17,11 +20,10 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QStyledItemDelegate,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
-    QStyledItemDelegate,
-    QAbstractItemDelegate,
 )
 
 from src.domain.delivery_routing import Driver
@@ -147,6 +149,7 @@ class DriverHouseholdsDialog(QDialog):
         service_day: date,
         drivers: tuple[Driver, ...],
         selected_driver_id: UUID | None = None,
+        rows_provider: Callable[[bool], tuple[DriverHouseholdRow, ...]] | None = None,
         parent=None,
     ):
         super().__init__(parent)
@@ -157,6 +160,7 @@ class DriverHouseholdsDialog(QDialog):
         self.resize(1000, 600)
 
         self._rows = tuple(rows)
+        self._rows_provider = rows_provider
         self._split_by_meal = False
         self._drivers = tuple(drivers)
         self._selected_driver_id = selected_driver_id if isinstance(selected_driver_id, UUID) else None
@@ -170,6 +174,9 @@ class DriverHouseholdsDialog(QDialog):
         self.day_label = QLabel(f"선택일: {service_day:%Y-%m-%d}")
         self.day_label.setObjectName("fieldLabel")
         layout.addWidget(self.day_label)
+        self.scope_label = QLabel("가입·배정된 모든 식종 · 일시중지·중지 포함")
+        self.scope_label.setObjectName("driverHouseholdsScope")
+        layout.addWidget(self.scope_label)
         guide = QLabel("배송순서를 더블클릭해 입력하면 이 행의 가구원 식종에 함께 적용됩니다.")
         guide.setWordWrap(True)
         guide.setObjectName("workspaceSubtitle")
@@ -177,6 +184,12 @@ class DriverHouseholdsDialog(QDialog):
 
         filters = QHBoxLayout()
         filters.addStretch(1)
+        self.include_hidden_checkbox = QCheckBox("숨긴 명단 포함")
+        self.include_hidden_checkbox.setObjectName("includeHiddenHouseholds")
+        self.include_hidden_checkbox.setToolTip("장기 미배송으로 숨긴 대상자를 기사별 가구에 포함")
+        self.include_hidden_checkbox.setEnabled(rows_provider is not None)
+        self.include_hidden_checkbox.toggled.connect(self._set_include_hidden)
+        filters.addWidget(self.include_hidden_checkbox)
         self.split_button = QPushButton("식종별 분리")
         self.split_button.setObjectName("quietAction")
         self.split_button.setToolTip("가구 행을 식종별 배송 행으로 표시")
@@ -204,6 +217,11 @@ class DriverHouseholdsDialog(QDialog):
         )
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setTextElideMode(Qt.TextElideMode.ElideNone)
+        self.table.setWordWrap(True)
+        self.table.verticalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents
+        )
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked)
         self._sequence_delegate = _SequenceDelegate(self.table)
         self.table.setItemDelegateForColumn(3, self._sequence_delegate)
@@ -247,6 +265,9 @@ class DriverHouseholdsDialog(QDialog):
 
         self._refresh()
 
+    @property
+    def include_hidden(self) -> bool:
+        return self.include_hidden_checkbox.isChecked()
 
     def replace_rows(self, rows):
         self._rows = tuple(rows)
@@ -258,6 +279,14 @@ class DriverHouseholdsDialog(QDialog):
         problem = result.status is SequenceSaveStatus.FAILED or result.backup_warning
         self.sequence_status.setStyleSheet("color: #B42318;" if problem else "")
         self.sequence_status.setText(result.message)
+
+    def _set_include_hidden(self, include_hidden: bool) -> None:
+        if self._rows_provider is None:
+            return
+        editor = self.table.findChild(QLineEdit, "householdSequenceEditor")
+        if editor is not None:
+            self._sequence_delegate._cancel(editor)
+        self.replace_rows(self._rows_provider(include_hidden))
 
     def _visible_rows(self) -> tuple[DriverHouseholdRow, ...]:
         visible = []
@@ -322,6 +351,8 @@ class DriverHouseholdsDialog(QDialog):
 
     def _set_column_search(self, key, text):
         normalized = " ".join(text.split()).casefold()
+        if self._column_searches.get(key, "") == normalized:
+            return
         if normalized:
             self._column_searches[key] = normalized
         else:
@@ -329,6 +360,9 @@ class DriverHouseholdsDialog(QDialog):
         self._refresh()
 
     def _set_column_values(self, key, values):
+        values = None if values is None else frozenset(values)
+        if self._column_values.get(key) == values:
+            return
         if values is None:
             self._column_values.pop(key, None)
         else:
@@ -345,25 +379,32 @@ class DriverHouseholdsDialog(QDialog):
         )
         # Inserting into a sorted QTableWidget can move a half-populated row.
         self.table.setSortingEnabled(False)
-        self.table.setRowCount(len(rows))
-        for index, row in enumerate(rows):
-            values = self._display_values(row)
-            for column, value in enumerate(values):
-                sort_key = _sequence_key(row.sequences) if column == 3 else (value.casefold(),)
-                item = _SortableItem(value, sort_key)
-                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-                item.setToolTip(value)
-                if column == 3:
-                    item.setData(Qt.ItemDataRole.UserRole, row)
-                    if _sequence_targets(row):
-                        item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
-                    item.setToolTip(f"{value or '순서 미지정'}\n더블클릭하여 가구에 같은 순서 적용 · Enter 저장 · Esc 취소")
-                if column == 0:
-                    item.setData(Qt.ItemDataRole.UserRole, (
-                        row.household_key, row.driver_id, row.driver_name, row.address,
-                    ))
-                self.table.setItem(index, column, item)
-        self.table.setSortingEnabled(True)
+        # Replacing populated cells otherwise recalculates wrapped row heights
+        # after every setItem, which can block filter Apply for large manifests.
+        row_header = self.table.verticalHeader()
+        row_header.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        try:
+            self.table.setRowCount(len(rows))
+            for index, row in enumerate(rows):
+                values = self._display_values(row)
+                for column, value in enumerate(values):
+                    sort_key = _sequence_key(row.sequences) if column == 3 else (value.casefold(),)
+                    item = _SortableItem(value, sort_key)
+                    item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                    item.setToolTip(value)
+                    if column == 3:
+                        item.setData(Qt.ItemDataRole.UserRole, row)
+                        if _sequence_targets(row):
+                            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
+                        item.setToolTip(f"{value or '순서 미지정'}\n더블클릭하여 가구에 같은 순서 적용 · Enter 저장 · Esc 취소")
+                    if column == 0:
+                        item.setData(Qt.ItemDataRole.UserRole, (
+                            row.household_key, row.driver_id, row.driver_name, row.address,
+                        ))
+                    self.table.setItem(index, column, item)
+            self.table.setSortingEnabled(True)
+        finally:
+            row_header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         if selected_identity is not None:
             for index in range(self.table.rowCount()):
                 if self.table.item(index, 0).data(Qt.ItemDataRole.UserRole) == selected_identity:
@@ -376,4 +417,4 @@ class DriverHouseholdsDialog(QDialog):
         elif self._rows:
             self.empty.setText("현재 기사와 칼럼 필터에 해당하는 가구가 없습니다.")
         else:
-            self.empty.setText("선택일에 배송 상태인 가구가 없습니다.")
+            self.empty.setText("표시할 가입·배정 가구가 없습니다.")

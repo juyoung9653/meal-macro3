@@ -5,6 +5,7 @@ import pytest
 
 from PySide6.QtCore import QSettings, Qt
 from PySide6.QtGui import QInputMethodEvent
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from src.desktop_v2.roster_window import RosterTableModel, RosterWindow
@@ -223,7 +224,8 @@ def test_value_picker_apply_cancel_reset_and_reopen(tmp_path):
     picker = header._menu.findChild(ColumnValuePicker)
     picker.select_none.click()
     picker.list.item(0).setCheckState(Qt.CheckState.Checked)
-    picker.apply.click()
+    QTest.mouseClick(picker.apply, Qt.MouseButton.LeftButton)
+    assert not header._menu.isVisible()
     assert window.table_model.rowCount() == 1
     assert window.table_model.selected_column_values("school") == frozenset({""})
     header.open_value_filter("school")
@@ -231,14 +233,16 @@ def test_value_picker_apply_cancel_reset_and_reopen(tmp_path):
     assert picker.list.item(0).checkState() == Qt.CheckState.Checked
     assert picker.list.item(1).checkState() == Qt.CheckState.Unchecked
     picker.select_all.click()
-    picker.cancel.click()
+    QTest.mouseClick(picker.cancel, Qt.MouseButton.LeftButton)
+    assert not header._menu.isVisible()
     assert window.table_model.rowCount() == 1
     header.open_value_filter("school")
     picker = header._menu.findChild(ColumnValuePicker)
     picker.search.setText("샘플")
     assert picker.list.item(0).isHidden()
     assert not picker.list.item(1).isHidden()
-    picker.reset.click()
+    QTest.mouseClick(picker.reset, Qt.MouseButton.LeftButton)
+    assert not header._menu.isVisible()
     assert window.table_model.rowCount() == 2
     assert window.table_model.selected_column_values("school") is None
     window.close()
