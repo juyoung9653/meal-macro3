@@ -797,6 +797,15 @@ def test_startup_cancel_does_not_construct_or_show_blank_roster(
     tmp_path: Path,
 ):
     session = _session(tmp_path)
+    startup_order = []
+
+    def run_startup_task(task, *, message, parent=None):
+        assert parent is None
+        assert "명단" in message
+        startup_order.append("loading")
+        result = task()
+        startup_order.append("loading_closed")
+        return result
 
     class Access:
         backup_result = AutomaticBackupResult()
@@ -812,6 +821,8 @@ def test_startup_cancel_does_not_construct_or_show_blank_roster(
             assert opened_session is session
 
         def run(self, parent=None):
+            assert startup_order == ["loading", "loading_closed"]
+            startup_order.append("import")
             return GuidedImportOutcome(GuidedImportStatus.CANCELLED)
 
     class BlankWindowMustNotExist:
@@ -825,11 +836,13 @@ def test_startup_cancel_does_not_construct_or_show_blank_roster(
         guided_controller_type=CancelGuided,
         roster_window_type=BlankWindowMustNotExist,
         message_box=_Messages,
+        startup_task_runner=run_startup_task,
     )
 
     outcome = controller.start()
 
     assert outcome.status is StartupStatus.ONBOARDING_PENDING
+    assert startup_order == ["loading", "loading_closed", "import"]
     assert outcome.session is None
     with pytest.raises(RuntimeError, match="닫혔습니다"):
         _ = session.database

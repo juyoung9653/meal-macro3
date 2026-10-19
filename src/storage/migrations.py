@@ -793,6 +793,39 @@ MIGRATIONS = (
             "ALTER TABLE person_projection ADD COLUMN delivery_settings_json TEXT CHECK(delivery_settings_json IS NULL OR (json_valid(delivery_settings_json) AND json_type(delivery_settings_json) = 'array'))",
         ),
     ),
+    Migration(
+        version=8,
+        name="historical_status_projection_restore",
+        statements=(
+            "DROP TRIGGER status_event_projection_guard_insert",
+            """
+            CREATE TRIGGER status_event_projection_guard_insert
+            BEFORE INSERT ON status_event_projection
+            WHEN NOT EXISTS (
+                SELECT 1 FROM projection_write_context
+                WHERE revision_id = NEW.created_revision_id
+            ) AND NOT EXISTS (
+                SELECT 1
+                FROM projection_write_context AS context
+                JOIN revision AS restoring ON restoring.revision_id = context.revision_id
+                JOIN audit_change AS restored ON restored.revision_id = context.revision_id
+                  AND restored.entity_kind = 'status.event'
+                  AND restored.entity_id = NEW.event_id
+                  AND restored.operation IN ('insert', 'update')
+                JOIN audit_change AS original ON original.revision_id = NEW.created_revision_id
+                  AND original.entity_kind = restored.entity_kind
+                  AND original.entity_id = NEW.event_id
+                  AND original.operation = 'insert'
+                  AND original.after_json = restored.after_json
+                JOIN revision_seal AS seal ON seal.revision_id = original.revision_id
+                WHERE json_type(restoring.decisions_json, '$.snapshot_restore_target') = 'text'
+            )
+            BEGIN
+                SELECT RAISE(ABORT, 'projection write requires an open revision');
+            END
+            """,
+        ),
+    ),
 )
 
 CURRENT_SCHEMA_VERSION = MIGRATIONS[-1].version

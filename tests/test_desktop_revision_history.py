@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
 from src.desktop_v2.application import DesktopStartupController, StartupStatus
 from src.desktop_v2.person_history import PersonHistoryDialog
 from src.desktop_v2.revision_history import GlobalRevisionHistoryDialog
-from src.domain.revisions import RevisionActor, RevisionSource, RevisionSummary
+from src.domain.revisions import HistoricalSnapshot, RevisionActor, RevisionSource, RevisionSummary
 from src.domain.roster import Meal
 
 REVISION_1 = UUID("96000000-0000-0000-0000-000000000001")
@@ -186,6 +186,10 @@ def test_startup_wires_revision_history_signal_to_injected_dialog(app):
         def current_roster(self):
             return roster
 
+        def snapshot(self, revision_id):
+            assert revision_id == roster.revision_id
+            return HistoricalSnapshot(revision_id, {})
+
     session = SimpleNamespace(
         database=Database(),
         credentials=SimpleNamespace(database_id=UUID(int=5)),
@@ -233,9 +237,7 @@ def test_startup_wires_revision_history_signal_to_injected_dialog(app):
         revision_history_dialog_type=Dialog,
     )
     controller._histories = lambda _session, _roster: {}
-    controller._imported_profile_fields = lambda _session, _roster: frozenset()
     controller._revision_display_code = lambda _session, _roster: "20261014-110000"
-    controller._refresh_school_calendar = lambda _session, _window, _roster: None
 
     outcome = controller._start_with_dialog(Access(), None)
     assert outcome.status is StartupStatus.READY

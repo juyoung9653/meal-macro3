@@ -34,8 +34,10 @@ from src.services.sqlite_delivery_report_service import (
 from src.services.document_column_mappings import (
     confirmation_default_mapping,
     effective_mapping,
+    effective_fallbacks,
     invoice_default_mapping,
     load_mapping_overrides,
+    load_mapping_fallbacks,
     mapping_setting_from_snapshot,
 )
 from src.services.sqlite_document_service import prepare_monthly_document_data
@@ -212,7 +214,9 @@ class DocumentGenerationController:
                     column_mapping,
                     load_mapping_overrides(current_snapshot, profile_key, "invoice"),
                 )
+                column_fallbacks = effective_fallbacks(column_mapping, load_mapping_fallbacks(current_snapshot, profile_key, "invoice"), document_kind="invoice")
                 _validate_custom_mapping_sources(column_mapping, current_roster)
+                _validate_custom_mapping_sources(column_fallbacks, current_roster)
                 _count, publication = self._invoice_writer(
                     prepared.batch,
                     column_mapping,
@@ -221,6 +225,7 @@ class DocumentGenerationController:
                     meal_type=profile_key,
                     global_note=prepared.global_note,
                     output_password=password_setting.password,
+                    **({"column_fallbacks": column_fallbacks} if column_fallbacks else {}),
                 )
                 kind = DocumentKind.INVOICE
                 writer_name = "invoice_generator.make_invoice_publication"
@@ -233,7 +238,9 @@ class DocumentGenerationController:
                     column_mapping,
                     load_mapping_overrides(current_snapshot, profile_key, "confirmation"),
                 )
+                column_fallbacks = effective_fallbacks(column_mapping, load_mapping_fallbacks(current_snapshot, profile_key, "confirmation"), document_kind="confirmation")
                 _validate_custom_mapping_sources(column_mapping, current_roster)
+                _validate_custom_mapping_sources(column_fallbacks, current_roster)
                 _created, publication = self._confirmation_writer(
                     prepared.batch,
                     column_mapping,
@@ -241,11 +248,13 @@ class DocumentGenerationController:
                     str(template_path),
                     meal_type=profile_key,
                     output_password=password_setting.password,
+                    **({"column_fallbacks": column_fallbacks} if column_fallbacks else {}),
                 )
                 kind = DocumentKind.CONFIRMATION
                 writer_name = "confirm_generator.make_confirm_publication"
             else:
                 column_mapping = {}
+                column_fallbacks = {}
                 mapping_setting = None
                 publication = self._report_writer(
                     prepared.reports,
@@ -266,6 +275,7 @@ class DocumentGenerationController:
                 "template_byte_size": template_path.stat().st_size,
                 "writer": writer_name,
                 "column_mapping": dict(sorted(column_mapping.items())),
+                "column_fallbacks": dict(sorted(column_fallbacks.items())),
                 "content_sha256": publication.content_sha256,
                 "export_password": password_setting.public_manifest(),
             }

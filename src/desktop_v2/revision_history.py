@@ -1,4 +1,4 @@
-"""Read-only browser for the complete revision ledger."""
+"""Browse the complete revision ledger and choose historical restore or branch."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QPushButton,
     QSplitter,
     QTableView,
     QVBoxLayout,
@@ -151,6 +152,7 @@ class GlobalRevisionHistoryDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self._database = database
+        self._restore_controller = None
         self._change_rows_builder = change_rows_builder
         self._summary_load_failed = False
         try:
@@ -179,6 +181,19 @@ class GlobalRevisionHistoryDialog(QDialog):
             self._clear_detail("선택할 변경 기록이 없습니다.")
         self._search.setFocus()
 
+    def configure_actions(self, session, settings, on_restart) -> None:
+        from .revision_restore import RevisionRestoreController
+        self._restore_controller = RevisionRestoreController(session, settings, on_restart)
+        self._restore_button.show()
+        self._open_file_button.show()
+        self._restore_button.setEnabled(self.selected_revision_id is not None)
+        self._eyebrow.setText(f"운영 데이터 · {session.path.name}")
+        self._eyebrow.setToolTip(str(session.path))
+
+    def _restore_selected(self):
+        if self._restore_controller is not None:
+            self._restore_controller.run(self.selected_revision_id, self)
+
     @property
     def selected_revision_id(self) -> UUID | None:
         index = self._summary_table.currentIndex()
@@ -202,6 +217,7 @@ class GlobalRevisionHistoryDialog(QDialog):
         header_layout.setSpacing(4)
         eyebrow = QLabel("운영 데이터 · 읽기 전용")
         eyebrow.setObjectName("editEyebrow")
+        self._eyebrow = eyebrow
         title = QLabel("전체 변경 이력")
         title.setObjectName("workspaceTitle")
         subtitle = QLabel(
@@ -229,6 +245,16 @@ class GlobalRevisionHistoryDialog(QDialog):
         buttons.button(QDialogButtonBox.StandardButton.Close).setObjectName(
             "quietAction"
         )
+        self._restore_button = QPushButton("선택한 변경번호로 복구·분기")
+        self._restore_button.setObjectName("primaryAction")
+        self._restore_button.clicked.connect(self._restore_selected)
+        self._restore_button.hide()
+        buttons.addButton(self._restore_button, QDialogButtonBox.ButtonRole.ActionRole)
+        self._open_file_button = QPushButton("다른 운영 파일 열기")
+        self._open_file_button.setObjectName("quietAction")
+        self._open_file_button.clicked.connect(lambda: self._restore_controller.open_existing(self))
+        self._open_file_button.hide()
+        buttons.addButton(self._open_file_button, QDialogButtonBox.ButtonRole.ActionRole)
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
 
@@ -352,6 +378,7 @@ class GlobalRevisionHistoryDialog(QDialog):
         self._summary_status.setText(text)
 
     def _load_selected_revision(self, current, _previous) -> None:
+        self._restore_button.setEnabled(current.isValid())
         self._detail_model.set_rows(())
         if not current.isValid():
             return
@@ -398,6 +425,7 @@ class GlobalRevisionHistoryDialog(QDialog):
         )
 
     def _clear_detail(self, status: str) -> None:
+        self._restore_button.setEnabled(False)
         self._detail_model.set_rows(())
         self._selection_title.setText("변경번호를 선택하세요.")
         self._selection_meta.clear()

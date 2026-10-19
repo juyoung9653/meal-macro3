@@ -22,7 +22,7 @@ from src.domain.projections import (
 )
 from src.domain.provider_settings import PROVIDER_SETTING_KIND
 from src.domain.sequence_settings import SEQUENCE_MODE_SETTING_KIND
-from src.domain.household_shared import HOUSEHOLD_SHARED_KIND, shared_columns_from_state
+from src.domain.household_shared import HOUSEHOLD_SHARED_KIND, shared_columns_from_state, shared_exceptions_from_state
 from src.domain.revisions import (
     AuditChange,
     ChangeOperation,
@@ -259,13 +259,19 @@ def _change_text(change: AuditChange, snapshot=None, previous_snapshot=None) -> 
                     if state is not None:
                         return str(state.get("name", "사용자 정의 항목"))
                 return "사용자 정의 항목"
-            aliases = {"mobile": "핸드폰", "school": "학교명", "delivery_settings": "배송 설정", "status:dinner": "석식 상태", "status:breakfast": "조식 상태", "status:lunch": "중식 상태"}
+            aliases = {"address": "도로명주소", "detail_address": "상세주소", "mobile": "핸드폰", "school": "학교명", "delivery_settings": "배송 설정", "status:dinner": "석식 상태", "status:breakfast": "조식 상태", "status:lunch": "중식 상태"}
             return aliases.get(key, _FIELD_LABELS.get(key, key))
         details = []
         if after - before:
             details.append("가구 공용 지정: " + ", ".join(label(key) for key in sorted(after - before)))
         if before - after:
             details.append("가구 공용 해제: " + ", ".join(label(key) for key in sorted(before - after)))
+        old_exceptions = shared_exceptions_from_state(change.before)
+        new_exceptions = shared_exceptions_from_state(change.after)
+        for title, pairs in (("개별 관리 추가", new_exceptions - old_exceptions), ("개별 관리 해제", old_exceptions - new_exceptions)):
+            if pairs:
+                details.append(title + ": " + ", ".join(
+                    f"{_person_name(pid, snapshot, previous_snapshot)} · {label(key)}" for pid, key in sorted(pairs, key=lambda pair: (str(pair[0]), pair[1]))))
         return " · ".join(details) or "가구 공용 설정 변경"
 
     if change.entity_kind == EXPORT_PASSWORD_SETTING_KIND:

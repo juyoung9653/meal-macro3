@@ -22,6 +22,8 @@ def inactive_person_ids(
 ) -> frozenset[UUID]:
     """Return people without delivery during ``days`` inclusive calendar days.
 
+    People whose first enrollment is still in the future remain visible;
+    waiting for delivery to start is not inactivity.
     For one day, every meal must display as STOPPED or unavailable (None).
     ``status_on`` supplies the roster display's date-specific availability.
     When ``has_visible_history`` is authoritative, a person with no visible
@@ -75,6 +77,11 @@ def inactive_person_ids(
             ):
                 raise ValueError("상태 이력의 사람·식종이 조회 키와 다릅니다.")
             intervals_by_meal[meal] = () if history is None else history.intervals
+        if enrollments and all(
+            item.period.starts_on is not None and item.period.starts_on > as_of
+            for item in enrollments
+        ):
+            continue
         if days == 1:
             statuses = tuple(
                 status_on(person.person_id, meal, as_of)

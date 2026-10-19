@@ -27,6 +27,7 @@ from src.domain.documents import (
     DocumentRun,
 )
 from src.storage.encrypted_database import EncryptedDatabase
+from src.storage.migrations import CURRENT_SCHEMA_VERSION
 
 
 KEY = bytes.fromhex("55" * 32)
@@ -184,7 +185,7 @@ def test_schema_five_migration_preserves_existing_document_runs(tmp_path: Path):
     _mark_as_schema_four(path)
 
     with EncryptedDatabase.open(path, KEY) as migrated:
-        assert migrated.schema_version == 7
+        assert migrated.schema_version == CURRENT_SCHEMA_VERSION
         assert migrated.document_runs() == (_run(),)
         migrated.check_integrity()
 

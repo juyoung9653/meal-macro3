@@ -33,7 +33,11 @@ from src.domain.roster import (
     RosterSnapshot,
 )
 from src.domain.revisions import RevisionActor
-from src.domain.household_shared import profile_with_shared_routing, build_profile_revision_with_shared_routing
+from src.domain.household_shared import (
+    profile_with_shared_routing,
+    build_profile_revision_with_shared_routing,
+    build_profile_correction_revision,
+)
 from src.domain.profile_edits import profile_household_members
 from src.domain.roster import CustomFieldDefinition, CustomFieldType, HouseholdDeliverySetting, Meal
 from src.storage.database_session import (
@@ -186,6 +190,8 @@ class PersonProfileEditDialog(QDialog):
         title.setObjectName("workspaceTitle")
         header_layout.addWidget(title)
         help_text = QLabel(
+            "주소·관할동을 여기서 수정하면 이전 날짜에도 반영됩니다. "
+            "특정 날짜부터 변경하려면 이사 등록을 이용해주세요. 미래 이사 예약은 유지됩니다.\n"
             "이 화면에서 비운 값은 저장된 명단에서도 삭제됩니다. "
             "Excel 가져오기의 빈칸은 기존 값을 유지합니다."
         )
@@ -794,7 +800,11 @@ class PersonProfileEditController:
                 and not copy_delivery
             ):
                 return PersonProfileEditOutcome(PersonProfileEditStatus.CANCELLED)
-            prepared = build_profile_revision_with_shared_routing(
+            build_revision = (
+                build_profile_revision_with_shared_routing
+                if delivery_only else build_profile_correction_revision
+            )
+            prepared = build_revision(
                 roster,
                 person_id,
                 updated_profile,

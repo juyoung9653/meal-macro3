@@ -9,7 +9,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6")
 
-from PySide6.QtCore import QSettings, Qt
+from PySide6.QtCore import QItemSelectionModel, QSettings, Qt
 from PySide6.QtWidgets import QAbstractItemView, QApplication, QDialogButtonBox, QLabel
 
 from src.desktop_v2.import_review import ImportReviewDialog
@@ -1729,4 +1729,101 @@ def test_delivery_settings_can_open_without_linked_household(app):
     assert window._delivery_settings_button.isEnabled()
     window._delivery_settings_button.click()
     assert requested == [FIRST_PERSON_ID]
+    window.close()
+
+
+def _refresh_saved_roster(monkeypatch, window, roster):
+    from types import SimpleNamespace
+
+    from src.desktop_v2 import application as application_module
+
+    controller = application_module.DesktopStartupController()
+    monkeypatch.setattr(controller, "_histories", lambda *_args: {})
+    monkeypatch.setattr(controller, "_revision_display_code", lambda *_args: "")
+    monkeypatch.setattr(
+        controller, "_refresh_school_calendar",
+        lambda _session, target, _roster: target.set_school_calendar(_calendar()),
+    )
+    monkeypatch.setattr(
+        controller, "_refresh_household_shared_columns", lambda *_args: None,
+    )
+    monkeypatch.setattr(controller, "_imported_profile_fields", lambda *_args: frozenset())
+    monkeypatch.setattr(
+        application_module,
+        "routing_state_from_snapshot",
+        lambda _snapshot: RoutingState((), ()),
+    )
+    session = SimpleNamespace(database=SimpleNamespace(snapshot=lambda _revision: object()))
+    controller._replace_roster(session, window, roster)
+
+
+def test_saved_person_refresh_keeps_sorted_selection_and_household(monkeypatch, app):
+    from dataclasses import replace
+
+    roster = _three_member_household_roster()
+    window = RosterWindow(roster, {}, school_calendar=_calendar())
+    window._set_day(SERVICE_DAY)
+    window.show()
+    model = window.table_model
+    name_column = next(i for i, item in enumerate(model.columns) if item.key == "name")
+    model.set_column_search("school", "샘플초")
+    model.sort(name_column)
+    selected_row = next(
+        row for row in range(model.rowCount())
+        if model.person_at(row).person_id == FIRST_PERSON_ID
+    )
+    window._table.selectionModel().setCurrentIndex(
+        model.index(selected_row, name_column),
+        QItemSelectionModel.SelectionFlag.ClearAndSelect,
+    )
+    app.processEvents()
+
+    updated = replace(roster, persons=tuple(
+        replace(person, profile=replace(
+            person.profile,
+            name="가구원 수정" if person.person_id == FIRST_PERSON_ID else
+                 "김아침 수정" if person.person_id == SECOND_PERSON_ID else person.profile.name,
+        )) for person in roster.persons
+    ))
+    _refresh_saved_roster(monkeypatch, window, updated)
+    app.processEvents()
+
+    assert window.selected_person_cell() == (FIRST_PERSON_ID, "name")
+    assert window._inspector_name.text() == "가구원 수정"
+    assert "김아침 수정" in {window._household_list.item(row).text().split("   ")[0]
+                         for row in range(window._household_list.count())}
+    assert model.service_day == SERVICE_DAY
+    assert model._column_searches["school"] == "샘플초"
+    assert model._sort_criteria[0][0] == "name"
+    assert any("가구원 수정" in row.member_names for row in window.driver_household_rows())
+    window.set_routing_state(RoutingState((), ()))
+    assert window.selected_person_cell() == (FIRST_PERSON_ID, "name")
+    assert window._inspector_name.text() == "가구원 수정"
+    window.close()
+
+
+def test_saved_person_filtered_out_clears_selection(monkeypatch, app):
+    from dataclasses import replace
+
+    roster = _roster()
+    window = RosterWindow(roster, {}, school_calendar=_calendar())
+    window._set_day(SERVICE_DAY)
+    window.show()
+    model = window.table_model
+    name_column = next(i for i, item in enumerate(model.columns) if item.key == "name")
+    model.set_column_search("name", "홍길동")
+    window._table.selectRow(0)
+    assert window.selected_person_cell()[0] == FIRST_PERSON_ID
+
+    updated = replace(roster, persons=(
+        replace(roster.persons[0], profile=replace(roster.persons[0].profile, name="새 이름")),
+        roster.persons[1],
+    ))
+    _refresh_saved_roster(monkeypatch, window, updated)
+    app.processEvents()
+
+    assert model.rowCount() == 0
+    assert window.selected_person_cell() is None
+    assert window._inspector_name.text() == "명단에서 한 사람을 선택하세요"
+    assert model._column_searches["name"] == "홍길동"
     window.close()

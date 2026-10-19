@@ -57,6 +57,7 @@ from .roster_window import RosterWindow
 from .sequence_edit import SequenceEditController, SequenceSaveStatus
 from .sequence_settings import SequenceModeController
 from .household_shared_columns import HouseholdSharedColumnController
+from .household_shared_exceptions import HouseholdSharedExceptionsController
 from .school_calendar_edit import (
     SchoolCalendarEditController,
     SchoolCalendarEditStatus,
@@ -65,6 +66,7 @@ from .school_calendar_import import SchoolCalendarImportController
 from .service_adjustment import ServiceAdjustmentController
 from .settings_hub import SettingsAction, SettingsHubDialog
 from .unit_price_edit import UnitPriceChangeController
+from .startup_loading import run_startup_task
 
 
 class StartupStatus(StrEnum):
@@ -95,6 +97,15 @@ class DesktopStartupOutcome:
             self.session = None
 
 
+@dataclass(frozen=True, slots=True)
+class _StartupPreparation:
+    roster: object
+    histories: dict
+    revision_display_code: str
+    imported_profile_fields: frozenset[str]
+    snapshot: object
+
+
 class DesktopStartupController:
     """Create/login, mandatory import, then and only then construct the roster UI."""
 
@@ -118,6 +129,7 @@ class DesktopStartupController:
         delivery_defaults_controller_type=DeliveryDefaultsController,
         sequence_mode_controller_type=SequenceModeController,
         household_shared_column_controller_type=HouseholdSharedColumnController,
+        household_shared_exceptions_controller_type=HouseholdSharedExceptionsController,
         meal_status_controller_type=MealStatusChangeController,
         service_adjustment_controller_type=ServiceAdjustmentController,
         school_calendar_controller_type=SchoolCalendarImportController,
@@ -141,6 +153,7 @@ class DesktopStartupController:
         document_directory_dialog_type=DefaultDocumentDirectoryDialog,
         roster_window_type=RosterWindow,
         message_box=QMessageBox,
+        startup_task_runner=run_startup_task,
     ) -> None:
         self._settings = settings or DesktopStorageSettings()
         self._create_dialog_type = create_dialog_type
@@ -159,6 +172,7 @@ class DesktopStartupController:
         self._delivery_defaults_controller_type = delivery_defaults_controller_type
         self._sequence_mode_controller_type = sequence_mode_controller_type
         self._household_shared_column_controller_type = household_shared_column_controller_type
+        self._household_shared_exceptions_controller_type = household_shared_exceptions_controller_type
         self._meal_status_controller_type = meal_status_controller_type
         self._service_adjustment_controller_type = (
             service_adjustment_controller_type
@@ -186,6 +200,7 @@ class DesktopStartupController:
         self._document_directory_dialog_type = document_directory_dialog_type
         self._roster_window_type = roster_window_type
         self._message_box = message_box
+        self._startup_task_runner = startup_task_runner
 
     def start(self, parent: QWidget | None = None) -> DesktopStartupOutcome:
         access_dialog = None
@@ -226,8 +241,12 @@ class DesktopStartupController:
                 + str(initial_backup.error),
             )
 
-        roster = session.database.current_roster()
-        if roster is None:
+        preparation = self._startup_task_runner(
+            lambda: self._prepare_startup(session),
+            message="명단과 변경 이력을 읽고 운영 화면을 준비하는 중입니다.",
+            parent=parent,
+        )
+        if preparation is None:
             guided = self._guided_controller_type(session)
             outcome = guided.run(parent)
             if not outcome.completed:
@@ -239,6 +258,14 @@ class DesktopStartupController:
                 )
                 return DesktopStartupOutcome(status)
             roster = outcome.roster
+            if roster is not None:
+                preparation = self._startup_task_runner(
+                    lambda: self._prepare_startup(session, roster),
+                    message="가져온 명단과 변경 이력을 읽고 운영 화면을 준비하는 중입니다.",
+                    parent=parent,
+                )
+        else:
+            roster = preparation.roster
         if roster is None or not roster.persons:
             session.close()
             self._message_box.critical(
@@ -248,19 +275,22 @@ class DesktopStartupController:
             )
             return DesktopStartupOutcome(StartupStatus.ONBOARDING_PENDING)
 
-        histories = self._histories(session, roster)
+        histories = preparation.histories
         window = self._roster_window_type(
             roster,
             histories,
-            revision_display_code=self._revision_display_code(session, roster),
+            revision_display_code=preparation.revision_display_code,
             view_settings_scope=str(session.credentials.database_id),
-            imported_profile_fields=self._imported_profile_fields(session, roster),
+            imported_profile_fields=preparation.imported_profile_fields,
         )
-        self._refresh_school_calendar(session, window, roster)
-        self._refresh_household_shared_columns(session, window, roster)
+        path_setter = getattr(window, "set_operating_database", None)
+        if callable(path_setter):
+            path_setter(session.path)
+        self._refresh_school_calendar(session, window, roster, snapshot=preparation.snapshot)
+        self._refresh_household_shared_columns(session, window, roster, snapshot=preparation.snapshot)
         routing_setter = getattr(window, "set_routing_state", None)
         if callable(routing_setter):
-            routing_setter(routing_state_from_snapshot(session.database.snapshot(roster.revision_id)))
+            routing_setter(routing_state_from_snapshot(preparation.snapshot))
         history_setter = getattr(window, "set_history_provider", None)
         if callable(history_setter):
             history_setter(
@@ -291,6 +321,7 @@ class DesktopStartupController:
             ("relocation_requested", lambda person_id: self._run_relocation(session, window, person_id)),
             ("cell_edit_requested", lambda person_id, column_key, text: self._run_roster_cell_edit(session, window, person_id, column_key, text)),
             ("household_shared_column_requested", lambda column_key: self._run_household_shared_column(session, window, column_key)),
+            ("household_shared_exception_requested", lambda person_id, column_key, enabled: self._run_household_shared_exception(session, window, person_id, column_key, enabled)),
         ):
             signal = getattr(window, signal_name, None)
             if signal is not None and hasattr(signal, "connect"):
@@ -396,6 +427,12 @@ class DesktopStartupController:
     def _run_revision_history(self, session: DatabaseSession, window) -> None:
         try:
             dialog = self._revision_history_dialog_type(session.database, window)
+            configure = getattr(dialog, "configure_actions", None)
+            if callable(configure):
+                def restart():
+                    dialog.close()
+                    window.close()
+                configure(session, self._settings, restart)
         except Exception:  # noqa: BLE001 - keep history payloads out of error UI
             self._message_box.critical(
                 window,
@@ -509,6 +546,21 @@ class DesktopStartupController:
         )
         if outcome.roster is not None:
             self._replace_roster_if_changed(session, window, outcome.roster)
+
+    def _run_household_shared_exception(
+        self, session, window, person_id, column_key, enabled,
+    ) -> None:
+        outcome = self._household_shared_exceptions_controller_type(
+            session
+        ).set_exception(
+            person_id, column_key, enabled, window.table_model.service_day,
+            parent=window,
+        )
+        if outcome.roster is not None:
+            self._replace_roster_if_changed(session, window, outcome.roster)
+        current = session.database.current_roster()
+        if current is not None:
+            self._refresh_household_shared_columns(session, window, current)
 
     def _run_document_hub(self, session: DatabaseSession, window) -> None:
         hub = self._document_hub_dialog_type(parent=window)
@@ -964,6 +1016,8 @@ class DesktopStartupController:
         return True
 
     def _replace_roster(self, session, window, roster) -> None:
+        selection_getter = getattr(window, "selected_person_cell", None)
+        selected_cell = selection_getter() if callable(selection_getter) else None
         window.replace_roster(
             roster,
             self._histories(session, roster),
@@ -977,14 +1031,34 @@ class DesktopStartupController:
         setter = getattr(window, "set_imported_profile_fields", None)
         if callable(setter):
             setter(self._imported_profile_fields(session, roster))
+        selection_restorer = getattr(window, "restore_person_cell", None)
+        if selected_cell is not None and callable(selection_restorer):
+            selection_restorer(selected_cell)
 
     @staticmethod
-    def _refresh_household_shared_columns(session, window, roster) -> None:
+    def _refresh_household_shared_columns(
+        session, window, roster, *, snapshot=None,
+    ) -> None:
+        state_setter = getattr(window, "set_household_shared_state", None)
         setter = getattr(window, "set_household_shared_columns", None)
+        if not callable(state_setter) and not callable(setter):
+            return
+        from src.domain.household_shared import (
+            HOUSEHOLD_SHARED_KIND, HOUSEHOLD_SHARED_ID,
+            shared_columns_from_state, shared_exceptions_from_state,
+        )
+        if snapshot is None:
+            snapshot = session.database.snapshot(roster.revision_id)
+        stored = snapshot.entity(
+            HOUSEHOLD_SHARED_KIND, HOUSEHOLD_SHARED_ID,
+        )
+        columns = shared_columns_from_state(stored)
+        exceptions = shared_exceptions_from_state(stored)
+        if callable(state_setter):
+            state_setter(columns, exceptions)
+            return
         if callable(setter):
-            from src.domain.household_shared import HOUSEHOLD_SHARED_KIND, HOUSEHOLD_SHARED_ID, shared_columns_from_state
-            stored = session.database.snapshot(roster.revision_id).entity(HOUSEHOLD_SHARED_KIND, HOUSEHOLD_SHARED_ID)
-            setter(shared_columns_from_state(stored))
+            setter(columns)
 
     @staticmethod
     def _imported_profile_fields(session, roster) -> frozenset[str]:
@@ -992,11 +1066,13 @@ class DesktopStartupController:
         return frozenset(field.value for stored in profiles for field in stored.profile.profile_columns)
 
     @staticmethod
-    def _refresh_school_calendar(session, window, roster) -> None:
+    def _refresh_school_calendar(session, window, roster, *, snapshot=None) -> None:
         setter = getattr(window, "set_school_calendar", None)
         if callable(setter):
+            if snapshot is None:
+                snapshot = session.database.snapshot(roster.revision_id)
             setter(school_lunch_calendar_from_snapshot(
-                session.database.snapshot(roster.revision_id)
+                snapshot
             ))
 
     @staticmethod
@@ -1015,6 +1091,25 @@ class DesktopStartupController:
             for person in roster.persons
             for meal in Meal
         }
+
+    def _prepare_startup(self, session: DatabaseSession, roster=None):
+        if roster is None:
+            roster = session.database.current_roster()
+        if roster is None:
+            return None
+        snapshot = session.database.snapshot(roster.revision_id)
+        profiles = import_profiles_from_snapshot(snapshot)
+        return _StartupPreparation(
+            roster=roster,
+            histories=self._histories(session, roster),
+            revision_display_code=self._revision_display_code(session, roster),
+            imported_profile_fields=frozenset(
+                field.value
+                for stored in profiles
+                for field in stored.profile.profile_columns
+            ),
+            snapshot=snapshot,
+        )
 
     @staticmethod
     def _revision_display_code(session: DatabaseSession, roster) -> str:

@@ -127,7 +127,7 @@ class _Messages:
 class _AcceptedDialog:
     mapping = {"성명": "학교명", "학교명": "학교명"}
 
-    def __init__(self, specs, overrides, parent=None, *, message_box=None):
+    def __init__(self, specs, overrides, parent=None, *, message_box=None, fallbacks=None):
         assert len(specs) == 4
         assert len(overrides) == 4
 
@@ -139,6 +139,9 @@ class _AcceptedDialog:
 
     def desired_mapping(self):
         return self.mapping
+
+    def desired_fallbacks(self):
+        return {}
 
 
 class _CancelledDialog(_AcceptedDialog):
@@ -212,8 +215,8 @@ def test_dialog_screenshots_default_and_small(app):
         {scope: mapping_editor_spec(*scope) for scope in SCOPES},
         {scope: {} for scope in SCOPES},
     )
-    evidence = Path(".agent_evidence")
-    evidence.mkdir(exist_ok=True)
+    evidence = Path("artifacts/document-mapping-priority")
+    evidence.mkdir(parents=True, exist_ok=True)
     dialog.show()
     app.processEvents()
     assert dialog.grab().save(str(evidence / "output_mapping_ui_default.png"))

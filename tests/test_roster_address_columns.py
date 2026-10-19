@@ -92,7 +92,7 @@ def test_old_layout_aliases_and_filters_migrate_once(app, tmp_path, hide_address
         reopened.close()
 
 
-def test_shared_address_group_remains_accessible_from_both_columns(app, tmp_path):
+def test_shared_address_columns_toggle_and_mark_independently(app, tmp_path):
     window = RosterWindow(roster(), column_settings=QSettings(str(tmp_path / "shared.ini"), QSettings.IniFormat))
     try:
         window.set_household_shared_columns(frozenset({"address"}))
@@ -100,14 +100,21 @@ def test_shared_address_group_remains_accessible_from_both_columns(app, tmp_path
         window.household_shared_column_requested.connect(requested.append)
         for key in ("address", "detail_address"):
             index, column = next((i, c) for i, c in enumerate(window.table_model.columns) if c.key == key)
-            assert window.table_model.headerData(index, Qt.Horizontal, Qt.DecorationRole) is not None
+            assert (window.table_model.headerData(index, Qt.Horizontal, Qt.DecorationRole) is not None) == (key == "address")
             menu = QMenu()
             window._add_household_shared_column_actions(menu, column)
             action = menu.actions()[0]
-            assert "도로명주소·상세주소" in action.text()
-            assert action.isChecked()
+            assert action.text() == "가구 공용 설정"
+            assert action.isChecked() == (key == "address")
             action.trigger()
-        assert requested == ["address", "address"]
+        assert requested == ["address", "detail_address"]
+        window.set_household_shared_columns(frozenset({"detail_address"}))
+        road, detail = (
+            next(i for i, column in enumerate(window.table_model.columns) if column.key == key)
+            for key in ("address", "detail_address")
+        )
+        assert window.table_model.headerData(road, Qt.Horizontal, Qt.DecorationRole) is None
+        assert window.table_model.headerData(detail, Qt.Horizontal, Qt.DecorationRole) is not None
     finally:
         window.close()
 

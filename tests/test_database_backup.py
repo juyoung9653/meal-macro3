@@ -252,7 +252,7 @@ def test_older_schema_backup_rotates_without_migrating_archive_and_restores(tmp_
         with DatabaseSession.restore_and_open_with_user_password(
             archive_path, tmp_path / "restored.sqlite3", "second"
         ) as restored:
-            assert restored.database.schema_version == 7
+            assert restored.database.schema_version == 8
             restored.database.check_integrity()
         assert hashlib.sha256((tmp_path / "restored.sqlite3").read_bytes()).hexdigest() != original_hash
 

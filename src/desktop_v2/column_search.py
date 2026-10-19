@@ -6,6 +6,7 @@ from PySide6.QtCore import QPoint, QSize, Qt, Signal
 from PySide6.QtGui import QPolygon
 from PySide6.QtWidgets import (
     QHBoxLayout,
+    QCheckBox,
     QHeaderView,
     QLabel,
     QLineEdit,
@@ -397,16 +398,18 @@ class SequenceValuePicker(ColumnValuePicker):
 class ColumnSearchHeader(QHeaderView):
     search_changed = Signal(str, str)
     values_changed = Signal(str, object)
+    exceptions_changed = Signal(str, bool)
     BUTTON_WIDTH = 24
 
     def __init__(self, parent=None, *, values_provider=None, selection_provider=None,
-                 search_provider=None, picker_provider=None):
+                 search_provider=None, picker_provider=None, exception_provider=None):
         super().__init__(Qt.Orientation.Horizontal, parent)
         self.setSectionsClickable(True)
         self._values_provider = values_provider
         self._selection_provider = selection_provider
         self._search_provider = search_provider
         self._picker_provider = picker_provider
+        self._exception_provider = exception_provider
         self.buttons: dict[str, QPushButton] = {}
         self._menu = None
         self._keys: list[str] = []
@@ -471,6 +474,7 @@ class ColumnSearchHeader(QHeaderView):
             self._selection_provider is not None
             and self._selection_provider(key) is not None
         )
+        active = active or bool(self._exception_provider and self._exception_provider(key))
         button = self.buttons[key]
         button.setProperty("filterActive", active)
         button.setToolTip("필터 열기" if not active else "필터 적용 중 · 클릭하여 변경")
@@ -500,11 +504,23 @@ class ColumnSearchHeader(QHeaderView):
             self._search_provider(key) if self._search_provider else "",
             menu,
         )
+        exception_state = self._exception_provider(key) if self._exception_provider else None
+        exceptions = None
+        if exception_state is not None:
+            exceptions = QCheckBox("예외만 보기", picker)
+            exceptions.setAccessibleName("공용 예외만 보기")
+            exceptions.setToolTip("이 칼럼에서 공용 예외로 지정한 행만 표시합니다.")
+            exceptions.setChecked(exception_state)
+            picker.layout().insertWidget(1, exceptions)
+            # Reset must clear this condition along with search/value conditions.
+            picker.reset.clicked.disconnect()
+            picker.reset.clicked.connect(lambda: self._apply_filter(key, "", None, menu, False))
         action = QWidgetAction(menu)
         action.setDefaultWidget(picker)
         menu.addAction(action)
         picker.applied.connect(
-            lambda search, values: self._apply_filter(key, search, values, menu)
+            lambda search, values: self._apply_filter(
+                key, search, values, menu, exceptions.isChecked() if exceptions is not None else None)
         )
         if hasattr(picker, "layout_changed"):
             picker.layout_changed.connect(
@@ -552,9 +568,11 @@ class ColumnSearchHeader(QHeaderView):
         y = below if below + size.height() <= available.bottom() + 1 else max(available.top(), above)
         menu.move(x, y)
 
-    def _apply_filter(self, key, search, values, menu):
+    def _apply_filter(self, key, search, values, menu, exceptions=None):
         self.search_changed.emit(key, search)
         self.values_changed.emit(key, values)
+        if exceptions is not None:
+            self.exceptions_changed.emit(key, exceptions)
         self._update_button(key)
         menu.close()
 

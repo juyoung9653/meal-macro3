@@ -104,7 +104,7 @@ def test_wizard_all_columns_survive_encrypted_reopen(app, tmp_path, blank, as_cu
         model = window.table_model
         assert model.rowCount() == 1
         displayed = {column.label: model.data(model.index(0, index)) for index, column in enumerate(model.columns)}
-        assert displayed.items() >= {"학교 유형": "" if blank else "초등학교", "세대주 성명": "" if blank else "합성 보호자", "아동과의 관계": "" if blank else "모", "학교": "가상초", "학년": "5", "성명": "합성 아동", "생년월일": "2015-03-02", "전화번호": "031-111-2222", "핸드폰": "010-1111-2222", "관할동": "가상동", "주소": "가상로 1 101호", "비고": "합성 메모", "관리코드": "001", "반": "2반", "제공기관": "원본 기관"}.items()
+        assert displayed.items() >= {"학교 유형": "" if blank else "초등학교", "세대주 성명": "" if blank else "합성 보호자", "아동과의 관계": "" if blank else "모", "학교": "가상초", "학년": "5", "성명": "합성 아동", "생년월일": "2015-03-02", "전화번호": "031-111-2222", "핸드폰": "010-1111-2222", "관할동": "가상동", "도로명주소": "가상로 1", "상세주소": "101호", "비고": "합성 메모", "관리코드": "001", "반": "2반", "제공기관": "원본 기관"}.items()
         assert "제외 항목" not in displayed
         assert model.column_filter_values("school_type" if not as_custom else next(column.key for column in model.columns if column.label == "학교 유형")) == (("",) if blank else ("초등학교",))
         if not blank:

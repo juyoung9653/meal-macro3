@@ -167,15 +167,15 @@ def test_driver_view_uses_all_delivery_meals_and_current_date_despite_roster_fil
     assert settings["drivers"] == state.drivers
     assert len(rows) == 2
     assert {row.driver_id: row.meals for row in rows} == {
-        driver_a.driver_id: (Meal.BREAKFAST, Meal.LUNCH), driver_b.driver_id: (Meal.DINNER,),
-    }  # All assigned meals remain regardless of service days and main-table filters.
+        driver_a.driver_id: (Meal.BREAKFAST,), driver_b.driver_id: (Meal.DINNER,),
+    }  # Main-table filters do not apply; lunch outside reviewed coverage stays hidden.
     assert len(next(row for row in rows if row.driver_id == driver_a.driver_id).member_ids) == 2
 
     window._set_day(service_day + timedelta(days=1))
     window._driver_households_button.click()
     rows, settings = opened[-1]
     assert settings["service_day"] == service_day + timedelta(days=1)
-    assert next(row for row in rows if row.driver_id == driver_a.driver_id).meals == (Meal.BREAKFAST, Meal.LUNCH)
+    assert next(row for row in rows if row.driver_id == driver_a.driver_id).meals == (Meal.BREAKFAST,)
 
 
 def test_driver_households_button_opens_real_dialog_and_can_close(window):
@@ -193,7 +193,8 @@ def test_driver_households_button_opens_real_dialog_and_can_close(window):
 
     QTimer.singleShot(0, close_dialog)
     window._driver_households_button.click()
-    assert seen == [(True, 2)]
+    # Without a reviewed school calendar, only the breakfast household is shown.
+    assert seen == [(True, 1)]
 
 @pytest.mark.parametrize("size", [(1080, 680), (1440, 860)])
 def test_archive_controls_share_filter_row_and_exit_preserves_conditions(tmp_path, size):

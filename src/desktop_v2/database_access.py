@@ -37,6 +37,7 @@ from src.storage.database_credentials import (
 from src.storage.encrypted_database import DatabaseUnlockError
 
 from .theme import application_stylesheet, register_application_fonts
+from .startup_loading import run_startup_task
 
 
 from .portable_settings import DesktopStorageSettings
@@ -412,12 +413,17 @@ class LoginDialog(_DatabaseAccessDialog):
 
     def _submit(self) -> None:
         self._clear_error()
+        password = self.password_edit.text()
         try:
-            self._session = DatabaseSession.open(
-                self._database_path,
-                self.password_edit.text(),
-                backup_directory=self._backup_directory,
-                _lock=self._reservation,
+            self._session = run_startup_task(
+                lambda: DatabaseSession.open(
+                    self._database_path,
+                    password,
+                    backup_directory=self._backup_directory,
+                    _lock=self._reservation,
+                ),
+                message="암호화된 운영 파일을 확인하고 연결하는 중입니다.",
+                parent=self,
             )
         except Exception as error:
             self._show_error(_friendly_error(error))

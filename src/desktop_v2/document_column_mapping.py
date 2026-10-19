@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
 from src.domain.revisions import RevisionActor
 from src.domain.roster import RosterSnapshot
 from src.services.document_column_mappings import (
-    MappingEditorSpec, build_mapping_revision, load_mapping_overrides,
+    MappingEditorSpec, build_mapping_revision, load_mapping_overrides, load_mapping_fallbacks,
     mapping_editor_spec,
 )
 from src.storage.database_session import (
@@ -44,10 +44,13 @@ class DocumentColumnMappingDialog(QDialog):
         parent: QWidget | None = None,
         *,
         message_box=QMessageBox,
+        fallbacks: Mapping[tuple[str, str], Mapping[str, str]] | None = None,
     ) -> None:
         super().__init__(parent)
         self._specs = specs
         self._overrides = overrides
+        self._fallbacks = fallbacks or {}
+        self._fallback_combos: dict[str, QComboBox] = {}
         self._message_box = message_box
         self._scope = _SCOPES[0]
         self._combos: dict[str, QComboBox] = {}
@@ -57,7 +60,7 @@ class DocumentColumnMappingDialog(QDialog):
         self.setWindowTitle("출력 칼럼 연결")
         self.setObjectName("documentColumnMappingDialog")
         self.setModal(True)
-        self.resize(800, 650)
+        self.resize(900, 650)
         self.setMinimumSize(630, 450)
         self.setStyleSheet(application_stylesheet())
         self._build_ui()
@@ -84,8 +87,18 @@ class DocumentColumnMappingDialog(QDialog):
             for source in (overrides.get(key, spec.defaults.get(key, "")),)
         }
 
+    def desired_fallbacks(self) -> dict[str, str]:
+        return {key: combo.currentData() for key, combo in self._fallback_combos.items() if combo.currentData()}
+
+    def _initial_fallbacks(self, scope):
+        spec = self._specs[scope]
+        selectable = spec.source_options if spec.selectable_source_options is None else spec.selectable_source_options
+        return {key: source for key, source in self._fallbacks.get(scope, {}).items()
+                if key in spec.targets and key not in spec.locked_targets and source and source in selectable}
+
     def _dirty(self) -> bool:
-        return self.desired_mapping() != self._initial_mapping(self._scope)
+        return (self.desired_mapping() != self._initial_mapping(self._scope)
+                or self.desired_fallbacks() != self._initial_fallbacks(self._scope))
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -101,7 +114,7 @@ class DocumentColumnMappingDialog(QDialog):
         title = QLabel("출력 칼럼 연결")
         title.setObjectName("workspaceTitle")
         explanation = QLabel(
-            "템플릿의 각 칼럼에 넣을 명단 항목을 선택하세요. 저장 후 새로 생성하는 문서에 적용되며, 가져온 명단은 바뀌지 않습니다."
+            "각 대상자의 1순위 값이 비어 있으면 2순위 값을 사용합니다. 둘 다 비어 있으면 빈칸으로 출력합니다. 저장 후 새로 만드는 문서에 적용됩니다."
         )
         explanation.setObjectName("workspaceSubtitle")
         explanation.setWordWrap(True)
@@ -128,10 +141,10 @@ class DocumentColumnMappingDialog(QDialog):
         root.addLayout(selectors)
 
         headings = QHBoxLayout()
-        for text in ("템플릿 칼럼", "넣을 명단 항목"):
+        for index, text in enumerate(("템플릿 칼럼", "1순위", "2순위 · 1순위가 비면")):
             label = QLabel(text)
             label.setObjectName("editEyebrow")
-            headings.addWidget(label, 1)
+            headings.addWidget(label, 1 if index == 0 else 2)
         root.addLayout(headings)
 
         self._scroll = QScrollArea()
@@ -186,6 +199,7 @@ class DocumentColumnMappingDialog(QDialog):
     def _show_scope(self) -> None:
         spec = self._specs[self._scope]
         self._combos = {}
+        self._fallback_combos = {}
         self._indicators = {}
         container = QWidget()
         grid = QGridLayout(container)
@@ -206,10 +220,14 @@ class DocumentColumnMappingDialog(QDialog):
                     reason = "자동 계산"
                 automatic = QLabel(f"{reason} · 수정할 수 없음")
                 automatic.setObjectName("settingsHubNote")
-                grid.addWidget(automatic, row, 1)
+                automatic.setWordWrap(True)
+                grid.addWidget(automatic, row, 1, 1, 2)
                 continue
             field = QComboBox()
-            field.setMinimumWidth(220)
+            field.setMinimumWidth(140)
+            field.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+            field.setMinimumContentsLength(8)
+            field.setAccessibleName(f"{target} 1순위")
             field.addItem("비움", "")
             selectable = spec.source_options if spec.selectable_source_options is None else spec.selectable_source_options
             for source in selectable:
@@ -221,12 +239,27 @@ class DocumentColumnMappingDialog(QDialog):
             indicator = QLabel()
             indicator.setObjectName("settingsHubNote")
             self._indicators[target] = indicator
-            right = QHBoxLayout()
+            secondary = QComboBox()
+            secondary.setMinimumWidth(140)
+            secondary.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+            secondary.setMinimumContentsLength(8)
+            secondary.setAccessibleName(f"{target} 2순위")
+            secondary.addItem("사용 안 함", "")
+            for source in selectable:
+                if source:
+                    secondary.addItem(spec.source_labels[source], source)
+            secondary.setCurrentIndex(secondary.findData(self._initial_fallbacks(self._scope).get(target, "")))
+            secondary.currentIndexChanged.connect(self._refresh_indicators)
+            self._fallback_combos[target] = secondary
+            grid.addWidget(secondary, row, 2, alignment=Qt.AlignmentFlag.AlignTop)
+            right = QVBoxLayout()
+            right.setSpacing(2)
             right.addWidget(field, 1)
             right.addWidget(indicator)
             grid.addLayout(right, row, 1)
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(1, 2)
+        grid.setColumnStretch(2, 2)
         grid.setRowStretch(len(spec.targets), 1)
         self._scroll.setWidget(container)
         self._refresh_indicators()
@@ -235,7 +268,7 @@ class DocumentColumnMappingDialog(QDialog):
         defaults = self._specs[self._scope].defaults
         for target, combo in self._combos.items():
             self._indicators[target].setText(
-                "별도 연결" if combo.currentData() != defaults.get(target, "") else "기본 연결"
+                "별도 연결" if combo.currentData() != defaults.get(target, "") or self._fallback_combos[target].currentData() else "기본 연결"
             )
 
     def _reset_scope(self) -> None:
@@ -243,6 +276,7 @@ class DocumentColumnMappingDialog(QDialog):
         for target, combo in self._combos.items():
             index = combo.findData(defaults.get(target, ""))
             combo.setCurrentIndex(index if index >= 0 else 0)
+            self._fallback_combos[target].setCurrentIndex(0)
 
 
 class DocumentColumnMappingStatus(StrEnum):
@@ -298,11 +332,12 @@ class DocumentColumnMappingController:
                 scope: load_mapping_overrides(snapshot, *scope)
                 for scope in _SCOPES
             }
+            fallbacks = {scope: load_mapping_fallbacks(snapshot, *scope) for scope in _SCOPES}
         except Exception as error:
             self._message_box.critical(parent, "출력 칼럼을 읽지 못했습니다", str(error))
             return DocumentColumnMappingOutcome(DocumentColumnMappingStatus.FAILED)
 
-        dialog = self._dialog_type(specs, overrides, parent, message_box=self._message_box)
+        dialog = self._dialog_type(specs, overrides, parent, message_box=self._message_box, fallbacks=fallbacks)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return DocumentColumnMappingOutcome(DocumentColumnMappingStatus.CANCELLED, roster)
         try:
@@ -312,6 +347,7 @@ class DocumentColumnMappingController:
                 dialog.selected_profile,
                 dialog.document_kind,
                 dialog.desired_mapping(),
+                desired_fallbacks=dialog.desired_fallbacks(),
                 actor=self._actor_provider(),
                 recorded_at=self._recorded_at_provider(),
                 revision_id=self._revision_id_factory(),

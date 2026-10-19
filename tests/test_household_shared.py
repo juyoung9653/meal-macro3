@@ -166,7 +166,7 @@ def test_resolving_conflict_does_not_write_equal_household_routing_history():
     snapshot = historical(r)
     rows = household_shared_rows(r, "address", DAY, snapshot=snapshot)
     values = {row.household_id: row.values for row in rows}
-    values[r.households[0].household_id] = ("직접 정한 값", "")
+    values[r.households[0].household_id] = ("직접 정한 값",)
     record = build_household_shared_revision(r, None, "address", True, values,
         actor=ACTOR, recorded_at=NOW, effective_on=DAY, revision_id=uuid4(), snapshot=snapshot)
     events = [c for c in record.changes if c.entity_kind == ROUTING_EVENT_KIND]
@@ -622,7 +622,7 @@ def test_encrypted_commit_roundtrip_rollback_and_default_off_fast_path(
 @pytest.mark.parametrize(
     "key,values,attribute",
     [
-        ("address", ("새 주소", "101"), "road_address"),
+        ("address", ("새 주소",), "road_address"),
         ("jurisdiction", ("새 관할",), "jurisdiction"),
         ("status:dinner", ("배송", "", "새 기사"), "driver"),
     ],
@@ -737,7 +737,7 @@ def test_clear_shared_address_has_real_dated_effect():
             for p in r.persons
         ),
     )
-    result = apply(historical(r), activate(r, "address", ("", "")))
+    result = apply(historical(r), activate(r, "address", ("",)))
     saved = roster_from_historical_snapshot(result)
     routing = routing_state_from_snapshot(result)
     assert all(
@@ -935,7 +935,7 @@ def test_setting_history_names_enabled_disabled_builtin_and_custom_columns():
 @pytest.mark.parametrize(
     "key,field,new_values",
     [
-        ("address", "road_address", ("현재 주소", "101")),
+        ("address", "road_address", ("현재 주소",)),
         ("jurisdiction", "jurisdiction", ("현재 관할",)),
     ],
 )
@@ -1025,7 +1025,7 @@ def test_profile_adapter_unrelated_edit_keeps_routing_and_household_others_uncha
 
     r = roster()
     first, second, _ = r.persons
-    configured = apply(historical(r), activate(r, "address", ("현재 주소", "101")))
+    configured = apply(historical(r), activate(r, "address", ("현재 주소",)))
     saved = roster_from_historical_snapshot(configured)
     displayed = profile_with_shared_routing(saved, first.person_id, DAY, configured)
     prepared = build_profile_revision_with_shared_routing(
@@ -1088,7 +1088,7 @@ def test_person_controller_seeds_shared_current_values_and_noop_writes_nothing(
         tmp_path / "profile.sqlite3", "password", "recovery"
     ) as session:
         session.append_revision(initial)
-        session.append_revision(activate(r, "address", ("현재 주소", "101")))
+        session.append_revision(activate(r, "address", ("현재 주소",)))
         before = session.database.current_roster()
         controller = PersonProfileEditController(
             session,
@@ -1148,7 +1148,7 @@ def test_profile_adapter_road_edit_preserves_siblings_unedited_detail():
 @pytest.mark.parametrize(
     "key,field,values",
     [
-        ("address", "road_address", ("가구 주소", "101")),
+        ("address", "road_address", ("가구 주소",)),
         ("jurisdiction", "jurisdiction", ("가구 관할",)),
     ],
 )
@@ -1238,5 +1238,5 @@ def test_profile_after_disable_keeps_current_value_and_edits_only_one_person(
             getattr(
                 routing.resolve(saved, first.person_id, DAY - timedelta(days=1)), field
             )
-            is None
+            == "개인 변경"
         )

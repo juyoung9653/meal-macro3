@@ -204,6 +204,7 @@ class RosterTableModel(QAbstractTableModel):
         self._column_aliases = dict(column_aliases or {})
         self._imported_profile_fields = frozenset(imported_profile_fields)
         self._household_shared_columns: frozenset[str] = frozenset()
+        self._household_shared_exceptions: frozenset[tuple[UUID, str]] = frozenset()
         self._shared_column_icon = None
         self._day = date.today()
         self._meal = Meal.LUNCH
@@ -211,6 +212,7 @@ class RosterTableModel(QAbstractTableModel):
         self._include_hidden_in_search = False
         self._column_searches: dict[str, str] = {}
         self._column_values: dict[str, frozenset[str]] = {}
+        self._exception_only_columns: set[str] = set()
         self._active_only = False
         self._driver_filter: UUID | None = None
         self._birth_month: int | None = None
@@ -381,12 +383,32 @@ class RosterTableModel(QAbstractTableModel):
         self._refresh_people()
         self.endResetModel()
 
+    def exception_filter_state(self, key: str) -> bool | None:
+        if key not in self._household_shared_columns:
+            return None
+        return key in self._exception_only_columns
+
+    def set_exception_filter(self, key: str, enabled: bool) -> None:
+        if key not in {column.key for column in self._columns}:
+            raise ValueError(f"Unknown column: {key}")
+        enabled = bool(enabled) and key in self._household_shared_columns
+        if (key in self._exception_only_columns) == enabled:
+            return
+        self.beginResetModel()
+        if enabled:
+            self._exception_only_columns.add(key)
+        else:
+            self._exception_only_columns.discard(key)
+        self._refresh_people()
+        self.endResetModel()
+
     def clear_column_filters(self) -> None:
-        if not self._column_searches and not self._column_values:
+        if not self._column_searches and not self._column_values and not self._exception_only_columns:
             return
         self.beginResetModel()
         self._column_searches.clear()
         self._column_values.clear()
+        self._exception_only_columns.clear()
         self._refresh_people()
         self.endResetModel()
 
@@ -420,6 +442,7 @@ class RosterTableModel(QAbstractTableModel):
         if not enabled:
             self._column_searches.pop("delivery_settings", None)
             self._column_values.pop("delivery_settings", None)
+            self._exception_only_columns.discard("delivery_settings")
         self._prune_sort_criteria()
         self._refresh_people()
         self.endResetModel()
@@ -440,6 +463,7 @@ class RosterTableModel(QAbstractTableModel):
             self._imported_profile_fields = frozenset(imported_profile_fields)
         self._columns = self._build_columns()
         keys = {column.key for column in self._columns}
+        self._exception_only_columns.intersection_update(keys)
         self._column_searches = {
             key: value for key, value in self._column_searches.items() if key in keys
         }
@@ -586,7 +610,7 @@ class RosterTableModel(QAbstractTableModel):
     ):
         if orientation == Qt.Orientation.Horizontal and 0 <= section < len(self._columns):
             key = self._columns[section].key
-            shared = ("address" if key == "detail_address" else key) in self._household_shared_columns
+            shared = key in self._household_shared_columns
             if role == Qt.ItemDataRole.ToolTipRole and shared:
                 return self._columns[section].label + " · 가구 공용: 같은 가구의 수정값을 함께 적용합니다."
             if role == Qt.ItemDataRole.DecorationRole and shared:
@@ -752,6 +776,9 @@ class RosterTableModel(QAbstractTableModel):
         ]
         birth_month = date.today().month if self._birth_month == 0 else self._birth_month
         for person in self._roster.persons:
+            if any((person.person_id, key) not in self._household_shared_exceptions
+                   for key in self._exception_only_columns):
+                continue
             if self._special_only and not self._delivery_setting_text(person):
                 continue
             if not self._matches_archive_filter(person):
@@ -1284,6 +1311,7 @@ class RosterWindow(QMainWindow):
     settings_requested = Signal()
     custom_fields_requested = Signal()
     household_shared_column_requested = Signal(str)
+    household_shared_exception_requested = Signal(object, str, bool)
 
     def __init__(
         self,
@@ -1325,6 +1353,7 @@ class RosterWindow(QMainWindow):
         self._column_aliases = self._load_column_aliases()
         self._sheets, self._active_sheet_id = self._load_sheets()
         self._restoring_search = False
+        self._pending_exception_filters: set[str] = set()
         self._inactive_settings = inactive_settings
         self._archive_settings = InactiveRosterSettings(inactive_settings)
         self._roster = roster
@@ -1455,16 +1484,45 @@ class RosterWindow(QMainWindow):
         )
 
     def set_household_shared_columns(self, columns: frozenset[str]) -> None:
-        self._model._household_shared_columns = frozenset(columns)
+        self.set_household_shared_state(columns, self._model._household_shared_exceptions)
+
+    def set_household_shared_state(
+        self,
+        columns: frozenset[str],
+        exceptions: frozenset[tuple[UUID, str]],
+    ) -> None:
+        columns, exceptions = frozenset(columns), frozenset(exceptions)
+        if (columns == self._model._household_shared_columns
+                and exceptions == self._model._household_shared_exceptions
+                and not self._pending_exception_filters):
+            return
+        selected = self.selected_person_cell()
+        self._model.beginResetModel()
+        self._model._household_shared_columns = columns
+        self._model._household_shared_exceptions = exceptions
+        self._model._exception_only_columns.update(self._pending_exception_filters)
+        self._pending_exception_filters.clear()
+        self._model._exception_only_columns.intersection_update(
+            columns, {c.key for c in self._model.columns})
+        self._model._refresh_people()
+        self._model.endResetModel()
+        self._column_search_header.refresh_buttons()
+        self._after_model_reset()
+        self._save_search_filters()
+        if selected is not None:
+            self.restore_person_cell(selected)
         if self._model.columnCount():
             self._model.headerDataChanged.emit(Qt.Orientation.Horizontal, 0, self._model.columnCount() - 1)
 
     def set_routing_state(self, state: RoutingState) -> None:
         if not isinstance(state, RoutingState):
             raise TypeError("state는 RoutingState여야 합니다.")
+        selected_cell = self.selected_person_cell()
         self._routing_state = state
         self._model.set_routing_state(state)
         self._after_model_reset()
+        if selected_cell is not None:
+            self.restore_person_cell(selected_cell)
 
     def set_school_calendar(self, calendar: SchoolLunchCalendar) -> None:
         if not isinstance(calendar, SchoolLunchCalendar):
@@ -1926,11 +1984,13 @@ class RosterWindow(QMainWindow):
             selection_provider=self._model.selected_column_values,
             search_provider=self._model.selected_column_search,
             picker_provider=lambda key: SequenceValuePicker if key == "sequence" else ColumnValuePicker,
+            exception_provider=self._model.exception_filter_state,
         )
         self._table.setHorizontalHeader(self._column_search_header)
         self._column_search_header.replace_columns(self._model.columns)
         self._column_search_header.search_changed.connect(self._on_column_search_changed)
         self._column_search_header.values_changed.connect(self._on_column_values_changed)
+        self._column_search_header.exceptions_changed.connect(self._on_exception_filter_changed)
         self._table.horizontalScrollBar().valueChanged.connect(
             self._column_search_header.update_positions
         )
@@ -2043,8 +2103,8 @@ class RosterWindow(QMainWindow):
 
     def _add_household_shared_column_actions(self, menu, column=None) -> None:
         if column is not None:
-            key = "address" if column.key == "detail_address" else column.key
-            action = menu.addAction("가구 공용 설정 (도로명주소·상세주소)" if key == "address" else "가구 공용 설정")
+            key = column.key
+            action = menu.addAction("가구 공용 설정")
             action.setCheckable(True)
             action.setChecked(key in self._model._household_shared_columns)
             action.setToolTip("체크하면 가구 공용으로 사용하고, 체크를 해제하면 현재 값을 유지하며 공용 사용을 끝냅니다.")
@@ -2057,9 +2117,7 @@ class RosterWindow(QMainWindow):
         if not any(item.key == "delivery_settings" for item in columns):
             columns.append(_Column("delivery_settings", self._column_aliases.get("delivery_settings", "배송 설정"), 240))
         for item in columns:
-            if item.key == "detail_address":
-                continue
-            action = shared_menu.addAction("도로명주소·상세주소" if item.key == "address" else item.label)
+            action = shared_menu.addAction(item.label)
             action.setCheckable(True)
             action.setChecked(item.key in self._model._household_shared_columns)
             action.setToolTip("체크하면 가구 공용으로 사용하고, 체크를 해제하면 현재 값을 유지하며 공용 사용을 끝냅니다.")
@@ -2069,6 +2127,29 @@ class RosterWindow(QMainWindow):
         self.household_shared_column_requested.emit(key)
         # A cancelled conflict review must not leave a checked menu item behind.
         action.setChecked(key in self._model._household_shared_columns)
+
+    def _add_household_shared_exception_action(
+        self, menu: QMenu, person: Person, column_key: str | None,
+    ) -> None:
+        if column_key not in self._model._household_shared_columns:
+            return
+        pair = (person.person_id, column_key)
+        action = menu.addAction("공용 예외")
+        action.setCheckable(True)
+        action.setChecked(pair in self._model._household_shared_exceptions)
+        action.setToolTip("체크하면 이 대상자의 선택한 칼럼만 개별 관리합니다.")
+        action.triggered.connect(
+            lambda checked=False, target=action, person_id=person.person_id, key=column_key:
+            self._request_household_shared_exception(person_id, key, checked, target)
+        )
+
+    def _request_household_shared_exception(
+        self, person_id: UUID, column_key: str, enabled: bool, action: QAction,
+    ) -> None:
+        self.household_shared_exception_requested.emit(person_id, column_key, enabled)
+        action.setChecked(
+            (person_id, column_key) in self._model._household_shared_exceptions
+        )
 
     def _load_column_aliases(self) -> dict[str, str]:
         if not self._remember_view or not self._search_settings.contains(
@@ -2426,6 +2507,7 @@ class RosterWindow(QMainWindow):
                 relocation = QAction("이사 등록", menu)
                 relocation.triggered.connect(lambda: self.relocation_requested.emit(person.person_id))
                 menu.addAction(relocation)
+            self._add_household_shared_exception_action(menu, person, column_key)
             self._add_person_context_actions(menu, person, None)
             return menu
         for label, status in (
@@ -2460,8 +2542,12 @@ class RosterWindow(QMainWindow):
                 lambda: self.driver_assignment_requested.emit(person.person_id, meal)
             )
         menu.addAction(assignment)
+        self._add_household_shared_exception_action(menu, person, column_key)
         self._add_person_context_actions(menu, person, meal)
         return menu
+
+    def set_operating_database(self, path):
+        self.setWindowTitle(f"급식 배송 운영 · {APP_VERSION} · {path.name}")
 
     def _add_person_context_actions(
         self, menu: QMenu, person: Person, meal: Meal | None
@@ -2599,6 +2685,12 @@ class RosterWindow(QMainWindow):
     def _on_qdate_changed(self, value: QDate) -> None:
         self._set_day(date(value.year(), value.month(), value.day()))
 
+    def _on_exception_filter_changed(self, key: str, enabled: bool) -> None:
+        self._model.set_exception_filter(key, enabled)
+        self._column_search_header.refresh_buttons()
+        self._after_model_reset()
+        self._save_search_filters()
+
     def _on_column_values_changed(self, key: str, values) -> None:
         self._model.set_column_values(key, values)
         self._after_model_reset()
@@ -2611,6 +2703,7 @@ class RosterWindow(QMainWindow):
 
     def _clear_column_filters(self) -> None:
         self._model.clear_column_filters()
+        self._pending_exception_filters.clear()
         self._column_search_header.refresh_buttons()
         self._after_model_reset()
         self._save_search_filters()
@@ -2636,12 +2729,13 @@ class RosterWindow(QMainWindow):
             "include_hidden": self._include_hidden_filter.isChecked(),
             "special_only": self._special_only_filter.isChecked(),
             "columns": dict(self._model._column_searches),
+            "exception_only": sorted(self._model._exception_only_columns | self._pending_exception_filters),
             # Omission means all values; an empty list means explicitly none.
             "values": {
                 key: sorted(values) for key, values in self._model._column_values.items()
             },
         }
-        if not any((state["global"], state["include_hidden"], state["special_only"], state["columns"], state["values"])):
+        if not any((state["global"], state["include_hidden"], state["special_only"], state["columns"], state["values"], state["exception_only"])):
             self._search_settings.remove(self._search_settings_key)
         else:
             self._search_settings.setValue(
@@ -2681,6 +2775,10 @@ class RosterWindow(QMainWindow):
                 for key, search in searches.items():
                     if key in keys and isinstance(search, str):
                         self._model.set_column_search(key, search)
+            exception_only = state.get("exception_only")
+            if isinstance(exception_only, list):
+                self._pending_exception_filters = {key for key in exception_only
+                                                   if isinstance(key, str) and key in keys}
             selections = state.get("values")
             if isinstance(selections, dict):
                 for key, values in selections.items():
@@ -2729,6 +2827,7 @@ class RosterWindow(QMainWindow):
             column.label for column in self._model.columns
             if column.key in self._model._column_searches
             or column.key in self._model._column_values
+            or column.key in self._model._exception_only_columns
         ]
         archive_visible = self._archive_action.isChecked()
         self._column_filter_strip.setVisible(bool(active_columns) or archive_visible)
@@ -2821,6 +2920,30 @@ class RosterWindow(QMainWindow):
             return current
         selected = selection_model.selectedIndexes()
         return selected[0] if selected else QModelIndex()
+
+    def selected_person_cell(self) -> tuple[UUID, str] | None:
+        index = self._selected_index()
+        if not index.isValid():
+            return None
+        return self._model.person_at(index.row()).person_id, self._model.columns[index.column()].key
+
+    def restore_person_cell(self, selected_cell: tuple[UUID, str]) -> None:
+        person_id, column_key = selected_cell
+        for row in range(self._model.rowCount()):
+            if self._model.person_at(row).person_id != person_id:
+                continue
+            column = next(
+                (index for index, item in enumerate(self._model.columns) if item.key == column_key),
+                0,
+            )
+            self._table.selectionModel().setCurrentIndex(
+                self._model.index(row, column),
+                QItemSelectionModel.SelectionFlag.ClearAndSelect,
+            )
+            self._update_inspector()
+            return
+        self._table.clearSelection()
+        self._clear_inspector()
 
     def _clear_inspector(self) -> None:
         self._edit_person_button.setEnabled(False)

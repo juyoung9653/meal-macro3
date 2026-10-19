@@ -14,6 +14,7 @@ from ..core.invoice_data import (
     WeeklyDelivery,
 )
 from ..core.models import combine_address
+from .mapping_values import resolve_mapping_value
 from ..core.settings import get_settings
 from ..excel.excel_utils import adjust_formula, build_merged_anchor_map, copy_cell
 from ..excel.publication import WorkbookPublicationResult, publish_workbook
@@ -189,6 +190,7 @@ def make_confirm_publication(
     title_prefix: str = "",
     meal_type: str = "급식",
     output_password: str | None = None,
+    column_fallbacks: Mapping[str, str] | None = None,
 ) -> tuple[list[dict], WorkbookPublicationResult]:
     """명단 데이터 → 확인서템플릿 채워서 단일 엑셀 파일 생성."""
     s = get_settings()
@@ -204,6 +206,10 @@ def make_confirm_publication(
     )
     phone_col = _mapped_source_column(col_mapping, "핸드폰", "전화번호")
     dong_col = _mapped_source_column(col_mapping, "관할동", "동")
+    fallbacks = column_fallbacks or {}
+    name_fallback = _mapped_source_column(fallbacks, "성명", "이름") if any(key in fallbacks for key in ("성명", "이름")) else ""
+    head_fallback = _mapped_source_column(fallbacks, "세대주 성명", "세대주\n성명", "세대주성명") if any(key in fallbacks for key in ("세대주 성명", "세대주\n성명", "세대주성명")) else ""
+    phone_fallback = _mapped_source_column(fallbacks, "핸드폰", "전화번호") if any(key in fallbacks for key in ("핸드폰", "전화번호")) else ""
 
     # 1. 도로명·상세주소를 정규화하고 관할동+전체주소 가구를 검증한다.
     dong_households = _validated_household_groups(
@@ -390,9 +396,9 @@ def make_confirm_publication(
                 if meal_type != "급식":
                     sheet_seq += 1
 
-                name = _blank_text(person.roster.extra.get(name_col, ""))
-                head = _blank_text(person.roster.extra.get(head_col, ""))
-                phone = _blank_text(person.roster.extra.get(phone_col, ""))
+                name = _blank_text(resolve_mapping_value(person.roster.extra, name_col, name_fallback))
+                head = _blank_text(resolve_mapping_value(person.roster.extra, head_col, head_fallback))
+                phone = _blank_text(resolve_mapping_value(person.roster.extra, phone_col, phone_fallback))
 
                 if meal_type == "급식" and ci == 0:
                     _set_ph(ws, ph_map, "num1", current_row, sheet_seq, tpl_anchor_map)

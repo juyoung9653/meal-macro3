@@ -23,6 +23,7 @@ from src.desktop_v2.database_access import (
     LoginDialog,
     RestoreBackupDialog,
 )
+from src.desktop_v2.startup_loading import StartupLoadingDialog
 from src.desktop_v2.portable_settings import DesktopStorageSettings
 from src.desktop_v2.database_access import BackupDirectoryDialog, DatabaseLocationDialog, DatabasePasswordChangeDialog, relocate_database
 from src.storage.database_session import (
@@ -460,9 +461,74 @@ def test_login_keeps_dialog_open_on_wrong_password_then_opens_on_correct_one(
     assert dialog.result() != QDialog.DialogCode.Accepted
     assert not dialog._error.isHidden()
     assert "비밀번호" in dialog._error.text()
+    assert not any(
+        isinstance(widget, StartupLoadingDialog) and widget.isVisible()
+        for widget in app.topLevelWidgets()
+    )
 
     dialog.password_edit.setText("correct-password")
     dialog._submit()
+    assert dialog.result() == QDialog.DialogCode.Accepted
+    assert dialog.session is not None
+    assert not any(
+        isinstance(widget, StartupLoadingDialog) and widget.isVisible()
+        for widget in app.topLevelWidgets()
+    )
+    dialog.session.close()
+
+
+def test_login_shows_responsive_loading_dialog_during_actual_database_open(
+    app: QApplication,
+    tmp_path: Path,
+    monkeypatch,
+):
+    from threading import Event, get_ident
+
+    from PySide6.QtCore import QTimer
+
+    database_path = tmp_path / "delayed-open.sqlite3"
+    DatabaseSession.create(database_path, "correct-password").close()
+    original_open = DatabaseSession.open
+    entered, released = Event(), Event()
+    ui_thread = get_ident()
+    observed = []
+
+    def delayed_open(cls, *args, **kwargs):
+        assert get_ident() != ui_thread
+        entered.set()
+        assert released.wait(5), "UI event loop did not continue during DB open"
+        return original_open(*args, **kwargs)
+
+    monkeypatch.setattr(DatabaseSession, "open", classmethod(delayed_open))
+    dialog = LoginDialog(database_path)
+    dialog.password_edit.setText("correct-password")
+
+    def heartbeat():
+        if not entered.is_set() or released.is_set():
+            return
+        loading = next(
+            (
+                widget
+                for widget in app.topLevelWidgets()
+                if isinstance(widget, StartupLoadingDialog) and widget.isVisible()
+            ),
+            None,
+        )
+        if loading is None:
+            return
+        observed.append((get_ident(), loading.isVisible()))
+        released.set()
+
+    timer = QTimer()
+    timer.timeout.connect(heartbeat)
+    timer.start(10)
+    try:
+        dialog._submit()
+    finally:
+        timer.stop()
+        released.set()
+
+    assert observed == [(ui_thread, True)]
     assert dialog.result() == QDialog.DialogCode.Accepted
     assert dialog.session is not None
     dialog.session.close()

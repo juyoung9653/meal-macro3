@@ -4,10 +4,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
+from math import ceil
 from uuid import uuid4
 
 from PySide6.QtCore import Qt, Signal, QRect, QSize
-from PySide6.QtGui import QColor, QKeySequence, QPalette
+from PySide6.QtGui import (
+    QColor, QKeySequence, QPalette, QTextCharFormat, QTextCursor,
+    QTextDocument, QTextOption,
+)
 from PySide6.QtWidgets import (
     QApplication, QAbstractItemView, QComboBox, QDialog, QDialogButtonBox,
     QHBoxLayout, QHeaderView, QLabel, QPushButton,
@@ -34,11 +38,11 @@ class _SharedValueDelegate(QStyledItemDelegate):
 
     def sizeHint(self, option, index):
         width = self.parent().columnWidth(index.column())
-        bounds = option.fontMetrics.boundingRect(
-            QRect(0, 0, max(30, width - 18), 100000),
-            Qt.TextFlag.TextWordWrap, index.data() or "",
+        document = self._text_document(
+            index.data() or "", option.font,
+            option.palette.color(QPalette.ColorRole.Text), max(30, width - 10),
         )
-        return QSize(width, max(52, bounds.height() + 18))
+        return QSize(width, max(52, ceil(document.size().height()) + 14))
 
     def paint(self, painter, option, index):
         # Qt's native item text layout collapses embedded newlines on some
@@ -52,14 +56,38 @@ class _SharedValueDelegate(QStyledItemDelegate):
         selected = bool(decorated.state & QStyle.StateFlag.State_Selected)
         role = QPalette.ColorRole.HighlightedText if selected else QPalette.ColorRole.Text
         painter.save()
-        painter.setFont(decorated.font)
-        painter.setPen(decorated.palette.color(role))
         painter.setClipRect(decorated.rect)
-        painter.drawText(decorated.rect.adjusted(5, 7, -5, -7), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop | Qt.TextFlag.TextWordWrap, text)
+        name_row = isinstance(self.parent(), _CurrentValuesGrid) and index.row() % 2 == 0
+        padding = 4 if name_row else 7
+        content = decorated.rect.adjusted(5, padding, -5, -padding)
+        document = self._text_document(
+            text, decorated.font, decorated.palette.color(role),
+            max(30, content.width()),
+        )
+        painter.translate(content.topLeft())
+        document.drawContents(painter, QRect(0, 0, content.width(), content.height()))
         painter.restore()
 
+    @staticmethod
+    def _text_document(text, font, color, width):
+        document = QTextDocument()
+        document.setDocumentMargin(0)
+        document.setDefaultFont(font)
+        option = document.defaultTextOption()
+        option.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+        document.setDefaultTextOption(option)
+
+        cursor = QTextCursor(document)
+        document.setPlainText(text)
+        cursor.select(QTextCursor.SelectionType.Document)
+        text_format = QTextCharFormat()
+        text_format.setForeground(color)
+        cursor.mergeCharFormat(text_format)
+        document.setTextWidth(width)
+        return document
+
     def createEditor(self, parent, option, index):
-        component = self._components[index.column() - 2]
+        component = self._components[index.column() - 1]
         if component.choices:
             editor = QComboBox(parent)
             editor.setEditable(True)
@@ -108,7 +136,7 @@ class SharedValueTable(QTableWidget):
     def paste_cells(self):
         if not self.values_editable:
             return
-        if self.currentItem() is None or self.currentColumn() < 2:
+        if self.currentItem() is None or self.currentColumn() < 1:
             self.clipboard_error.emit("공용 값을 입력할 칸을 먼저 선택해주세요.")
             return
         item = self.currentItem()
@@ -119,10 +147,92 @@ class SharedValueTable(QTableWidget):
         if not self.values_editable:
             return
         for index in self.selectedIndexes():
-            if index.column() >= 2:
+            if index.column() >= 1:
                 item = self.item(index.row(), index.column())
                 item.setText("")
                 item.setData(Qt.ItemDataRole.UserRole, True)
+
+
+class _CurrentValuesGrid(QTableWidget):
+    RAW_VALUE_ROLE = Qt.ItemDataRole.UserRole + 1
+
+    def __init__(self, components, member_names, existing_values, outer_table):
+        super().__init__(2 * len(member_names), len(components), outer_table)
+        self._outer_table = outer_table
+        self.setAccessibleName("가구원별 현재 값")
+        self.setHorizontalHeaderLabels([component.label for component in components])
+        self.horizontalHeader().setVisible(len(components) > 1)
+        self.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        self.verticalHeader().hide()
+        self.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        self.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectItems)
+        self.setWordWrap(True)
+        self.setTextElideMode(Qt.TextElideMode.ElideNone)
+        self.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setItemDelegate(_SharedValueDelegate((), self))
+        for member_index, (name, values) in enumerate(zip(member_names, existing_values)):
+            name_row = 2 * member_index
+            name_item = QTableWidgetItem(name)
+            name_item.setFlags(name_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            name_item.setToolTip(name)
+            name_item.setData(self.RAW_VALUE_ROLE, name)
+            font = self.font()
+            font.setBold(True)
+            name_item.setFont(font)
+            name_item.setBackground(QColor("#EDF3F5"))
+            self.setItem(name_row, 0, name_item)
+            if len(components) > 1:
+                self.setSpan(name_row, 0, 1, len(components))
+            for component_column, value in enumerate(values):
+                raw_value = "" if value is None else value
+                item = QTableWidgetItem(raw_value if raw_value else "(빈 값)")
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                item.setData(self.RAW_VALUE_ROLE, raw_value)
+                item.setToolTip(raw_value)
+                self.setItem(name_row + 1, component_column, item)
+
+    def keyPressEvent(self, event):
+        if event.matches(QKeySequence.StandardKey.Copy):
+            item = self.currentItem()
+            if item is not None:
+                QApplication.clipboard().setText(item.data(self.RAW_VALUE_ROLE) or "")
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def wheelEvent(self, event):
+        if event.angleDelta().y() and not event.modifiers():
+            self._outer_table.wheelEvent(event)
+            return
+        super().wheelEvent(event)
+
+    def fit_to_width(self, width):
+        frame_width = self.frameWidth() * 2
+        available = max(1, width - 1 - frame_width)
+        shared_width = max(140, available // max(1, self.columnCount()))
+        for column in range(self.columnCount()):
+            self.setColumnWidth(column, shared_width)
+        self.resizeRowsToContents()
+        for row in range(0, self.rowCount(), 2):
+            item = self.item(row, 0)
+            document = _SharedValueDelegate._text_document(
+                item.text(), item.font(), self.palette().color(QPalette.ColorRole.Text),
+                max(30, shared_width * self.columnCount() - 10),
+            )
+            self.setRowHeight(row, ceil(document.size().height()) + 8)
+        height = (
+            (self.horizontalHeader().height() if not self.horizontalHeader().isHidden() else 0)
+            + sum(self.rowHeight(row) for row in range(self.rowCount()))
+            + (self.horizontalScrollBar().sizeHint().height()
+               if shared_width * self.columnCount() > available else 0)
+            + frame_width + 1
+        )
+        self.setMinimumHeight(height)
+        return height
 
 
 class HouseholdSharedColumnDialog(QDialog):
@@ -158,17 +268,14 @@ class HouseholdSharedColumnDialog(QDialog):
         note.setWordWrap(True)
         layout.addWidget(note)
         controls = QHBoxLayout()
-        self.copy = QPushButton("복사 (Ctrl+C)")
-        self.paste = QPushButton("붙여넣기 (Ctrl+V)")
         self.clear = QPushButton("선택한 값 비우기")
-        for button in (self.copy, self.paste, self.clear):
-            button.setObjectName("quietAction")
-            controls.addWidget(button)
+        self.clear.setObjectName("quietAction")
+        controls.addWidget(self.clear)
         controls.addStretch()
         layout.addLayout(controls)
-        self.table = SharedValueTable(len(rows), 2 + len(components))
+        self.table = SharedValueTable(len(rows), 1 + len(components))
         self.table.setAccessibleName(f"{column_label} 가구별 공용 값")
-        self.table.setHorizontalHeaderLabels(["가구원", "현재 개인별 값", *("공용 · " + c.label for c in components)])
+        self.table.setHorizontalHeaderLabels(["현재 개인별 값", *("공용 · " + c.label for c in components)])
         self.table.setWordWrap(True)
         self.table.setTextElideMode(Qt.TextElideMode.ElideNone)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
@@ -177,33 +284,40 @@ class HouseholdSharedColumnDialog(QDialog):
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked | QAbstractItemView.EditTrigger.EditKeyPressed | QAbstractItemView.EditTrigger.AnyKeyPressed)
         self.table.setItemDelegate(_SharedValueDelegate(components, self.table))
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        self.table.setColumnWidth(0, 160)
-        self.table.setColumnWidth(1, 300)
-        for column, component in enumerate(components, 2):
+        self.table.setColumnWidth(0, 420)
+        self._current_value_grids = []
+        for column, component in enumerate(components, 1):
             self.table.setColumnWidth(column, 190)
             hint = component.placeholder
             if component.choices:
                 hint = " · ".join(component.choices) + ("\n" + hint if hint else "")
             self.table.horizontalHeaderItem(column).setToolTip(hint)
         for row_index, row in enumerate(rows):
-            names = QTableWidgetItem("\n".join(row.member_names))
-            current = QTableWidgetItem("\n".join(
-                name + ": " + " · ".join(f"{c.label}: {value or '(빈 값)'}" for c, value in zip(components, values))
+            current_text = "\n\n".join(
+                name + "\n" + "\n".join(
+                    f"{component.label}: {value if value is not None else ''}"
+                    for component, value in zip(components, values)
+                )
                 for name, values in zip(row.member_names, row.existing_values)
-            ))
-            for column, item in enumerate((names, current)):
-                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-                item.setToolTip(item.text())
-                self.table.setItem(row_index, column, item)
-            for column, value in enumerate(row.values, 2):
+            )
+            current = QTableWidgetItem()
+            current.setToolTip(current_text)
+            current.setFlags(current.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self.table.setItem(row_index, 0, current)
+            current_grid = _CurrentValuesGrid(
+                components, row.member_names, row.existing_values, self.table,
+            )
+            self._current_value_grids.append(current_grid)
+            self.table.setCellWidget(row_index, 0, current_grid)
+            for column, value in enumerate(row.values, 1):
                 item = QTableWidgetItem(value if value is not None else "")
                 item.setData(Qt.ItemDataRole.UserRole, value is not None)
                 self.table.setItem(row_index, column, item)
                 self._decorate_item(item)
-        self.table.resizeRowsToContents()
-        self.table.horizontalHeader().sectionResized.connect(lambda *_: self.table.resizeRowsToContents())
+        self._resize_review_rows()
+        self.table.horizontalHeader().sectionResized.connect(self._column_resized)
         layout.addWidget(self.table, 1)
-        hint = QLabel("더블클릭·F2로 수정 · 입력 중 Ctrl+C / Ctrl+V · Tab으로 다음 칸 · 비우기/Del은 선택한 공용 값을 지웁니다.")
+        hint = QLabel("선택한 셀 Ctrl+C · 더블클릭·F2로 수정 · 입력 중 Ctrl+C / Ctrl+V · Tab으로 다음 칸 · 비우기/Del은 선택한 공용 값을 지웁니다.")
         hint.setWordWrap(True)
         layout.addWidget(hint)
         self.error = QLabel()
@@ -218,8 +332,6 @@ class HouseholdSharedColumnDialog(QDialog):
         self.buttons.accepted.connect(self.accept)
         self.buttons.rejected.connect(self.reject)
         layout.addWidget(self.buttons)
-        self.copy.clicked.connect(self.table.copy_cells)
-        self.paste.clicked.connect(self.table.paste_cells)
         self.clear.clicked.connect(self.table.clear_cells)
         self.table.clipboard_error.connect(self.error.setText)
         self.table.itemChanged.connect(self._item_changed)
@@ -227,19 +339,34 @@ class HouseholdSharedColumnDialog(QDialog):
         self._loading = False
         self._update_enabled(enabled)
 
+    def _column_resized(self, column, _old_width, _new_width):
+        self._resize_review_rows()
+
+    def _resize_review_rows(self):
+        width = self.table.columnWidth(0)
+        for row, grid in enumerate(self._current_value_grids):
+            height = grid.fit_to_width(width)
+            self.table.resizeRowToContents(row)
+            self.table.setRowHeight(row, max(self.table.rowHeight(row), height))
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # Fonts and header metrics are final only after the dialog is polished.
+        self._resize_review_rows()
+
     def _decorate_item(self, item):
         resolved = bool(item.data(Qt.ItemDataRole.UserRole))
         item.setBackground(QColor("#FFFFFF" if resolved else "#FFF1DA"))
         item.setToolTip(item.text() if resolved else "개인별 값이 다릅니다. 공용 값을 직접 입력하거나 붙여넣으세요. 빈 값으로 결정하려면 '선택한 값 비우기'를 누르세요.")
 
     def _item_changed(self, item):
-        if self._loading or item.column() < 2:
+        if self._loading or item.column() < 1:
             return
         self._loading = True
         item.setData(Qt.ItemDataRole.UserRole, True)
         self._decorate_item(item)
         self._loading = False
-        self.table.resizeRowToContents(item.row())
+        self._resize_review_rows()
         self.error.clear()
 
     def _update_enabled(self, enabled):
@@ -251,11 +378,10 @@ class HouseholdSharedColumnDialog(QDialog):
         )
         self._loading = True
         for row in range(self.table.rowCount()):
-            for column in range(2, self.table.columnCount()):
+            for column in range(1, self.table.columnCount()):
                 item = self.table.item(row, column)
                 item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable if enabled else item.flags() & ~Qt.ItemFlag.ItemIsEditable)
         self._loading = False
-        self.paste.setEnabled(enabled)
         self.clear.setEnabled(enabled)
         self.error.setText("" if enabled else "공용 사용을 선택해야 값을 수정할 수 있습니다. 현재 값은 스크롤·복사로 확인할 수 있습니다.")
 
@@ -265,7 +391,7 @@ class HouseholdSharedColumnDialog(QDialog):
         result = {}
         for row_index, row in enumerate(self._rows):
             values = []
-            for column, component in enumerate(self._components, 2):
+            for column, component in enumerate(self._components, 1):
                 item = self.table.item(row_index, column)
                 if not item.data(Qt.ItemDataRole.UserRole):
                     self.table.setCurrentCell(row_index, column)

@@ -13,7 +13,7 @@ from src.core.models import FULL_ADDRESS_FIELD
 from src.core.settings import SettingsManager, get_settings
 from src.domain.document_column_mappings import (
     PreparedMappingRevision, build_mapping_revision as _build_mapping_revision,
-    load_mapping_overrides, mapping_setting_from_snapshot,
+    load_mapping_overrides, load_mapping_fallbacks, mapping_setting_from_snapshot,
 )
 from src.domain.revisions import HistoricalSnapshot, RevisionActor
 from src.domain.roster import (
@@ -182,23 +182,32 @@ def effective_mapping(defaults: Mapping[str, str], overrides: Mapping[str, str])
     return result
 
 
+def effective_fallbacks(defaults: Mapping[str, str], fallbacks: Mapping[str, str], *, document_kind: str) -> dict[str, str]:
+    protected = set(_CONFIRM_LOCKED) if document_kind == "confirmation" else set(_INVOICE_AUTOMATIC_TARGETS)
+    protected.update(value for key, value in defaults.items() if key.startswith("__calc_") and value)
+    return {target: source for target, source in fallbacks.items()
+            if source and not target.startswith("__calc_") and target not in protected}
+
+
 def build_mapping_revision(
     current_revision_id: UUID, snapshot: HistoricalSnapshot, profile: str,
     document_kind: str, desired_mapping: Mapping[str, str], *, actor: RevisionActor,
     recorded_at: datetime, revision_id: UUID, settings: SettingsManager | None = None,
     roster: RosterSnapshot | None = None,
+    desired_fallbacks: Mapping[str, str] | None = None,
 ) -> PreparedMappingRevision | None:
     spec = mapping_editor_spec(profile, document_kind, settings=settings, roster=roster)
     editable = {key: spec.defaults[key] for key in spec.targets if key not in spec.locked_targets}
     return _build_mapping_revision(
         current_revision_id, snapshot, profile, document_kind, desired_mapping,
+        desired_fallbacks=desired_fallbacks,
         defaults=editable, allowed_sources=spec.source_options, locked_targets=spec.locked_targets,
         actor=actor, recorded_at=recorded_at, revision_id=revision_id,
     )
 
 
 __all__ = [
-    "MappingEditorSpec", "mapping_editor_spec", "load_mapping_overrides",
-    "mapping_setting_from_snapshot", "effective_mapping", "build_mapping_revision",
+    "MappingEditorSpec", "mapping_editor_spec", "load_mapping_overrides", "load_mapping_fallbacks",
+    "mapping_setting_from_snapshot", "effective_mapping", "effective_fallbacks", "build_mapping_revision",
     "invoice_default_mapping", "confirmation_default_mapping",
 ]

@@ -198,7 +198,7 @@ def _downgrade_to_schema_two_for_migration_test(path: Path) -> None:
 def test_create_append_reopen_and_read_revision(tmp_path: Path):
     path = tmp_path / "operations.sqlite3"
     with EncryptedDatabase.create(path, KEY) as database:
-        assert database.schema_version == 7
+        assert database.schema_version == 8
         assert database.latest_revision() is None
         database.append_revision(_record())
         database.check_integrity()
@@ -339,7 +339,7 @@ def test_open_migrates_schema_two_and_backfills_stable_display_codes(tmp_path: P
     _downgrade_to_schema_two_for_migration_test(path)
 
     with EncryptedDatabase.open(path, KEY) as migrated:
-        assert migrated.schema_version == 7
+        assert migrated.schema_version == 8
         assert migrated.revision_display_code(REVISION_ID) == "20260825-001"
         assert migrated.revision_display_code(SECOND_REVISION_ID) == "20260825-002"
         migrated.check_integrity()
@@ -367,7 +367,7 @@ def test_open_migrates_schema_five_and_preserves_default_household(tmp_path: Pat
     finally:
         connection.close()
     with EncryptedDatabase.open(path, KEY) as migrated:
-        assert migrated.schema_version == 7
+        assert migrated.schema_version == 8
         assert migrated.current_roster().households == first.households
         migrated.check_integrity()
 

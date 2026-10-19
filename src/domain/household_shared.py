@@ -99,13 +99,65 @@ def shared_columns_from_state(state):
         not isinstance(key, str) for key in keys
     ):
         raise ValueError("가구 공용 칼럼 설정이 올바르지 않습니다.")
+    keys = set(keys)
+    if state.get("address_columns_version", 1) < 2 and "address" in keys:
+        keys.add("detail_address")
     return frozenset(keys)
+
+
+def shared_exceptions_from_state(state):
+    pairs = set()
+    entries = (state or {}).get("exceptions", ())
+    if not isinstance(entries, (list, tuple)):
+        raise ValueError("가구 공용 예외 설정이 올바르지 않습니다.")
+    for entry in entries:
+        try:
+            pid, column = UUID(entry["person_id"]), entry["column"]
+            if not isinstance(column, str):
+                raise ValueError()
+            pairs.add((pid, column))
+            if (state or {}).get("address_columns_version", 1) < 2 and column == "address":
+                pairs.add((pid, "detail_address"))
+        except (KeyError, TypeError, ValueError, AttributeError) as error:
+            raise ValueError("가구 공용 예외 설정이 올바르지 않습니다.") from error
+    return frozenset(pairs)
+
+
+def _shared_state(columns, exceptions):
+    state = {"columns": sorted(columns), "address_columns_version": 2}
+    if exceptions:
+        state["exceptions"] = [
+            {"person_id": str(pid), "column": column}
+            for pid, column in sorted(exceptions, key=lambda pair: (str(pair[0]), pair[1]))
+        ]
+    return state
+
+
+def build_household_shared_exceptions_revision(roster, stored_state, exceptions, *,
+        actor, recorded_at, effective_on, revision_id):
+    exceptions = frozenset(exceptions)
+    people = {person.person_id for person in roster.persons}
+    columns = set(available_shared_column_keys(roster))
+    if any(pid not in people or column not in columns for pid, column in exceptions):
+        raise ValueError("현재 명단에 없는 대상자 또는 칼럼입니다.")
+    if exceptions == shared_exceptions_from_state(stored_state):
+        return None
+    after = _shared_state(shared_columns_from_state(stored_state), exceptions)
+    return RevisionRecord(
+        RevisionMetadata(revision_id, roster.revision_id, recorded_at, effective_on,
+                         actor, "가구 공용 예외 설정", RevisionSource.UI,
+                         decisions={"household_shared_exceptions": True}),
+        (AuditChange(HOUSEHOLD_SHARED_KIND, HOUSEHOLD_SHARED_ID,
+                     ChangeOperation.INSERT if stored_state is None else ChangeOperation.UPDATE,
+                     stored_state, after),),
+    )
 
 
 def available_shared_column_keys(roster):
     return (
         *_PROFILE,
         "address",
+        "detail_address",
         "sequence",
         "delivery_settings",
         *(f"status:{key}" for key in _MEALS),
@@ -116,11 +168,8 @@ def available_shared_column_keys(roster):
 def household_shared_components(roster, column_key, *, snapshot=None):
     if column_key not in available_shared_column_keys(roster):
         raise ValueError("현재 명단에 없는 칼럼입니다.")
-    if column_key == "address":
-        return (
-            SharedComponent("road_address", "도로명주소"),
-            SharedComponent("detail_address", "상세주소"),
-        )
+    if column_key in ("address", "detail_address"):
+        return (SharedComponent("road_address", "도로명주소"),) if column_key == "address" else (SharedComponent("detail_address", "상세주소"),)
     if column_key == "sequence":
         return tuple(
             SharedComponent(meal.value, f"{meal.value} 순서") for meal in _DISPLAY_MEALS
@@ -231,7 +280,7 @@ def _values(roster, key, person_id, on, snapshot=None, *, context=None):
     person = roster.person(person_id)
     if context is None and snapshot is not None:
         context = _ReadContext(snapshot)
-    needs_routing = key in ("address", "jurisdiction") or key.startswith("status:")
+    needs_routing = key in ("address", "detail_address", "jurisdiction") or key.startswith("status:")
     view = (
         context.routing.resolve(roster, person_id, on)
         if context is not None and needs_routing
@@ -246,11 +295,9 @@ def _values(roster, key, person_id, on, snapshot=None, *, context=None):
         return (_text(value),)
     if key.startswith("custom:"):
         return (_text(person.profile.custom_values.get(UUID(key[7:]))),)
-    if key == "address":
-        return tuple(
-            _text(getattr(view or person.profile, field))
-            for field in ("road_address", "detail_address")
-        )
+    if key in ("address", "detail_address"):
+        field = "road_address" if key == "address" else "detail_address"
+        return (_text(getattr(view or person.profile, field)),)
     if key == "sequence":
         return tuple(
             roster.resolve_assignment(person_id, meal).sequence or ""
@@ -305,12 +352,14 @@ def _values(roster, key, person_id, on, snapshot=None, *, context=None):
     )
 
 
-def household_shared_rows(roster, column_key, on, *, snapshot=None):
+def household_shared_rows(roster, column_key, on, *, snapshot=None, exceptions=None):
     household_shared_components(roster, column_key, snapshot=snapshot)
     rows = []
+    if exceptions is None:
+        exceptions = shared_exceptions_from_state(snapshot.entity(HOUSEHOLD_SHARED_KIND, HOUSEHOLD_SHARED_ID) if snapshot else None)
     context = _ReadContext(snapshot) if snapshot is not None else None
     for household in roster.households:
-        members = roster.household_members(household.household_id, on=on)
+        members = tuple(p for p in roster.household_members(household.household_id, on=on) if (p.person_id, column_key) not in exceptions)
         if not members:
             continue
         values = tuple(
@@ -383,15 +432,9 @@ def _set_values(roster, key, person_id, values, on):
         else:
             profile = replace(person.profile, **{_PROFILE[key]: value})
         updated = replace(person, profile=profile)
-    elif key == "address":
-        updated = replace(
-            person,
-            profile=replace(
-                person.profile,
-                road_address=values[0] or None,
-                detail_address=values[1] or None,
-            ),
-        )
+    elif key in ("address", "detail_address"):
+        field = "road_address" if key == "address" else "detail_address"
+        updated = replace(person, profile=replace(person.profile, **{field: values[0] or None}))
     elif key == "sequence":
         for meal, value in zip(_DISPLAY_MEALS, values):
             if "\n" in value or "\r" in value:
@@ -484,6 +527,21 @@ def _routing_change(
     )
 
 
+def _address_pair(roster, person_id, on, routing, extra=()):
+    """Resolve a complete pair, including earlier changes in this revision."""
+    profile = roster.person(person_id).profile
+    road, detail = profile.road_address or "", profile.detail_address or ""
+    events = {event.event_id: _routing_event_state(event) for event in routing.events} if routing else {}
+    for change in extra:
+        if change.entity_kind == ROUTING_EVENT_KIND and change.after is not None:
+            events[change.entity_id] = change.after
+    ordered = sorted(events.values(), key=lambda state: (state["effective_on"], state["position"]))
+    for state in ordered:
+        if state["person_id"] == str(person_id) and state["effective_on"] <= on.isoformat() and state["road_address"] is not None:
+            road, detail = state["road_address"], state["detail_address"] or ""
+    return {"road": road, "detail": detail}
+
+
 def _shared_period(roster, source_id, target_id, household_id, on, requested):
     periods = [requested]
     for pid in (source_id, target_id):
@@ -535,14 +593,14 @@ def _subtract_periods(periods, removed):
     return remaining
 
 
-def _propagate_enrollments(before, after, working, selected, on):
+def _propagate_enrollments(before, after, working, selected, on, exceptions):
     claims = {}
     old_ids = {p.person_id for p in before.persons}
     for person in after.persons:
         if person.person_id not in old_ids:
             continue
         for name, meal in _MEALS.items():
-            if "status:" + name not in selected:
+            if "status:" + name not in selected or (person.person_id, "status:" + name) in exceptions:
                 continue
             previous = tuple(
                 e.period
@@ -566,6 +624,8 @@ def _propagate_enrollments(before, after, working, selected, on):
                     for member in after.household_members(
                         household.household_id, on=day
                     ):
+                        if (member.person_id, "status:" + name) in exceptions:
+                            continue
                         clipped = _shared_period(
                             after,
                             person.person_id,
@@ -636,7 +696,8 @@ def build_household_shared_revision(
 ):
     components = household_shared_components(roster, column_key, snapshot=snapshot)
     keys = set(shared_columns_from_state(stored_state))
-    rows = household_shared_rows(roster, column_key, effective_on, snapshot=snapshot)
+    exceptions = shared_exceptions_from_state(stored_state)
+    rows = household_shared_rows(roster, column_key, effective_on, snapshot=snapshot, exceptions=exceptions)
     if enabled and set(household_values) != {row.household_id for row in rows}:
         raise ValueError("모든 가구의 공용 값을 직접 확인·입력해주세요.")
     working = replace(roster, revision_id=revision_id)
@@ -646,7 +707,7 @@ def build_household_shared_revision(
         context.routing
         if context is not None
         and (
-            column_key in ("address", "jurisdiction")
+            column_key in ("address", "detail_address", "jurisdiction")
             or column_key.startswith("status:")
         )
         else None
@@ -666,6 +727,8 @@ def build_household_shared_revision(
                 continue
             for person in roster.household_members(row.household_id, on=effective_on):
                 pid = person.person_id
+                if (pid, column_key) in exceptions:
+                    continue
                 position += 1
                 if column_key.startswith("status:"):
                     meal = _MEALS[column_key[7:]]
@@ -765,18 +828,19 @@ def build_household_shared_revision(
                         )
                     )
                 else:
-                    if column_key not in ("address", "jurisdiction"):
+                    if column_key not in ("address", "detail_address", "jurisdiction"):
                         working = _set_values(
                             working, column_key, pid, values, effective_on
                         )
-                    if column_key == "address":
+                    if column_key in ("address", "detail_address"):
+                        pair = _address_pair(roster, pid, effective_on, routing, extra)
+                        pair["road" if column_key == "address" else "detail"] = values[0].strip()
                         extra.append(
                             _routing_change(
                                 pid,
                                 effective_on,
                                 position,
-                                road=values[0].strip(),
-                                detail=values[1].strip(),
+                                **pair,
                             )
                         )
                     elif column_key == "jurisdiction":
@@ -790,9 +854,9 @@ def build_household_shared_revision(
                         )
     else:
         keys.discard(column_key)
-    after = {"columns": sorted(keys)}
+    after = _shared_state(keys, exceptions)
     changes = list(roster_audit_changes(roster, working)) + extra
-    if stored_state != after:
+    if keys != shared_columns_from_state(stored_state):
         changes.append(
             AuditChange(
                 HOUSEHOLD_SHARED_KIND,
@@ -844,7 +908,8 @@ def expand_household_shared_revision(snapshot, record):
         c.entity_kind == HOUSEHOLD_SHARED_KIND for c in record.changes
     ):
         return record
-    if not selected:
+    exceptions = shared_exceptions_from_state(snapshot.entity(HOUSEHOLD_SHARED_KIND, HOUSEHOLD_SHARED_ID))
+    if not selected and not exceptions:
         return record
     before = roster_from_historical_snapshot(snapshot)
     after = roster_from_entity_states(record.metadata.revision_id, entities)
@@ -855,6 +920,12 @@ def expand_household_shared_revision(snapshot, record):
         or record.metadata.recorded_at.astimezone(ZoneInfo("Asia/Seoul")).date()
     )
     active = selected & set(available_shared_column_keys(after))
+    correction = record.metadata.decisions.get("profile_routing_correction", {})
+    corrected_components = {
+        (UUID(item["person_id"]), item["column"])
+        for item in correction.get("components", ())
+    }
+    corrected_events = set(correction.get("event_ids", ()))
     working = after
     proposals = {}
     old_ids = {p.person_id for p in before.persons}
@@ -873,9 +944,12 @@ def expand_household_shared_revision(snapshot, record):
         ):
             continue
         for key in active:
+            if (person.person_id, key) in exceptions:
+                continue
             values = {
                 _values(after, key, member.person_id, on, context=after_context)
                 for member in after.household_members(household.household_id, on=on)
+                if (member.person_id, key) not in exceptions
             }
             if len(values) > 1:
                 raise ValueError(
@@ -886,6 +960,8 @@ def expand_household_shared_revision(snapshot, record):
         if household is None:
             continue
         for key in active:
+            if (person.person_id, key) in exceptions or (person.person_id, key) in corrected_components:
+                continue
             if key.startswith("status:"):
                 # Enrollment and status events are handled below; assignment
                 # changes are the driver component of this visible column.
@@ -914,6 +990,8 @@ def expand_household_shared_revision(snapshot, record):
                 proposals[target] = value
     for (hid, key, index), value in proposals.items():
         for person in after.household_members(hid, on=on):
+            if (person.person_id, key) in exceptions:
+                continue
             if key.startswith("status:"):
                 working = _set_assignment(
                     working,
@@ -932,7 +1010,8 @@ def expand_household_shared_revision(snapshot, record):
         (member.person_id, key)
         for (hid, key, _index) in proposals
         for member in after.household_members(hid, on=on)
-        if key in ("address", "jurisdiction") or key.startswith("status:")
+        if (member.person_id, key) not in exceptions
+        and (key in ("address", "detail_address", "jurisdiction") or key.startswith("status:"))
     }
     for pid, key in temporal_people:
         if pid not in old_ids:
@@ -948,7 +1027,7 @@ def expand_household_shared_revision(snapshot, record):
             )
         else:
             working = _set_values(working, key, pid, _values(before, key, pid, on), on)
-    working = _propagate_enrollments(before, after, working, active, on)
+    working = _propagate_enrollments(before, after, working, active, on, exceptions)
     extra = [c for c in record.changes if c.entity_kind not in ROSTER_ENTITY_KINDS]
     routing = after_context.routing
     position = max((e.position for e in routing.events), default=0)
@@ -958,22 +1037,25 @@ def expand_household_shared_revision(snapshot, record):
     # older movement records would otherwise hide the explicitly entered value.
     projected = {}
     for (hid, key, index), value in proposals.items():
-        if key not in ("address", "jurisdiction") and not key.startswith("status:"):
+        if key not in ("address", "detail_address", "jurisdiction") and not key.startswith("status:"):
             continue
         for member in after.household_members(hid, on=on):
+            if (member.person_id, key) in exceptions:
+                continue
             target = (member.person_id, key)
             if target not in projected:
                 projected[target] = list(
                     _values(after, key, member.person_id, on, context=after_context)
                 )
             projected[target][2 if key.startswith("status:") else index] = value
+    address_projections = {}
     for (pid, key), values in projected.items():
+        if key in ("address", "detail_address"):
+            pair = address_projections.setdefault(pid, _address_pair(after, pid, on, routing, extra))
+            pair["road" if key == "address" else "detail"] = values[0]
+            continue
         position += 1
-        if key == "address":
-            extra.append(
-                _routing_change(pid, on, position, road=values[0], detail=values[1])
-            )
-        elif key == "jurisdiction":
+        if key == "jurisdiction":
             extra.append(_routing_change(pid, on, position, jurisdiction=values[0]))
         else:
             meal = _MEALS[key[7:]]
@@ -983,17 +1065,22 @@ def expand_household_shared_revision(snapshot, record):
             extra.append(
                 _routing_change(pid, on, position, driver_ids={meal: driver_id})
             )
+    for pid, pair in address_projections.items():
+        position += 1
+        extra.append(_routing_change(pid, on, position, **pair))
     for change in record.changes:
         if change.entity_kind == STATUS_EVENT_KIND and change.after is not None:
             event = status_event_from_state(change.entity_id, change.after)
             key = "status:" + next(k for k, v in _MEALS.items() if v == event.meal)
-            if key not in active:
+            if key not in active or (event.person_id, key) in exceptions:
                 continue
             day = event.period.starts_on or on
             household = after.household_for(event.person_id, on=day)
             if household is None:
                 continue
             for member in after.household_members(household.household_id, on=day):
+                if (member.person_id, key) in exceptions:
+                    continue
                 period = (
                     event.period
                     if member.person_id == event.person_id
@@ -1055,19 +1142,27 @@ def expand_household_shared_revision(snapshot, record):
                         )
                     )
         elif change.entity_kind == ROUTING_EVENT_KIND and change.after is not None:
+            if str(change.entity_id) in corrected_events:
+                continue
             event = next(e for e in routing.events if e.event_id == change.entity_id)
             household = after.household_for(event.person_id, on=event.effective_on)
             if household is None:
                 continue
             fields = {}
-            if "address" in active and event.road_address is not None:
-                fields.update(road=event.road_address, detail=event.detail_address)
-            if "jurisdiction" in active and event.jurisdiction is not None:
+            edited_components = record.metadata.decisions.get("household_shared_profile_components")
+            for key, field, value, component in (
+                ("address", "road", event.road_address, "road_address"),
+                ("detail_address", "detail", event.detail_address, "detail_address"),
+            ):
+                if key in active and (event.person_id, key) not in exceptions and event.road_address is not None and (edited_components is None or component in edited_components):
+                    fields[field] = value or ""
+            if "jurisdiction" in active and (event.person_id, "jurisdiction") not in exceptions and event.jurisdiction is not None:
                 fields["jurisdiction"] = event.jurisdiction
             drivers = {
                 meal: driver
                 for meal, driver in event.driver_ids.items()
                 if "status:" + next(k for k, v in _MEALS.items() if v == meal) in active
+                and (event.person_id, "status:" + next(k for k, v in _MEALS.items() if v == meal)) not in exceptions
             }
             if drivers:
                 fields["driver_ids"] = drivers
@@ -1097,19 +1192,25 @@ def expand_household_shared_revision(snapshot, record):
                     if member.person_id != event.person_id:
                         position += 1
                         member_fields = dict(fields)
-                        edited_components = record.metadata.decisions.get(
-                            "household_shared_profile_components"
-                        )
-                        if edited_components is not None and "road" in member_fields:
-                            current_view = routing.resolve(
-                                after, member.person_id, event.effective_on
-                            )
-                            if "road_address" not in edited_components:
-                                member_fields["road"] = current_view.road_address or ""
-                            if "detail_address" not in edited_components:
-                                member_fields["detail"] = (
-                                    current_view.detail_address or ""
-                                )
+                        if (member.person_id, "address") in exceptions:
+                            member_fields.pop("road", None)
+                        if (member.person_id, "detail_address") in exceptions:
+                            member_fields.pop("detail", None)
+                        if (member.person_id, "jurisdiction") in exceptions:
+                            member_fields.pop("jurisdiction", None)
+                        if "driver_ids" in member_fields:
+                            member_fields["driver_ids"] = {
+                                meal: driver for meal, driver in member_fields["driver_ids"].items()
+                                if (member.person_id, "status:" + next(k for k, v in _MEALS.items() if v == meal)) not in exceptions
+                            }
+                            if not member_fields["driver_ids"]:
+                                member_fields.pop("driver_ids")
+                        if not member_fields:
+                            continue
+                        if "road" in member_fields or "detail" in member_fields:
+                            pair = _address_pair(after, member.person_id, event.effective_on, routing, extra)
+                            pair.update({key: member_fields[key] for key in ("road", "detail") if key in member_fields})
+                            member_fields.update(pair)
                         extra.append(
                             _routing_change(
                                 member.person_id,
@@ -1119,7 +1220,8 @@ def expand_household_shared_revision(snapshot, record):
                             )
                         )
     # Removing a custom definition also removes its obsolete opt-in key.
-    if active != selected:
+    valid_exceptions = frozenset((pid, key) for pid, key in exceptions if pid in {p.person_id for p in after.persons} and key in available_shared_column_keys(after))
+    if active != selected or valid_exceptions != exceptions:
         state = snapshot.entity(HOUSEHOLD_SHARED_KIND, HOUSEHOLD_SHARED_ID)
         extra.append(
             AuditChange(
@@ -1127,7 +1229,7 @@ def expand_household_shared_revision(snapshot, record):
                 HOUSEHOLD_SHARED_ID,
                 ChangeOperation.UPDATE,
                 state,
-                {"columns": sorted(active)},
+                _shared_state(active, valid_exceptions),
             )
         )
     return replace(record, changes=(*roster_audit_changes(before, working), *extra))
@@ -1148,7 +1250,9 @@ def _profile_routing_columns(snapshot, person_id):
             selected.add("address")
         if event.jurisdiction is not None:
             selected.add("jurisdiction")
-    return selected.intersection({"address", "jurisdiction"})
+    if selected.intersection({"address", "detail_address"}):
+        selected.update({"address", "detail_address"})
+    return selected.intersection({"address", "detail_address", "jurisdiction"})
 
 
 def profile_with_shared_routing(roster, person_id, on, snapshot):
@@ -1168,6 +1272,97 @@ def profile_with_shared_routing(roster, person_id, on, snapshot):
     if "jurisdiction" in selected:
         fields["jurisdiction"] = view.jurisdiction
     return replace(profile, **fields)
+
+
+def build_profile_correction_revision(
+    roster, person_id, updated_profile, *, snapshot=None, **kwargs
+):
+    """Correct entered routing components through today, preserving reservations.
+
+    Sharing uses today's membership and per-column exceptions. Existing events
+    are updated in this revision, leaving previous revision snapshots intact.
+    """
+    from .profile_edits import build_person_profile_revision, PreparedPersonProfileRevision
+
+    on = kwargs["effective_on"]
+    baseline = roster.person(person_id).profile
+    displayed = profile_with_shared_routing(roster, person_id, on, snapshot)
+    columns = {"road_address": "address", "detail_address": "detail_address", "jurisdiction": "jurisdiction"}
+    changed = {
+        field: getattr(updated_profile, field)
+        for field in columns
+        if (getattr(updated_profile, field) or "") != (getattr(displayed, field) or "")
+    }
+    # The dialog displays resolved routing values. Unedited components must not
+    # leak back into the baseline when another profile field is saved.
+    profile = replace(updated_profile, **{
+        field: changed.get(field, getattr(baseline, field)) for field in columns
+    })
+    try:
+        prepared = build_person_profile_revision(roster, person_id, profile, **kwargs)
+    except ValueError as error:
+        if str(error) != "변경된 사람 정보가 없습니다." or not changed:
+            raise
+        prepared = None
+    if not changed:
+        return prepared
+
+    state = snapshot.entity(HOUSEHOLD_SHARED_KIND, HOUSEHOLD_SHARED_ID) if snapshot else None
+    shared = shared_columns_from_state(state)
+    exceptions = shared_exceptions_from_state(state)
+    household = roster.household_for(person_id, on=on)
+    corrections = {person_id: dict(changed)}
+    for field, value in changed.items():
+        column = columns[field]
+        if column not in shared or (person_id, column) in exceptions or household is None:
+            continue
+        for member in roster.household_members(household.household_id, on=on):
+            if (member.person_id, column) not in exceptions:
+                corrections.setdefault(member.person_id, {})[field] = value
+
+    working = prepared.snapshot if prepared else replace(roster, revision_id=kwargs["revision_id"])
+    working = replace(working, persons=tuple(
+        replace(person, profile=replace(person.profile, **corrections[person.person_id]))
+        if person.person_id in corrections else person
+        for person in working.persons
+    ))
+    event_changes = []
+    for event in routing_state_from_snapshot(snapshot).events if snapshot else ():
+        if event.person_id not in corrections or event.effective_on > on:
+            continue
+        values = {
+            field: value or ""
+            for field, value in corrections[event.person_id].items()
+            if (field == "jurisdiction" and event.jurisdiction is not None)
+            or (field != "jurisdiction" and event.road_address is not None)
+        }
+        updated = replace(event, **values)
+        if updated != event:
+            event_changes.append(AuditChange(
+                ROUTING_EVENT_KIND, event.event_id, ChangeOperation.UPDATE,
+                _routing_event_state(event), _routing_event_state(updated),
+            ))
+    metadata = prepared.record.metadata if prepared else RevisionMetadata(
+        kwargs["revision_id"], roster.revision_id, kwargs["recorded_at"], on,
+        kwargs["actor"], kwargs.get("reason", "사람 정보 수정"), RevisionSource.UI,
+    )
+    metadata = replace(metadata, decisions={
+        **metadata.decisions,
+        "profile_routing_correction": {
+            "components": [
+                {"person_id": str(pid), "column": columns[field]}
+                for pid, fields in corrections.items() for field in fields
+            ],
+            "event_ids": [str(change.entity_id) for change in event_changes],
+        },
+    })
+    record = RevisionRecord(metadata, (*roster_audit_changes(roster, working), *event_changes))
+    changed_fields = tuple(dict.fromkeys((*(prepared.changed_fields if prepared else ()), *changed)))
+    cleared_fields = tuple(field for field in changed_fields if getattr(updated_profile, field) is None)
+    if prepared:
+        return replace(prepared, snapshot=working, record=record,
+                       changed_fields=changed_fields, cleared_fields=cleared_fields)
+    return PreparedPersonProfileRevision(working, record, changed_fields, cleared_fields)
 
 
 def build_profile_revision_with_shared_routing(

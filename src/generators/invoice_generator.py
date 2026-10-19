@@ -21,7 +21,7 @@ from ..core.invoice_data import (
     MonthlyDelivery,
     MonthlyDeliveryBatch,
 )
-from ..core.models import FULL_ADDRESS_FIELD, combine_address
+from .mapping_values import resolve_mapping_value
 from ..excel.excel_utils import CENTER_ALIGN, adjust_formula, copy_style
 from ..excel.publication import WorkbookPublicationResult, publish_workbook
 from ..templates.config import (
@@ -50,19 +50,22 @@ def _map_person_to_row(
     person: MonthlyDelivery,
     mapping: dict,
     template_columns: list[str],
+    column_fallbacks: Mapping[str, str] | None = None,
 ) -> dict:
     """Typed recipient plus template mapping → {template_col_name: value}."""
     row_data: dict[str, object] = {}
     source = person.roster.extra
+    calculated = {value for key, value in mapping.items() if key.startswith("__calc_")}
     for col in template_columns:
         if col == "연번":
             row_data[col] = person.delivery_sequence
             continue
         roster_key = mapping.get(col, "")
-        if roster_key == FULL_ADDRESS_FIELD:
-            row_data[col] = combine_address(source.get("도로명주소"), source.get("상세주소"))
-        elif roster_key:
-            row_data[col] = source.get(roster_key, "")
+        secondary = (column_fallbacks or {}).get(col, "")
+        if roster_key or secondary:
+            row_data[col] = resolve_mapping_value(source, roster_key, secondary)
+        elif col in mapping and col not in calculated and col != "제공기관":
+            row_data[col] = ""
     return row_data
 
 
@@ -106,6 +109,7 @@ def _fill_invoice_sheet(
     prices: MealPrices,
     meal_type: str = "급식",
     global_note: str | None = None,
+    column_fallbacks: Mapping[str, str] | None = None,
 ) -> int:
     """단일 시트에 people 데이터를 채운다. 작성 건수 반환."""
     template_columns = read_template_columns(template_path, sheet_name=sheet_name)
@@ -139,7 +143,8 @@ def _fill_invoice_sheet(
         dinner_cnt = person.dinner_count
         lunch_cnt = person.lunch_count
 
-        row_data = _map_person_to_row(person, col_mapping, template_columns)
+        row_data = _map_person_to_row(person, col_mapping, template_columns, column_fallbacks)
+        mapped_targets = set(row_data) - {bf_col, dn_col, lh_col, price_col, col_mapping.get("__calc_total", "계")}
 
         # 식사 건수: 시트에 해당 컬럼이 있을 때만 기록
         if bf_col in col_idx_map:
@@ -179,7 +184,7 @@ def _fill_invoice_sheet(
 
             if c_idx == _memo_col_idx:
                 # 비고: 명단 원본의 plain text
-                txt = str(value) if value else ""
+                txt = str(value) if value is not None else ""
                 cell.value = txt
                 cell.alignment = _MEMO_ALIGN
                 line_count = txt.count("\n") + 1
@@ -193,7 +198,7 @@ def _fill_invoice_sheet(
                 cell.alignment = CENTER_ALIGN
             else:
                 v = to_numeric(value)
-                cell.value = None if isinstance(v, (int, float)) and v == 0 else v
+                cell.value = None if col_name not in mapped_targets and isinstance(v, (int, float)) and v == 0 else v
                 cell.alignment = CENTER_ALIGN
 
         row_idx += 1
@@ -349,6 +354,7 @@ def make_invoice_publication(
     meal_type: str = "급식",
     global_note: str | None = None,
     output_password: str | None = None,
+    column_fallbacks: Mapping[str, str] | None = None,
 ) -> tuple[int, WorkbookPublicationResult]:
     """월별 배송 배치 → 청구서템플릿 다중 시트 채워서 output_path 에 저장.
 
@@ -391,6 +397,7 @@ def make_invoice_publication(
                 batch.prices,
                 meal_type=meal_type,
                 global_note=global_note,
+                column_fallbacks=column_fallbacks,
             )
         if rename_prefix:
             _rename_sheets(wb, rename_prefix)

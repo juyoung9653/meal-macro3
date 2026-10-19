@@ -58,6 +58,7 @@ def apply_typed_projection_changes(
     connection: apsw.Connection,
     revision_id: UUID,
     changes: tuple[AuditChange, ...],
+    *, restoring: bool = False,
 ) -> None:
     """Apply recognized audit entities inside the caller's transaction."""
 
@@ -104,7 +105,10 @@ def apply_typed_projection_changes(
         key=lambda change: (_write_order(change.entity_kind), str(change.entity_id)),
     )
     for change in (*deletes, *writes):
-        _apply_change(connection, revision_id, change)
+        if restoring and change.entity_kind == STATUS_EVENT_KIND:
+            _apply_status_event(connection, revision_id, change, change.after, restoring=True)
+        else:
+            _apply_change(connection, revision_id, change)
     connection.execute(
         "DELETE FROM projection_write_context WHERE revision_id = ?",
         (str(revision_id),),
@@ -509,11 +513,18 @@ def _apply_status_event(
     revision_id: UUID,
     change: AuditChange,
     state: Mapping[str, JsonValue] | None,
+    *, restoring: bool = False,
 ) -> None:
-    if change.operation is not ChangeOperation.INSERT or state is None:
+    if restoring:
+        if change.operation is ChangeOperation.UPDATE and change.before == change.after:
+            return
+        connection.execute("DELETE FROM status_event_projection WHERE event_id = ?", (str(change.entity_id),))
+        if change.operation is ChangeOperation.DELETE:
+            return
+    elif change.operation is not ChangeOperation.INSERT or state is None:
         raise ProjectionContractError("원본 상태 사건은 append-only insert여야 합니다.")
     event = status_event_from_state(change.entity_id, state)
-    if event.revision_id != revision_id:
+    if event.revision_id != revision_id and not restoring:
         raise ProjectionContractError(
             "상태 사건 revision ID가 현재 revision과 다릅니다."
         )

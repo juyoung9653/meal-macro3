@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from itertools import groupby
 from datetime import UTC, date, datetime, timedelta, timezone
 from pathlib import Path
 from uuid import UUID
@@ -150,10 +151,12 @@ class EncryptedDatabase:
                     "parent revision이 현재 최신 revision과 다릅니다. "
                     f"expected={expected_parent}, actual={actual_parent}"
                 )
-            _validate_changes_against_current(connection, record.changes)
+            restoring = "snapshot_restore_target" in record.metadata.decisions
+            if not restoring:
+                _validate_changes_against_current(connection, record.changes)
             from src.domain.household_shared import (
                 HOUSEHOLD_SHARED_KIND, HOUSEHOLD_SHARED_ID,
-                shared_columns_from_state, expand_household_shared_revision,
+                shared_columns_from_state, shared_exceptions_from_state, expand_household_shared_revision,
             )
             setting = connection.execute(
                 """SELECT change.after_json FROM audit_change AS change
@@ -162,12 +165,22 @@ class EncryptedDatabase:
                    ORDER BY revision.sequence DESC LIMIT 1""",
                 (HOUSEHOLD_SHARED_KIND, str(HOUSEHOLD_SHARED_ID)),
             ).fetchone()
-            shared = shared_columns_from_state(
-                None if setting is None or setting[0] is None else json.loads(str(setting[0]))
-            )
+            shared_state = None if setting is None or setting[0] is None else json.loads(str(setting[0]))
+            shared = shared_columns_from_state(shared_state)
+            exceptions = shared_exceptions_from_state(shared_state)
             shared_setting_changed = any(change.entity_kind == HOUSEHOLD_SHARED_KIND for change in record.changes)
-            if shared and actual_parent is not None:
-                record = expand_household_shared_revision(self._current_entity_snapshot(actual_parent), record)
+            if restoring:
+                from src.services.revision_restore import validate_snapshot_restore
+                if actual_parent is None:
+                    raise ValueError("복구할 현재 변경 이력이 없습니다.")
+                target_id = UUID(str(record.metadata.decisions["snapshot_restore_target"]))
+                validate_snapshot_restore(
+                    self._current_entity_snapshot(actual_parent), self.snapshot(target_id), record,
+                )
+                _validate_changes_against_current(connection, record.changes, restoring=True)
+            if actual_parent is not None and not restoring:
+                if shared or exceptions:
+                    record = expand_household_shared_revision(self._current_entity_snapshot(actual_parent), record)
                 _validate_changes_against_current(connection, record.changes)
             _insert_revision(connection, record.metadata)
             _insert_revision_display_code(connection, record.metadata)
@@ -177,6 +190,7 @@ class EncryptedDatabase:
                 connection,
                 record.metadata.revision_id,
                 record.changes,
+                restoring=restoring,
             )
             validate_typed_projections(connection)
             if record.import_batch is not None:
@@ -196,7 +210,7 @@ class EncryptedDatabase:
             )
             committed_roster = (
                 load_current_roster(connection, record.metadata.revision_id)
-                if shared or shared_setting_changed else None
+                if shared or shared_setting_changed or restoring else None
             )
             connection.execute("COMMIT")
             return committed_roster
@@ -210,13 +224,22 @@ class EncryptedDatabase:
             """SELECT entity_kind, entity_id, after_json FROM (
                 SELECT change.entity_kind, change.entity_id, change.after_json,
                        change.operation,
+                       FIRST_VALUE(revision.sequence) OVER (
+                           PARTITION BY change.entity_kind, change.entity_id
+                           ORDER BY revision.sequence, change.ordinal
+                       ) AS first_sequence,
+                       FIRST_VALUE(change.ordinal) OVER (
+                           PARTITION BY change.entity_kind, change.entity_id
+                           ORDER BY revision.sequence, change.ordinal
+                       ) AS first_ordinal,
                        ROW_NUMBER() OVER (
                            PARTITION BY change.entity_kind, change.entity_id
                            ORDER BY revision.sequence DESC
                        ) AS state_rank
                 FROM audit_change AS change
                 JOIN revision ON revision.revision_id = change.revision_id
-            ) WHERE state_rank = 1 AND operation != 'delete'"""
+            ) WHERE state_rank = 1 AND operation != 'delete'
+              ORDER BY first_sequence, first_ordinal"""
         )
         return HistoricalSnapshot(revision_id, {
             EntityRef(str(row[0]), UUID(str(row[1]))): json.loads(str(row[2]))
@@ -333,6 +356,7 @@ class EncryptedDatabase:
             raise KeyError(f"없는 revision ID입니다: {revision_id}")
 
         entities: dict[EntityRef, object] = {}
+        first_seen: dict[EntityRef, int] = {}
         for row in connection.execute(
             """
             SELECT change.entity_kind, change.entity_id,
@@ -345,12 +369,18 @@ class EncryptedDatabase:
             (int(target[0]),),
         ):
             reference = EntityRef(str(row[0]), UUID(str(row[1])))
+            first_seen.setdefault(reference, len(first_seen))
             operation = ChangeOperation(str(row[2]))
             if operation is ChangeOperation.DELETE:
                 entities.pop(reference, None)
             else:
                 entities[reference] = freeze_json_object(json.loads(str(row[3])))
-        return HistoricalSnapshot(revision_id, entities)
+        # Status precedence uses original source order when timestamps tie.
+        # A restore may resurrect deleted IDs in a different audit-change order.
+        return HistoricalSnapshot(revision_id, {
+            reference: entities[reference]
+            for reference in sorted(entities, key=first_seen.__getitem__)
+        })
 
     def roster_snapshot(self, revision_id: UUID) -> RosterSnapshot:
         """Rehydrate the roster at an explicit immutable revision."""
@@ -924,6 +954,7 @@ def _insert_import_batch(
 def _validate_changes_against_current(
     connection: apsw.Connection,
     changes: tuple[AuditChange, ...],
+    *, restoring: bool = False,
 ) -> None:
     for change in changes:
         row = connection.execute(
@@ -942,7 +973,7 @@ def _validate_changes_against_current(
             current = json.loads(str(row[1]))
 
         if change.operation is ChangeOperation.INSERT:
-            if row is not None:
+            if row is not None and not (restoring and current is None):
                 raise RevisionConflictError(
                     f"이력이 있는 entity ID를 다시 insert할 수 없습니다: "
                     f"{change.entity_kind}/{change.entity_id}"
@@ -1089,38 +1120,73 @@ def _validate_ledger(connection: apsw.Connection) -> None:
     if import_source_mismatches:
         raise DatabaseIntegrityError("import batch의 revision source가 import가 아닙니다.")
 
+    restore_info = {}
+    try:
+        for revision_id, decisions_text, source in connection.execute(
+            """SELECT revision_id, decisions_json, source FROM revision
+               WHERE json_type(decisions_json, '$.snapshot_restore_target') IS NOT NULL"""
+        ):
+            decisions = json.loads(str(decisions_text))
+            target = UUID(str(decisions["snapshot_restore_target"]))
+            if str(source) != RevisionSource.UI.value:
+                raise ValueError("복구 기록의 source가 올바르지 않습니다.")
+            restore_info[str(revision_id)] = (target, decisions)
+    except (KeyError, TypeError, ValueError) as error:
+        raise DatabaseIntegrityError("복구 기록 정보가 올바르지 않습니다.") from error
+    restore_targets = {target for target, _ in restore_info.values()}
+    historical_targets = {}
     current: dict[EntityRef, object] = {}
     seen: set[EntityRef] = set()
-    for row in connection.execute(
+    previous_id = None
+    audit_rows = connection.execute(
         """
-        SELECT audit_change.entity_kind, audit_change.entity_id,
+        SELECT audit_change.revision_id, audit_change.entity_kind, audit_change.entity_id,
                audit_change.operation, audit_change.before_json,
                audit_change.after_json
         FROM audit_change
         JOIN revision ON revision.revision_id = audit_change.revision_id
         ORDER BY revision.sequence, audit_change.ordinal
         """
-    ):
-        reference = EntityRef(str(row[0]), UUID(str(row[1])))
-        operation = ChangeOperation(str(row[2]))
-        before = None if row[3] is None else json.loads(str(row[3]))
-        after = None if row[4] is None else json.loads(str(row[4]))
-        if operation is ChangeOperation.INSERT:
-            if reference in seen:
-                raise DatabaseIntegrityError(
-                    f"entity ID가 다시 insert되었습니다: {reference}"
+    )
+    for revision_text, group in groupby(audit_rows, key=lambda row: str(row[0])):
+        revision_id = UUID(revision_text)
+        rows = tuple(group)
+        restoring = revision_text in restore_info
+        if restoring:
+            from src.services.revision_restore import validate_snapshot_restore_changes
+            target_id, decisions = restore_info[revision_text]
+            try:
+                target = historical_targets[target_id]
+                changes = tuple(AuditChange(
+                    str(row[1]), UUID(str(row[2])), ChangeOperation(str(row[3])),
+                    None if row[4] is None else json.loads(str(row[4])),
+                    None if row[5] is None else json.loads(str(row[5])),
+                ) for row in rows)
+                validate_snapshot_restore_changes(
+                    HistoricalSnapshot(previous_id, current), target, changes, decisions,
                 )
-            seen.add(reference)
-            current[reference] = after
-            continue
-        if reference not in current or current[reference] != before:
-            raise DatabaseIntegrityError(
-                f"audit before chain이 일치하지 않습니다: {reference}"
-            )
-        if operation is ChangeOperation.UPDATE:
-            current[reference] = after
-        else:
-            current.pop(reference)
+            except (KeyError, TypeError, ValueError) as error:
+                raise DatabaseIntegrityError("복구 기록이 대상 변경번호의 전체 상태와 다릅니다.") from error
+        for row in rows:
+            reference = EntityRef(str(row[1]), UUID(str(row[2])))
+            operation = ChangeOperation(str(row[3]))
+            before = None if row[4] is None else json.loads(str(row[4]))
+            after = None if row[5] is None else json.loads(str(row[5]))
+            if operation is ChangeOperation.INSERT:
+                if reference in seen and not (restoring and reference not in current):
+                    raise DatabaseIntegrityError(f"entity ID가 다시 insert되었습니다: {reference}")
+                seen.add(reference)
+                current[reference] = after
+                continue
+            if reference not in current or current[reference] != before:
+                raise DatabaseIntegrityError(f"audit before chain이 일치하지 않습니다: {reference}")
+            if operation is ChangeOperation.UPDATE:
+                current[reference] = after
+            else:
+                current.pop(reference)
+        if revision_id in restore_targets:
+            historical_targets[revision_id] = HistoricalSnapshot(revision_id, current)
+        previous_id = revision_id
 
 
 def _validate_typed_projection_integrity(connection: apsw.Connection) -> None:
