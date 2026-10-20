@@ -63,7 +63,7 @@ def qapp(tmp_path: Path):
 
 @pytest.fixture
 def template_path() -> str:
-    path = "assets/급식_청구서템플릿.xlsx"
+    path = "assets/급식/급식_청구서템플릿.xlsx"
     if not os.path.exists(path):
         pytest.skip("급식 청구서 템플릿 없음")
     return path
@@ -71,7 +71,7 @@ def template_path() -> str:
 
 @pytest.fixture
 def confirm_template_path() -> str:
-    path = "assets/급식_확인서템플릿.xlsx"
+    path = "assets/급식/급식_확인서템플릿.xlsx"
     if not os.path.exists(path):
         pytest.skip("급식 확인서 템플릿 없음")
     return path
@@ -334,7 +334,7 @@ def test_happy_lunch_maps_combined_address_into_invoice(
     qapp: QApplication,
     tmp_path: Path,
 ):
-    template = "assets/행복도시락_청구서템플릿.xlsx"
+    template = "assets/행복도시락/행복도시락_청구서템플릿.xlsx"
     if not os.path.exists(template):
         pytest.skip("행복도시락 청구서 템플릿 없음")
 

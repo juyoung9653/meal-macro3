@@ -155,7 +155,7 @@ def test_saved_fallback_used_with_historical_source_and_manifest(tmp_path):
         with selection.output_path.open("rb") as file:
             encrypted=msoffcrypto.OfficeFile(file);encrypted.load_key(password="xlsx-secret");buffer=BytesIO();encrypted.decrypt(buffer)
         buffer.seek(0);workbook=openpyxl.load_workbook(buffer)
-        col=read_template_columns("assets/급식_청구서템플릿.xlsx",sheet_name="청구서").index("성명")+1
+        col=read_template_columns("assets/급식/급식_청구서템플릿.xlsx",sheet_name="청구서").index("성명")+1
         assert workbook["청구서"].cell(4,col).value=="푸른초"
         workbook.close();buffer.close()
     with DatabaseSession.open(path,"password") as session:

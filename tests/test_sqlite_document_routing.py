@@ -148,7 +148,7 @@ def test_document_period_end_routing_changes_presentation_only(tmp_path):
         "routing_basis": "document_period_end",
     }
 
-    template = "assets/급식_확인서템플릿.xlsx"
+    template = "assets/급식/급식_확인서템플릿.xlsx"
     if not __import__("os").path.exists(template):
         pytest.skip("급식 확인서 템플릿 없음")
     output = tmp_path / "routing-confirm.xlsx"

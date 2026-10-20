@@ -296,9 +296,9 @@ def test_publishes_encrypted_monthly_document_records_run_and_backup(
         try:
             if action is DocumentAction.INVOICE:
                 template_path = (
-                    "assets/급식_청구서템플릿.xlsx"
+                    "assets/급식/급식_청구서템플릿.xlsx"
                     if profile is DocumentTemplateProfile.SCHOOL_MEAL
-                    else "assets/행복도시락_청구서템플릿.xlsx"
+                    else "assets/행복도시락/행복도시락_청구서템플릿.xlsx"
                 )
                 template_sheet = (
                     "청구서"
@@ -371,9 +371,9 @@ def test_publishes_encrypted_monthly_document_records_run_and_backup(
                 assert sheet.cell(4, price_column).value == 220_000
             else:
                 confirm_template = (
-                    "assets/급식_확인서템플릿.xlsx"
+                    "assets/급식/급식_확인서템플릿.xlsx"
                     if profile is DocumentTemplateProfile.SCHOOL_MEAL
-                    else "assets/행복도시락_확인서템플릿.xlsx"
+                    else "assets/행복도시락/행복도시락_확인서템플릿.xlsx"
                 )
                 placeholders = scan_placeholders(
                     confirm_template,
@@ -452,7 +452,7 @@ def test_latest_saved_mapping_changes_old_source_invoice_and_survives_backup(tmp
         plaintext.seek(0)
         workbook = openpyxl.load_workbook(plaintext)
         try:
-            column = read_template_columns("assets/급식_청구서템플릿.xlsx", sheet_name="청구서").index("학교명") + 1
+            column = read_template_columns("assets/급식/급식_청구서템플릿.xlsx", sheet_name="청구서").index("학교명") + 1
             assert workbook["청구서"].cell(4, column).value == "6학년"
         finally:
             workbook.close()
@@ -502,7 +502,7 @@ def test_confirmation_saved_name_mapping_changes_actual_workbook(
         plaintext.seek(0)
         workbook = openpyxl.load_workbook(plaintext)
         try:
-            placeholders = scan_placeholders("assets/급식_확인서템플릿.xlsx", ["1명"])["1명"]
+            placeholders = scan_placeholders("assets/급식/급식_확인서템플릿.xlsx", ["1명"])["1명"]
             row, column = placeholders["child1"][0]
             assert workbook["정자동"].cell(row, column).value == expected
         finally:

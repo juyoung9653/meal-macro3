@@ -31,7 +31,7 @@ def _clear_template_cache():
 
 
 def test_typed_mixed_price_amount_is_written_as_exact_number(tmp_path: Path):
-    template = "assets/급식_청구서템플릿.xlsx"
+    template = "assets/급식/급식_청구서템플릿.xlsx"
     if not os.path.exists(template):
         pytest.skip("급식 청구서 템플릿 없음")
     output = tmp_path / "mixed-price.xlsx"
@@ -79,7 +79,7 @@ def test_typed_mixed_price_amount_is_written_as_exact_number(tmp_path: Path):
 
 
 def test_distinct_meal_prices_reach_saved_invoice_formula(tmp_path: Path):
-    template = Path("assets/급식_청구서템플릿.xlsx")
+    template = Path("assets/급식/급식_청구서템플릿.xlsx")
     output = tmp_path / "distinct-prices.xlsx"
     person = MonthlyDelivery(
         roster=RosterEntry(2, {"성명": "단가 검증"}),
@@ -127,7 +127,7 @@ def test_distinct_meal_prices_reach_saved_invoice_formula(tmp_path: Path):
 
 
 def test_preserves_roster_note_and_numbers_invoice_rows(tmp_path: Path):
-    template = "assets/급식_청구서템플릿.xlsx"
+    template = "assets/급식/급식_청구서템플릿.xlsx"
     if not os.path.exists(template):
         pytest.skip("급식 청구서 템플릿 없음")
 
@@ -171,9 +171,9 @@ def test_preserves_roster_note_and_numbers_invoice_rows(tmp_path: Path):
 @pytest.mark.parametrize(
     ("template", "meal_type", "expected_sheets"),
     [
-        ("assets/급식_청구서템플릿.xlsx", "급식", ("청구서",)),
+        ("assets/급식/급식_청구서템플릿.xlsx", "급식", ("청구서",)),
         (
-            "assets/행복도시락_청구서템플릿.xlsx",
+            "assets/행복도시락/행복도시락_청구서템플릿.xlsx",
             "행복도시락",
             ("총괄", "학기중"),
         ),
@@ -231,7 +231,7 @@ def test_writes_global_note_in_each_subtotal_row_note_cell(
 
 
 def test_invoice_writer_applies_output_password(tmp_path: Path):
-    template = "assets/급식_청구서템플릿.xlsx"
+    template = "assets/급식/급식_청구서템플릿.xlsx"
     if not os.path.exists(template):
         pytest.skip("급식 청구서 템플릿 없음")
     output = tmp_path / "protected_invoice.xlsx"
@@ -265,17 +265,17 @@ def test_invoice_writer_applies_output_password(tmp_path: Path):
 @pytest.mark.parametrize(
     ("meal_type", "is_vacation_month", "template", "output_sheets"),
     [
-        ("급식", False, "assets/급식_청구서템플릿.xlsx", ("청구서",)),
+        ("급식", False, "assets/급식/급식_청구서템플릿.xlsx", ("청구서",)),
         (
             "행복도시락",
             False,
-            "assets/행복도시락_청구서템플릿.xlsx",
+            "assets/행복도시락/행복도시락_청구서템플릿.xlsx",
             ("총괄", "학기중"),
         ),
         (
             "행복도시락",
             True,
-            "assets/행복도시락_청구서템플릿.xlsx",
+            "assets/행복도시락/행복도시락_청구서템플릿.xlsx",
             ("총괄", "학기중", "방중"),
         ),
     ],
@@ -383,7 +383,7 @@ def test_generated_invoice_keeps_relationship_editable_and_automatic_columns_pro
     ("행복도시락", True, {"총괄": ("석식 대상", "중식 대상", "조식 대상"), "학기중": ("석식 대상", "조식 대상"), "방중": ("중식 대상",)}),
 ))
 def test_invoice_ordinals_restart_per_filtered_sheet(tmp_path, profile, vacation, expected):
-    template = Path(f"assets/{profile}_청구서템플릿.xlsx")
+    template = Path(f"assets/{profile}/{profile}_청구서템플릿.xlsx")
     deliveries = tuple(MonthlyDelivery(
         RosterEntry(position, {"성명": name}), "", "합성 기사", sequence,
         breakfast, lunch, dinner, (), billing_amount=(breakfast + lunch + dinner) * 10000,

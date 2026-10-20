@@ -23,14 +23,14 @@ TEMPLATE_PROFILES: dict[str, TemplateProfile] = {
     "급식": TemplateProfile(
         key="급식",
         label="급식",
-        invoice_template_path="assets/급식_청구서템플릿.xlsx",
-        confirm_template_path="assets/급식_확인서템플릿.xlsx",
+        invoice_template_path="assets/급식/급식_청구서템플릿.xlsx",
+        confirm_template_path="assets/급식/급식_확인서템플릿.xlsx",
     ),
     "행복도시락": TemplateProfile(
         key="행복도시락",
         label="행복도시락",
-        invoice_template_path="assets/행복도시락_청구서템플릿.xlsx",
-        confirm_template_path="assets/행복도시락_확인서템플릿.xlsx",
+        invoice_template_path="assets/행복도시락/행복도시락_청구서템플릿.xlsx",
+        confirm_template_path="assets/행복도시락/행복도시락_확인서템플릿.xlsx",
     ),
 }
 DEFAULT_TEMPLATE_PROFILE_KEY = "급식"
@@ -51,8 +51,8 @@ DEFAULTS: dict[str, Any] = {
         "meal_type": "급식",
     },
     "templates": {
-        "invoice_path": "assets/급식_청구서템플릿.xlsx",
-        "confirm_path": "assets/급식_확인서템플릿.xlsx",
+        "invoice_path": "assets/급식/급식_청구서템플릿.xlsx",
+        "confirm_path": "assets/급식/급식_확인서템플릿.xlsx",
         "report_path": "assets/report_template.xlsx",
         "sheet_name": "학기_총괄",
         "data_start_row": 4,

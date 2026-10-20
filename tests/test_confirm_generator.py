@@ -145,7 +145,7 @@ def test_typed_same_household_requires_one_consistent_address(tmp_path: Path):
 
 @pytest.fixture
 def confirm_template() -> str:
-    path = "assets/급식_확인서템플릿.xlsx"
+    path = "assets/급식/급식_확인서템플릿.xlsx"
     if not os.path.exists(path):
         pytest.skip("급식 확인서 템플릿 없음")
     return path
@@ -448,7 +448,7 @@ def test_renders_five_person_household_without_omission(
 
 
 def test_happy_lunch_delivery_phone_placeholder_is_explicitly_blank(tmp_path: Path):
-    template = "assets/행복도시락_확인서템플릿.xlsx"
+    template = "assets/행복도시락/행복도시락_확인서템플릿.xlsx"
     if not os.path.exists(template):
         pytest.skip("행복도시락 확인서 템플릿 없음")
 

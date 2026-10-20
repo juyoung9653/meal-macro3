@@ -17,11 +17,14 @@ from .conftest import make_settings_manager
 
 
 class TestTemplateProfiles:
-    def test_known_profile_has_existing_asset_paths(self):
-        profile = get_template_profile("행복도시락")
-        assert profile is TEMPLATE_PROFILES["행복도시락"]
-        assert profile.invoice_template_path == "assets/행복도시락_청구서템플릿.xlsx"
-        assert profile.confirm_template_path == "assets/행복도시락_확인서템플릿.xlsx"
+    @pytest.mark.parametrize("key", ("급식", "행복도시락"))
+    def test_known_profile_has_existing_asset_paths(self, key):
+        profile = get_template_profile(key)
+        assert profile is TEMPLATE_PROFILES[key]
+        assert profile.invoice_template_path == f"assets/{key}/{key}_청구서템플릿.xlsx"
+        assert profile.confirm_template_path == f"assets/{key}/{key}_확인서템플릿.xlsx"
+        assert Path(profile.invoice_template_path).is_file()
+        assert Path(profile.confirm_template_path).is_file()
 
     def test_unknown_profile_falls_back_to_급식(self):
         assert get_template_profile("알수없음").key == "급식"
@@ -57,32 +60,34 @@ class TestTypedAccessors:
         """Template paths now resolve lazily from meal type."""
         sm = make_settings_manager()
         sm.set_meal_type("행복도시락")
-        assert sm.get_invoice_template_path() == "assets/행복도시락_청구서템플릿.xlsx"
-        assert sm.get_confirm_template_path() == "assets/행복도시락_확인서템플릿.xlsx"
+        assert sm.get_invoice_template_path() == "assets/행복도시락/행복도시락_청구서템플릿.xlsx"
+        assert sm.get_confirm_template_path() == "assets/행복도시락/행복도시락_확인서템플릿.xlsx"
 
     def test_set_meal_type_restore_to_급식(self):
         sm = make_settings_manager()
         sm.set_meal_type("행복도시락")
         sm.set_meal_type("급식")
-        assert sm.get_invoice_template_path() == "assets/급식_청구서템플릿.xlsx"
-        assert sm.get_confirm_template_path() == "assets/급식_확인서템플릿.xlsx"
+        assert sm.get_invoice_template_path() == "assets/급식/급식_청구서템플릿.xlsx"
+        assert sm.get_confirm_template_path() == "assets/급식/급식_확인서템플릿.xlsx"
 
     def test_unknown_meal_type_falls_back_to_급식(self):
         sm = make_settings_manager()
         sm.set_meal_type("알수없음")
         assert sm.get_meal_type() == "급식"
 
+    @pytest.mark.parametrize("key", ("급식", "행복도시락"))
     def test_template_paths_use_pyinstaller_resource_root(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, key
     ):
         sm = make_settings_manager()
+        sm.set_meal_type(key)
         monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path), raising=False)
 
         assert sm.get_invoice_template_path() == str(
-            tmp_path / "assets" / "급식_청구서템플릿.xlsx"
+            tmp_path / "assets" / key / f"{key}_청구서템플릿.xlsx"
         )
         assert sm.get_confirm_template_path() == str(
-            tmp_path / "assets" / "급식_확인서템플릿.xlsx"
+            tmp_path / "assets" / key / f"{key}_확인서템플릿.xlsx"
         )
         assert sm.get_report_template_path() == str(
             tmp_path / "assets" / "report_template.xlsx"
@@ -102,11 +107,11 @@ class TestDirectGet:
 
     def test_invoice_template_path(self):
         sm = make_settings_manager()
-        assert sm.get_invoice_template_path() == "assets/급식_청구서템플릿.xlsx"
+        assert sm.get_invoice_template_path() == "assets/급식/급식_청구서템플릿.xlsx"
 
     def test_confirm_template_path(self):
         sm = make_settings_manager()
-        assert sm.get_confirm_template_path() == "assets/급식_확인서템플릿.xlsx"
+        assert sm.get_confirm_template_path() == "assets/급식/급식_확인서템플릿.xlsx"
 
     def test_template_sheet_name(self):
         sm = make_settings_manager()
