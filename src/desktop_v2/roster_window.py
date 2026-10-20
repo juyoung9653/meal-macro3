@@ -82,6 +82,7 @@ from .current_sheet_export import CurrentSheetSnapshot
 from .date_edit import WheelSafeDateEdit
 from .inactive_roster import InactiveRosterSettings, InactiveThresholdDialog
 from .inspector_history import MealHistoryRow
+from .meal_history import meal_status_summary
 from .panel_handle import PanelEdgeHandle
 from .more_panel import MoreActionsPanel
 from .dialog_workflow import DialogRequest, dialog_workflow, invoke, launch
@@ -95,7 +96,6 @@ from .stopped_highlight import (
 
 from .theme import (
     DELIVERY,
-    MUTED,
     NOT_ENROLLED,
     PAUSED,
     STOPPED,
@@ -618,7 +618,7 @@ class RosterTableModel(QAbstractTableModel):
             if column.key == "sequence":
                 return f"{value or '순서 미지정'}\n더블클릭 → 순서 수정"
             if column.key in {"address", "detail_address", "jurisdiction"}:
-                return f"{value or '미등록'}\n더블클릭 → 이사 등록"
+                return f"{value or '미등록'}\n더블클릭하여 수정 · 우클릭 → 이사 등록"
             if column.key == "delivery_settings":
                 return f"{value or '기본값 사용'}\n더블클릭 → 배송 설정"
             if is_roster_cell_editable(column.key):
@@ -1439,8 +1439,9 @@ class RosterWindow(QMainWindow):
         self._history_dialogs: list[QDialog] = []
         self._history_provider = None
         self._meal_change_history_provider: (
-            Callable[[Person], tuple[tuple[str, str], ...]] | None
+            Callable[[Person], tuple[MealHistoryRow | tuple[str, str], ...]] | None
         ) = None
+        self._meal_history_presence_provider: Callable[[UUID], bool] | None = None
         self._meal_change_history_rows: dict[UUID, tuple] = {}
         register_application_fonts()
         self.setWindowTitle(f"급식 배송 운영 · {APP_VERSION}")
@@ -1859,8 +1860,10 @@ class RosterWindow(QMainWindow):
     def _archive_ids_on(self, day: date, *, days: int | None = None):
         has_visible_history: Callable[[UUID], bool] | None = None
         if self._meal_change_history_provider is not None:
-            def has_visible_history(person_id: UUID) -> bool:
-                return bool(self._meal_history_rows_for(self._roster.person(person_id)))
+            has_visible_history = self._meal_history_presence_provider
+            if has_visible_history is None:
+                def has_visible_history(person_id: UUID) -> bool:
+                    return bool(self._meal_history_rows_for(self._roster.person(person_id)))
 
         return inactive_person_ids(
             self._roster, self._histories,
@@ -2626,7 +2629,7 @@ class RosterWindow(QMainWindow):
                 edit = QAction("정보 수정", menu)
                 edit.triggered.connect(lambda: self.person_edit_requested.emit(person.person_id))
             menu.addAction(edit)
-            if column_key in {"address", "detail_address"}:
+            if column_key in {"address", "detail_address", "jurisdiction"}:
                 relocation = QAction("이사 등록", menu)
                 relocation.triggered.connect(lambda: self.relocation_requested.emit(person.person_id))
                 menu.addAction(relocation)
@@ -2721,9 +2724,7 @@ class RosterWindow(QMainWindow):
         column = self._model.columns[index.column()]
         if column.meal is not None or is_roster_cell_editable(column.key):
             return
-        if column.key in {"address", "detail_address", "jurisdiction"}:
-            self.relocation_requested.emit(person.person_id)
-        elif column.key == "sequence":
+        if column.key == "sequence":
             self.sequence_edit_requested.emit(person.person_id)
         elif column.key == "delivery_settings":
             self.delivery_settings_requested.emit(person.person_id)
@@ -2741,13 +2742,16 @@ class RosterWindow(QMainWindow):
 
     def set_meal_change_history_provider(
         self,
-        provider: Callable[[Person], tuple[tuple[str, str], ...]] | None,
+        provider: Callable[[Person], tuple[MealHistoryRow | tuple[str, str], ...]] | None,
+        *,
+        history_presence_provider: Callable[[UUID], bool] | None = None,
     ) -> None:
         index = self._selected_index()
         selected_person_id = (
             self._model.person_at(index.row()).person_id if index.isValid() else None
         )
         self._meal_change_history_provider = provider
+        self._meal_history_presence_provider = history_presence_provider
         self._meal_change_history_rows.clear()
         self._refresh_archive()
         if selected_person_id is not None:
@@ -3088,19 +3092,16 @@ class RosterWindow(QMainWindow):
         )
         for row in rows:
             if isinstance(row, MealHistoryRow):
-                title, tooltip = row.text, row.tooltip
-                applied = f"적용 {row.applied}"
-                recorded = f"기록 {row.recorded[:16]}" if row.recorded else ""
-                reason = f"사유 {row.reason}" if row.reason else ""
-                detail = " · ".join(part for part in (applied, recorded) if part)
+                title = f"{row.meal} · {row.category}"
+                period = f"기간 {row.period}"
+                tooltip = f"{title}\n{period}"
             else:
                 title, tooltip = row
-                detail = ""
-            item = QListWidgetItem(title if not detail else "")
-            item.setSizeHint(QSize(0, 58 if detail else 34))
+            item = QListWidgetItem("" if isinstance(row, MealHistoryRow) else title)
+            item.setSizeHint(QSize(0, 54 if isinstance(row, MealHistoryRow) else 34))
             item.setToolTip(tooltip)
             self._meal_history_list.addItem(item)
-            if detail:
+            if isinstance(row, MealHistoryRow):
                 entry = QWidget()
                 entry_layout = QVBoxLayout(entry)
                 entry_layout.setContentsMargins(5, 2, 5, 2)
@@ -3109,15 +3110,12 @@ class RosterWindow(QMainWindow):
                 title_label.setWordWrap(True)
                 title_label.setStyleSheet("font-weight: 700;")
                 entry_layout.addWidget(title_label)
-                for line in (applied, reason, recorded):
-                    if not line:
-                        continue
-                    detail_label = QLabel(line)
-                    detail_label.setWordWrap(True)
-                    detail_label.setStyleSheet(f"color: {MUTED}; font-size: 11px;" if line == recorded else "font-size: 12px;")
-                    entry_layout.addWidget(detail_label)
+                period_label = QLabel(period)
+                period_label.setWordWrap(True)
+                period_label.setStyleSheet("font-size: 12px;")
+                entry_layout.addWidget(period_label)
                 entry.setToolTip(tooltip)
-                entry.setAccessibleName(f"{title}, {detail}")
+                entry.setAccessibleName(f"{title}, {period}")
                 self._meal_history_list.setItemWidget(item, entry)
         if not rows:
             item = QListWidgetItem("기록된 식종 변경 이력이 없습니다")
@@ -3132,26 +3130,18 @@ class RosterWindow(QMainWindow):
             self._meal_change_history_rows[person.person_id] = rows
         return rows
 
-    def _fallback_meal_history_rows(self, person: Person) -> tuple[tuple[str, str], ...]:
+    def _fallback_meal_history_rows(self, person: Person) -> tuple[MealHistoryRow, ...]:
         history_events = [
             (meal, event)
             for meal in Meal
             for history in (self._histories.get((person.person_id, meal)),)
             for event in (history.events if history is not None else ())
         ]
-        rows = []
-        for meal, event in sorted(
+        return tuple(MealHistoryRow(*meal_status_summary(event)) for _, event in sorted(
             history_events,
             key=lambda item: item[1].recorded_at,
             reverse=True,
-        ):
-            recorded_at = event.recorded_at.astimezone(
-                timezone(timedelta(hours=9)),
-            )
-            description = event.source_text or event.status.value
-            text = f"{recorded_at:%Y-%m-%d %H:%M}  {meal.value} · {description}"
-            rows.append((text, text))
-        return tuple(rows)
+        ))
 
 
 def _date_button(text: str, tooltip: str) -> QToolButton:

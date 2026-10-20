@@ -24,6 +24,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from src.domain.household_shared import (
+    build_profile_correction_revision,
+    profile_with_shared_routing,
+)
 from src.domain.profile_edits import build_person_profile_revision
 from src.domain.revisions import RevisionActor
 from src.domain.roster import (
@@ -53,10 +57,24 @@ _PROFILE_FIELDS = {
     "mobile": "mobile_phone",
     "note": "note",
 }
+_ROUTING_PROFILE_FIELDS = {
+    "address": "road_address",
+    "detail_address": "detail_address",
+    "jurisdiction": "jurisdiction",
+}
 
 
 def is_roster_cell_editable(column_key: str) -> bool:
-    return column_key == "birth_date" or column_key in _PROFILE_FIELDS or column_key.startswith("custom:")
+    return (
+        column_key == "birth_date"
+        or column_key in _PROFILE_FIELDS
+        or column_key in _ROUTING_PROFILE_FIELDS
+        or column_key.startswith("custom:")
+    )
+
+
+def is_roster_routing_cell(column_key: str) -> bool:
+    return column_key in _ROUTING_PROFILE_FIELDS
 
 
 def roster_cell_text(person: Person, column_key: str, definition: CustomFieldDefinition | None = None) -> str:
@@ -67,6 +85,8 @@ def roster_cell_text(person: Person, column_key: str, definition: CustomFieldDef
         return "" if profile.birth_date is None else profile.birth_date.isoformat()
     if column_key in _PROFILE_FIELDS:
         value = getattr(profile, _PROFILE_FIELDS[column_key])
+    elif column_key in _ROUTING_PROFILE_FIELDS:
+        value = getattr(profile, _ROUTING_PROFILE_FIELDS[column_key])
     elif column_key.startswith("custom:") and definition is not None:
         value = profile.custom_values.get(definition.definition_id)
     else:
@@ -91,6 +111,11 @@ def updated_profile_for_cell(
         field = _PROFILE_FIELDS[column_key]
         value = text if field == "name" else _optional_text(text)
         return replace(profile, **{field: value})
+    if column_key in _ROUTING_PROFILE_FIELDS:
+        return replace(
+            profile,
+            **{_ROUTING_PROFILE_FIELDS[column_key]: _optional_text(text)},
+        )
     if not column_key.startswith("custom:"):
         raise ValueError("이 칼럼은 셀에서 직접 수정할 수 없습니다.")
     try:
@@ -138,7 +163,11 @@ class RosterCellEditDelegate(QStyledItemDelegate):
         editor.setAccessibleName(column.label)
         editor._roster_person_id = person.person_id
         editor._roster_column_key = column.key
-        editor._roster_original_text = roster_cell_text(person, column.key, column.custom_field)
+        editor._roster_original_text = (
+            str(model.data(index, Qt.ItemDataRole.DisplayRole) or "")
+            if column.key in _ROUTING_PROFILE_FIELDS
+            else roster_cell_text(person, column.key, column.custom_field)
+        )
         editor._roster_finished = False
         return editor
 
@@ -208,7 +237,8 @@ class RosterCellEditDelegate(QStyledItemDelegate):
         column_key = editor._roster_column_key
         text = self._text(editor)
         self.closeEditor.emit(editor, hint)
-        self.save_requested.emit(person_id, column_key, text)
+        if text != editor._roster_original_text:
+            self.save_requested.emit(person_id, column_key, text)
 
     def _cancel(self, editor) -> None:
         if editor._roster_finished:
@@ -259,27 +289,78 @@ class RosterCellEditController:
         column_key: str,
         text: str,
         parent: QWidget | None = None,
+        *,
+        service_day: date | None = None,
     ) -> RosterCellEditOutcome:
         try:
             roster = self._session.database.current_roster()
             if roster is None:
                 raise ValueError("현재 명단이 없습니다.")
             person = roster.person(person_id)
+            effective_on = self._effective_date_provider()
+            snapshot = None
+            editing_person = person
+            forced_routing_fields = ()
+            if column_key in _ROUTING_PROFILE_FIELDS:
+                snapshot_reader = getattr(self._session.database, "snapshot", None)
+                snapshot = (
+                    snapshot_reader(roster.revision_id)
+                    if snapshot_reader is not None
+                    else None
+                )
+                if service_day is not None:
+                    displayed_profile = profile_with_shared_routing(
+                        roster,
+                        person_id,
+                        service_day,
+                        snapshot,
+                    )
+                    field = _ROUTING_PROFILE_FIELDS[column_key]
+                    if (_optional_text(text) or "") == (
+                        getattr(displayed_profile, field) or ""
+                    ):
+                        return RosterCellEditOutcome(RosterCellEditStatus.CANCELLED)
+                    forced_routing_fields = (field,)
+                editing_person = replace(
+                    person,
+                    profile=profile_with_shared_routing(
+                        roster,
+                        person_id,
+                        effective_on,
+                        snapshot,
+                    ),
+                )
             updated_profile = updated_profile_for_cell(
-                person, column_key, text, roster.custom_fields
+                editing_person, column_key, text, roster.custom_fields
             )
-            if updated_profile == person.profile:
+            if updated_profile == editing_person.profile and not forced_routing_fields:
                 return RosterCellEditOutcome(RosterCellEditStatus.CANCELLED)
-            prepared = build_person_profile_revision(
-                roster,
-                person_id,
-                updated_profile,
-                actor=self._actor_provider(),
-                recorded_at=self._recorded_at_provider(),
-                effective_on=self._effective_date_provider(),
-                revision_id=self._revision_id_factory(),
-                reason="명단 셀 수정",
+            build_revision = (
+                build_profile_correction_revision
+                if column_key in _ROUTING_PROFILE_FIELDS
+                else build_person_profile_revision
             )
+            try:
+                prepared = build_revision(
+                    roster,
+                    person_id,
+                    updated_profile,
+                    **({"snapshot": snapshot} if column_key in _ROUTING_PROFILE_FIELDS else {}),
+                    **(
+                        {"forced_routing_fields": forced_routing_fields}
+                        if forced_routing_fields
+                        else {}
+                    ),
+                    actor=self._actor_provider(),
+                    recorded_at=self._recorded_at_provider(),
+                    effective_on=effective_on,
+                    revision_id=self._revision_id_factory(),
+                    reason="명단 셀 수정",
+                )
+            except ValueError as error:
+                if forced_routing_fields and str(error) == "변경된 사람 정보가 없습니다.":
+                    return RosterCellEditOutcome(RosterCellEditStatus.CANCELLED)
+                raise
             backup_result = save_revision(self._session, prepared.record, parent=parent)
         except Exception as error:
             self._message_box.critical(

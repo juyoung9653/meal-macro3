@@ -266,6 +266,61 @@ def test_archive_threshold_keeps_zero_history_and_applies_history_boundary(app, 
     window.close()
 
 
+def test_nonstatus_visible_history_preserves_archive_boundary_with_empty_cards(app, tmp_path):
+    selected_day = date(2026, 9, 30)
+    yesterday = selected_day - timedelta(days=1)
+    person_id = UUID(int=801)
+    revision_id = UUID(int=802)
+    roster = RosterSnapshot(
+        revision_id,
+        persons=(Person(person_id, PersonProfile("가입기간만 수정")),),
+        enrollments=(MealEnrollment(
+            person_id, Meal.DINNER, InclusiveDateRange(yesterday, yesterday),
+        ),),
+    )
+    delivery = StatusEvent(
+        UUID(int=803), revision_id, person_id, Meal.DINNER, MealStatus.DELIVERY,
+        InclusiveDateRange(yesterday, yesterday), datetime(2026, 9, 29, tzinfo=UTC),
+    )
+    histories = {(person_id, Meal.DINNER): resolve_status_history(
+        person_id, Meal.DINNER, (delivery,),
+    )}
+    record = RevisionRecord(
+        RevisionMetadata(
+            revision_id, None, datetime(2026, 9, 30, tzinfo=UTC), selected_day,
+            RevisionActor("tester", "sid"), "가입기간 수정", RevisionSource.UI,
+        ),
+        (AuditChange(
+            ENROLLMENT_KIND, UUID(int=804), ChangeOperation.INSERT, None,
+            {"person_id": str(person_id), "meal": Meal.DINNER.value,
+             "periods": ({"starts_on": str(yesterday), "ends_on": str(yesterday)},)},
+        ),),
+    )
+
+    class Database:
+        def snapshot(self, requested_revision):
+            return HistoricalSnapshot(requested_revision, {})
+
+        def revision(self, requested_revision):
+            return record
+
+    settings = QSettings(str(tmp_path / "nonstatus-history.ini"), QSettings.Format.IniFormat)
+    settings.setValue(InactiveRosterSettings.SETTINGS_KEY, 2)
+    window = RosterWindow(roster, histories, inactive_settings=settings)
+    window._set_day(selected_day)
+    history = InspectorMealHistory(Database())
+    provider = lambda person: history.rows_for(window.roster, person.person_id)
+    presence = lambda target: history.has_visible_history(window.roster, target)
+
+    assert provider(roster.person(person_id)) == ()
+    assert presence(person_id)
+    window.set_meal_change_history_provider(provider)
+    assert _visible_ids(window) == set()  # Empty cards alone would archive early.
+    window.set_meal_change_history_provider(provider, history_presence_provider=presence)
+    assert _visible_ids(window) == {person_id}
+    window.close()
+
+
 @pytest.mark.parametrize("days", [2, 365])
 def test_imported_enrollment_with_no_visible_history_archives_at_any_threshold(
     app, tmp_path, days,
@@ -343,7 +398,8 @@ def test_imported_enrollment_with_no_visible_history_archives_at_any_threshold(
     def provider(person):
         return meal_history.rows_for(window.roster, person.person_id)
 
-    window.set_meal_change_history_provider(provider)
+    presence = lambda person_id: meal_history.has_visible_history(window.roster, person_id)
+    window.set_meal_change_history_provider(provider, history_presence_provider=presence)
 
     assert not meal_history.rows_for(roster, person_id)
     assert window.table_model._contexts[person_id].meal_statuses == {
@@ -357,7 +413,7 @@ def test_imported_enrollment_with_no_visible_history_archives_at_any_threshold(
 
     window.set_meal_change_history_provider(None)
     assert _visible_ids(window) == set()
-    window.set_meal_change_history_provider(provider)
+    window.set_meal_change_history_provider(provider, history_presence_provider=presence)
     assert _visible_ids(window) == {person_id}
 
     manual_revision_id = UUID("af000000-0000-0000-0000-00000000000d")
@@ -375,6 +431,9 @@ def test_imported_enrollment_with_no_visible_history_archives_at_any_threshold(
                     "status": MealStatus.STOPPED.value,
                     "starts_on": str(selected_day),
                     "ends_on": None,
+                    "revision_id": str(manual_revision_id),
+                    "recorded_at": datetime(2026, 9, 30, tzinfo=UTC).isoformat(),
+                    "source_text": None,
                 },
             ),
         ),

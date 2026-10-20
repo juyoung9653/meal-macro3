@@ -6,6 +6,10 @@ from uuid import uuid4
 
 import pytest
 
+from src.desktop_v2.roster_cell_edit import (
+    RosterCellEditController,
+    RosterCellEditStatus,
+)
 from src.domain.household_shared import (
     build_profile_correction_revision,
     expand_household_shared_revision,
@@ -52,6 +56,36 @@ def correction(r, snap, pid, **fields):
     return build_profile_correction_revision(r, pid, replace(profile, **fields), snapshot=snap,
                                             actor=ACTOR, recorded_at=NOW, effective_on=DAY,
                                             revision_id=uuid4())
+
+
+def initial_record(r, snap):
+    roster_changes = roster_audit_changes(None, r)
+    roster_kinds = {change.entity_kind for change in roster_changes}
+    return RevisionRecord(
+        RevisionMetadata(
+            r.revision_id,
+            None,
+            NOW,
+            None,
+            ACTOR,
+            "initial",
+            RevisionSource.IMPORT,
+        ),
+        (
+            *roster_changes,
+            *(
+                AuditChange(
+                    ref.entity_kind,
+                    ref.entity_id,
+                    ChangeOperation.INSERT,
+                    None,
+                    state,
+                )
+                for ref, state in snap.entities.items()
+                if ref.entity_kind not in roster_kinds
+            ),
+        ),
+    )
 
 
 @pytest.mark.parametrize("field,column", tuple(zip(FIELDS, COLUMNS)))
@@ -156,3 +190,180 @@ def test_noop_rejected_without_new_revision_and_missing_snapshot_supported():
         correction(r, snap, a.person_id)
     prepared = correction(r, None, a.person_id, road_address="corrected")
     assert prepared.snapshot.person(a.person_id).profile.road_address == "corrected"
+
+
+@pytest.mark.parametrize("column,field", tuple(zip(COLUMNS, FIELDS)))
+def test_roster_cell_controller_persists_component_correction_through_real_session(
+    tmp_path, monkeypatch, column, field
+):
+    r, original = setup_history(COLUMNS)
+    a, b, _ = r.persons
+    events = tuple(
+        AuditChange(
+            ref.entity_kind,
+            ref.entity_id,
+            ChangeOperation.INSERT,
+            None,
+            state,
+        )
+        for ref, state in original.entities.items()
+        if ref.entity_kind == ROUTING_EVENT_KIND
+    )
+    initial_snapshot = snapshot(
+        r,
+        COLUMNS,
+        ((b.person_id, column),),
+        events,
+    )
+    initial = initial_record(r, initial_snapshot)
+    monkeypatch.setattr(
+        "src.desktop_v2.roster_cell_edit.save_revision",
+        lambda session, record, parent=None: session.append_revision(record),
+    )
+    next_revision = uuid4()
+    with DatabaseSession.create(
+        tmp_path / f"cell-{column}.sqlite3", "password", "recovery"
+    ) as session:
+        session.append_revision(initial)
+        controller = RosterCellEditController(
+            session,
+            actor_provider=lambda: ACTOR,
+            recorded_at_provider=lambda: NOW,
+            effective_date_provider=lambda: DAY,
+            revision_id_factory=lambda: next_revision,
+        )
+        before = session.database.snapshot(r.revision_id)
+        outcome = controller.save(a.person_id, column, "cell-corrected")
+        assert outcome.status is RosterCellEditStatus.COMPLETED
+        final = session.database.snapshot(next_revision)
+
+        for day in (DAY - timedelta(days=10), DAY - timedelta(days=1), DAY):
+            assert getattr(view(final, a.person_id, day), field) == "cell-corrected"
+            assert view(final, b.person_id, day) == view(before, b.person_id, day)
+        assert view(final, a.person_id, DAY + timedelta(days=2)) == view(
+            before, a.person_id, DAY + timedelta(days=2)
+        )
+        for companion in set(FIELDS) - {field}:
+            assert getattr(view(final, a.person_id, DAY), companion) == getattr(
+                view(before, a.person_id, DAY), companion
+            )
+
+        current_revision = session.database.current_roster().revision_id
+        unchanged = controller.save(a.person_id, column, "cell-corrected")
+        assert unchanged.status is RosterCellEditStatus.CANCELLED
+        assert session.database.current_roster().revision_id == current_revision
+
+
+def test_roster_cell_controller_corrects_past_view_to_existing_today_value(
+    tmp_path, monkeypatch
+):
+    r, original = setup_history()
+    a = r.persons[0]
+    events = tuple(
+        AuditChange(
+            ref.entity_kind,
+            ref.entity_id,
+            ChangeOperation.INSERT,
+            None,
+            state,
+        )
+        for ref, state in original.entities.items()
+        if ref.entity_kind == ROUTING_EVENT_KIND
+    )
+    events += (
+        movement(
+            a.person_id,
+            DAY,
+            30,
+            road_address="today-road",
+            detail_address="today-unit",
+            jurisdiction="today-jurisdiction",
+        ),
+    )
+    initial_snapshot = snapshot(r, events=events)
+    monkeypatch.setattr(
+        "src.desktop_v2.roster_cell_edit.save_revision",
+        lambda session, record, parent=None: session.append_revision(record),
+    )
+    next_revision = uuid4()
+    with DatabaseSession.create(
+        tmp_path / "past-view-cell.sqlite3", "password", "recovery"
+    ) as session:
+        session.append_revision(initial_record(r, initial_snapshot))
+        controller = RosterCellEditController(
+            session,
+            actor_provider=lambda: ACTOR,
+            recorded_at_provider=lambda: NOW,
+            effective_date_provider=lambda: DAY,
+            revision_id_factory=lambda: next_revision,
+        )
+        unchanged = controller.save(
+            a.person_id,
+            "address",
+            "past-road-0",
+            service_day=DAY - timedelta(days=1),
+        )
+        assert unchanged.status is RosterCellEditStatus.CANCELLED
+        assert session.database.current_roster().revision_id == r.revision_id
+
+        changed = controller.save(
+            a.person_id,
+            "address",
+            "today-road",
+            service_day=DAY - timedelta(days=1),
+        )
+        assert changed.status is RosterCellEditStatus.COMPLETED
+        final = session.database.snapshot(next_revision)
+        assert view(final, a.person_id, DAY - timedelta(days=1)).road_address == "today-road"
+        assert view(final, a.person_id, DAY).road_address == "today-road"
+        assert view(final, a.person_id, DAY - timedelta(days=1)).detail_address == "past-unit-0"
+        assert view(final, a.person_id, DAY + timedelta(days=2)) == view(
+            initial_snapshot,
+            a.person_id,
+            DAY + timedelta(days=2),
+        )
+
+
+def test_roster_cell_controller_future_view_to_today_value_is_clean_noop(
+    tmp_path, monkeypatch
+):
+    r = address_roster()
+    a = r.persons[0]
+    future = DAY + timedelta(days=2)
+    initial_snapshot = snapshot(
+        r,
+        events=(
+            movement(
+                a.person_id,
+                future,
+                1,
+                road_address="reserved-road",
+                detail_address="reserved-unit",
+                jurisdiction="reserved-jurisdiction",
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        "src.desktop_v2.roster_cell_edit.save_revision",
+        lambda session, record, parent=None: session.append_revision(record),
+    )
+    with DatabaseSession.create(
+        tmp_path / "future-view-cell.sqlite3", "password", "recovery"
+    ) as session:
+        session.append_revision(initial_record(r, initial_snapshot))
+        controller = RosterCellEditController(
+            session,
+            actor_provider=lambda: ACTOR,
+            recorded_at_provider=lambda: NOW,
+            effective_date_provider=lambda: DAY,
+            revision_id_factory=uuid4,
+        )
+        outcome = controller.save(
+            a.person_id,
+            "address",
+            a.profile.road_address,
+            service_day=future,
+        )
+        assert outcome.status is RosterCellEditStatus.CANCELLED
+        assert session.database.current_roster().revision_id == r.revision_id
+        assert session.database.snapshot(r.revision_id) == initial_snapshot

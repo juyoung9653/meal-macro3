@@ -961,8 +961,9 @@ def test_startup_builds_roster_window_only_after_guided_import_completes(
                 )
             )
 
-        def set_meal_change_history_provider(self, provider):
+        def set_meal_change_history_provider(self, provider, *, history_presence_provider=None):
             self.meal_history_provider = provider
+            self.meal_history_presence_provider = history_presence_provider
 
         def replace_roster(self, roster, histories, *, revision_display_code):
             self.roster = roster
@@ -1237,6 +1238,7 @@ def test_startup_builds_roster_window_only_after_guided_import_completes(
     assert len(outcome.window.histories) == 3
     # Ordinary Excel import history is intentionally hidden in person history.
     assert not outcome.window.meal_history_provider(outcome.window.roster.person(PERSON_ID))
+    assert not outcome.window.meal_history_presence_provider(PERSON_ID)
     assert outcome.window.revision_display_code == format_revision_timestamp(
         session.database.revision(outcome.window.roster.revision_id).metadata.recorded_at
     )

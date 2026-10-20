@@ -1041,9 +1041,10 @@ def test_row_selection_populates_household_inspector(app):
     assert window._household_list.count() == 2
     assert "김아침" in window._household_list.item(1).text()
     assert window._meal_history_list.count() == 1
-    assert window._meal_history_list.item(0).text() == (
-        "2026-08-25 01:00  중식 · 17일 일시중지"
-    )
+    entry = window._meal_history_list.itemWidget(window._meal_history_list.item(0))
+    assert [label.text() for label in entry.findChildren(QLabel)] == [
+        "중식 · 일시중지", "기간 2026-08-17 ~ 2026-08-17",
+    ]
     assert (
         window._table.selectionBehavior()
         is QAbstractItemView.SelectionBehavior.SelectItems
@@ -1111,7 +1112,7 @@ def test_inspector_uses_meal_history_provider_in_a_scrollable_list(app):
     window.close()
 
 
-def test_inspector_long_history_wraps_and_separates_dates(app):
+def test_inspector_status_card_shows_only_meal_category_period(app):
     from src.desktop_v2.inspector_history import MealHistoryRow
 
     window = RosterWindow(_roster(), _histories(), school_calendar=_calendar())
@@ -1120,20 +1121,21 @@ def test_inspector_long_history_wraps_and_separates_dates(app):
     window._table.selectRow(0)
     app.processEvents()
     row = MealHistoryRow(
-        "중식 · 상태: 이전 배송 상태에서 일시중지로 변경된 긴 이력 항목",
-        "전체 변경 상세",
-        "2026-09-24",
-        "2026-09-22 10:25:43",
+        "중식",
+        "일시중지",
+        "시작일 미지정 ~ 종료일 미지정",
     )
     window.set_meal_change_history_provider(lambda person: (row,) * 6)
     app.processEvents()
     item = window._meal_history_list.item(0)
     entry = window._meal_history_list.itemWidget(item)
     labels = entry.findChildren(QLabel)
-    assert len(labels) == 3
-    assert labels[0].wordWrap() and labels[1].wordWrap() and labels[2].wordWrap()
-    assert labels[1].text() == "적용 2026-09-24"
-    assert labels[2].text() == "기록 2026-09-22 10:25"
+    assert len(labels) == 2
+    assert all(label.wordWrap() for label in labels)
+    assert [label.text() for label in labels] == [
+        "중식 · 일시중지", "기간 시작일 미지정 ~ 종료일 미지정",
+    ]
+    assert item.toolTip() == "중식 · 일시중지\n기간 시작일 미지정 ~ 종료일 미지정"
     assert item.sizeHint().height() >= sum(label.heightForWidth(window._meal_history_list.viewport().width() - 16) for label in labels)
     assert window._meal_history_list.verticalScrollBar().maximum() > 0
     window.close()

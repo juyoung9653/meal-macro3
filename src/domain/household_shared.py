@@ -1275,7 +1275,13 @@ def profile_with_shared_routing(roster, person_id, on, snapshot):
 
 
 def build_profile_correction_revision(
-    roster, person_id, updated_profile, *, snapshot=None, **kwargs
+    roster,
+    person_id,
+    updated_profile,
+    *,
+    snapshot=None,
+    forced_routing_fields=(),
+    **kwargs,
 ):
     """Correct entered routing components through today, preserving reservations.
 
@@ -1288,10 +1294,14 @@ def build_profile_correction_revision(
     baseline = roster.person(person_id).profile
     displayed = profile_with_shared_routing(roster, person_id, on, snapshot)
     columns = {"road_address": "address", "detail_address": "detail_address", "jurisdiction": "jurisdiction"}
+    forced = frozenset(forced_routing_fields)
+    if not forced.issubset(columns):
+        raise ValueError("정정할 주소 항목이 올바르지 않습니다.")
     changed = {
         field: getattr(updated_profile, field)
         for field in columns
-        if (getattr(updated_profile, field) or "") != (getattr(displayed, field) or "")
+        if field in forced
+        or (getattr(updated_profile, field) or "") != (getattr(displayed, field) or "")
     }
     # The dialog displays resolved routing values. Unedited components must not
     # leak back into the baseline when another profile field is saved.
@@ -1356,7 +1366,10 @@ def build_profile_correction_revision(
             "event_ids": [str(change.entity_id) for change in event_changes],
         },
     })
-    record = RevisionRecord(metadata, (*roster_audit_changes(roster, working), *event_changes))
+    changes = (*roster_audit_changes(roster, working), *event_changes)
+    if not changes:
+        raise ValueError("변경된 사람 정보가 없습니다.")
+    record = RevisionRecord(metadata, changes)
     changed_fields = tuple(dict.fromkeys((*(prepared.changed_fields if prepared else ()), *changed)))
     cleared_fields = tuple(field for field in changed_fields if getattr(updated_profile, field) is None)
     if prepared:

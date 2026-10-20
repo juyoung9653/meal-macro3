@@ -28,6 +28,7 @@ from src.domain.revisions import RevisionActor
 from src.domain.roster import (
     CustomFieldDefinition,
     CustomFieldType,
+    HouseholdDeliverySetting,
     Meal,
     Person,
     PersonProfile,
@@ -72,12 +73,18 @@ def _roster():
                     grade="1",
                     telephone="031-1",
                     mobile_phone="010-1",
+                    jurisdiction="분당동",
+                    road_address="성남대로 1",
+                    detail_address="101호",
                     note="첫 줄\n둘째 줄",
                     custom_values={
                         NUMBER_FIELD: 2,
                         DATE_FIELD: date(2026, 1, 2),
                         CHOICE_FIELD: "가",
                     },
+                ),
+                delivery_settings=(
+                    HouseholdDeliverySetting(Meal.BREAKFAST, (0,)),
                 ),
             ),
             Person(PERSON_B, PersonProfile("나 대상", school_name="나초")),
@@ -311,17 +318,50 @@ def test_double_click_routes_special_columns_and_keeps_meals_read_only(app):
         index for index in range(window.table_model.rowCount())
         if window.table_model.person_at(index).person_id == PERSON_A
     )
+    for key, original, changed in (
+        ("address", "성남대로 1", "성남대로 2"),
+        ("detail_address", "101호", "202호"),
+        ("jurisdiction", "분당동", "정자동"),
+    ):
+        index = _double_click(window, row, key, app)
+        editor = _active_editor(window, app, QLineEdit)
+        assert editor is not None and editor.text() == original
+        assert window.table_model.flags(index) & Qt.ItemFlag.ItemIsEditable
+        editor.selectAll()
+        editor.setText(changed)
+        QTest.keyClick(editor, Qt.Key.Key_Return)
+        app.processEvents()
+        assert "우클릭 → 이사 등록" in index.data(Qt.ItemDataRole.ToolTipRole)
+    assert relocation == []
+    assert cell == [
+        (PERSON_A, "address", "성남대로 2"),
+        (PERSON_A, "detail_address", "202호"),
+        (PERSON_A, "jurisdiction", "정자동"),
+    ]
+
+    person = window.table_model.person_at(row)
     for key in ("address", "detail_address", "jurisdiction"):
-        index = window.table_model.index(row, _column(window, key))
-        window._table.doubleClicked.emit(index)
+        menu = window._create_context_menu(person, column_key=key)
+        next(action for action in menu.actions() if action.text() == "이사 등록").trigger()
     sequence_index = window.table_model.index(row, _column(window, "sequence"))
     window._table.doubleClicked.emit(sequence_index)
     meal_index = window.table_model.index(row, _column(window, "status:lunch"))
     assert not (window.table_model.flags(meal_index) & Qt.ItemFlag.ItemIsEditable)
     window._table.doubleClicked.emit(meal_index)
+
+    window._special_only_filter.setChecked(True)
+    app.processEvents()
+    delivery_row = next(
+        index for index in range(window.table_model.rowCount())
+        if window.table_model.person_at(index).person_id == PERSON_A
+    )
+    delivery_index = window.table_model.index(
+        delivery_row, _column(window, "delivery_settings")
+    )
+    window._table.doubleClicked.emit(delivery_index)
     assert relocation == [PERSON_A, PERSON_A, PERSON_A]
     assert sequence == [PERSON_A]
-    assert delivery == [] and cell == []
+    assert delivery == [PERSON_A]
     window.close()
 
 
@@ -366,3 +406,28 @@ def test_application_refreshes_roster_histories_and_calendar_without_replacing_r
     assert window.replacement[1]["revision_display_code"] == str(NEXT_REVISION)
     assert calendar_refreshes == [(window, NEXT_REVISION)]
     assert window.routing_state is original_routing
+
+
+def test_application_passes_view_day_only_for_routing_cell():
+    service_day = date(2026, 10, 10)
+    calls = []
+
+    class CellController:
+        def save(self, *args, **kwargs):
+            calls.append((args, kwargs))
+            return RosterCellEditOutcome(RosterCellEditStatus.CANCELLED)
+
+    class Window:
+        table_model = SimpleNamespace(service_day=service_day)
+
+    startup = DesktopStartupController.__new__(DesktopStartupController)
+    startup._roster_cell_edit_controller_type = lambda _session: CellController()
+    window = Window()
+    startup._run_roster_cell_edit(object(), window, PERSON_A, "address", "새 주소")
+    startup._run_roster_cell_edit(object(), window, PERSON_A, "grade", "2")
+
+    assert calls[0] == (
+        (PERSON_A, "address", "새 주소", window),
+        {"service_day": service_day},
+    )
+    assert calls[1] == ((PERSON_A, "grade", "2", window), {})

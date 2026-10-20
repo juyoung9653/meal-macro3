@@ -53,7 +53,7 @@ from .import_controller import (
 )
 from .meal_status_edit import MealStatusChangeController
 from .person_edit import PersonProfileEditController
-from .roster_cell_edit import RosterCellEditController
+from .roster_cell_edit import RosterCellEditController, is_roster_routing_cell
 from .roster_row_edit import RosterRowEditController
 from .provider_settings import ProviderSettingsController
 from .delivery_defaults import DeliveryDefaultsController
@@ -316,7 +316,10 @@ class DesktopStartupController:
         if callable(meal_history_setter):
             meal_history = InspectorMealHistory(session.database)
             meal_history_setter(
-                lambda person: meal_history.rows_for(window.roster, person.person_id)
+                lambda person: meal_history.rows_for(window.roster, person.person_id),
+                history_presence_provider=lambda person_id: meal_history.has_visible_history(
+                    window.roster, person_id
+                ),
             )
         for signal_name, handler in (
             ("complaint_requested", lambda person_id, meal: launch(self._run_complaint, session, window, person_id, meal)),
@@ -914,9 +917,17 @@ class DesktopStartupController:
         column_key: str,
         text: str,
     ) -> None:
-        outcome = self._roster_cell_edit_controller_type(session).save(
-            person_id, column_key, text, window
-        )
+        controller = self._roster_cell_edit_controller_type(session)
+        if is_roster_routing_cell(column_key):
+            outcome = controller.save(
+                person_id,
+                column_key,
+                text,
+                window,
+                service_day=window.table_model.service_day,
+            )
+        else:
+            outcome = controller.save(person_id, column_key, text, window)
         if not outcome.completed:
             return
         roster = outcome.roster
