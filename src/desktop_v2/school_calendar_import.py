@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from .dialog_workflow import DialogRequest, dialog_workflow
+
+from .startup_loading import save_revision
+
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -858,6 +862,7 @@ class SchoolCalendarImportController:
         self._revision_id_factory = revision_id_factory
         self._batch_id_factory = batch_id_factory
 
+    @dialog_workflow
     def run(self, parent: QWidget | None = None) -> SchoolCalendarImportOutcome:
         roster = self._session.database.current_roster()
         if roster is None:
@@ -872,7 +877,7 @@ class SchoolCalendarImportController:
             calendar_year=self._today_provider().year,
             parent=parent,
         )
-        if import_dialog.exec() != QDialog.DialogCode.Accepted:
+        if (yield DialogRequest(import_dialog, self._session)) != QDialog.DialogCode.Accepted:
             return SchoolCalendarImportOutcome(SchoolCalendarImportStatus.CANCELLED)
         preview = import_dialog.preview()
         review = self._review_dialog_type(
@@ -884,7 +889,7 @@ class SchoolCalendarImportController:
             ),
             parent=parent,
         )
-        if review.exec() != QDialog.DialogCode.Accepted:
+        if (yield DialogRequest(review, self._session)) != QDialog.DialogCode.Accepted:
             return SchoolCalendarImportOutcome(SchoolCalendarImportStatus.CANCELLED)
         latest = self._session.database.latest_revision()
         if latest is None:
@@ -905,7 +910,7 @@ class SchoolCalendarImportController:
                 revision_id=self._revision_id_factory(),
                 batch_id=self._batch_id_factory(),
             )
-            backup_result = self._session.append_revision(prepared.record)
+            backup_result = save_revision(self._session, prepared.record, parent=parent)
             updated_roster = self._session.database.current_roster()
         except Exception as error:
             self._message_box.critical(

@@ -41,6 +41,11 @@ def test_add_person_enrolls_selected_meals_and_audits_insert():
     assert result.snapshot.meals_for(person.person_id, on=date(2026, 10, 4)) == ()
     assert result.snapshot.meals_for(person.person_id, on=date(2026, 10, 5)) == (Meal.LUNCH, Meal.DINNER)
     assert result.snapshot.meals_for(person.person_id, on=date(2026, 10, 6)) == (Meal.LUNCH, Meal.DINNER)
+    members = [item for item in result.snapshot.memberships if item.person_id == person.person_id]
+    assert len(members) == 1
+    assert members[0].period.starts_on == date(2026, 10, 5)
+    assert members[0].household_id not in {item.household_id for item in original.households}
+    assert {item.household_id for item in result.snapshot.households} == {HOUSEHOLD, members[0].household_id}
     assert result.snapshot.meals_for(KEEP, on=date(2026, 10, 4)) == original.meals_for(KEEP, on=date(2026, 10, 4))
     assert any(change.entity_kind == PERSON_KIND and change.entity_id == person.person_id and change.operation is ChangeOperation.INSERT for change in result.record.changes)
     assert result.record.metadata.parent_revision_id == OLD

@@ -5,6 +5,7 @@ from typing import NamedTuple
 from src.services.person_history import build_history_tables
 
 from .ledger_reader import load_revision_chain
+from .startup_loading import run_progress_task
 
 
 class MealHistoryRow(NamedTuple):
@@ -24,6 +25,15 @@ class InspectorMealHistory:
         self._rows = {}
 
     def rows_for(self, roster, person_id):
+        if roster.revision_id != self._revision_id:
+            run_progress_task(
+                lambda: self._prepare(roster),
+                title="식종 변경 이력을 불러오는 중입니다",
+                message="선택 정보에 표시할 식종 변경 이력을 읽는 중입니다.",
+            )
+        return self._rows.get(str(person_id), ())
+
+    def _prepare(self, roster):
         if roster.revision_id != self._revision_id:
             snapshot = self._database.snapshot(roster.revision_id)
             revisions = load_revision_chain(self._database, roster.revision_id)
@@ -62,4 +72,3 @@ class InspectorMealHistory:
                 )
             self._rows = {key: tuple(items) for key, items in grouped.items()}
             self._revision_id = roster.revision_id
-        return self._rows.get(str(person_id), ())

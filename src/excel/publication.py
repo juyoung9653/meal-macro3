@@ -29,6 +29,7 @@ def publish_workbook(
     target: str | Path,
     *,
     password: str | None = None,
+    overwrite: bool = True,
 ) -> WorkbookPublicationResult:
     """Save ``workbook`` to a staging file, then atomically publish it.
 
@@ -36,6 +37,8 @@ def publish_workbook(
     the same filesystem.  The previous target remains untouched unless both
     save and close complete successfully.  With a password, plaintext remains
     in memory and only the encrypted package reaches the staging file.
+    ``overwrite=False`` publishes only if the destination is still absent, even
+    if another process creates it while this workbook is being generated.
     """
     target_path = Path(target)
     staging_path: Path | None = None
@@ -82,7 +85,15 @@ def publish_workbook(
 
         output_sha256 = _file_sha256(staging_path)
         output_byte_size = staging_path.stat().st_size
-        os.replace(staging_path, target_path)
+        if overwrite:
+            os.replace(staging_path, target_path)
+        elif os.name == "nt":
+            # Windows rename fails atomically when the destination exists.
+            os.rename(staging_path, target_path)
+        else:
+            # Unlike POSIX rename, link never replaces an existing pathname.
+            # Unsupported filesystems fail safely; do not fall back to replace.
+            os.link(staging_path, target_path)
         return WorkbookPublicationResult(
             target_path,
             normalized_password is not None,

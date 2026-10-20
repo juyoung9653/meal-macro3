@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from .dialog_workflow import DialogRequest, dialog_workflow
+
+from .startup_loading import save_revision
+
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -332,6 +336,7 @@ class UnitPriceChangeController:
         self._revision_id_factory = revision_id_factory
         self._change_id_factory = change_id_factory
 
+    @dialog_workflow
     def run(self, parent: QWidget | None = None) -> UnitPriceChangeOutcome:
         roster = self._session.database.current_roster()
         if roster is None:
@@ -356,7 +361,7 @@ class UnitPriceChangeController:
             )
             return UnitPriceChangeOutcome(UnitPriceChangeStatus.FAILED)
         dialog = self._dialog_type(schedule, self._today_provider(), parent)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        if (yield DialogRequest(dialog, self._session)) != QDialog.DialogCode.Accepted:
             return UnitPriceChangeOutcome(UnitPriceChangeStatus.CANCELLED)
         try:
             prepared = build_unit_price_revision(
@@ -370,7 +375,7 @@ class UnitPriceChangeController:
                 revision_id=self._revision_id_factory(),
                 change_id=self._change_id_factory(),
             )
-            backup_result = self._session.append_revision(prepared.record)
+            backup_result = save_revision(self._session, prepared.record, parent=parent)
             updated_roster = self._session.database.current_roster()
         except Exception as error:
             self._message_box.critical(

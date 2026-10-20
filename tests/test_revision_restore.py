@@ -191,7 +191,7 @@ def test_real_schema_seven_upgrades_then_restores_status_provenance(tmp_path, mo
     import src.storage.encrypted_database as storage
     from src.storage.migrations import MIGRATIONS
     with monkeypatch.context() as older:
-        older.setattr(storage, "MIGRATIONS", MIGRATIONS[:-1])
+        older.setattr(storage, "MIGRATIONS", tuple(m for m in MIGRATIONS if m.version <= 7))
         older.setattr(storage, "CURRENT_SCHEMA_VERSION", 7)
         generator = history.__wrapped__(tmp_path)
         session, first, second, _ = next(generator)
@@ -200,7 +200,7 @@ def test_real_schema_seven_upgrades_then_restores_status_provenance(tmp_path, mo
         source = session.path
         generator.close()
     with DatabaseSession.open(source, "source-password") as session:
-        assert session.database.schema_version == 8
+        assert session.database.schema_version == MIGRATIONS[-1].version
         a = restore_revision(session, first, second, ACTOR)
         b = restore_revision(session, second, a.revision_id, ACTOR)
         assert session.database.status_events() == original_events

@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from .dialog_workflow import DialogRequest, dialog_workflow, invoke
+
+from .startup_loading import save_revision
+
 from src.storage.database_session import committed_roster_after_save
 
 from collections.abc import Callable
@@ -717,13 +721,15 @@ class PersonProfileEditController:
         self._effective_date_provider = effective_date_provider or date.today
         self._revision_id_factory = revision_id_factory
 
+    @dialog_workflow
     def run(
         self,
         person_id: UUID,
         parent: QWidget | None = None,
     ) -> PersonProfileEditOutcome:
-        return self._run(person_id, parent, delivery_only=False)
+        return (yield from invoke(self._run, person_id, parent, delivery_only=False))
 
+    @dialog_workflow
     def run_delivery_settings(
         self,
         person_id: UUID,
@@ -731,8 +737,9 @@ class PersonProfileEditController:
         *,
         service_day: date | None = None,
     ) -> PersonProfileEditOutcome:
-        return self._run(person_id, parent, delivery_only=True, service_day=service_day)
+        return (yield from invoke(self._run, person_id, parent, delivery_only=True, service_day=service_day))
 
+    @dialog_workflow
     def _run(
         self,
         person_id: UUID,
@@ -785,7 +792,7 @@ class PersonProfileEditController:
             )
         else:
             dialog = self._dialog_type(editing_person, parent, message_box=self._message_box)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        if (yield DialogRequest(dialog, self._session)) != QDialog.DialogCode.Accepted:
             return PersonProfileEditOutcome(PersonProfileEditStatus.CANCELLED)
         try:
             updated_profile = dialog.profile()
@@ -817,7 +824,7 @@ class PersonProfileEditController:
                 delivery_settings_to_household=copy_delivery,
                 revision_id=self._revision_id_factory(),
             )
-            backup_result = self._session.append_revision(prepared.record)
+            backup_result = save_revision(self._session, prepared.record, parent=parent)
         except Exception as error:
             self._message_box.critical(
                 parent,

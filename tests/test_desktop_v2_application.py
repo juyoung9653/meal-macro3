@@ -1447,7 +1447,10 @@ def test_school_calendar_editor_can_route_to_excel_import():
         def status_history(*_args):
             raise AssertionError("빈 명단에서는 상태 이력을 읽지 않아야 합니다")
 
-    session = SimpleNamespace(database=Database())
+    from src.domain.revisions import HistoricalSnapshot
+    database = Database()
+    database.snapshot = lambda revision_id: HistoricalSnapshot(revision_id, {})
+    session = SimpleNamespace(database=database)
 
     class StoredEditor:
         def __init__(self, opened_session):
@@ -1539,3 +1542,22 @@ def test_roster_history_read_error_is_not_replaced_with_default_delivery():
             SimpleNamespace(database=SimpleNamespace(status_events=status_events)),
             SimpleNamespace(persons=(SimpleNamespace(person_id=UUID(int=701)),)),
         )
+
+
+def test_refresh_read_failure_keeps_roster_and_routing_unchanged(app):
+    old = SimpleNamespace(revision_id=UUID(int=1))
+    saved = SimpleNamespace(revision_id=UUID(int=2))
+    writes, errors = [], []
+    window = SimpleNamespace(
+        roster=old,
+        replace_roster=lambda *args, **kwargs: writes.append("roster"),
+        set_routing_state=lambda state: writes.append("routing"),
+    )
+    controller = DesktopStartupController(message_box=SimpleNamespace(critical=lambda *args: errors.append(args)))
+    def fail(*args):
+        raise OSError("refresh unavailable")
+    controller._prepare_startup = fail
+    controller._apply_routing_outcome(None, window, SimpleNamespace(roster=saved, routing_state=object()))
+    assert not writes
+    assert window.roster is old
+    assert len(errors) == 1 and "refresh unavailable" in errors[0][-1]

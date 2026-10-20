@@ -21,13 +21,15 @@ class DocumentKind(StrEnum):
     INVOICE = "invoice"
     CONFIRMATION = "confirmation"
     DELIVERY_REPORT = "delivery_report"
+    DELIVERY_SUBSTITUTE = "delivery_substitute"
 
     @property
     def label(self) -> str:
         return {
             DocumentKind.INVOICE: "청구서",
             DocumentKind.CONFIRMATION: "확인서",
-            DocumentKind.DELIVERY_REPORT: "배송 리포트",
+            DocumentKind.DELIVERY_REPORT: "일일식수",
+            DocumentKind.DELIVERY_SUBSTITUTE: "배송대타",
         }[self]
 
 

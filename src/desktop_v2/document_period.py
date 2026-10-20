@@ -258,7 +258,7 @@ class DocumentPeriodDialog(QDialog):
             controls.addWidget(self._ends_on)
             controls.addStretch(1)
             layout.addLayout(controls)
-            help_text = QLabel("여러 날을 고르면 날짜별 리포트를 한 파일로 만듭니다.")
+            help_text = QLabel("여러 날을 고르면 날짜별 일일식수를 한 파일로 만듭니다.")
         else:
             controls = QHBoxLayout()
             controls.setSpacing(8)

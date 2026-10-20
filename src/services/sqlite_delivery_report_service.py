@@ -121,12 +121,42 @@ def prepare_delivery_report_data(
     entitlement's original service date.
     """
 
+    return _prepare_delivery_data(
+        snapshot, period_start, period_end, meals, staff_sort=staff_sort, build_reports=True
+    )
+
+
+def prepare_physical_delivery_data(
+    snapshot: HistoricalSnapshot,
+    period_start: date,
+    period_end: date,
+    meals: Sequence[Meal],
+) -> PreparedDeliveryReportData:
+    """Prepare physical shipments without report grouping or driver requirements.
+
+    ``reports`` is empty; shipments and calculation provenance use the same
+    entitlement rules and evaluation window as delivery reports.
+    """
+    return _prepare_delivery_data(
+        snapshot, period_start, period_end, meals, staff_sort=None, build_reports=False
+    )
+
+
+def _prepare_delivery_data(
+    snapshot: HistoricalSnapshot,
+    period_start: date,
+    period_end: date,
+    meals: Sequence[Meal],
+    *,
+    staff_sort: Mapping[Meal | str, Sequence[str]] | None,
+    build_reports: bool,
+) -> PreparedDeliveryReportData:
     if not isinstance(snapshot, HistoricalSnapshot):
         raise TypeError("snapshot은 HistoricalSnapshot이어야 합니다.")
-    _validate_date(period_start, "리포트 시작일")
-    _validate_date(period_end, "리포트 종료일")
+    _validate_date(period_start, "일일식수 시작일")
+    _validate_date(period_end, "일일식수 종료일")
     if period_start > period_end:
-        raise ValueError("리포트 시작일은 종료일보다 늦을 수 없습니다.")
+        raise ValueError("일일식수 시작일은 종료일보다 늦을 수 없습니다.")
     selected_meals = _canonical_meals(meals)
     normalized_staff_sort = _normalize_staff_sort(staff_sort)
 
@@ -267,42 +297,44 @@ def prepare_delivery_report_data(
         if comparison_start <= item.delivery_on <= period_end
     )
 
-    target_keys = tuple(
-        sorted(
-            {
-                (item.delivery_on, item.meal)
-                for item in coalesced_shipments
-                if period_start <= item.delivery_on <= period_end
-            },
-            key=lambda item: (item[0], tuple(Meal).index(item[1])),
+    reports: tuple[DeliveryReport, ...] = ()
+    if build_reports:
+        target_keys = tuple(
+            sorted(
+                {
+                    (item.delivery_on, item.meal)
+                    for item in coalesced_shipments
+                    if period_start <= item.delivery_on <= period_end
+                },
+                key=lambda item: (item[0], tuple(Meal).index(item[1])),
+            )
         )
-    )
-    previous_by_key = _previous_delivery_keys(coalesced_shipments, target_keys)
-    relevant_keys = set(target_keys) | set(previous_by_key.values())
-    relevant_shipments = tuple(
-        item
-        for item in coalesced_shipments
-        if (item.delivery_on, item.meal) in relevant_keys
-    )
-    presences = _shipment_presences(roster, relevant_shipments, routing)
-    aggregates = {
-        key: _aggregate_presences(
-            presences.get(key, ()),
-            roster,
-            context=f"{key[0]:%Y%m%d} {key[1].value}",
+        previous_by_key = _previous_delivery_keys(coalesced_shipments, target_keys)
+        relevant_keys = set(target_keys) | set(previous_by_key.values())
+        relevant_shipments = tuple(
+            item
+            for item in coalesced_shipments
+            if (item.delivery_on, item.meal) in relevant_keys
         )
-        for key in relevant_keys
-    }
-    reports = tuple(
-        _build_report(
-            day,
-            meal,
-            aggregates[(day, meal)],
-            aggregates.get(previous_by_key.get((day, meal)), _empty_aggregate()),
-            normalized_staff_sort.get(meal, ()),
+        presences = _shipment_presences(roster, relevant_shipments, routing)
+        aggregates = {
+            key: _aggregate_presences(
+                presences.get(key, ()),
+                roster,
+                context=f"{key[0]:%Y%m%d} {key[1].value}",
+            )
+            for key in relevant_keys
+        }
+        reports = tuple(
+            _build_report(
+                day,
+                meal,
+                aggregates[(day, meal)],
+                aggregates.get(previous_by_key.get((day, meal)), _empty_aggregate()),
+                normalized_staff_sort.get(meal, ()),
+            )
+            for day, meal in target_keys
         )
-        for day, meal in target_keys
-    )
 
     target_shipments = tuple(
         item
@@ -392,6 +424,11 @@ def prepare_delivery_report_data(
             ),
         }
     )
+    if not build_reports:
+        manifest = freeze_json_object({
+            key: value for key, value in manifest.items()
+            if key not in {"household_grouping", "staff_order", "report_count"}
+        })
     return PreparedDeliveryReportData(reports, target_shipments, manifest)
 
 
@@ -514,18 +551,13 @@ def _shipment_presences(
         person = roster.person(shipment.person_id)
         household_ids: set[UUID] = set()
         for service_on in shipment.service_dates:
-            ids_on_day = {
-                membership.household_id
-                for membership in roster.memberships
-                if membership.person_id == shipment.person_id
-                and membership.period.contains(service_on)
-            }
-            if not ids_on_day:
+            household = roster.household_for(shipment.person_id, on=service_on)
+            if household is None:
                 raise ValueError(
                     f"{person.profile.name}님의 {service_on:%Y.%m.%d} 식사일에 "
                     "유효한 가구가 없습니다."
                 )
-            household_ids.update(ids_on_day)
+            household_ids.add(household.household_id)
         if len(household_ids) != 1:
             shown = ", ".join(day.strftime("%Y.%m.%d") for day in shipment.service_dates)
             raise ValueError(
@@ -607,7 +639,7 @@ def _aggregate_presences(
             raise ValueError(
                 f"{context}: {driver} 담당 가구가 6명 이상입니다"
                 f"({household_size}명: {names}; 가구 {household_id}). "
-                "현재 배송 리포트 양식은 1~5명 가구만 지원합니다."
+                "현재 일일식수 양식은 1~5명 가구만 지원합니다."
             )
         buckets[driver][household_size - 1] += 1
     return _DeliveryAggregate(
@@ -765,11 +797,11 @@ def _normalized_names(names: Sequence[str]) -> tuple[str, ...]:
 def _canonical_meals(meals: Sequence[Meal]) -> tuple[Meal, ...]:
     selected = tuple(meals)
     if not selected:
-        raise ValueError("배송 리포트에 포함할 식종이 없습니다.")
+        raise ValueError("일일식수에 포함할 식종이 없습니다.")
     if any(not isinstance(meal, Meal) for meal in selected):
         raise TypeError("meals에는 Meal만 허용됩니다.")
     if len(set(selected)) != len(selected):
-        raise ValueError("배송 리포트 식종은 중복될 수 없습니다.")
+        raise ValueError("일일식수 식종은 중복될 수 없습니다.")
     return tuple(meal for meal in Meal if meal in selected)
 
 

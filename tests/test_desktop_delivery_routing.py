@@ -264,7 +264,7 @@ def test_application_routing_actions_use_selected_day_and_refresh(monkeypatch):
         set_routing_state=lambda value: refreshed.append(value),
     )
     monkeypatch.setattr(
-        app_controller, "_replace_roster_if_changed", lambda *args: None
+        app_controller, "_replace_roster_if_changed", lambda *args: True
     )
     person = roster.persons[0].person_id
     app_controller._run_driver_assignment(object(), window, person, Meal.DINNER)
@@ -690,12 +690,7 @@ def test_right_click_stop_keeps_excel_imported_meal_driver_in_window_and_reload(
     notices = Messages()
 
     class StopDialog(MealStatusChangeDialog):
-        def exec(self):
-            assert self.selected_meals() == (Meal.BREAKFAST,)
-            assert self.selected_status() is MealStatus.STOPPED
-            assert self.selected_period() == InclusiveDateRange(imported_on, None)
-            self._save()
-            return self.result()
+        pass
 
     class StopController(MealStatusChangeController):
         def __init__(self, session):
@@ -750,6 +745,14 @@ def test_right_click_stop_keeps_excel_imported_meal_driver_in_window_and_reload(
         next(
             action for action in menu.actions() if action.text() == "조식 중지"
         ).trigger()
+        app.processEvents()
+        dialog = window.findChild(StopDialog)
+        assert dialog is not None and dialog.isVisible()
+        assert not dialog.isModal()
+        assert dialog.selected_meals() == (Meal.BREAKFAST,)
+        assert dialog.selected_status() is MealStatus.STOPPED
+        assert dialog.selected_period() == InclusiveDateRange(imported_on, None)
+        dialog._save()
         app.processEvents()
 
         row = next(

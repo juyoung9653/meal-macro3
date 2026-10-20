@@ -592,3 +592,94 @@ def test_global_dinner_mapping_crosses_month_boundary_and_closure_remains():
     states[EntityRef(SERVICE_ADJUSTMENT_SCHEDULE_KIND, SERVICE_ADJUSTMENT_SCHEDULE_ID)] = service_adjustment_schedule_state(ServiceAdjustmentSchedule((change,)))
     closed = prepare_delivery_report_data(HistoricalSnapshot(snapshot.revision_id, states), date(2026, 8, 31), date(2026, 8, 31), (Meal.DINNER,))
     assert not closed.shipments
+
+
+@pytest.mark.parametrize('people,include_driver', [(2, True), (6, True), (2, False)])
+def test_physical_delivery_preparation_skips_report_only_requirements(people, include_driver):
+    from src.services.sqlite_delivery_report_service import prepare_physical_delivery_data
+
+    snapshot, _ = _snapshot(people=people, include_driver=include_driver)
+    day = date(2026, 8, 21)
+    physical = prepare_physical_delivery_data(snapshot, day, day, (Meal.BREAKFAST,))
+    assert physical.reports == ()
+    assert len(physical.shipments) == people
+    assert sum(s.entitlement_count for s in physical.shipments) == people * 3
+    assert 'household_grouping' not in physical.calculation_manifest
+    if people <= 5 and include_driver:
+        report = prepare_delivery_report_data(snapshot, day, day, (Meal.BREAKFAST,))
+        assert physical.shipments == report.shipments
+        assert physical.calculation_manifest == {
+            k: v for k, v in report.calculation_manifest.items()
+            if k not in {'household_grouping', 'staff_order', 'report_count'}
+        }
+    else:
+        with pytest.raises(ValueError):
+            prepare_delivery_report_data(snapshot, day, day, (Meal.BREAKFAST,))
+
+
+def test_physical_delivery_preparation_keeps_strict_school_calendar_failure():
+    from src.services.sqlite_delivery_report_service import prepare_physical_delivery_data
+    from src.domain.school_calendar import SchoolLunchCalendarError
+
+    snapshot, _ = _snapshot(meals=(Meal.LUNCH,))
+    with pytest.raises(SchoolLunchCalendarError):
+        prepare_physical_delivery_data(snapshot, date(2026, 10, 19), date(2026, 10, 19), (Meal.LUNCH,))
+
+
+@pytest.mark.parametrize('day', [date(2026, 8, 21), date(2027, 1, 1)])
+def test_report_preserves_dated_roster_status_and_routing_transitions(day, monkeypatch):
+    snapshot, person_ids = _snapshot(people=2, meals=(Meal.BREAKFAST, Meal.DINNER))
+    roster = roster_from_historical_snapshot(snapshot)
+    new_household = Household(uuid4())
+    previous_day = day - timedelta(days=1)
+    memberships = tuple(
+        item for item in roster.memberships if item.person_id != person_ids[0]
+    ) + (
+        HouseholdMembership(person_ids[0], roster.households[0].household_id, InclusiveDateRange(None, previous_day)),
+        HouseholdMembership(person_ids[0], new_household.household_id, InclusiveDateRange(day, None)),
+    )
+    enrollments = tuple(
+        replace(item, period=InclusiveDateRange(day, None)) if item.person_id == person_ids[0] else item
+        for item in roster.enrollments
+    )
+    changed = replace(roster, households=roster.households + (new_household,), memberships=memberships, enrollments=enrollments)
+    states = dict(snapshot.entities)
+    states.update(roster_entity_states(changed))
+    paused = StatusEvent(uuid4(), snapshot.revision_id, person_ids[1], Meal.BREAKFAST,
+                         MealStatus.PAUSED, InclusiveDateRange(day, day), datetime(2026, 1, 1, tzinfo=UTC))
+    states[EntityRef('status.event', paused.event_id)] = status_event_state(paused)
+    states[EntityRef(ROUTING_EVENT_KIND, uuid4())] = {
+        'person_id': str(person_ids[0]), 'effective_on': day.isoformat(), 'position': 1,
+        'driver_ids': {}, 'road_address': None, 'detail_address': None, 'jurisdiction': '판교동',
+    }
+    snapshot = HistoricalSnapshot(snapshot.revision_id, states)
+    optimized = prepare_delivery_report_data(snapshot, day, day, (Meal.BREAKFAST, Meal.DINNER))
+    assert optimized.shipments
+    assert any('판교동' in row.reference_areas for report in optimized.reports for row in report.rows)
+
+    def scan_meals(self, person_id, *, on):
+        active = {e.meal for e in self.enrollments if e.person_id == person_id and e.period.contains(on)}
+        return tuple(meal for meal in Meal if meal in active)
+
+    def scan_household(self, person_id, *, on):
+        household_id = next((m.household_id for m in self.memberships if m.person_id == person_id and m.period.contains(on)), None)
+        return next((h for h in self.households if h.household_id == household_id), None)
+
+    monkeypatch.setattr(RosterSnapshot, 'meals_for', scan_meals)
+    monkeypatch.setattr(RosterSnapshot, 'household_for', scan_household)
+    assert prepare_delivery_report_data(snapshot, day, day, (Meal.BREAKFAST, Meal.DINNER)) == optimized
+
+
+def test_shipment_household_change_inside_bundled_weekend_remains_error():
+    snapshot, person_ids = _snapshot()
+    roster = roster_from_historical_snapshot(snapshot)
+    friday = date(2026, 8, 21)
+    new_household = Household(uuid4())
+    changed = replace(roster, households=roster.households + (new_household,), memberships=(
+        HouseholdMembership(person_ids[0], roster.households[0].household_id, InclusiveDateRange(None, friday)),
+        HouseholdMembership(person_ids[0], new_household.household_id, InclusiveDateRange(friday + timedelta(days=1), None)),
+    ))
+    states = dict(snapshot.entities)
+    states.update(roster_entity_states(changed))
+    with pytest.raises(ValueError, match='서로 다른 가구'):
+        prepare_delivery_report_data(HistoricalSnapshot(snapshot.revision_id, states), friday, friday, (Meal.BREAKFAST,))

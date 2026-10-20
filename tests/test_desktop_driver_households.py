@@ -264,3 +264,35 @@ def test_column_buttons_stay_aligned_after_resizing_and_horizontal_scroll(search
         button = header.buttons[key]
         assert button.geometry().left() == header.sectionViewportPosition(column) + header.sectionSize(column) - header.BUTTON_WIDTH - 2
         assert button.width() == header.BUTTON_WIDTH
+
+
+def test_sequence_save_and_hidden_toggle_refresh_with_opening_day_provider(app, monkeypatch):
+    from types import SimpleNamespace
+    from src.desktop_v2 import application as module
+    from src.desktop_v2.application import DesktopStartupController
+    from src.desktop_v2.sequence_edit import SequenceSaveStatus
+
+    opening_day, main_day = date(2026, 9, 22), date(2026, 10, 12)
+    original = _row(uuid4(), None, "", sequence=("001",))
+    updated = replace(original, sequences=("002",))
+    calls = []
+
+    def rows_provider(include_hidden, captured_day=opening_day):
+        calls.append((captured_day, include_hidden))
+        return (updated,)
+
+    dialog = DriverHouseholdsDialog(
+        (original,), service_day=opening_day, drivers=(), rows_provider=rows_provider,
+    )
+    window = SimpleNamespace(table_model=SimpleNamespace(service_day=main_day))
+    result = SimpleNamespace(status=SequenceSaveStatus.SAVED, roster=object(), backup_warning=False, message="saved")
+    monkeypatch.setattr(module, "SequenceEditController", lambda session: SimpleNamespace(save_value=lambda *args, **kwargs: result))
+    controller = DesktopStartupController(settings=SimpleNamespace())
+    monkeypatch.setattr(controller, "_replace_roster_if_changed", lambda *args: True)
+    controller._save_household_sequence(object(), window, ((original.member_ids[0], Meal.DINNER),), "002", dialog)
+    assert calls == [(opening_day, False)]
+    assert dialog.table.item(0, 3).text() == "002"
+    dialog.include_hidden_checkbox.setChecked(True)
+    assert calls == [(opening_day, False), (opening_day, True)]
+    assert window.table_model.service_day == main_day
+    dialog.close()

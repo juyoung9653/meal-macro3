@@ -353,8 +353,13 @@ def test_application_refreshes_roster_histories_and_calendar_without_replacing_r
     startup._histories = lambda _session, value: {"for": value.revision_id}
     startup._revision_display_code = lambda _session, value: str(value.revision_id)
     calendar_refreshes = []
-    startup._refresh_school_calendar = lambda _session, target, value: calendar_refreshes.append(
+    startup._refresh_school_calendar = lambda _session, target, value, **_kwargs: calendar_refreshes.append(
         (target, value.revision_id)
+    )
+    from types import SimpleNamespace
+    startup._prepare_startup = lambda _session, value: SimpleNamespace(
+        histories={"for": value.revision_id}, revision_display_code=str(value.revision_id),
+        snapshot=None, imported_profile_fields=frozenset(),
     )
     startup._run_roster_cell_edit(object(), window, PERSON_A, "grade", "2")
     assert window.replacement[0] == (saved_roster, {"for": NEXT_REVISION})

@@ -206,6 +206,16 @@ class RosterImportWizard(QDialog):
         self._meal_mode_changed()
         self._set_page(0)
 
+    def set_initial_import_defaults(self) -> None:
+        """Called once by the controller only when no current roster exists."""
+        if getattr(self, "_initial_import_defaults_applied", False):
+            return
+        self._initial_import_defaults_applied = True
+        today = QDate.currentDate()
+        self.effective_date_edit.setDate(QDate(today.year(), today.month(), 1))
+        self.initial_date_note.show()
+        self.effective_date_edit.setToolTip(self.initial_date_note.text())
+
     @property
     def inspection(self) -> WorkbookInspection | None:
         return self._inspection
@@ -442,6 +452,11 @@ class RosterImportWizard(QDialog):
         effective_row.addWidget(self.effective_date_edit)
         effective_row.addStretch(1)
         layout.addLayout(effective_row)
+        self.initial_date_note = QLabel("처음 가져오는 명단은 이번 달 1일부터 적용합니다. 실제 시작일이 다르면 날짜를 바꿔주세요.")
+        self.initial_date_note.setWordWrap(True)
+        self.initial_date_note.setObjectName("muted")
+        self.initial_date_note.hide()
+        layout.addWidget(self.initial_date_note)
         import_note = QLabel("가져오기를 누르면 오류를 검사하고 바로 저장합니다. 오류나 모호한 연결이 있을 때만 수정·선택 창이 열립니다.")
         import_note.setObjectName("muted")
         import_note.setWordWrap(True)
@@ -707,9 +722,10 @@ class RosterImportWizard(QDialog):
 
     def _build_correction_dialog(self) -> None:
         self.correction_dialog = QDialog(self)
+        self.finished.connect(self.correction_dialog.close)
         self.correction_dialog.setObjectName("importCorrectionDialog")
         self.correction_dialog.setWindowTitle("명단 오류 한꺼번에 수정")
-        self.correction_dialog.setModal(True)
+        self.correction_dialog.setModal(False)
         self.correction_dialog.setSizeGripEnabled(True)
         self.correction_dialog.setStyleSheet(application_stylesheet())
         _fit_dialog_to_available_screen(
@@ -1427,7 +1443,8 @@ class RosterImportWizard(QDialog):
             return
         self.correction_table.scrollToTop()
         self.correction_table.horizontalScrollBar().setValue(0)
-        self.correction_dialog.open()
+        self.correction_dialog.setWindowModality(Qt.WindowModality.NonModal)
+        self.correction_dialog.show()
         self.correction_dialog.raise_()
         self.correction_dialog.activateWindow()
         QTimer.singleShot(0, self._resize_correction_columns)

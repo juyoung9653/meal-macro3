@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from .dialog_workflow import DialogRequest, dialog_workflow
+
+from .startup_loading import save_revision
+
 from src.storage.database_session import committed_roster_after_save
 
 from collections.abc import Callable
@@ -191,7 +195,8 @@ class CustomFieldController:
         self._revision_id_factory = revision_id_factory
         self._definition_id_factory = definition_id_factory
 
-    def run(self, parent: QWidget | None = None) -> CustomFieldOutcome:
+    @dialog_workflow
+    def run(self, parent: QWidget | None = None, *, on_saved=None) -> CustomFieldOutcome:
         roster = self._session.database.current_roster()
         if roster is None:
             self._message_box.critical(
@@ -213,12 +218,12 @@ class CustomFieldController:
                 message_box=self._message_box,
                 affected_value_counts=counts,
             )
-            if dialog.exec() != QDialog.DialogCode.Accepted:
+            if (yield DialogRequest(dialog, self._session)) != QDialog.DialogCode.Accepted:
                 return CustomFieldOutcome(
                     CustomFieldStatus.COMPLETED
                     if changed
                     else CustomFieldStatus.CANCELLED,
-                    roster if changed else None,
+                    committed_roster_after_save(self._session, roster) if changed else None,
                 )
             try:
                 request = dialog.request()
@@ -244,9 +249,11 @@ class CustomFieldController:
                         effective_on=self._effective_date_provider(),
                         revision_id=self._revision_id_factory(),
                     )
-                backup_result = self._session.append_revision(prepared.record)
+                backup_result = save_revision(self._session, prepared.record, parent=parent)
                 roster = committed_roster_after_save(self._session, prepared.snapshot)
                 changed = True
+                if on_saved is not None:
+                    on_saved(roster)
                 if backup_result.error is not None:
                     self._message_box.warning(
                         parent,

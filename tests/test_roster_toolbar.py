@@ -24,6 +24,7 @@ def window():
     ("_import_action", "import_review_requested"),
     ("_database_export_action", "database_export_requested"),
     ("_revision_history_action", "revision_history_requested"),
+    ("_complaint_history_action", "complaint_history_requested"),
     ("_drivers_action", "drivers_requested"),
     ("_driver_replacement_action", "driver_replacement_requested"),
     ("_school_calendar_action", "school_calendar_requested"),
@@ -35,9 +36,25 @@ def test_more_menu_actions_keep_their_original_workflows(window, action_name, si
     called = []
     getattr(window, signal_name).connect(lambda: called.append(True))
     action = getattr(window, action_name)
-    assert action in window._more_menu.actions()
+    assert any(action in group.menu().actions() for group in window._more_menu.actions())
     action.trigger()
     assert called == [True]
+
+
+def test_more_menu_has_one_level_of_task_submenus(window):
+    expected = {
+        "명단 관리": ("_import_action", "_add_person_action", "_archive_action"),
+        "이력·민원": ("_revision_history_action", "_complaint_history_action"),
+        "내보내기": ("_current_sheet_export_action", "_database_export_action"),
+        "기사 관리": ("_drivers_action", "_driver_replacement_action"),
+        "운영": ("_school_calendar_action", "_service_adjustment_action", "_unit_price_action"),
+        "화면·설정": ("_columns_action", "_settings_action"),
+    }
+    assert [action.text() for action in window._more_menu.actions()] == list(expected)
+    for group in window._more_menu.actions():
+        assert group.menu().actions() == [getattr(window, name) for name in expected[group.text()]]
+        assert all(action.menu() is None for action in group.menu().actions())
+    assert window._archive_action.isCheckable()
 
 
 def test_current_sheet_export_action_emits_frozen_snapshot(window):
@@ -54,9 +71,68 @@ def test_header_only_exposes_frequent_actions(window):
     header = window._more_button.parentWidget()
     visible = {button.text() for button in header.findChildren(QPushButton) if button.isVisible()}
     assert visible == {"문서 만들기", "기사별 가구", "행 추가", "더보기"}
-    assert window._more_button.menu() is window._more_menu
+    assert window._more_button.menu() is None
+    assert window._more_panel.isHidden()
     assert window._column_search_header.buttons["name"].isVisible()
     assert not header.findChildren(QComboBox)
+
+
+def test_more_categories_expand_inside_window_and_keep_actions(window):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    app = QApplication.instance()
+    window.resize(window.minimumSize())
+    window._more_button.click()
+    app.processEvents()
+    panel = window._more_panel
+    assert panel.isVisible()
+    assert not panel.isWindow()
+    assert [button.text() for button in panel.group_buttons] == [
+        action.text() for action in window._more_menu.actions()
+    ]
+    for button, body in zip(panel.group_buttons, panel.group_bodies):
+        button.click()
+        app.processEvents()
+        assert body.isVisible()
+        assert button.arrowType() == Qt.ArrowType.DownArrow
+        position = panel.mapTo(window, panel.rect().topLeft())
+        assert window.rect().contains(position)
+        assert window.rect().contains(position + panel.rect().bottomRight())
+
+    window.resize(1440, 860)
+    app.processEvents()
+    window.resize(1080, 680)
+    app.processEvents()
+    assert window.rect().contains(panel.mapTo(window, panel.rect().bottomRight()))
+
+    archive = next(button for button in panel.action_buttons
+                   if button.defaultAction() is window._archive_action)
+    QTest.mouseClick(archive, Qt.MouseButton.LeftButton)
+    assert window._archive_action.isChecked()
+    assert archive.isChecked()
+    assert panel.isHidden()
+    assert not window._more_button.isChecked()
+    window._more_button.click()
+    panel.group_buttons[0].setFocus()
+    QTest.keyClick(panel.group_buttons[0], Qt.Key.Key_Escape)
+    assert panel.isHidden()
+
+
+def test_more_action_buttons_follow_enabled_state_and_emit_once(window):
+    called = []
+    window.settings_requested.connect(lambda: called.append(True))
+    action = window._settings_action
+    button = next(button for button in window._more_panel.action_buttons
+                  if button.defaultAction() is action)
+    action.setEnabled(False)
+    assert not button.isEnabled()
+    action.setEnabled(True)
+    window._more_button.click()
+    window._more_panel.group_buttons[-1].click()
+    button.click()
+    assert called == [True]
+    assert window._more_panel.isHidden()
 
 
 def test_archive_threshold_button_only_appears_in_archive_mode(window):
@@ -144,16 +220,13 @@ def test_driver_view_uses_all_delivery_meals_and_current_date_despite_roster_fil
     assert window.table_model.rowCount() == 0
     opened = []
 
-    class Dialog:
+    from PySide6.QtWidgets import QDialog
+
+    class Dialog(QDialog):
         def __init__(self, rows, **kwargs):
+            super().__init__(kwargs.get("parent"))
             opened.append((rows, kwargs))
             self.sequence_save_requested = SignalStub()
-
-        def exec(self):
-            return 0
-
-        def deleteLater(self):
-            pass
 
     class SignalStub:
         def connect(self, callback):
@@ -179,7 +252,8 @@ def test_driver_view_uses_all_delivery_meals_and_current_date_despite_roster_fil
 
 
 def test_driver_households_button_opens_real_dialog_and_can_close(window):
-    from PySide6.QtCore import QTimer
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QDialogButtonBox
     from src.desktop_v2.driver_households import DriverHouseholdsDialog
 
@@ -191,8 +265,17 @@ def test_driver_households_button_opens_real_dialog_and_can_close(window):
             seen.append((dialog.isVisible(), dialog.table.rowCount()))
             dialog.findChild(QDialogButtonBox).button(QDialogButtonBox.StandardButton.Close).click()
 
-    QTimer.singleShot(0, close_dialog)
     window._driver_households_button.click()
+    QApplication.instance().processEvents()
+    dialog = window.findChild(DriverHouseholdsDialog)
+    assert dialog.isVisible()
+    assert not dialog.isModal()
+    assert QApplication.activeModalWidget() is None
+    QTest.mouseClick(window._search_input, Qt.MouseButton.LeftButton)
+    QTest.keyClicks(window._search_input, "editable")
+    assert window._search_input.text() == "editable"
+    assert dialog.isVisible()
+    close_dialog()
     # Without a reviewed school calendar, only the breakfast household is shown.
     assert seen == [(True, 1)]
 

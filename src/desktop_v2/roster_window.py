@@ -83,7 +83,15 @@ from .date_edit import WheelSafeDateEdit
 from .inactive_roster import InactiveRosterSettings, InactiveThresholdDialog
 from .inspector_history import MealHistoryRow
 from .panel_handle import PanelEdgeHandle
+from .more_panel import MoreActionsPanel
+from .dialog_workflow import DialogRequest, dialog_workflow, invoke, launch
 from .roster_cell_edit import RosterCellEditDelegate, is_roster_cell_editable
+from .stopped_highlight import (
+    StoppedHighlightDialog,
+    StoppedHighlightPreference,
+    load_preference,
+    save_preference,
+)
 
 from .theme import (
     DELIVERY,
@@ -121,6 +129,7 @@ class _PersonContext:
     meals: tuple[Meal, ...]
     status: str
     meal_statuses: Mapping[Meal, str]
+    stopped_starts: Mapping[Meal, date | None]
     meal_drivers: Mapping[Meal, str]
     meal_driver_ids: Mapping[Meal, UUID | None]
     jurisdiction: str | None
@@ -191,12 +200,14 @@ class RosterTableModel(QAbstractTableModel):
         school_calendar: SchoolLunchCalendar | None = None,
         column_aliases: Mapping[str, str] | None = None,
         imported_profile_fields: frozenset[str] = frozenset(),
+        stopped_highlight: StoppedHighlightPreference | None = None,
     ) -> None:
         super().__init__(parent)
         if not isinstance(roster, RosterSnapshot):
             raise TypeError("roster는 RosterSnapshot이어야 합니다.")
         self._roster = roster
         self._histories = dict(histories or {})
+        self._stopped_highlight = stopped_highlight or StoppedHighlightPreference()
         self._routing_state = RoutingState() if routing_state is None else routing_state
         self._school_calendar = (
             SchoolLunchCalendar() if school_calendar is None else school_calendar
@@ -271,6 +282,20 @@ class RosterTableModel(QAbstractTableModel):
         self._rebuild_context_projection()
         self._refresh_people()
         self.endResetModel()
+
+    def set_stopped_highlight(self, preference: StoppedHighlightPreference) -> None:
+        if preference == self._stopped_highlight:
+            return
+        self._stopped_highlight = preference
+        if self.rowCount() == 0:
+            return
+        for column_index, column in enumerate(self._columns):
+            if column.meal is not None:
+                self.dataChanged.emit(
+                    self.index(0, column_index),
+                    self.index(self.rowCount() - 1, column_index),
+                    [Qt.ItemDataRole.ForegroundRole],
+                )
 
     def set_routing_state(self, state: RoutingState) -> None:
         if not isinstance(state, RoutingState):
@@ -566,7 +591,12 @@ class RosterTableModel(QAbstractTableModel):
         if role == self.StatusRole:
             return self._status_for_column(column, context)
         if role == Qt.ItemDataRole.ForegroundRole and column.meal is not None:
-            return QColor(_STATUS_COLORS[self._status_for_column(column, context)])
+            status = self._status_for_column(column, context)
+            if status == MealStatus.STOPPED.value:
+                start = context.stopped_starts[column.meal]
+                if not self._stopped_highlight.is_red(start, self._day):
+                    return QColor(NOT_ENROLLED)
+            return QColor(_STATUS_COLORS[status])
         if role == Qt.ItemDataRole.FontRole and (column.meal is not None or column.key == "name"):
             font = QFont()
             font.setBold(True)
@@ -951,6 +981,19 @@ class RosterTableModel(QAbstractTableModel):
                 meal: self._resolve_status(person_id, meal, meals)
                 for meal in Meal
             }
+            stopped_starts = {}
+            for meal, status in meal_statuses.items():
+                start = None
+                if status == MealStatus.STOPPED.value:
+                    history = self._histories.get((person_id, meal))
+                    if history is not None:
+                        start = next(
+                            (interval.period.starts_on for interval in history.intervals
+                             if interval.status is MealStatus.STOPPED
+                             and interval.period.contains(self._day)),
+                            None,
+                        )
+                stopped_starts[meal] = start
             delivery_view = self._routing_state.resolve(self._roster, person_id, self._day)
             sequences = {
                 meal: self._roster.resolve_assignment(person_id, meal).sequence or ""
@@ -978,6 +1021,7 @@ class RosterTableModel(QAbstractTableModel):
                 meals=meals,
                 status=meal_statuses[self._meal],
                 meal_statuses=meal_statuses,
+                stopped_starts=stopped_starts,
                 meal_drivers=delivery_view.drivers,
                 meal_driver_ids=delivery_view.driver_ids,
                 jurisdiction=delivery_view.jurisdiction,
@@ -1296,6 +1340,7 @@ class RosterWindow(QMainWindow):
     current_sheet_export_requested = Signal(object)
     driver_households_export_requested = Signal(object, object)
     revision_history_requested = Signal()
+    complaint_history_requested = Signal()
     import_review_requested = Signal()
     person_edit_requested = Signal(object)
     cell_edit_requested = Signal(object, str, str)
@@ -1342,6 +1387,14 @@ class RosterWindow(QMainWindow):
             if view_settings_scope is None
             else f"{self._SEARCH_SETTINGS_KEY}/{sha256(view_settings_scope.encode('utf-8')).hexdigest()}"
         )
+        self._stopped_highlight_key = (
+            self._search_settings_key.replace(self._SEARCH_SETTINGS_KEY, "roster/stopped_highlight_v1", 1)
+            if self._remember_view else None
+        )
+        self._stopped_highlight = load_preference(
+            self._search_settings if self._remember_view else None,
+            self._stopped_highlight_key,
+        )
         self._driver_household_search_settings_key = self._search_settings_key.replace(
             self._SEARCH_SETTINGS_KEY, "driver_households/search_v1", 1
         )
@@ -1380,6 +1433,7 @@ class RosterWindow(QMainWindow):
             school_calendar=self._school_calendar,
             column_aliases=self._column_aliases,
             imported_profile_fields=imported_profile_fields,
+            stopped_highlight=self._stopped_highlight,
         )
         self._meal = Meal.LUNCH
         self._history_dialogs: list[QDialog] = []
@@ -1408,6 +1462,23 @@ class RosterWindow(QMainWindow):
         """Current immutable roster displayed by this window."""
 
         return self._roster
+
+    @dialog_workflow
+    def open_stopped_highlight_settings(self) -> None:
+        dialog = StoppedHighlightDialog(self._stopped_highlight, parent=self)
+        if (yield DialogRequest(dialog)) != QDialog.DialogCode.Accepted:
+            return
+        selected = dialog.selected_preference()
+        if selected == self._stopped_highlight:
+            return
+        if self._stopped_highlight_key is not None:
+            try:
+                save_preference(self._search_settings, self._stopped_highlight_key, selected)
+            except OSError as error:
+                QMessageBox.warning(self, "중지 표시 기간을 저장하지 못했습니다", str(error))
+                return
+        self._stopped_highlight = selected
+        self._model.set_stopped_highlight(selected)
 
     def current_sheet_snapshot(self) -> CurrentSheetSnapshot:
         """Freeze the active table exactly as displayed, on the UI thread."""
@@ -1693,15 +1764,18 @@ class RosterWindow(QMainWindow):
         self._documents_button = QPushButton("문서 만들기")
         self._documents_button.setObjectName("documentHubAction")
         self._documents_button.setToolTip(
-            "청구서·확인서·배송 리포트·배송대타를 한 곳에서 선택합니다"
+            "청구서·확인서·일일식수·배송대타를 한 곳에서 선택합니다"
         )
         self._documents_button.clicked.connect(self.documents_requested.emit)
         heading.addWidget(self._documents_button)
         self._more_button = QPushButton("더보기")
         self._more_button.setObjectName("quietAction")
-        self._more_button.setToolTip("명단 가져오기·내보내기, 기사 관리, 운영 설정")
+        self._more_button.setToolTip("명단 관리, 이력·민원, 내보내기, 기사 관리, 운영, 화면·설정")
         self._more_menu = self._build_more_menu()
-        self._more_button.setMenu(self._more_menu)
+        self._more_button.setCheckable(True)
+        self._more_panel = MoreActionsPanel(self._more_menu, self)
+        self._more_button.toggled.connect(self._toggle_more_panel)
+        self._more_panel.action_selected.connect(lambda: self._more_button.setChecked(False))
         heading.addWidget(self._more_button)
         layout.addLayout(heading)
 
@@ -1725,7 +1799,7 @@ class RosterWindow(QMainWindow):
         self._driver_households_button.setToolTip(
             "선택일에 배송 상태인 모든 식종의 담당 가구를 기사별로 봅니다"
         )
-        self._driver_households_button.clicked.connect(self._show_driver_households)
+        self._driver_households_button.clicked.connect(lambda: launch(self._show_driver_households))
         filters.addWidget(self._driver_households_button)
         self._add_person_button = QPushButton("행 추가")
         self._add_person_button.setObjectName("quietAction")
@@ -1748,7 +1822,7 @@ class RosterWindow(QMainWindow):
         self._archive_threshold_button = QPushButton("보관 기준 설정")
         self._archive_threshold_button.setObjectName("quietAction")
         self._archive_threshold_button.setToolTip("장기 미배송 보관 기준 일수를 변경합니다")
-        self._archive_threshold_button.clicked.connect(self._show_archive_threshold)
+        self._archive_threshold_button.clicked.connect(lambda: launch(self._show_archive_threshold))
         self._archive_threshold_button.hide()
         filter_notice.addWidget(self._archive_threshold_button)
         self._archive_exit_button = QPushButton("나가기")
@@ -1761,19 +1835,43 @@ class RosterWindow(QMainWindow):
         self._column_filter_strip.hide()
         return frame
 
-    def _refresh_archive(self, *, days: int | None = None) -> None:
+    def _position_more_panel(self) -> None:
+        anchor = self._more_button.mapTo(self, self._more_button.rect().bottomRight())
+        width = min(360, self.width() - 24)
+        height = min(340, self.height() - anchor.y() - 18)
+        self._more_panel.setGeometry(max(12, anchor.x() - width + 1), anchor.y() + 6, width, height)
+
+    def _toggle_more_panel(self, expanded: bool) -> None:
+        if expanded:
+            self._position_more_panel()
+            self._more_panel.show()
+            self._more_panel.raise_()
+            self._more_panel.group_buttons[0].setFocus()
+        else:
+            self._more_panel.hide()
+            self._more_button.setFocus()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if hasattr(self, "_more_panel") and self._more_panel.isVisible():
+            self._position_more_panel()
+
+    def _archive_ids_on(self, day: date, *, days: int | None = None):
         has_visible_history: Callable[[UUID], bool] | None = None
         if self._meal_change_history_provider is not None:
             def has_visible_history(person_id: UUID) -> bool:
                 return bool(self._meal_history_rows_for(self._roster.person(person_id)))
 
-        ids = inactive_person_ids(
+        return inactive_person_ids(
             self._roster, self._histories,
             days=self._archive_settings.days if days is None else days,
-            as_of=self._model.service_day,
+            as_of=day,
             status_on=self._model.effective_status_on,
             has_visible_history=has_visible_history,
         )
+
+    def _refresh_archive(self, *, days: int | None = None) -> None:
+        ids = self._archive_ids_on(self._model.service_day, days=days)
         self._model.set_archive_filter(ids, self._archive_action.isChecked())
         self._roster_title.setText(
             f"장기 미배송 보관함 ({len(ids)}명)" if self._archive_action.isChecked()
@@ -1781,10 +1879,11 @@ class RosterWindow(QMainWindow):
         )
         self._after_model_reset()
 
+    @dialog_workflow
     def _show_archive_threshold(self) -> None:
         dialog = InactiveThresholdDialog(self._archive_settings.days, self)
         dialog.days.valueChanged.connect(lambda days: self._refresh_archive(days=days))
-        if dialog.exec() == QDialog.DialogCode.Accepted:
+        if (yield DialogRequest(dialog)) == QDialog.DialogCode.Accepted:
             self._archive_settings.save_days(dialog.days.value())
         self._refresh_archive()
         dialog.deleteLater()
@@ -1880,20 +1979,29 @@ class RosterWindow(QMainWindow):
 
     def _build_more_menu(self) -> QMenu:
         menu = QMenu(self)
+        # Keep both Qt wrappers alive when callers inspect temporary action lists.
+        self._more_submenus = []
+        self._more_group_actions = []
         groups = (
-            ("명단", (
+            ("명단 관리", (
                 ("_import_action", "Excel 명단 가져오기", self.import_review_requested.emit,
                  "신규 명단을 가져오거나 기존 명단을 업데이트합니다"),
                 ("_add_person_action", "명단 행 추가", lambda: self.person_add_requested.emit(self._model.meal),
                  "새 대상자와 가입 식종을 명단에 추가합니다"),
-                ("_database_export_action", "DB 전체 Excel로 내보내기", self.database_export_requested.emit,
-                 "전체 명단·민원·정보 및 식종 변경 이력을 Excel로 저장합니다"),
-                ("_current_sheet_export_action", "현재 시트 Excel 내보내기", self._request_current_sheet_export,
-                 "현재 시트에 보이는 칼럼과 행을 표시 순서 그대로 Excel로 저장합니다"),
+            )),
+            ("이력·민원", (
                 ("_revision_history_action", "전체 변경 이력", self.revision_history_requested.emit,
                  "저장된 모든 변경번호와 변경 내용을 읽기 전용으로 확인합니다"),
+                ("_complaint_history_action", "전체 민원", self.complaint_history_requested.emit,
+                 "명단 검색·필터와 관계없이 모든 대상자의 민원을 확인합니다"),
             )),
-            ("기사", (
+            ("내보내기", (
+                ("_current_sheet_export_action", "현재 시트 Excel 내보내기", self._request_current_sheet_export,
+                 "현재 시트에 보이는 칼럼과 행을 표시 순서 그대로 Excel로 저장합니다"),
+                ("_database_export_action", "DB 전체 Excel로 내보내기", self.database_export_requested.emit,
+                 "전체 명단·민원·정보 및 식종 변경 이력을 Excel로 저장합니다"),
+            )),
+            ("기사 관리", (
                 ("_drivers_action", "기사 관리", self.drivers_requested.emit,
                  "배송기사를 등록하고 연락처를 관리합니다"),
                 ("_driver_replacement_action", "기사 일괄 교체", self.driver_replacement_requested.emit,
@@ -1915,22 +2023,24 @@ class RosterWindow(QMainWindow):
             )),
         )
         for label, entries in groups:
-            menu.addSection(label)
+            submenu = menu.addMenu(label)
+            self._more_submenus.append(submenu)
+            self._more_group_actions.append(submenu.menuAction())
             for attribute, text, callback, tooltip in entries:
-                action = menu.addAction(text)
+                action = submenu.addAction(text)
                 action.setToolTip(tooltip)
                 action.triggered.connect(callback)
                 setattr(self, attribute, action)
-            if label == "화면·설정":
-                self._archive_action = menu.addAction("장기 미배송 보관함")
+            if label == "명단 관리":
+                self._archive_action = submenu.addAction("장기 미배송 보관함")
                 self._archive_action.setCheckable(True)
                 self._archive_action.toggled.connect(lambda _checked: self._refresh_archive())
         return menu
 
-    def driver_household_rows(self, *, include_hidden: bool = False):
+    def driver_household_rows(self, *, include_hidden: bool = False, service_day: date | None = None):
         from src.services.driver_households import build_driver_household_rows
 
-        day = self._model.service_day
+        day = self._model.service_day if service_day is None else service_day
         included_meals = None if include_hidden else {
             person.person_id: tuple(
                 meal for meal in Meal
@@ -1943,19 +2053,24 @@ class RosterWindow(QMainWindow):
             self._roster, self._routing_state, day,
             included_meals=included_meals,
             browse_all_meals=True,
-            excluded_person_ids=() if include_hidden else self._model._archive_ids,
+            excluded_person_ids=() if include_hidden else (
+                self._model._archive_ids if day == self._model.service_day
+                else self._archive_ids_on(day)
+            ),
         )
 
+    @dialog_workflow
     def _show_driver_households(self) -> None:
         from .driver_households import DriverHouseholdsDialog
 
+        service_day = self._model.service_day
         dialog = DriverHouseholdsDialog(
             self.driver_household_rows(),
-            service_day=self._model.service_day,
+            service_day=service_day,
             drivers=self._routing_state.drivers,
             parent=self,
             rows_provider=lambda include_hidden: self.driver_household_rows(
-                include_hidden=include_hidden
+                include_hidden=include_hidden, service_day=service_day
             ),
             settings=self._search_settings if self._remember_view else None,
             settings_key=self._driver_household_search_settings_key,
@@ -1968,7 +2083,7 @@ class RosterWindow(QMainWindow):
             export_signal.connect(
                 lambda snapshot: self.driver_households_export_requested.emit(snapshot, dialog)
             )
-        dialog.exec()
+        yield DialogRequest(dialog)
         dialog.deleteLater()
 
     def _build_table_frame(self) -> QFrame:
@@ -2049,7 +2164,7 @@ class RosterWindow(QMainWindow):
         self._sheet_tabs.setCurrentIndex(self._sheet_index(self._active_sheet_id))
         self._sheet_tabs.currentChanged.connect(self._switch_sheet)
         self._sheet_tabs.tabMoved.connect(self._move_sheet)
-        self._sheet_tabs.customContextMenuRequested.connect(self._show_sheet_menu)
+        self._sheet_tabs.customContextMenuRequested.connect(lambda position: launch(self._show_sheet_menu, position))
         sheet_row.addWidget(self._sheet_tabs)
         add_sheet = QToolButton(frame)
         add_sheet.setObjectName("addRosterSheet")
@@ -2061,7 +2176,7 @@ class RosterWindow(QMainWindow):
             "border-radius: 4px; color: #16788A; font-weight: 700; min-width: 26px; "
             "min-height: 26px; } QToolButton#addRosterSheet:hover { background: #DCEFF2; }"
         )
-        add_sheet.clicked.connect(self._prompt_add_sheet)
+        add_sheet.clicked.connect(lambda: launch(self._prompt_add_sheet))
         sheet_row.addWidget(add_sheet)
         sheet_row.addStretch(1)
         layout.addLayout(sheet_row)
@@ -2081,7 +2196,7 @@ class RosterWindow(QMainWindow):
             None,
         )
         rename_callback = (
-            self._prompt_column_alias
+            (lambda key: launch(self._prompt_column_alias, key))
             if column is not None and column.custom_field is None else None
         )
         menu = (
@@ -2197,6 +2312,7 @@ class RosterWindow(QMainWindow):
         self._refresh_column_filter_strip()
         return True
 
+    @dialog_workflow
     def _prompt_column_alias(self, key: str) -> None:
         column = next(column for column in self._model.columns if column.key == key)
         dialog = QDialog(self)
@@ -2221,7 +2337,7 @@ class RosterWindow(QMainWindow):
         content.addWidget(buttons)
         entry.selectAll()
         entry.setFocus()
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        if (yield DialogRequest(dialog)) != QDialog.DialogCode.Accepted:
             return
         try:
             self._rename_column(key, entry.text())
@@ -2365,6 +2481,7 @@ class RosterWindow(QMainWindow):
         )
         self._save_sheets()
 
+    @dialog_workflow
     def _prompt_sheet_name(self, title: str, current: str = "") -> tuple[str, bool]:
         dialog = QDialog(self)
         dialog.setWindowTitle(title)
@@ -2388,11 +2505,12 @@ class RosterWindow(QMainWindow):
         content.addWidget(buttons)
         entry.selectAll()
         entry.setFocus()
-        accepted = dialog.exec() == QDialog.DialogCode.Accepted
+        accepted = (yield DialogRequest(dialog)) == QDialog.DialogCode.Accepted
         return entry.text(), accepted
 
+    @dialog_workflow
     def _prompt_add_sheet(self) -> None:
-        name, accepted = self._prompt_sheet_name("시트 추가")
+        name, accepted = yield from invoke(self._prompt_sheet_name, "시트 추가")
         if not accepted:
             return
         try:
@@ -2402,6 +2520,7 @@ class RosterWindow(QMainWindow):
             return
         self._add_sheet(name, {column.key for column in self._model.columns})
 
+    @dialog_workflow
     def _show_sheet_menu(self, position) -> None:
         index = self._sheet_tabs.tabAt(position)
         if index < 0:
@@ -2412,10 +2531,14 @@ class RosterWindow(QMainWindow):
         delete_action.setEnabled(len(self._sheets) > 1)
         chosen = menu.exec(self._sheet_tabs.mapToGlobal(position))
         if chosen == rename_action:
-            name, accepted = self._prompt_sheet_name("시트 이름 바꾸기", self._sheets[index][1])
+            sheet_id, old_name = self._sheets[index]
+            name, accepted = yield from invoke(self._prompt_sheet_name, "시트 이름 바꾸기", old_name)
             if accepted:
                 try:
+                    index = self._sheet_index(sheet_id)
                     self._rename_sheet(index, name)
+                except StopIteration:
+                    QMessageBox.warning(self, "시트 이름", "다른 창에서 삭제한 시트입니다.")
                 except ValueError as error:
                     QMessageBox.warning(self, "시트 이름", str(error))
         elif chosen == delete_action:
@@ -2554,7 +2677,7 @@ class RosterWindow(QMainWindow):
     ) -> None:
         """Keep history and complaint actions available on every person cell."""
         history = QAction("이력보기", menu)
-        history.triggered.connect(lambda: self._show_history(person, meal))
+        history.triggered.connect(lambda: launch(self._show_history, person, meal))
         menu.addAction(history)
         complaint = QAction("민원", menu)
         complaint.triggered.connect(
@@ -2634,6 +2757,7 @@ class RosterWindow(QMainWindow):
                     break
         self._update_inspector()
 
+    @dialog_workflow
     def _show_history(self, person: Person, meal: Meal | None = None) -> None:
         selected_meal = self._meal if meal is None else meal
         history = self._histories.get((person.person_id, selected_meal))
@@ -2647,7 +2771,7 @@ class RosterWindow(QMainWindow):
         dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         dialog.destroyed.connect(lambda: self._history_dialogs.remove(dialog))
         self._history_dialogs.append(dialog)
-        dialog.show()
+        yield DialogRequest(dialog)
 
     def _set_day(self, day: date) -> None:
         self._date_edit.blockSignals(True)
@@ -2911,7 +3035,7 @@ class RosterWindow(QMainWindow):
     def _show_selected_person_history(self) -> None:
         index = self._selected_index()
         if index.isValid():
-            self._show_history(self._model.person_at(index.row()), None)
+            launch(self._show_history, self._model.person_at(index.row()), None)
 
     def _selected_index(self) -> QModelIndex:
         selection_model = self._table.selectionModel()

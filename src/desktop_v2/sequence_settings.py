@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from .dialog_workflow import DialogRequest, dialog_workflow
+
+from .startup_loading import save_revision
+
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -118,6 +122,7 @@ class SequenceModeController:
         self._recorded_at_provider = recorded_at_provider or (lambda: datetime.now(UTC))
         self._revision_id_factory = revision_id_factory
 
+    @dialog_workflow
     def run(self, parent: QWidget | None = None) -> SequenceModeOutcome:
         roster = self._session.database.current_roster()
         if roster is None:
@@ -127,7 +132,7 @@ class SequenceModeController:
         stored_state = snapshot.entity(SEQUENCE_MODE_SETTING_KIND, SEQUENCE_MODE_SETTING_ID)
         current = sequence_mode_from_state(stored_state)
         dialog = self._dialog_type(current, parent)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        if (yield DialogRequest(dialog, self._session)) != QDialog.DialogCode.Accepted:
             return SequenceModeOutcome(SequenceModeStatus.CANCELLED)
         selected = dialog.selected_mode()
         if selected is current:
@@ -141,7 +146,7 @@ class SequenceModeController:
                 recorded_at=self._recorded_at_provider(),
                 revision_id=self._revision_id_factory(),
             )
-            backup = self._session.append_revision(prepared.record)
+            backup = save_revision(self._session, prepared.record, parent=parent)
         except Exception as error:  # noqa: BLE001 - save failure is reported at the UI boundary
             self._message_box.critical(parent, "배송순서 입력 방식을 저장하지 못했습니다", str(error))
             return SequenceModeOutcome(SequenceModeStatus.FAILED)

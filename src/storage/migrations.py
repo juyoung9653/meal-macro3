@@ -826,6 +826,107 @@ MIGRATIONS = (
             """,
         ),
     ),
+    Migration(
+        version=9,
+        name="delivery_substitute_document_run",
+        statements=(
+            "DROP TRIGGER document_run_validate_insert",
+            "DROP TRIGGER document_run_no_update",
+            "DROP TRIGGER document_run_no_delete",
+            "ALTER TABLE document_run RENAME TO document_run_schema8",
+            """
+            CREATE TABLE document_run (
+                sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT NOT NULL UNIQUE CHECK(length(run_id) = 36),
+                document_kind TEXT NOT NULL CHECK(
+                    document_kind IN (
+                        'invoice', 'confirmation', 'delivery_report', 'delivery_substitute'
+                    )
+                ),
+                source_revision_id TEXT NOT NULL REFERENCES revision(revision_id),
+                source_revision_display_code TEXT NOT NULL CHECK(
+                    length(source_revision_display_code) >= 12
+                ),
+                period_start TEXT NOT NULL CHECK(date(period_start) = period_start),
+                period_end TEXT NOT NULL CHECK(date(period_end) = period_end),
+                generated_at TEXT NOT NULL,
+                actor_username TEXT NOT NULL CHECK(length(trim(actor_username)) > 0),
+                actor_sid TEXT NOT NULL CHECK(length(trim(actor_sid)) > 0),
+                calculation_manifest_json TEXT NOT NULL CHECK(
+                    json_valid(calculation_manifest_json)
+                    AND json_type(calculation_manifest_json) = 'object'
+                ),
+                template_manifest_json TEXT NOT NULL CHECK(
+                    json_valid(template_manifest_json)
+                    AND json_type(template_manifest_json) = 'object'
+                ),
+                output_filename TEXT NOT NULL CHECK(
+                    length(trim(output_filename)) > 0
+                    AND instr(output_filename, '/') = 0
+                    AND instr(output_filename, char(92)) = 0
+                ),
+                output_sha256 TEXT NOT NULL CHECK(length(output_sha256) = 64),
+                output_byte_size INTEGER NOT NULL CHECK(output_byte_size >= 1),
+                CHECK(period_start <= period_end)
+            ) STRICT
+            """,
+            """
+            INSERT INTO document_run(
+                sequence, run_id, document_kind, source_revision_id,
+                source_revision_display_code, period_start, period_end,
+                generated_at, actor_username, actor_sid,
+                calculation_manifest_json, template_manifest_json,
+                output_filename, output_sha256, output_byte_size
+            )
+            SELECT sequence, run_id, document_kind, source_revision_id,
+                   source_revision_display_code, period_start, period_end,
+                   generated_at, actor_username, actor_sid,
+                   calculation_manifest_json, template_manifest_json,
+                   output_filename, output_sha256, output_byte_size
+            FROM document_run_schema8
+            ORDER BY sequence
+            """,
+            "DROP TABLE document_run_schema8",
+            """
+            CREATE INDEX document_run_by_source_revision
+            ON document_run(source_revision_id, sequence)
+            """,
+            """
+            CREATE TRIGGER document_run_validate_insert
+            BEFORE INSERT ON document_run
+            BEGIN
+                SELECT CASE
+                    WHEN NOT EXISTS (
+                        SELECT 1
+                        FROM revision_seal
+                        WHERE revision_id = NEW.source_revision_id
+                    )
+                    THEN RAISE(ABORT, 'document source revision must be sealed')
+                    WHEN NEW.source_revision_display_code IS NOT (
+                        SELECT display_code
+                        FROM revision_display_code
+                        WHERE revision_id = NEW.source_revision_id
+                    )
+                    THEN RAISE(ABORT, 'document source display code mismatch')
+                END;
+            END
+            """,
+            """
+            CREATE TRIGGER document_run_no_update
+            BEFORE UPDATE ON document_run
+            BEGIN
+                SELECT RAISE(ABORT, 'document runs are immutable');
+            END
+            """,
+            """
+            CREATE TRIGGER document_run_no_delete
+            BEFORE DELETE ON document_run
+            BEGIN
+                SELECT RAISE(ABORT, 'document runs are immutable');
+            END
+            """,
+        ),
+    ),
 )
 
 CURRENT_SCHEMA_VERSION = MIGRATIONS[-1].version

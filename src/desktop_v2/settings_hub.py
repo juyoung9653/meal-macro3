@@ -31,7 +31,10 @@ class SettingsAction(StrEnum):
     DOCUMENT_TEMPLATE = "document_template"
     DOCUMENT_COLUMN_MAPPING = "document_column_mapping"
     DELIVERY_DEFAULTS = "delivery_defaults"
+    STOPPED_HIGHLIGHT = "stopped_highlight"
     SEQUENCE_MODE = "sequence_mode"
+    INITIAL_ROSTER_DATE = "initial_roster_date"
+    MISSING_HOUSEHOLD_REPAIR = "missing_household_repair"
     DOCUMENT_DIRECTORY = "document_directory"
     DATABASE_LOCATION = "database_location"
     BACKUP_DIRECTORY = "backup_directory"
@@ -51,10 +54,25 @@ class SettingsAction(StrEnum):
 
 
 _SETTINGS_COPY = {
+    SettingsAction.MISSING_HOUSEHOLD_REPAIR: (
+        "가구 소속 기록 복구",
+        "과거 명단 행 추가·방학 중식 가져오기에서 빠진 가구 소속을 확인하고 복구합니다.",
+        "변경 이력에 기록",
+    ),
+    SettingsAction.INITIAL_ROSTER_DATE: (
+        "초기 명단 적용일",
+        "처음 가져온 명단의 적용일을 앞당깁니다. 이후 추가·변경된 기간은 유지합니다.",
+        "변경 이력에 기록",
+    ),
     SettingsAction.DELIVERY_DEFAULTS: (
         "식종별 배송 기본값",
         "별도 설정이 없는 기존·신규 대상자의 제공 요일과 배송요일을 설정합니다.",
         "변경 이력에 기록",
+    ),
+    SettingsAction.STOPPED_HIGHLIGHT: (
+        "중지 표시 기간",
+        "중지 식종을 빨간색으로 표시할 기간을 조회일 기준으로 정합니다.",
+        "이 PC의 운영 파일별 설정",
     ),
     SettingsAction.SEQUENCE_MODE: (
         "배송순서 입력 방식",
@@ -97,18 +115,21 @@ _SETTINGS_COPY = {
         "운영 파일 잠금 변경",
     ),
     SettingsAction.DOCUMENT_TEMPLATE: (
-        "청구서·확인서 양식",
-        "문서를 만들 때 사용할 급식 또는 행복도시락 Excel 양식을 선택합니다.",
+        "문서 양식",
+        "청구서·확인서·일일식수·배송대타의 급식 또는 행복도시락 양식을 선택합니다.",
         "변경 이력에 기록",
     ),
 }
 
 _SETTINGS_STAMPS = {
+    SettingsAction.MISSING_HOUSEHOLD_REPAIR: "가구",
+    SettingsAction.INITIAL_ROSTER_DATE: "시작",
     SettingsAction.PROVIDER: "기관",
     SettingsAction.EXPORT_PASSWORD: "잠금",
     SettingsAction.DOCUMENT_TEMPLATE: "양식",
     SettingsAction.DOCUMENT_COLUMN_MAPPING: "연결",
     SettingsAction.DELIVERY_DEFAULTS: "배송",
+    SettingsAction.STOPPED_HIGHLIGHT: "중지",
     SettingsAction.SEQUENCE_MODE: "순서",
     SettingsAction.DOCUMENT_DIRECTORY: "폴더",
     SettingsAction.DATABASE_LOCATION: "DB",
@@ -122,7 +143,10 @@ _SETTINGS_GROUPS = (
         (
             SettingsAction.PROVIDER,
             SettingsAction.DELIVERY_DEFAULTS,
+            SettingsAction.STOPPED_HIGHLIGHT,
             SettingsAction.SEQUENCE_MODE,
+            SettingsAction.INITIAL_ROSTER_DATE,
+            SettingsAction.MISSING_HOUSEHOLD_REPAIR,
         ),
     ),
     (

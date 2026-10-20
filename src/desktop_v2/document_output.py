@@ -26,6 +26,7 @@ from src.domain.roster import Meal
 from .document_hub import DocumentAction
 from .document_meal import DocumentMealSelection
 from .theme import application_stylesheet, register_application_fonts
+from .startup_loading import run_progress_task
 
 
 DirectoryPicker = Callable[[QWidget | None, str, str], str]
@@ -34,7 +35,7 @@ DirectoryPicker = Callable[[QWidget | None, str, str], str]
 _FILENAME_ACTION_LABELS = {
     DocumentAction.INVOICE: "청구서",
     DocumentAction.CONFIRMATION: "확인서",
-    DocumentAction.DELIVERY_REPORT: "배송리포트",
+    DocumentAction.DELIVERY_REPORT: "일일식수",
     DocumentAction.DELIVERY_SUBSTITUTE: "배송대타",
 }
 
@@ -166,10 +167,14 @@ class DocumentOutputDialog(QDialog):
             raise TypeError("문서 식종 선택이 올바르지 않습니다.")
         super().__init__(parent)
         self._document = document
-        self._saved_directory = _optional_resolved_path(saved_directory)
+        self._saved_directory, saved_available = run_progress_task(
+            lambda: _checked_directory(saved_directory),
+            title="문서 저장 위치를 확인하는 중입니다",
+            message="저장된 기본 문서 폴더에 연결하는 중입니다.", parent=parent,
+        )
         self._selected_directory: Path | None = (
             self._saved_directory
-            if _is_existing_directory(self._saved_directory)
+            if saved_available
             else None
         )
         self._mode: DocumentOutputMode | None = (
@@ -201,10 +206,11 @@ class DocumentOutputDialog(QDialog):
             return self._accepted_selection
         if self._selected_directory is None or self._mode is None:
             raise ValueError("문서를 저장할 폴더를 먼저 선택해주세요.")
-        return next_available_document_output(
-            self._document,
-            self._selected_directory,
-            self._mode,
+        document, directory, mode = self._document, self._selected_directory, self._mode
+        return run_progress_task(
+            lambda: next_available_document_output(document, directory, mode),
+            title="문서 저장 위치를 확인하는 중입니다",
+            message="저장 폴더와 사용할 수 있는 파일명을 확인하는 중입니다.", parent=self,
         )
 
     def _build_ui(self) -> None:
@@ -213,6 +219,7 @@ class DocumentOutputDialog(QDialog):
         root.setSpacing(13)
         root.addWidget(self._build_header())
         root.addWidget(self._build_document_ticket())
+
 
         section = QFrame()
         section.setObjectName("editSection")
@@ -398,8 +405,17 @@ class DocumentOutputDialog(QDialog):
         )
         if not selected:
             return
-        directory = _resolved_path(selected)
-        if not directory.is_dir():
+        try:
+            directory, exists = run_progress_task(
+                lambda: _checked_directory(selected),
+                title="문서 저장 위치를 확인하는 중입니다",
+                message="선택한 문서 폴더에 연결하는 중입니다.", parent=self,
+            )
+        except (ValueError, OSError) as error:
+            self._error.setText(str(error))
+            self._error.show()
+            return
+        if not exists:
             self._error.setText(
                 "선택한 폴더를 찾을 수 없습니다. 다른 폴더를 선택해주세요."
             )
@@ -410,7 +426,12 @@ class DocumentOutputDialog(QDialog):
         self._refresh_state()
 
     def _restore_saved_default(self) -> None:
-        if not _is_existing_directory(self._saved_directory):
+        saved = self._saved_directory
+        if not run_progress_task(
+            lambda: _is_existing_directory(saved),
+            title="문서 저장 위치를 확인하는 중입니다",
+            message="기본 문서 폴더에 연결하는 중입니다.", parent=self,
+        ):
             return
         self._selected_directory = self._saved_directory
         self._mode = DocumentOutputMode.SAVED_DEFAULT
@@ -418,7 +439,29 @@ class DocumentOutputDialog(QDialog):
 
     def _refresh_state(self) -> None:
         self._accepted_selection = None
-        available = _is_existing_directory(self._selected_directory)
+        selected, saved, document, requested_mode = (
+            self._selected_directory, self._saved_directory, self._document, self._mode,
+        )
+
+        def check():
+            available = _is_existing_directory(selected)
+            saved_available = _is_existing_directory(saved)
+            selection = (
+                next_available_document_output(document, selected, requested_mode)
+                if available and requested_mode is not None else None
+            )
+            return available, saved_available, selection
+
+        try:
+            available, saved_available, selection = run_progress_task(
+                check, title="문서 저장 위치를 확인하는 중입니다",
+                message="저장 폴더와 사용할 수 있는 파일명을 확인하는 중입니다.", parent=self,
+            )
+        except (ValueError, OSError) as error:
+            self._error.setText(str(error))
+            self._error.show()
+            self._save_button.setEnabled(False)
+            return
         mode = self._mode if available else None
         mode_value = "missing" if mode is None else mode.value
         self._destination.setProperty(
@@ -432,7 +475,6 @@ class DocumentOutputDialog(QDialog):
             label.style().unpolish(label)
             label.style().polish(label)
 
-        saved_available = _is_existing_directory(self._saved_directory)
         self._one_time_button.setVisible(saved_available)
         self._restore_default_button.setVisible(
             saved_available and mode is not DocumentOutputMode.SAVED_DEFAULT
@@ -482,7 +524,7 @@ class DocumentOutputDialog(QDialog):
             )
             self._change_default_button.setText("기본 폴더 변경")
         self._save_button.setEnabled(True)
-        self._refresh_filename(self.selection())
+        self._refresh_filename(selection)
 
     def _refresh_filename(
         self,
@@ -513,7 +555,7 @@ class DocumentOutputDialog(QDialog):
     def _accept_if_valid(self) -> None:
         try:
             selection = self.selection()
-        except (TypeError, ValueError) as error:
+        except (TypeError, ValueError, OSError) as error:
             self._error.setText(str(error))
             self._error.show()
             return
@@ -533,10 +575,14 @@ class DefaultDocumentDirectoryDialog(QDialog):
         directory_picker: DirectoryPicker | None = None,
     ) -> None:
         super().__init__(parent)
-        self._current_directory = _optional_resolved_path(current_directory)
+        self._current_directory, current_available = run_progress_task(
+            lambda: _checked_directory(current_directory),
+            title="문서 저장 위치를 확인하는 중입니다",
+            message="저장된 기본 문서 폴더에 연결하는 중입니다.", parent=parent,
+        )
         self._selected_directory: Path | None = (
             self._current_directory
-            if _is_existing_directory(self._current_directory)
+            if current_available
             else None
         )
         self._directory_picker = directory_picker or _pick_existing_directory
@@ -554,9 +600,15 @@ class DefaultDocumentDirectoryDialog(QDialog):
     def selected_directory(self) -> Path:
         if self._selected_directory is None:
             raise ValueError("기본 문서 폴더를 먼저 선택해주세요.")
-        if not self._selected_directory.is_dir():
+        selected = self._selected_directory
+        directory, exists = run_progress_task(
+            lambda: _checked_directory(selected),
+            title="문서 저장 위치를 확인하는 중입니다",
+            message="선택한 기본 문서 폴더에 연결하는 중입니다.", parent=self,
+        )
+        if not exists:
             raise ValueError("선택한 기본 문서 폴더를 찾을 수 없습니다.")
-        return self._selected_directory.resolve()
+        return directory
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -634,8 +686,17 @@ class DefaultDocumentDirectoryDialog(QDialog):
         )
         if not selected:
             return
-        directory = _resolved_path(selected)
-        if not directory.is_dir():
+        try:
+            directory, exists = run_progress_task(
+                lambda: _checked_directory(selected),
+                title="문서 저장 위치를 확인하는 중입니다",
+                message="선택한 문서 폴더에 연결하는 중입니다.", parent=self,
+            )
+        except (ValueError, OSError) as error:
+            self._error.setText(str(error))
+            self._error.show()
+            return
+        if not exists:
             self._error.setText(
                 "선택한 폴더를 찾을 수 없습니다. 다른 폴더를 선택해주세요."
             )
@@ -645,7 +706,12 @@ class DefaultDocumentDirectoryDialog(QDialog):
         self._refresh_state()
 
     def _refresh_state(self) -> None:
-        available = _is_existing_directory(self._selected_directory)
+        selected = self._selected_directory
+        available = run_progress_task(
+            lambda: _is_existing_directory(selected),
+            title="문서 저장 위치를 확인하는 중입니다",
+            message="문서 폴더에 연결하는 중입니다.", parent=self,
+        )
         self._panel.setProperty("available", available)
         self._panel.style().unpolish(self._panel)
         self._panel.style().polish(self._panel)
@@ -678,7 +744,7 @@ class DefaultDocumentDirectoryDialog(QDialog):
     def _accept_if_valid(self) -> None:
         try:
             self.selected_directory
-        except ValueError as error:
+        except (ValueError, OSError) as error:
             self._error.setText(str(error))
             self._error.show()
             return
@@ -703,6 +769,11 @@ def _optional_resolved_path(value: str | Path | None) -> Path | None:
     if value is None or (isinstance(value, str) and not value.strip()):
         return None
     return _resolved_path(value)
+
+
+def _checked_directory(value: str | Path | None) -> tuple[Path | None, bool]:
+    directory = _optional_resolved_path(value)
+    return directory, _is_existing_directory(directory)
 
 
 def _is_existing_directory(value: Path | None) -> bool:

@@ -25,6 +25,7 @@ from src.domain.revisions import format_revision_timestamp
 
 from .document_output import DocumentOutputSelection
 from .theme import application_stylesheet, register_application_fonts
+from .startup_loading import run_progress_task
 
 
 PathOpener = Callable[[Path], bool]
@@ -108,7 +109,10 @@ class DocumentCompletionDialog(QDialog):
     ) -> None:
         if not isinstance(result, GeneratedDocumentResult):
             raise TypeError("문서 생성 결과가 올바르지 않습니다.")
-        result.verify_file()
+        run_progress_task(
+            result.verify_file, title="문서 파일을 확인하는 중입니다",
+            message="저장된 문서의 크기와 내용을 확인하는 중입니다.", parent=parent,
+        )
         super().__init__(parent)
         self._result = result
         self._path_opener = path_opener or _open_local_path
@@ -267,7 +271,10 @@ class DocumentCompletionDialog(QDialog):
 
     def _open_file(self) -> None:
         try:
-            path = self._result.verify_file()
+            path = run_progress_task(
+                self._result.verify_file, title="문서 파일을 확인하는 중입니다",
+                message="문서를 열기 전에 저장된 내용을 확인하는 중입니다.", parent=self,
+            )
         except (TypeError, ValueError, OSError) as error:
             self._show_status(str(error), outcome="error")
             return
@@ -284,7 +291,10 @@ class DocumentCompletionDialog(QDialog):
 
     def _open_folder(self) -> None:
         directory = self._result.output.directory
-        if not directory.is_dir():
+        if not run_progress_task(
+            directory.is_dir, title="저장 폴더를 확인하는 중입니다",
+            message="문서가 저장된 폴더에 연결하는 중입니다.", parent=self,
+        ):
             self._show_status(
                 "저장 폴더를 찾을 수 없습니다. 폴더가 이동되었는지 확인해주세요.",
                 outcome="error",

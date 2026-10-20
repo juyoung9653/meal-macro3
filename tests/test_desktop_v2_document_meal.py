@@ -79,11 +79,11 @@ def test_omission_sensitive_documents_default_to_all_meals(action):
 
 
 @pytest.mark.parametrize("anchor_meal", tuple(Meal))
-def test_substitute_defaults_to_the_current_roster_meal(anchor_meal):
+def test_substitute_requires_explicit_meal(anchor_meal):
     assert suggest_document_meals(
         DocumentAction.DELIVERY_SUBSTITUTE,
         anchor_meal,
-    ) == (anchor_meal,)
+    ) == ()
 
 
 def test_selection_requires_unique_meals_and_stores_enum_order():
@@ -135,7 +135,7 @@ def test_multi_meal_dialog_defaults_all_and_blocks_an_empty_selection(app):
     dialog.close()
 
 
-def test_substitute_dialog_is_exclusive_and_marks_current_screen_meal(app):
+def test_substitute_dialog_is_exclusive_without_current_screen_meal(app):
     dialog = DocumentMealDialog(
         _period(
             DocumentAction.DELIVERY_SUBSTITUTE,
@@ -145,12 +145,10 @@ def test_substitute_dialog_is_exclusive_and_marks_current_screen_meal(app):
     dialog.show()
     app.processEvents()
 
-    assert dialog.selected_meals() == (Meal.DINNER,)
-    assert dialog._summary.text() == "배송대타 포함 식종: 석식"
-    badges = dialog.findChildren(QLabel, "documentMealAnchorBadge")
-    assert len(badges) == 1
-    assert badges[0].text() == "현재 화면 식종"
-    assert badges[0].parent() is dialog._cards[Meal.DINNER]
+    assert dialog.selected_meals() == ()
+    assert not dialog._save_button.isEnabled()
+    assert not dialog.findChildren(QLabel, "documentMealAnchorBadge")
+    assert all("화면 식종" not in label.text() for label in dialog.findChildren(QLabel))
 
     dialog._buttons_by_meal[Meal.BREAKFAST].click()
     app.processEvents()

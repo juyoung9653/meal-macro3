@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from .dialog_workflow import DialogRequest, dialog_workflow
+
+from .startup_loading import save_revision
+
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -315,6 +319,7 @@ class DocumentColumnMappingController:
         self._recorded_at_provider = recorded_at_provider or (lambda: datetime.now(UTC))
         self._revision_id_factory = revision_id_factory
 
+    @dialog_workflow
     def run(self, parent: QWidget | None = None) -> DocumentColumnMappingOutcome:
         try:
             roster = self._session.database.current_roster()
@@ -338,7 +343,7 @@ class DocumentColumnMappingController:
             return DocumentColumnMappingOutcome(DocumentColumnMappingStatus.FAILED)
 
         dialog = self._dialog_type(specs, overrides, parent, message_box=self._message_box, fallbacks=fallbacks)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        if (yield DialogRequest(dialog, self._session)) != QDialog.DialogCode.Accepted:
             return DocumentColumnMappingOutcome(DocumentColumnMappingStatus.CANCELLED, roster)
         try:
             prepared = build_mapping_revision(
@@ -355,7 +360,7 @@ class DocumentColumnMappingController:
             )
             if prepared is None:
                 return DocumentColumnMappingOutcome(DocumentColumnMappingStatus.COMPLETED, roster)
-            backup = self._session.append_revision(prepared.record)
+            backup = save_revision(self._session, prepared.record, parent=parent)
             updated = self._session.database.current_roster()
             if updated is None:
                 raise RuntimeError("저장 뒤 현재 명단을 다시 읽지 못했습니다.")

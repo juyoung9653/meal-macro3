@@ -357,6 +357,8 @@ class RosterSnapshot:
     delivery_defaults: tuple[HouseholdDeliverySetting, ...] = field(default_factory=standard_delivery_defaults)
     _persons_by_id: Mapping[UUID, Person] = field(init=False, repr=False)
     _households_by_id: Mapping[UUID, Household] = field(init=False, repr=False)
+    _memberships_by_person: Mapping[UUID, tuple[HouseholdMembership, ...]] = field(init=False, repr=False)
+    _enrollments_by_person: Mapping[UUID, tuple[MealEnrollment, ...]] = field(init=False, repr=False)
     _assignments_by_key: Mapping[
         tuple[UUID, Meal | None], DeliveryAssignment
     ] = field(init=False, repr=False)
@@ -406,21 +408,25 @@ class RosterSnapshot:
                     )
                 definition.validate_value(value)
 
+        memberships_by_person: dict[UUID, list[HouseholdMembership]] = {}
         for membership in memberships:
             if not isinstance(membership, HouseholdMembership):
                 raise TypeError("memberships에는 HouseholdMembership만 허용됩니다.")
             _require_reference(membership.person_id, persons_by_id, "사람")
             _require_reference(membership.household_id, households_by_id, "가구")
+            memberships_by_person.setdefault(membership.person_id, []).append(membership)
         _reject_overlapping_periods(
             memberships,
             lambda item: item.person_id,
             "한 사람의 가구 소속 기간",
         )
 
+        enrollments_by_person: dict[UUID, list[MealEnrollment]] = {}
         for enrollment in enrollments:
             if not isinstance(enrollment, MealEnrollment):
                 raise TypeError("enrollments에는 MealEnrollment만 허용됩니다.")
             _require_reference(enrollment.person_id, persons_by_id, "사람")
+            enrollments_by_person.setdefault(enrollment.person_id, []).append(enrollment)
         _reject_overlapping_periods(
             enrollments,
             lambda item: (item.person_id, item.meal),
@@ -444,6 +450,12 @@ class RosterSnapshot:
         object.__setattr__(self, "assignments", assignments)
         object.__setattr__(self, "custom_fields", custom_fields)
         object.__setattr__(self, "_persons_by_id", MappingProxyType(persons_by_id))
+        object.__setattr__(self, "_memberships_by_person", MappingProxyType({
+            person_id: tuple(items) for person_id, items in memberships_by_person.items()
+        }))
+        object.__setattr__(self, "_enrollments_by_person", MappingProxyType({
+            person_id: tuple(items) for person_id, items in enrollments_by_person.items()
+        }))
         object.__setattr__(
             self,
             "_households_by_id",
@@ -464,8 +476,8 @@ class RosterSnapshot:
     def household_for(self, person_id: UUID, *, on: date) -> Household | None:
         self.person(person_id)
         _validate_date(on, "조회일")
-        for membership in self.memberships:
-            if membership.person_id == person_id and membership.period.contains(on):
+        for membership in self._memberships_by_person.get(person_id, ()):
+            if membership.period.contains(on):
                 return self._households_by_id[membership.household_id]
         return None
 
@@ -500,8 +512,8 @@ class RosterSnapshot:
         _validate_date(on, "조회일")
         active = {
             enrollment.meal
-            for enrollment in self.enrollments
-            if enrollment.person_id == person_id and enrollment.period.contains(on)
+            for enrollment in self._enrollments_by_person.get(person_id, ())
+            if enrollment.period.contains(on)
         }
         return tuple(meal for meal in _MEAL_ORDER if meal in active)
 

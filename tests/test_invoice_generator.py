@@ -126,7 +126,7 @@ def test_distinct_meal_prices_reach_saved_invoice_formula(tmp_path: Path):
         workbook.close()
 
 
-def test_preserves_roster_note_and_sequence_text(tmp_path: Path):
+def test_preserves_roster_note_and_numbers_invoice_rows(tmp_path: Path):
     template = "assets/급식_청구서템플릿.xlsx"
     if not os.path.exists(template):
         pytest.skip("급식 청구서 템플릿 없음")
@@ -162,8 +162,8 @@ def test_preserves_roster_note_and_sequence_text(tmp_path: Path):
         note_column = columns.index("비고") + 1
         sequence_column = columns.index("연번") + 1
         assert ws.cell(row=4, column=note_column).value == "명단 원본 비고"
-        assert ws.cell(row=4, column=sequence_column).value == "003"
-        assert ws.cell(row=4, column=sequence_column).number_format == "@"
+        assert ws.cell(row=4, column=sequence_column).value == 1
+        assert ws.cell(row=4, column=sequence_column).number_format == "0"
     finally:
         wb.close()
 
@@ -375,3 +375,42 @@ def test_generated_invoice_keeps_relationship_editable_and_automatic_columns_pro
             assert isinstance(total_formula, str) and total_formula.startswith("=")
     finally:
         workbook.close()
+
+
+@pytest.mark.parametrize("profile,vacation,expected", (
+    ("급식", False, {"청구서": ("석식 대상", "중식 대상", "조식 대상")}),
+    ("행복도시락", False, {"총괄": ("석식 대상", "중식 대상", "조식 대상"), "학기중": ("석식 대상", "중식 대상", "조식 대상")}),
+    ("행복도시락", True, {"총괄": ("석식 대상", "중식 대상", "조식 대상"), "학기중": ("석식 대상", "조식 대상"), "방중": ("중식 대상",)}),
+))
+def test_invoice_ordinals_restart_per_filtered_sheet(tmp_path, profile, vacation, expected):
+    template = Path(f"assets/{profile}_청구서템플릿.xlsx")
+    deliveries = tuple(MonthlyDelivery(
+        RosterEntry(position, {"성명": name}), "", "합성 기사", sequence,
+        breakfast, lunch, dinner, (), billing_amount=(breakfast + lunch + dinner) * 10000,
+    ) for position, name, sequence, breakfast, lunch, dinner in (
+        (99, "제외 대상", "001", 0, 0, 0),
+        (500, "석식 대상", "009 / 002", 0, 0, 1),
+        (3, "중식 대상", "", 0, 2, 0),
+        (80, "조식 대상", "009", 3, 0, 0),
+    ))
+    batch = MonthlyDeliveryBatch(2026, 8, MealPrices(10000, 10000, 10000), vacation, deliveries)
+    mapping = invoice_default_mapping(template, profile, vacation)
+    mapping["연번"] = "성명"  # Neither saved mappings nor fallbacks may replace automatic numbering.
+    output = tmp_path / "numbered.xlsx"
+    count, _ = make_invoice_publication(batch, mapping, str(output), str(template),
+        meal_type=profile, column_fallbacks={"연번": "성명"})
+    assert count == 3
+    book = openpyxl.load_workbook(output, data_only=False)
+    try:
+        for sheet_name, names in expected.items():
+            source_sheet = "청구서" if profile == "급식" else ("방학_" if vacation else "학기_") + sheet_name
+            columns = read_template_columns(str(template), sheet_name=source_sheet)
+            serial, name_col = columns.index("연번") + 1, columns.index("성명") + 1
+            sheet = book[sheet_name]
+            assert tuple(sheet.cell(row, name_col).value for row in range(4, 4 + len(names))) == names
+            assert tuple(sheet.cell(row, serial).value for row in range(4, 4 + len(names))) == tuple(range(1, len(names) + 1))
+            assert all(sheet.cell(row, serial).data_type == "n" and sheet.cell(row, serial).number_format == "0"
+                       for row in range(4, 4 + len(names)))
+        assert deliveries[1].delivery_sequence == "009 / 002"
+    finally:
+        book.close()

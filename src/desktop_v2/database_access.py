@@ -37,7 +37,7 @@ from src.storage.database_credentials import (
 from src.storage.encrypted_database import DatabaseUnlockError
 
 from .theme import application_stylesheet, register_application_fonts
-from .startup_loading import run_startup_task
+from .startup_loading import run_progress_task, run_startup_task
 
 
 from .portable_settings import DesktopStorageSettings
@@ -607,7 +607,12 @@ class BackupDirectoryDialog(_DatabaseAccessDialog):
             self._show_error("새 자동 백업 폴더가 없습니다. 기존 폴더를 선택해주세요.")
             return
         try:
-            replacement = self._source_session.prepare_backup_directory(target)
+            replacement = run_progress_task(
+                lambda: self._source_session.prepare_backup_directory(target),
+                title="새 백업 폴더를 확인하는 중입니다",
+                message="선택한 폴더에 백업을 만들고 정상적으로 읽을 수 있는지 확인합니다.",
+                parent=self,
+            )
             self._settings.save_backup_directory(target)
             self._source_session.activate_backup_directory(replacement)
         except OSError as error:
@@ -669,7 +674,12 @@ class DatabasePasswordChangeDialog(_DatabaseAccessDialog):
             self._show_error("새 비밀번호와 확인 값이 다릅니다.")
             return
         try:
-            self.backup_result = self._source_session.change_user_password(current, new)
+            self.backup_result = run_progress_task(
+                lambda: self._source_session.change_user_password(current, new),
+                title="비밀번호를 변경하는 중입니다",
+                message="운영 파일과 기존 백업의 비밀번호를 변경하고 있습니다.",
+                parent=self,
+            )
         except Exception as error:
             self._show_error(_friendly_error(error))
             return

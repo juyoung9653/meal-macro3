@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from datetime import date
 from uuid import UUID
 
 from src.domain.complaints import COMPLAINT_KIND
@@ -127,6 +128,15 @@ _FIELD_LABELS = {
     "ignored_columns": "제외 칼럼",
     "provider_value": "제공기관",
     "mode": "입력 방식",
+    "meal": "식종",
+    "effective_on": "적용일",
+    "delivery_settings": "식종별 배송 설정",
+    "field_type": "항목 종류",
+    "display_order": "표시 순서",
+    "choices": "선택 항목",
+    "form": "제공 형태",
+    "value": "값",
+    "household_id": "가구 연결",
 }
 
 _INTERNAL_FIELDS = {
@@ -140,9 +150,14 @@ _INTERNAL_FIELDS = {
     "rule_id",
     "header_fingerprint",
     "normalization_version",
+    "position",
 }
 
 _KNOWN_KINDS = frozenset(_KIND_LABELS)
+_WEEKDAYS = ("월", "화", "수", "목", "금", "토", "일")
+_MEAL_ORDER = {"석식": 0, "조식": 1, "중식": 2}
+_MEAL_COLUMN_KEYS = {"석식": "status:dinner", "조식": "status:breakfast", "중식": "status:lunch"}
+_ROSTER_FIELD_KEYS = {"school_name": "school", "mobile_phone": "mobile", "road_address": "address"}
 
 
 def build_revision_change_rows(
@@ -150,6 +165,7 @@ def build_revision_change_rows(
     snapshot: HistoricalSnapshot,
     *,
     previous_snapshot: HistoricalSnapshot | None = None,
+    column_labels: Mapping[str, str] | None = None,
 ) -> tuple[tuple[str, str, str, str], ...]:
     """Return 대상/식종/구분/변경 내용 rows for one revision.
 
@@ -162,16 +178,319 @@ def build_revision_change_rows(
         raise TypeError("snapshot은 HistoricalSnapshot이어야 합니다.")
     if previous_snapshot is not None and not isinstance(previous_snapshot, HistoricalSnapshot):
         raise TypeError("previous_snapshot은 HistoricalSnapshot 또는 None이어야 합니다.")
+    if column_labels is not None and not isinstance(column_labels, Mapping):
+        raise TypeError("column_labels는 Mapping 또는 None이어야 합니다.")
 
-    return tuple(
-        (
-            _target_text(change, snapshot, previous_snapshot),
-            _meal_text(change),
-            _KIND_LABELS.get(change.entity_kind, change.entity_kind),
+    current_households = _household_members(snapshot)
+    previous_households = _household_members(previous_snapshot)
+    current_assignments = _household_assignments(snapshot)
+    previous_assignments = _household_assignments(previous_snapshot)
+    grouped_meals, grouped_followers = _status_groups(record.changes)
+    rows = []
+    changed_people = {}
+    for index, change in enumerate(record.changes):
+        if index in grouped_followers:
+            continue
+        target = _target_text(change, snapshot, previous_snapshot)
+        if change.entity_kind == HOUSEHOLD_KIND:
+            members = _active_household_names(
+                change.entity_id, current_assignments, snapshot, record.metadata.effective_on,
+            ) or _active_household_names(
+                change.entity_id, previous_assignments, previous_snapshot, record.metadata.effective_on,
+            )
+            if members:
+                target = "\n".join(members)
+        meals = grouped_meals.get(index, (_meal_text(change),))
+        meal_text = " · ".join(meal for meal in meals if meal)
+        if change.entity_kind == HOUSEHOLD_SHARED_KIND:
+            shared_rows = _shared_change_rows(change, snapshot, previous_snapshot, column_labels)
+            if shared_rows:
+                rows.extend(shared_rows)
+            continue
+        if change.entity_kind == STATUS_EVENT_KIND:
+            field_label = " · ".join(_status_column_label(meal, column_labels) for meal in meals)
+            row_index = len(rows)
+            rows.append((target, meal_text, field_label,
+                         _status_change_text(change, grouped_meals=meal_text)))
+            changed_people[row_index] = (_uuid((change.after or {}).get("person_id")),
+                                         (change.after or {}).get("starts_on") or record.metadata.effective_on,
+                                         (STATUS_EVENT_KIND, meals))
+            continue
+        if change.entity_kind in _KNOWN_KINDS - {HOUSEHOLD_SHARED_KIND, EXPORT_PASSWORD_SETTING_KIND}:
+            fields = _field_change_rows(
+                change, snapshot, previous_snapshot,
+                current_households=current_households,
+                previous_households=previous_households,
+                column_labels=column_labels,
+            )
+            for field_key, label, content in fields:
+                row_index = len(rows)
+                rows.append((target, meal_text, label, content))
+                if change.entity_kind == PERSON_KIND:
+                    changed_people[row_index] = (change.entity_id, record.metadata.effective_on,
+                                                 (PERSON_KIND, field_key))
+            if not fields and any(_is_sensitive(field) and (change.before or {}).get(field) != (change.after or {}).get(field)
+                                  for field in set(change.before or {}) | set(change.after or {})):
+                rows.append((target, meal_text, _KIND_LABELS[change.entity_kind], "민감한 설정 변경"))
+            continue
+        rows.append((
+            target, meal_text, _KIND_LABELS.get(change.entity_kind, change.entity_kind),
             _change_text(change, snapshot, previous_snapshot),
-        )
-        for change in record.changes
+        ))
+    return _group_household_rows(
+        rows, changed_people, current_assignments, previous_assignments,
     )
+
+
+def _status_groups(changes: tuple[AuditChange, ...]) -> tuple[dict[int, tuple[str, ...]], set[int]]:
+    """Combine one person's matching, newly recorded meal statuses only."""
+    candidates: dict[tuple, dict[str, int]] = {}
+    for index, change in enumerate(changes):
+        if change.entity_kind != STATUS_EVENT_KIND or change.operation is not ChangeOperation.INSERT or change.before is not None:
+            continue
+        state = change.after or {}
+        person_id = _uuid(state.get("person_id"))
+        meal = state.get("meal")
+        status = state.get("status")
+        source = state.get("source_text")
+        if person_id is None or meal not in _MEAL_ORDER or not isinstance(status, str) or not isinstance(source, (str, type(None))):
+            continue
+        if _is_generated_status_source(state, source):
+            source = None
+        key = (person_id, status, state.get("starts_on"), state.get("ends_on"), source)
+        candidates.setdefault(key, {}).setdefault(meal, index)
+
+    grouped_meals = {}
+    grouped_followers = set()
+    for meals_to_indices in candidates.values():
+        if len(meals_to_indices) < 2:
+            continue
+        indices = tuple(meals_to_indices.values())
+        grouped_meals[indices[0]] = tuple(sorted(meals_to_indices, key=_MEAL_ORDER.__getitem__))
+        grouped_followers.update(indices[1:])
+    return grouped_meals, grouped_followers
+
+
+def _column_label(key: str, fallback: str, column_labels: Mapping[str, str] | None) -> str:
+    alias = None if column_labels is None else column_labels.get(key)
+    return alias if isinstance(alias, str) and alias.strip() else fallback
+
+
+def _status_column_label(meal: str, column_labels: Mapping[str, str] | None) -> str:
+    return _column_label(_MEAL_COLUMN_KEYS.get(meal, ""), meal, column_labels)
+
+
+def _shared_column_label(
+    key: str,
+    snapshot: HistoricalSnapshot,
+    previous_snapshot: HistoricalSnapshot | None,
+    column_labels: Mapping[str, str] | None,
+) -> str:
+    if key.startswith("custom:"):
+        fallback = _named_entity(CUSTOM_FIELD_KIND, key[7:], snapshot, previous_snapshot)
+    else:
+        fallback = {
+            "address": "도로명주소", "detail_address": "상세주소",
+            "mobile": "핸드폰", "school": "학교명",
+            "delivery_settings": "배송 설정",
+            "status:dinner": "석식", "status:breakfast": "조식", "status:lunch": "중식",
+        }.get(key, _FIELD_LABELS.get(key, key))
+    return _column_label(key, fallback, column_labels)
+
+
+def _shared_change_rows(
+    change: AuditChange,
+    snapshot: HistoricalSnapshot,
+    previous_snapshot: HistoricalSnapshot | None,
+    column_labels: Mapping[str, str] | None,
+) -> tuple[tuple[str, str, str, str], ...]:
+    old_columns = shared_columns_from_state(change.before)
+    new_columns = shared_columns_from_state(change.after)
+    rows = []
+    for key in sorted(new_columns - old_columns):
+        rows.append(("전체 명단", "", _shared_column_label(key, snapshot, previous_snapshot, column_labels),
+                     "가구 공용 지정"))
+    for key in sorted(old_columns - new_columns):
+        rows.append(("전체 명단", "", _shared_column_label(key, snapshot, previous_snapshot, column_labels),
+                     "가구 공용 해제"))
+    old_exceptions = shared_exceptions_from_state(change.before)
+    new_exceptions = shared_exceptions_from_state(change.after)
+    for content, pairs in (("공용 예외 지정", new_exceptions - old_exceptions),
+                           ("공용 예외 해제", old_exceptions - new_exceptions)):
+        for person_id, key in sorted(pairs, key=lambda pair: (str(pair[0]), pair[1])):
+            name = _person_name(person_id, snapshot, previous_snapshot) or "이름을 확인할 수 없는 사람"
+            rows.append((name, "", _shared_column_label(key, snapshot, previous_snapshot, column_labels),
+                         content))
+    return tuple(rows)
+
+
+def _active_household_names(
+    household_id: UUID,
+    assignments: Mapping[UUID, tuple],
+    snapshot: HistoricalSnapshot | None,
+    day: date | None,
+) -> tuple[str, ...]:
+    if day is None or snapshot is None:
+        return ()
+    members = [
+        (_person_name(person_id, snapshot, None) or "이름을 확인할 수 없는 사람", str(person_id))
+        for person_id in assignments
+        if _household_at(person_id, day, assignments) == str(household_id)
+    ]
+    return tuple(name for name, _ in sorted(members))
+
+
+def _household_assignments(snapshot: HistoricalSnapshot | None) -> dict[UUID, tuple[tuple[str, str | None, str | None], ...]]:
+    if snapshot is None:
+        return {}
+    result: dict[UUID, list[tuple[str, str | None, str | None]]] = {}
+    for reference, state in snapshot.entities.items():
+        if reference.entity_kind != MEMBERSHIP_KIND:
+            continue
+        person_id = _uuid(state.get("person_id")) or reference.entity_id
+        for period in state.get("periods", ()):
+            if isinstance(period, Mapping) and period.get("household_id"):
+                result.setdefault(person_id, []).append((
+                    str(period["household_id"]), period.get("starts_on"), period.get("ends_on"),
+                ))
+    return {person_id: tuple(periods) for person_id, periods in result.items()}
+
+
+def _household_at(person_id: UUID, day: date | str | None,
+                  assignments: Mapping[UUID, tuple]) -> str | None:
+    day_text = day.isoformat() if isinstance(day, date) else day
+    if not day_text:
+        return None
+    homes = {home for home, start, end in assignments.get(person_id, ())
+             if (not start or start <= day_text) and (not end or day_text <= end)}
+    return next(iter(homes)) if len(homes) == 1 else None
+
+
+def _group_household_rows(
+    rows: list[tuple[str, str, str, str]],
+    changed_people: Mapping[int, tuple[UUID | None, date | str | None, tuple]],
+    current_assignments: Mapping[UUID, tuple],
+    previous_assignments: Mapping[UUID, tuple],
+) -> tuple[tuple[str, str, str, str], ...]:
+    groups: dict[tuple, dict[UUID, int]] = {}
+    for index, (person_id, day, field_identity) in changed_people.items():
+        if person_id is None:
+            continue
+        home = _household_at(person_id, day, current_assignments) or _household_at(
+            person_id, day, previous_assignments,
+        )
+        if home is None:
+            continue
+        _, meal, column, content = rows[index]
+        groups.setdefault((home, field_identity, meal, column, content), {}).setdefault(person_id, index)
+    merged = {}
+    followers = set()
+    for people in groups.values():
+        if len(people) < 2:
+            continue
+        indices = tuple(people.values())
+        merged[indices[0]] = "\n".join(rows[index][0] for index in indices)
+        followers.update(indices[1:])
+    return tuple((merged.get(index, row[0]), *row[1:])
+                 for index, row in enumerate(rows) if index not in followers)
+
+
+def _field_change_rows(
+    change: AuditChange,
+    snapshot: HistoricalSnapshot | None,
+    previous_snapshot: HistoricalSnapshot | None,
+    *,
+    current_households: Mapping | None,
+    previous_households: Mapping | None,
+    column_labels: Mapping[str, str] | None,
+) -> tuple[tuple[str, str, str], ...]:
+    before = change.before or {}
+    after = change.after or {}
+    if change.entity_kind == ENROLLMENT_KIND:
+        old_periods, new_periods = before.get("periods"), after.get("periods")
+        old_meal, new_meal = before.get("meal"), after.get("meal")
+        if (not old_periods and not new_periods) or (old_periods == new_periods and old_meal == new_meal):
+            return ()
+        meal = new_meal or old_meal
+        label = _status_column_label(meal, column_labels) if isinstance(meal, str) else "가입기간"
+        def period_value(periods, meal_name):
+            if not periods:
+                return "미지정"
+            prefix = f"{meal_name} · " if old_meal and new_meal and old_meal != new_meal and meal_name else ""
+            return prefix + "적용 기간: " + _value_text("periods", periods, snapshot, previous_snapshot)
+        return (("periods", label, _field_value_change(
+            change.operation, period_value(old_periods, old_meal), period_value(new_periods, new_meal),
+        )),)
+    if change.entity_kind == ASSIGNMENT_KIND:
+        old_meal, new_meal = before.get("meal"), after.get("meal")
+        meal = new_meal or old_meal
+        details = []
+        for key in ("driver", "sequence"):
+            old_value, new_value = before.get(key), after.get(key)
+            if _same_optional_value(old_value, new_value) and (
+                old_meal == new_meal or _same_optional_value(old_value, None)
+            ):
+                continue
+            label = _column_label(key, _FIELD_LABELS[key], column_labels)
+            context = f"{meal}\n" if isinstance(meal, str) else ""
+            details.append((key, label, context + _field_value_change(
+                change.operation, _value_text(key, old_value), _value_text(key, new_value),
+            )))
+        return tuple(details)
+    details = []
+    for field in sorted(set(before) | set(after)):
+        if field in _INTERNAL_FIELDS or _is_sensitive(field):
+            continue
+        old, new = before.get(field), after.get(field)
+        if _same_optional_value(old, new):
+            continue
+        if field == "custom_values" and isinstance(old or {}, Mapping) and isinstance(new or {}, Mapping):
+            for field_id in sorted(set(old or {}) | set(new or {})):
+                old_item = (old or {}).get(field_id)
+                new_item = (new or {}).get(field_id)
+                old_value = old_item.get("value") if isinstance(old_item, Mapping) and set(old_item) == {"kind", "value"} else old_item
+                new_value = new_item.get("value") if isinstance(new_item, Mapping) and set(new_item) == {"kind", "value"} else new_item
+                if old_item == new_item or (_same_optional_value(old_value, None) and _same_optional_value(new_value, None)):
+                    continue
+                name = _named_entity(CUSTOM_FIELD_KIND, field_id, snapshot, previous_snapshot)
+                label = _column_label(f"custom:{field_id}", name, column_labels)
+                if _is_sensitive(name) or _is_sensitive(label):
+                    details.append((f"custom:{field_id}", label, "설정 변경"))
+                    continue
+                details.append((f"custom:{field_id}", label, _field_value_change(
+                    change.operation,
+                    _value_text("value", old_value, previous_snapshot, snapshot),
+                    _value_text("value", new_value, snapshot, previous_snapshot),
+                )))
+            continue
+        label = _FIELD_LABELS.get(field, field.replace("_", " "))
+        label = _column_label(_ROSTER_FIELD_KEYS.get(field, field), label, column_labels)
+        old_text = _value_text(field, old, previous_snapshot, snapshot,
+                               households=previous_households)
+        new_text = _value_text(field, new, snapshot, previous_snapshot,
+                               households=current_households)
+        if change.entity_kind == MEMBERSHIP_KIND and field == "periods":
+            label = "같은 가구와 적용 기간"
+            old_groups = [p.get("household_id") for p in (old or ()) if isinstance(p, Mapping)]
+            new_groups = [p.get("household_id") for p in (new or ()) if isinstance(p, Mapping)]
+            if old_groups != new_groups and old and new:
+                label = "같은 가구가 바뀌었습니다 · 적용 기간"
+        elif field == "household_id" and old and new:
+            label = "같은 가구가 바뀌었습니다"
+        details.append((field, label, _field_value_change(change.operation, old_text, new_text)))
+    return tuple(details)
+
+
+def _field_value_change(operation: ChangeOperation, old_text: str, new_text: str) -> str:
+    return f"이전: {old_text}\n이후: {new_text}"
+
+
+def _same_optional_value(old: object, new: object) -> bool:
+    if old is None or old == "":
+        return new is None or new == ""
+    if type(old) is not type(new) and not isinstance(old, (Mapping, Sequence)):
+        return False
+    return old == new
 
 
 def _target_text(
@@ -184,12 +503,12 @@ def _target_text(
     state = change.after or change.before or {}
     if change.entity_kind == PERSON_KIND:
         name = _person_name(change.entity_id, snapshot, previous_snapshot, state)
-        return name or str(change.entity_id)
+        return name or "이름을 확인할 수 없는 사람"
 
     person_id = _uuid(state.get("person_id"))
     if person_id is not None:
         name = _person_name(person_id, snapshot, previous_snapshot)
-        return name or str(person_id)
+        return name or "이름을 확인할 수 없는 사람"
 
     for key in ("name", "school_name"):
         value = state.get(key)
@@ -207,7 +526,7 @@ def _target_text(
             if isinstance(value, str) and value.strip():
                 return value
 
-    return _KIND_LABELS.get(change.entity_kind, change.entity_kind)
+    return _KIND_LABELS[change.entity_kind]
 
 
 def _person_name(
@@ -241,9 +560,6 @@ def _meal_text(change: AuditChange) -> str:
     meals = state.get("meals")
     if isinstance(meals, Sequence) and not isinstance(meals, (str, bytes)):
         return ", ".join(str(item) for item in meals if not isinstance(item, Mapping))
-    driver_ids = state.get("driver_ids")
-    if isinstance(driver_ids, Mapping):
-        return ", ".join(str(item) for item in driver_ids)
     return ""
 
 
@@ -271,7 +587,7 @@ def _change_text(change: AuditChange, snapshot=None, previous_snapshot=None) -> 
         for title, pairs in (("개별 관리 추가", new_exceptions - old_exceptions), ("개별 관리 해제", old_exceptions - new_exceptions)):
             if pairs:
                 details.append(title + ": " + ", ".join(
-                    f"{_person_name(pid, snapshot, previous_snapshot)} · {label(key)}" for pid, key in sorted(pairs, key=lambda pair: (str(pair[0]), pair[1]))))
+                    f"{_person_name(pid, snapshot, previous_snapshot) or '이름을 확인할 수 없는 사람'} · {label(key)}" for pid, key in sorted(pairs, key=lambda pair: (str(pair[0]), pair[1]))))
         return " · ".join(details) or "가구 공용 설정 변경"
 
     if change.entity_kind == EXPORT_PASSWORD_SETTING_KIND:
@@ -280,38 +596,29 @@ def _change_text(change: AuditChange, snapshot=None, previous_snapshot=None) -> 
         return f"{change.entity_kind} · {_OPERATION_LABELS[change.operation]}"
     if change.entity_kind == STATUS_EVENT_KIND:
         return _status_change_text(change)
-
-    before = change.before or {}
-    after = change.after or {}
-    fields = sorted(set(before) | set(after))
-    details = []
-    for field in fields:
-        if field in _INTERNAL_FIELDS or _is_sensitive(field):
-            continue
-        old = before.get(field)
-        new = after.get(field)
-        if old == new:
-            continue
-        label = _FIELD_LABELS.get(field, field)
-        if change.operation is ChangeOperation.INSERT:
-            details.append(f"{label}: {_value_text(field, new)}")
-        elif change.operation is ChangeOperation.DELETE:
-            details.append(f"{label}: {_value_text(field, old)}")
-        else:
-            details.append(
-                f"{label}: {_value_text(field, old)} → {_value_text(field, new)}"
-            )
-    operation = _OPERATION_LABELS[change.operation]
-    return operation if not details else f"{operation} · {' · '.join(details)}"
+    return _OPERATION_LABELS[change.operation]
 
 
-def _status_change_text(change: AuditChange) -> str:
+def _status_change_text(change: AuditChange, *, grouped_meals: str | None = None) -> str:
     before = "" if change.before is None else _status_state_text(change.before)
     after = "" if change.after is None else _status_state_text(change.after)
+    state = change.after or change.before or {}
+    meal = grouped_meals or state.get("meal") or "식종"
+    status = state.get("status") or "상태 변경"
+    title = f"{meal} {status}"
+    if change.operation is ChangeOperation.INSERT:
+        lines = [title]
+        if "starts_on" in state or "ends_on" in state:
+            lines.append(f"적용 기간: {_period_text(state.get('starts_on'), state.get('ends_on'))}")
+        source = state.get("source_text")
+        if source and not _is_generated_status_source(state, source):
+            lines.append(f"사유: {_value_text('source_text', source)}")
+        return "\n".join(lines)
     if before and after:
-        return f"변경 전\n{before}\n변경 후\n{after}"
-    operation = _OPERATION_LABELS[change.operation]
-    return f"{operation} · {after or before}" if after or before else operation
+        return f"{title} 수정\n이전:\n{before}\n이후:\n{after}"
+    if before:
+        return f"{title} 기록 삭제\n이전:\n{before}\n이후: 기록 삭제"
+    return f"{title} 수정\n이전: 미지정\n이후:\n{after}" if after else title
 
 
 def _status_state_text(state: Mapping) -> str:
@@ -319,21 +626,15 @@ def _status_state_text(state: Mapping) -> str:
     if "status" in state:
         parts.append(f"상태: {_value_text('status', state.get('status'))}")
     if "starts_on" in state or "ends_on" in state:
-        parts.append(f"기간: {_period_text(state.get('starts_on'), state.get('ends_on'))}")
+        parts.append(f"적용 기간: {_period_text(state.get('starts_on'), state.get('ends_on'))}")
     source = state.get("source_text")
     if "source_text" in state and not _is_generated_status_source(state, source):
-        parts.append(f"원문: {_value_text('source_text', source)}")
+        parts.append(f"사유: {_value_text('source_text', source)}")
     return "\n".join(parts) or "상태 기록"
 
 
 def _period_text(start: object, end: object) -> str:
-    if start and end:
-        return f"{start} ~ {end}"
-    if start:
-        return f"{start}부터 · 종료일 미지정"
-    if end:
-        return f"시작일 미지정 · {end}까지"
-    return "시작일·종료일 미지정"
+    return f"{start or ''} ~ {end or ''}"
 
 
 def _is_generated_status_source(state: Mapping, source: object) -> bool:
@@ -348,7 +649,15 @@ def _is_generated_status_source(state: Mapping, source: object) -> bool:
     return source == f"{meal} {status} · {start} ~ {end}"
 
 
-def _value_text(field: str, value: object, *, depth: int = 0) -> str:
+def _value_text(
+    field: str,
+    value: object,
+    snapshot: HistoricalSnapshot | None = None,
+    previous_snapshot: HistoricalSnapshot | None = None,
+    *,
+    depth: int = 0,
+    households: Mapping | None = None,
+) -> str:
     if _is_sensitive(field):
         return "설정됨"
     if value is None or value == "":
@@ -361,13 +670,39 @@ def _value_text(field: str, value: object, *, depth: int = 0) -> str:
         return "모든 기준 일치"
     if field == "mode" and value in {"separate", "unified"}:
         return "식종별로 따로 입력" if value == "separate" else "한 번 입력해 모든 식종에 적용"
+    if field in {"weekdays", "delivery_weekdays"} and isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        return ", ".join(
+            _WEEKDAYS[day] if type(day) is int and 0 <= day < 7 else str(day)
+            for day in value
+        ) or "없음"
     if field == "periods" and isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
         return " / ".join(
-            _period_text(item.get("starts_on"), item.get("ends_on"))
+            ((_household_text(item["household_id"], households,
+                              item.get("starts_on"), item.get("ends_on")) + " · ")
+             if "household_id" in item else "")
+            + _period_text(item.get("starts_on"), item.get("ends_on"))
             if isinstance(item, Mapping)
             else str(item)
             for item in value
         ) or "없음"
+    if field == "driver_ids" and isinstance(value, Mapping):
+        return ", ".join(
+            f"{meal}: {_named_entity(DRIVER_KIND, driver_id, snapshot, previous_snapshot) if driver_id else '미지정'}"
+            for meal, driver_id in value.items()
+        ) or "없음"
+    if field == "household_id":
+        return _household_text(value, households)
+    if field == "custom_values" and isinstance(value, Mapping):
+        parts = []
+        for field_id, item in value.items():
+            name = _named_entity(CUSTOM_FIELD_KIND, field_id, snapshot, previous_snapshot)
+            if _is_sensitive(name):
+                parts.append(f"{name}: 설정됨")
+                continue
+            if isinstance(item, Mapping) and set(item) == {"kind", "value"}:
+                item = item["value"]
+            parts.append(f"{name}: {_value_text('value', item, snapshot, previous_snapshot, depth=depth + 1, households=households)}")
+        return ", ".join(parts) or "없음"
     if isinstance(value, Mapping):
         if depth >= 3:
             return "설정 값"
@@ -378,13 +713,61 @@ def _value_text(field: str, value: object, *, depth: int = 0) -> str:
                 continue
             items.append(
                 f"{_FIELD_LABELS.get(key_text, key_text)}: "
-                f"{_value_text(key_text, item, depth=depth + 1)}"
+                f"{_value_text(key_text, item, snapshot, previous_snapshot, depth=depth + 1, households=households)}"
             )
         return ", ".join(items) or "설정 값"
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
-        rendered = [_value_text(field, item, depth=depth + 1) for item in value]
+        rendered = [
+            _value_text(field, item, snapshot, previous_snapshot, depth=depth + 1, households=households)
+            for item in value
+        ]
         return " / ".join(rendered) if rendered else "없음"
     return str(value)
+
+
+def _household_members(snapshot):
+    """Index member names once per snapshot, including their membership dates."""
+    result = {}
+    if snapshot is None:
+        return result
+    for reference, state in snapshot.entities.items():
+        if reference.entity_kind != MEMBERSHIP_KIND:
+            continue
+        person_id = _uuid(state.get("person_id")) or reference.entity_id
+        name = _person_name(person_id, snapshot, None) or "이름을 확인할 수 없는 사람"
+        for period in state.get("periods", ()):
+            if isinstance(period, Mapping) and period.get("household_id"):
+                result.setdefault(str(period["household_id"]), []).append(
+                    (name, period.get("starts_on"), period.get("ends_on")))
+    return result
+
+
+def _household_text(value, households, starts_on=None, ends_on=None):
+    names = set()
+    for name, member_start, member_end in (households or {}).get(str(value), ()):
+        if starts_on and member_end and member_end < starts_on:
+            continue
+        if ends_on and member_start and member_start > ends_on:
+            continue
+        names.add(name)
+    return (", ".join(sorted(names)) + " 가구") if names else "가구원 정보가 없는 가구"
+
+
+def _named_entity(
+    kind: str,
+    value: object,
+    snapshot: HistoricalSnapshot | None,
+    previous_snapshot: HistoricalSnapshot | None,
+) -> str:
+    entity_id = _uuid(value)
+    if entity_id is not None:
+        for source in (snapshot, previous_snapshot):
+            state = source.entity(kind, entity_id) if source is not None else None
+            if state is not None:
+                name = state.get("name")
+                if isinstance(name, str) and name.strip():
+                    return name
+    return "이름을 확인할 수 없는 항목"
 
 
 def _uuid(value: object) -> UUID | None:
@@ -398,4 +781,4 @@ def _uuid(value: object) -> UUID | None:
 
 def _is_sensitive(field: str) -> bool:
     lowered = field.casefold()
-    return any(token in lowered for token in ("password", "secret", "token"))
+    return any(token in lowered for token in ("password", "secret", "token", "비밀번호"))

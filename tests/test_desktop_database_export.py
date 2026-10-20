@@ -156,13 +156,7 @@ def test_real_startup_menu_saves_complaint_then_history_and_export(app, session,
     target = tmp_path / "menu-export.xlsx"
 
     class FilledComplaint(ComplaintDialog):
-        def exec(self):
-            self._channel.setCurrentText("메일")
-            for meal, check in self._meal_checks.items():
-                check.setChecked(meal in (Meal.BREAKFAST, Meal.DINNER))
-            self._content.setPlainText("배송 시간 확인 요청")
-            self._save_button.click()
-            return self.result()
+        pass
 
     def complaint_controller(actual_session):
         return ComplaintController(
@@ -173,7 +167,7 @@ def test_real_startup_menu_saves_complaint_then_history_and_export(app, session,
 
     def export_controller(actual_session):
         return DatabaseExportController(
-            actual_session, dialog_type=AcceptedDialog, message_box=notices,
+            actual_session, dialog_type=DatabaseExportDialog, message_box=notices,
             file_dialog=SimpleNamespace(getSaveFileName=lambda *a, **k: (str(target), "")),
         )
 
@@ -193,6 +187,15 @@ def test_real_startup_menu_saves_complaint_then_history_and_export(app, session,
     person = window.roster.persons[0]
     menu = window._create_context_menu(person, column_key="name")
     next(action for action in menu.actions() if action.text() == "민원").trigger()
+    complaint_dialog = window.findChild(FilledComplaint)
+    assert complaint_dialog is not None and complaint_dialog.isVisible()
+    assert not complaint_dialog.isModal()
+    complaint_dialog._channel.setCurrentText("메일")
+    for meal, check in complaint_dialog._meal_checks.items():
+        check.setChecked(meal in (Meal.BREAKFAST, Meal.DINNER))
+    complaint_dialog._content.setPlainText("배송 시간 확인 요청")
+    complaint_dialog._save_button.click()
+    app.processEvents()
     assert window.roster.revision_id != old_id
     snapshot = session.database.snapshot(window.roster.revision_id)
     complaint = complaints_from_snapshot(snapshot)[0]
@@ -214,6 +217,11 @@ def test_real_startup_menu_saves_complaint_then_history_and_export(app, session,
         for col in range(table.model().columnCount())
     )
     window._database_export_action.trigger()
+    export_dialog = window.findChild(DatabaseExportDialog)
+    assert export_dialog is not None and export_dialog.isVisible()
+    assert not export_dialog.isModal()
+    export_dialog.accept()
+    app.processEvents()
     assert target.exists() and not notices.errors
     with target.open("rb") as stream:
         office = msoffcrypto.OfficeFile(stream)

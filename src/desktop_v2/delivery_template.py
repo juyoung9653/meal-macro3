@@ -1,0 +1,173 @@
+"""Computer-local editable delivery templates, scoped to the operating file."""
+from __future__ import annotations
+
+from hashlib import sha256
+from pathlib import Path
+from uuid import uuid4
+from shutil import copyfile
+
+from openpyxl import load_workbook
+from PySide6.QtCore import QSettings, QStandardPaths, QUrl, Qt
+from PySide6.QtGui import QDesktopServices
+from PySide6.QtWidgets import QDialog, QDialogButtonBox, QFileDialog, QLabel, QMessageBox, QPushButton, QVBoxLayout
+
+from src.core.settings import get_settings
+from src.domain.document_templates import DocumentTemplateProfile
+from src.excel.delivery_templates import validate_delivery_template
+from .document_hub import DocumentAction
+from .theme import application_stylesheet, register_application_fonts
+
+
+class DeliveryTemplateStore:
+    def __init__(self, database_id: str, *, profile=DocumentTemplateProfile.SCHOOL_MEAL, settings=None, root=None):
+        self.settings = settings if settings is not None else QSettings("분당구", "급식 배송 운영 SQLite v2")
+        scope = sha256(database_id.encode("utf-8")).hexdigest()
+        self.profile = DocumentTemplateProfile(profile)
+        self.legacy_key = f"documents/delivery_templates_v1/{scope}/"
+        self.key = self.legacy_key + self.profile.value + "/"
+        self.root = Path(root) if root is not None else Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppLocalDataLocation)) / "delivery_templates" / scope / self.profile.value
+
+    def selected(self, action: DocumentAction) -> Path | None:
+        key = self.key + action.value
+        if not self.settings.contains(key) and self.profile is DocumentTemplateProfile.SCHOOL_MEAL:
+            key = self.legacy_key + action.value
+        value = self.settings.value(key)
+        return Path(value) if isinstance(value, str) and value else None
+
+    def save(self, action: DocumentAction, path: Path | None) -> None:
+        if path is not None:
+            validate_delivery_template(path, action.value)
+        key = self.key + action.value
+        had_previous = self.settings.contains(key)
+        previous = self.settings.value(key)
+        self.settings.setValue(key, str(path.resolve()) if path else "")
+        self.settings.sync()
+        if self.settings.status() != QSettings.Status.NoError:
+            if had_previous:
+                self.settings.setValue(key, previous)
+            else:
+                self.settings.remove(key)
+            raise OSError("양식 선택을 저장하지 못했습니다. PC 설정 저장 권한을 확인해주세요.")
+
+    def create(self, action: DocumentAction) -> Path:
+        if self.profile is not DocumentTemplateProfile.SCHOOL_MEAL:
+            raise ValueError("행복도시락 배송 양식은 미설정입니다. 설정 → 문서 양식에서 해당 양식 파일을 선택해주세요.")
+        self.root.mkdir(parents=True, exist_ok=True)
+        path = self.root / f"{action.label}_양식_{uuid4().hex[:8]}.xlsx"
+        if action is DocumentAction.DELIVERY_SUBSTITUTE:
+            source = Path(get_settings().get_substitute_template_path())
+            validate_delivery_template(source, action.value)
+            copyfile(source, path)
+        else:
+            source = Path(get_settings().get_report_template_path())
+            validate_delivery_template(source, action.value)
+            wb = load_workbook(source)
+            try:
+                for name in list(wb.sheetnames):
+                    if name != "aaa":
+                        del wb[name]
+                ws = wb["aaa"]
+                ws["A1"] = "날짜 자동 입력"
+                for row in ws.iter_rows(min_row=4, max_row=9, max_col=9):
+                    for cell in row:
+                        cell.value = None
+                ws["A9"] = "합계"
+                guide = wb.create_sheet("수정 안내")
+                for row, text in enumerate(("aaa 시트: 글꼴·크기·글자색·채우기·테두리를 Excel에서 수정하세요.",
+                    "1~3행은 제목, 4~8행은 담당별 본문입니다. 6번째 담당부터 8행 서식을 반복합니다.",
+                    "9행은 합계 서식입니다. 데이터와 합계 위치는 인원에 맞춰 자동으로 정해집니다.",
+                    "시트 이름과 A:I 칼럼, 1~9행 위치를 유지하세요. 데이터 영역 병합·행/열 삽입은 지원하지 않습니다.",
+                    "직접 수정한 양식은 비고의 자동 글꼴/색과 변경 강조색 대신 지정한 서식을 사용합니다.",
+                    "Excel에서 저장하고 닫은 뒤 이 양식 사용을 누르세요. 기존 생성 파일은 바뀌지 않습니다."), 1):
+                    guide.cell(row, 1, text)
+                guide.column_dimensions["A"].width = 120
+                wb.save(path)
+            finally:
+                wb.close()
+        return path
+
+
+class DeliveryTemplateDialog(QDialog):
+    def __init__(self, action: DocumentAction, database_id: str, parent=None, *, profile=DocumentTemplateProfile.SCHOOL_MEAL, store=None, opener=None):
+        if action not in (DocumentAction.DELIVERY_REPORT, DocumentAction.DELIVERY_SUBSTITUTE):
+            raise ValueError("배송 문서 양식을 선택해주세요.")
+        super().__init__(parent)
+        self.action = action
+        self.store = store if store is not None else DeliveryTemplateStore(database_id, profile=profile)
+        self.profile = self.store.profile
+        self.path = self.store.selected(action)
+        self._opener = opener or QDesktopServices.openUrl
+        self.setWindowTitle(f"{self.profile.value} · {action.label} 양식 확인/수정")
+        self.resize(720, 430)
+        self.setMinimumSize(620, 400)
+        register_application_fonts()
+        self.setStyleSheet(application_stylesheet())
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 22, 24, 22)
+        layout.setSpacing(14)
+        title = QLabel(f"{self.profile.value} · {action.label}")
+        title.setObjectName("workspaceTitle")
+        layout.addWidget(title)
+        note = QLabel("Excel에서 글꼴·색·테두리를 직접 수정할 수 있습니다.\n" + ("처음 열면 급식 기본 양식의 개인 정보 없는 복사본을 만듭니다." if self.profile is DocumentTemplateProfile.SCHOOL_MEAL else "행복도시락에 사용할 배송 양식 파일을 먼저 선택해주세요."))
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        self.path_label = QLabel()
+        self.path_label.setWordWrap(True)
+        self.path_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(self.path_label)
+        for label, handler in (("Excel에서 양식 열기", self._open), ("다른 양식 파일 선택", self._choose), ("기본 양식 사용" if self.profile is DocumentTemplateProfile.SCHOOL_MEAL else "양식 연결 해제", self._reset)):
+            button = QPushButton(label)
+            button.setObjectName("quietAction")
+            button.clicked.connect(handler)
+            layout.addWidget(button)
+        hint = QLabel("양식의 ‘수정 안내’ 시트를 확인하세요. Excel에서 저장하고 닫은 뒤 ‘이 양식 사용’을 누르세요.\n선택은 이 PC의 운영 파일·급식/행복도시락별로 기억합니다. 취소하면 기존 양식 선택을 유지하며, Excel에서 이미 저장한 수정 내용은 되돌리지 않습니다.")
+        hint.setWordWrap(True)
+        hint.setObjectName("settingsHubNote")
+        layout.addWidget(hint)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Save).setText("이 양식 사용")
+        buttons.button(QDialogButtonBox.StandardButton.Save).setObjectName("primaryAction")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("취소")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setObjectName("quietAction")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self._refresh()
+
+    def _refresh(self):
+        self.path_label.setText(str(self.path) if self.path else ("현재 선택: 급식 기본 양식" if self.profile is DocumentTemplateProfile.SCHOOL_MEAL else "현재 선택: 행복도시락 양식 미설정"))
+
+    def _open(self):
+        try:
+            if self.path is None:
+                self.path = self.store.create(self.action)
+                self._refresh()
+            validate_delivery_template(self.path, self.action.value)
+            if not self._opener(QUrl.fromLocalFile(str(self.path.resolve()))):
+                raise OSError("Excel을 열지 못했습니다. 표시된 경로의 파일을 직접 열어주세요.")
+        except Exception as error:
+            QMessageBox.critical(self, "양식을 열지 못했습니다", str(error))
+
+    def _choose(self):
+        filename, _ = QFileDialog.getOpenFileName(self, "배송 양식 선택", str(self.path or ""), "Excel 양식 (*.xlsx)")
+        if not filename:
+            return
+        try:
+            validate_delivery_template(filename, self.action.value)
+        except Exception as error:
+            QMessageBox.critical(self, "양식을 선택하지 못했습니다", str(error))
+            return
+        self.path = Path(filename)
+        self._refresh()
+
+    def _reset(self):
+        self.path = None
+        self._refresh()
+
+    def accept(self):
+        try:
+            self.store.save(self.action, self.path)
+        except Exception as error:
+            QMessageBox.critical(self, "양식을 저장하지 못했습니다", str(error))
+            return
+        super().accept()

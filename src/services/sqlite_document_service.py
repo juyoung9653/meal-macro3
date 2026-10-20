@@ -63,6 +63,14 @@ from src.services.meal_service_availability import (
 MONTHLY_DOCUMENT_CALCULATION_CONTRACT_VERSION = 3
 
 
+class HouseholdServiceDatesError(ValueError):
+    """A household diagnostic with a private lookup key for the current UI row."""
+
+    def __init__(self, message: str, person_id: UUID) -> None:
+        super().__init__(message)
+        self.person_id = person_id
+
+
 @dataclass(frozen=True, slots=True)
 class PreparedMonthlyDocumentData:
     """One immutable calculation shared by invoice and confirmation writers."""
@@ -384,22 +392,72 @@ def _household_for_service_dates(
     person_id: UUID,
     service_dates: tuple[date, ...],
 ) -> UUID:
+    memberships = tuple(
+        item for item in roster.memberships if item.person_id == person_id
+    )
     household_ids = {
         membership.household_id
-        for membership in roster.memberships
-        if membership.person_id == person_id
-        and any(membership.period.contains(day) for day in service_dates)
+        for membership in memberships
+        if any(membership.period.contains(day) for day in service_dates)
     }
-    if not household_ids:
-        raise ValueError(
-            f"청구 대상자의 서비스일에 유효한 가구 소속이 없습니다: {person_id}"
-        )
     if len(household_ids) != 1:
-        raise ValueError(
-            "한 문서 기간 중 가구가 바뀐 대상자는 확인서를 자동으로 묶을 수 "
-            f"없습니다: {person_id}"
+        person = roster.person(person_id)
+        profile = person.profile
+        identity = [f"성명: {profile.name}"]
+        if profile.birth_date is not None:
+            identity.append(f"생년월일: {profile.birth_date.isoformat()}")
+        if profile.school_name:
+            identity.append(f"학교명: {profile.school_name}")
+        if not memberships:
+            reason = "청구 대상자의 가구 소속 기록이 없습니다."
+        elif not household_ids:
+            reason = "청구 대상자의 가구 소속 기간이 실제 서비스일과 겹치지 않습니다."
+        else:
+            reason = (
+                f"실제 서비스일에 해당하는 가구 소속이 {len(household_ids)}개입니다. "
+                "한 문서 기간의 가구를 하나로 결정할 수 없어 문서를 만들 수 없습니다."
+            )
+        periods = ["저장된 가구 소속 기간:"]
+        household_numbers: dict[UUID, int] = {}
+        for membership in memberships:
+            number = household_numbers.setdefault(
+                membership.household_id, len(household_numbers) + 1
+            )
+            starts_on = membership.period.starts_on
+            ends_on = membership.period.ends_on
+            periods.append(
+                f"- 가구 {number}: 적용 시작일 {starts_on.isoformat() if starts_on else '제한 없음'}, "
+                f"종료일 {ends_on.isoformat() if ends_on else '없음'}"
+            )
+        if not memberships:
+            periods.append("- 기록 없음")
+            periods.append("과거에 추가된 대상자라면 설정 → 가구 소속 기록 복구에서 복구 가능 여부를 확인해주세요.")
+        raise HouseholdServiceDatesError(
+            "\n".join((
+                reason,
+                " / ".join(identity),
+                f"실제 서비스일: {_service_date_ranges(service_dates)}",
+                "확인할 저장 항목: 가구 소속 / 적용 시작일 / 종료일",
+                *periods,
+                "위 날짜와 가구 소속 기록을 확인해주세요. 이 항목은 명단의 표시 칼럼이 아닙니다.",
+            )),
+            person_id,
         )
     return next(iter(household_ids))
+
+
+def _service_date_ranges(service_dates: tuple[date, ...]) -> str:
+    """List exact service dates, compacting only consecutive calendar days."""
+    days = sorted(set(service_dates))
+    ranges: list[str] = []
+    for day in days:
+        if ranges and day == ends_on + timedelta(days=1):
+            ends_on = day
+            ranges[-1] = f"{starts_on.isoformat()} ~ {ends_on.isoformat()}"
+        else:
+            starts_on = ends_on = day
+            ranges.append(day.isoformat())
+    return ", ".join(ranges) or "없음"
 
 
 def _relevant_adjustment_ids(

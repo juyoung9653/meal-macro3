@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from .dialog_workflow import DialogRequest, dialog_workflow
+
+from .startup_loading import save_revision
+
 from src.storage.database_session import committed_roster_after_save
 
 from collections.abc import Callable, Mapping
@@ -289,6 +293,7 @@ class RosterRowEditController:
         self._revision_id_factory = revision_id_factory
         self._person_id_factory = person_id_factory
 
+    @dialog_workflow
     def add(self, selected_meal: Meal, parent: QWidget | None = None, *, service_day: date | None = None) -> RosterRowEditOutcome:
         roster = self._session.database.current_roster()
         if roster is None:
@@ -326,7 +331,7 @@ class RosterRowEditController:
             )
         else:
             dialog = self._dialog_type(selected_meal, service_day or date.today(), parent)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        if (yield DialogRequest(dialog, self._session)) != QDialog.DialogCode.Accepted:
             return RosterRowEditOutcome(RosterRowEditStatus.CANCELLED)
         person_id = self._person_id_factory()
         if not hasattr(dialog, "request"):
@@ -391,7 +396,7 @@ class RosterRowEditController:
                 roster, actor=self._actor_provider(), recorded_at=self._recorded_at_provider(),
                 effective_on=self._effective_date_provider(), revision_id=self._revision_id_factory(), **change,
             )
-            backup = self._session.append_revision(prepared.record)
+            backup = save_revision(self._session, prepared.record, parent=parent)
         except Exception as error:
             return self._failure(parent, error)
         if backup.error is not None:

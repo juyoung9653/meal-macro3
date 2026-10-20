@@ -37,10 +37,13 @@ def test_settings_hub_has_db_and_computer_local_jobs(app):
     assert [action.label for action in dialog._cards] == [
         "공통 제공기관",
         "생성 Excel 비밀번호",
-        "청구서·확인서 양식",
+        "문서 양식",
         "출력 칼럼 연결",
         "식종별 배송 기본값",
+        "중지 표시 기간",
         "배송순서 입력 방식",
+        "초기 명단 적용일",
+        "가구 소속 기록 복구",
         "문서 저장 폴더",
         "운영 데이터 위치",
         "자동 백업 폴더",
@@ -65,7 +68,10 @@ def test_settings_hub_groups_equal_half_width_cards_at_minimum_size(app):
         "공통 운영": (
             SettingsAction.PROVIDER,
             SettingsAction.DELIVERY_DEFAULTS,
+            SettingsAction.STOPPED_HIGHLIGHT,
             SettingsAction.SEQUENCE_MODE,
+            SettingsAction.INITIAL_ROSTER_DATE,
+            SettingsAction.MISSING_HOUSEHOLD_REPAIR,
         ),
         "문서 출력": (
             SettingsAction.DOCUMENT_TEMPLATE,

@@ -119,7 +119,7 @@ def test_output_selection_requires_an_existing_directory(tmp_path: Path):
                 starts_on=date(2026, 8, 17),
                 ends_on=date(2026, 8, 23),
             ),
-            "2026-08-17~2026-08-23_배송리포트_조식-석식_20260831-150000.xlsx",
+            "2026-08-17~2026-08-23_일일식수_조식-석식_20260831-150000.xlsx",
         ),
         (
             _document(

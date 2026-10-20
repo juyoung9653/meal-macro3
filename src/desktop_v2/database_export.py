@@ -1,4 +1,6 @@
 """Choose and publish the current database's roster and history workbook."""
+
+from .dialog_workflow import DialogRequest, dialog_workflow
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -23,6 +25,7 @@ from src.services.database_export import build_database_workbook
 
 from .date_edit import WheelSafeDateEdit
 from .ledger_reader import load_revision_chain
+from .startup_loading import run_progress_task, run_worker_with_delayed_progress, take_worker_result
 from .theme import application_stylesheet, register_application_fonts
 
 
@@ -195,9 +198,10 @@ class DatabaseExportController:
         self._builder = workbook_builder
         self._publisher = publisher
 
+    @dialog_workflow
     def run(self, day, parent=None, *, directory=None):
         dialog = self._dialog_type(day, parent)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        if (yield DialogRequest(dialog)) != QDialog.DialogCode.Accepted:
             return None
         try:
             selection = dialog.selection()
@@ -211,7 +215,11 @@ class DatabaseExportController:
             target = Path(chosen)
             if target.suffix.lower() != ".xlsx":
                 target = target.with_suffix(".xlsx")
-            if target.exists() and self._messages.question(
+            exists = run_progress_task(
+                target.exists, title="Excel 저장 위치를 확인하는 중입니다",
+                message="저장 폴더와 같은 이름의 파일을 확인하는 중입니다.", parent=parent,
+            )
+            if exists and self._messages.question(
                 parent, "파일 덮어쓰기", f"{target.name} 파일을 덮어쓸까요?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
@@ -219,12 +227,8 @@ class DatabaseExportController:
                 return None
             worker = _ExportWorker(self._session, selection, target, self._builder, self._publisher)
             progress = DatabaseExportProgressDialog(worker, parent)
-            QTimer.singleShot(0, worker.start)
-            progress.exec()
-            worker.wait()
-            if worker.error is not None:
-                raise worker.error
-            result = worker.result
+            run_worker_with_delayed_progress(worker, progress)
+            result = take_worker_result(worker)
         except Exception as error:  # noqa: BLE001 - report output failures at the UI boundary
             self._messages.critical(parent, "Excel을 내보내지 못했습니다", str(error))
             return None

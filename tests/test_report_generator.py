@@ -1,4 +1,4 @@
-"""배송 리포트 Excel 출력 계약 테스트."""
+"""일일식수 Excel 출력 계약 테스트."""
 
 from __future__ import annotations
 
@@ -77,7 +77,7 @@ def test_export_multi_raises_when_required_template_is_missing(
         report_generator, "get_template_path", lambda: str(missing_template)
     )
 
-    with pytest.raises(FileNotFoundError, match="배송 리포트 템플릿"):
+    with pytest.raises(FileNotFoundError, match="일일식수 템플릿"):
         report_generator.export_multi(_report_results(), output)
 
     assert not output.exists()
@@ -178,7 +178,7 @@ def test_export_keeps_long_multiple_form_counts_readable(tmp_path: Path):
 def test_export_multi_rejects_empty_results(tmp_path: Path):
     output = tmp_path / "requested.xlsx"
 
-    with pytest.raises(ValueError, match="내보낼 리포트"):
+    with pytest.raises(ValueError, match="내보낼 일일식수"):
         report_generator.export_multi([], output)
 
     assert not output.exists()
@@ -326,3 +326,13 @@ def test_report_tab_keeps_preview_when_automatic_excel_output_fails(
         assert "Excel 출력 실패" in tab.info_label.text()
     finally:
         tab.close()
+
+
+def test_legacy_single_report_export_keeps_existing_call_contract(monkeypatch, tmp_path):
+    from src.generators import report_generator
+    report = object()
+    target = tmp_path / "legacy.xlsx"
+    calls = []
+    monkeypatch.setattr(report_generator, "export_multi", lambda reports, filepath, **kwargs: calls.append((reports, filepath, kwargs)))
+    report_generator.export(report, target, output_password="password")
+    assert calls == [((report,), target, {"output_password": "password"})]

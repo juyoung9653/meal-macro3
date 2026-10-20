@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from uuid import uuid4
 
@@ -8,6 +9,7 @@ import pytest
 from src.domain.entitlements import LunchDayRule, SchoolLunchMark
 from src.domain.projections import (
     roster_entity_states,
+    roster_from_historical_snapshot,
     status_event_state,
 )
 from src.domain.revisions import EntityRef, HistoricalSnapshot
@@ -44,7 +46,11 @@ from src.domain.unit_pricing import (
     UnitPriceSchedule,
     unit_price_schedule_state,
 )
-from src.services.sqlite_document_service import prepare_monthly_document_data
+from src.services.sqlite_document_service import (
+    HouseholdServiceDatesError,
+    _household_for_service_dates,
+    prepare_monthly_document_data,
+)
 
 
 def _month_days(year: int, month: int):
@@ -164,6 +170,79 @@ def _source_snapshot(*, include_school: bool = True, delivery_settings: tuple[Ho
     )
     states[EntityRef("status.event", status.event_id)] = status_event_state(status)
     return HistoricalSnapshot(revision_id, states)
+
+
+@pytest.mark.parametrize("case", ("missing", "outside", "multiple"))
+def test_household_diagnostic_identifies_person_dates_and_recorded_fields(case):
+    source = _source_snapshot()
+    roster = roster_from_historical_snapshot(source)
+    person = roster.persons[0]
+    original = roster.memberships[0]
+    second_household = Household(uuid4())
+    memberships = {
+        "missing": (),
+        "outside": (
+            replace(original, period=InclusiveDateRange(date(2026, 9, 1), None)),
+        ),
+        "multiple": (
+            replace(original, period=InclusiveDateRange(None, date(2026, 8, 15))),
+            HouseholdMembership(person.person_id, second_household.household_id,
+                                InclusiveDateRange(date(2026, 8, 16), None)),
+        ),
+    }[case]
+    changed = replace(roster, memberships=memberships,
+                      households=(*roster.households, second_household))
+    states = dict(source.entities)
+    states.update(roster_entity_states(changed))
+    invalid_source = HistoricalSnapshot(source.revision_id, states)
+
+    with pytest.raises(HouseholdServiceDatesError) as caught:
+        prepare_monthly_document_data(
+            invalid_source, date(2026, 8, 1), date(2026, 8, 31), (Meal.BREAKFAST,),
+        )
+
+    error = caught.value
+    assert isinstance(error, ValueError)
+    assert error.person_id == person.person_id
+    text = str(error)
+    assert "성명: 홍길동 / 생년월일: 2015-03-02 / 학교명: 푸른초" in text
+    assert "실제 서비스일:" in text
+    assert "가구 소속 / 적용 시작일 / 종료일" in text
+    assert "명단의 표시 칼럼이 아닙니다" in text
+    assert all(str(item) not in text for item in (
+        person.person_id, original.household_id, second_household.household_id,
+    ))
+    if case == "missing":
+        assert "가구 소속 기록이 없습니다" in text
+        assert "- 기록 없음" in text
+    elif case == "outside":
+        assert "실제 서비스일과 겹치지 않습니다" in text
+        assert "적용 시작일 2026-09-01, 종료일 없음" in text
+    else:
+        assert "가구 소속이 2개" in text
+        assert "가구 1: 적용 시작일 제한 없음, 종료일 2026-08-15" in text
+        assert "가구 2: 적용 시작일 2026-08-16, 종료일 없음" in text
+
+
+def test_household_diagnostic_lists_exact_dates_without_filling_service_gaps():
+    roster = roster_from_historical_snapshot(_source_snapshot())
+    roster = replace(roster, memberships=())
+    with pytest.raises(HouseholdServiceDatesError) as caught:
+        _household_for_service_dates(roster, roster.persons[0].person_id, (
+            date(2026, 8, 7), date(2026, 8, 3), date(2026, 8, 4), date(2026, 8, 3),
+        ))
+    assert "실제 서비스일: 2026-08-03 ~ 2026-08-04, 2026-08-07\n" in str(caught.value)
+
+
+def test_household_resolution_still_accepts_any_intersection_with_service_dates():
+    roster = roster_from_historical_snapshot(_source_snapshot())
+    membership = roster.memberships[0]
+    roster = replace(roster, memberships=(replace(
+        membership, period=InclusiveDateRange(date(2026, 8, 4), date(2026, 8, 4)),
+    ),))
+    assert _household_for_service_dates(roster, roster.persons[0].person_id, (
+        date(2026, 8, 3), date(2026, 8, 4), date(2026, 8, 7),
+    )) == membership.household_id
 
 
 def test_calculates_shared_invoice_and_confirmation_facts_from_source_revision():

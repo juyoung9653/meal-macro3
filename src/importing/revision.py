@@ -16,7 +16,7 @@ from src.domain.revisions import (
     RevisionRecord,
     RevisionSource,
 )
-from src.domain.roster import DeliveryAssignment, InclusiveDateRange, Meal, MealEnrollment, RosterSnapshot
+from src.domain.roster import DeliveryAssignment, Household, HouseholdMembership, InclusiveDateRange, Meal, MealEnrollment, RosterSnapshot
 from src.domain.status import MealStatus, StatusEvent, resolve_status_history
 
 from .application import (
@@ -320,6 +320,9 @@ def _apply_vacation_lunch(
             end = min(future_starts) - timedelta(days=1) if future_starts else None
             enrollments.append(MealEnrollment(person_id, Meal.LUNCH, InclusiveDateRange(plan.effective_on, end)))
     new_person_ids = {person.person_id for person in persons} - existing_ids
+    # The vacation-lunch path does not run household grouping. Give each new
+    # person a standalone household from the import's effective date.
+    new_household_ids = {person_id: uuid4() for person_id in new_person_ids}
     needed_custom_ids = {
         definition_id
         for person in persons if person.person_id in new_person_ids
@@ -332,7 +335,10 @@ def _apply_vacation_lunch(
           if definition.definition_id in needed_custom_ids and definition.definition_id not in existing_custom_ids),
     )
     snapshot = RosterSnapshot(
-        revision_id, persons, current.households, current.memberships,
+        revision_id, persons,
+        (*current.households, *(Household(household_id) for household_id in new_household_ids.values())),
+        (*current.memberships, *(HouseholdMembership(person_id, household_id, InclusiveDateRange(plan.effective_on))
+                                 for person_id, household_id in new_household_ids.items())),
         tuple(sorted(enrollments, key=lambda item: (str(item.person_id), item.meal.value, item.period.starts_on or date.min))),
         (*current.assignments, *(
             DeliveryAssignment(person_id, Meal.LUNCH, assignment.driver, assignment.sequence)

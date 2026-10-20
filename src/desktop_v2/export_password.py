@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from .dialog_workflow import DialogRequest, dialog_workflow, invoke
+
+from .startup_loading import run_progress_task, save_revision
+
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -277,6 +281,7 @@ class ExportPasswordController:
         self._recorded_at_provider = recorded_at_provider or _utc_now
         self._revision_id_factory = revision_id_factory
 
+    @dialog_workflow
     def ensure_configured(
         self,
         parent: QWidget | None = None,
@@ -292,52 +297,47 @@ class ExportPasswordController:
                 roster,
                 current,
             )
-        return self._choose_and_save(
+        return (yield from invoke(self._choose_and_save,
             roster,
             stored_state,
             current,
             parent,
-        )
+        ))
 
+    @dialog_workflow
     def run(self, parent: QWidget | None = None) -> ExportPasswordChangeOutcome:
         roster, stored_state, current = self._current(parent)
         if roster is None:
             return ExportPasswordChangeOutcome(ExportPasswordChangeStatus.FAILED)
-        return self._choose_and_save(
+        return (yield from invoke(self._choose_and_save,
             roster,
             stored_state,
             current,
             parent,
-        )
+        ))
 
     def _current(self, parent):
-        roster = self._session.database.current_roster()
-        if roster is None:
-            self._message_box.critical(
-                parent,
-                "Excel 비밀번호를 저장하지 못했습니다",
-                "현재 명단이 없습니다. 기존 명단 가져오기를 먼저 완료해주세요.",
-            )
-            return None, None, None
-        source = self._session.database.snapshot(roster.revision_id)
-        stored_state = source.entity(
-            EXPORT_PASSWORD_SETTING_KIND,
-            EXPORT_PASSWORD_SETTING_ID,
-        )
-        try:
-            current = export_password_setting_from_state(stored_state)
-        except Exception as error:
-            self._message_box.critical(
-                parent,
-                "Excel 비밀번호 설정을 읽지 못했습니다",
-                str(error),
-            )
-            return None, None, None
-        return roster, stored_state, current
+        def load():
+            roster = self._session.database.current_roster()
+            if roster is None:
+                raise ValueError("현재 명단이 없습니다. 기존 명단 가져오기를 먼저 완료해주세요.")
+            snapshot = self._session.database.snapshot(roster.revision_id)
+            stored_state = snapshot.entity(EXPORT_PASSWORD_SETTING_KIND, EXPORT_PASSWORD_SETTING_ID)
+            return roster, stored_state, export_password_setting_from_state(stored_state)
 
+        try:
+            return run_progress_task(
+                load, title="Excel 비밀번호 설정을 불러오는 중입니다",
+                message="문서 생성에 사용할 저장된 설정을 확인하는 중입니다.", parent=parent,
+            )
+        except Exception as error:
+            self._message_box.critical(parent, "Excel 비밀번호 설정을 읽지 못했습니다", str(error))
+            return None, None, None
+
+    @dialog_workflow
     def _choose_and_save(self, roster, stored_state, current, parent):
         dialog = self._dialog_type(current, parent)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        if (yield DialogRequest(dialog, self._session)) != QDialog.DialogCode.Accepted:
             return ExportPasswordChangeOutcome(ExportPasswordChangeStatus.CANCELLED)
 
         try:
@@ -354,8 +354,12 @@ class ExportPasswordController:
                     else "생성 Excel 비밀번호 변경"
                 ),
             )
-            backup_result = self._session.append_revision(prepared.record)
-            updated_roster = self._session.database.current_roster()
+            backup_result = save_revision(self._session, prepared.record, parent=parent)
+            updated_roster = run_progress_task(
+                self._session.database.current_roster,
+                title="저장된 설정을 불러오는 중입니다",
+                message="문서 생성에 사용할 최신 설정을 읽는 중입니다.", parent=parent,
+            )
         except Exception as error:
             self._message_box.critical(
                 parent,

@@ -30,7 +30,7 @@ _STANDARD_SOURCES = (
 _SOURCE_COLUMN_KEYS = {
     "성명": "name", "생년월일": "birth_date", "학교명": "school", "학년": "grade",
     "전화번호": "telephone", "핸드폰": "mobile", "관할동": "jurisdiction",
-    FULL_ADDRESS_FIELD: "address", "도로명주소": "address",
+    "도로명주소": "address",
     "상세주소": "detail_address", "비고": "note",
     "취학유형": "school_type", "세대주 성명": "household_head_name",
     "아동과의 관계": "relationship_to_child",

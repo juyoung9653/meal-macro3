@@ -296,6 +296,11 @@ class DriverHouseholdsDialog(QDialog):
     def include_hidden(self) -> bool:
         return self.include_hidden_checkbox.isChecked()
 
+    def refresh_rows(self):
+        """Reload using the provider and service day captured when opened."""
+        if self._rows_provider is not None:
+            self.replace_rows(self._rows_provider(self.include_hidden))
+
     def replace_rows(self, rows):
         self._rows = tuple(rows)
         self._refresh()
@@ -349,7 +354,7 @@ class DriverHouseholdsDialog(QDialog):
         editor = self.table.findChild(QLineEdit, "householdSequenceEditor")
         if editor is not None:
             self._sequence_delegate._cancel(editor)
-        self.replace_rows(self._rows_provider(include_hidden))
+        self.refresh_rows()
 
     def _visible_rows(self) -> tuple[DriverHouseholdRow, ...]:
         visible = []

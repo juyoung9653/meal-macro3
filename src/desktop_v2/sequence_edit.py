@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from .dialog_workflow import DialogRequest, dialog_workflow
+
+from .startup_loading import save_revision
+
 from src.storage.database_session import committed_roster_after_save
 
 from dataclasses import dataclass
@@ -165,6 +169,7 @@ class SequenceEditController:
         self._message_box = message_box
         self._actor_provider = actor_provider
 
+    @dialog_workflow
     def run(self, person_id, parent=None):
         try:
             roster = self._session.database.current_roster()
@@ -183,7 +188,7 @@ class SequenceEditController:
             else:
                 # Keep older injected test/dialog factories compatible.
                 dialog = self._dialog_type(roster, person_id, parent)
-            if dialog.exec() != QDialog.DialogCode.Accepted:
+            if (yield DialogRequest(dialog, self._session)) != QDialog.DialogCode.Accepted:
                 return None
             values = dialog.values()
             if not values:
@@ -197,7 +202,7 @@ class SequenceEditController:
                 roster, person_id, values, actor=self._actor_provider(),
                 recorded_at=datetime.now(UTC), revision_id=uuid4(),
             )
-            backup = self._session.append_revision(prepared.record)
+            backup = save_revision(self._session, prepared.record, parent=parent)
             if backup.error is not None:
                 self._message_box.warning(
                     parent, "배송순서는 저장됐지만 자동 백업에 실패했습니다", str(backup.error)
@@ -208,7 +213,7 @@ class SequenceEditController:
             return None
 
 
-    def save_value(self, targets, value: str) -> SequenceSaveResult:
+    def save_value(self, targets, value: str, parent=None) -> SequenceSaveResult:
         """Apply one value to exact manifest pairs with an explicit commit outcome."""
         try:
             roster = self._session.database.current_roster()
@@ -228,7 +233,7 @@ class SequenceEditController:
                 roster, {key: normalized for key in targets}, actor=self._actor_provider(),
                 recorded_at=datetime.now(UTC), revision_id=uuid4(),
             )
-            backup = self._session.append_revision(prepared.record)
+            backup = save_revision(self._session, prepared.record, parent=parent)
         except Exception as error:  # noqa: BLE001 - observable inline storage boundary
             return SequenceSaveResult(SequenceSaveStatus.FAILED, message=f"배송순서를 저장하지 못했습니다: {error}")
         # append_revision reports automatic backup failures after the committed

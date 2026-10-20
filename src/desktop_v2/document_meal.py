@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 
 from src.domain.revisions import format_revision_timestamp
 from src.domain.roster import Meal
+from src.domain.delivery_substitute import SubstituteOptions
 
 from .document_hub import DocumentAction
 from .document_period import DocumentPeriodSelection
@@ -32,14 +33,14 @@ def suggest_document_meals(
     action: DocumentAction,
     anchor_meal: Meal,
 ) -> tuple[Meal, ...]:
-    """Use all meals for omission-sensitive documents, one lane for substitute."""
+    """Use all meals for omission-sensitive documents; explicitly pick substitute."""
 
     if not isinstance(action, DocumentAction):
         raise TypeError("문서 작업은 DocumentAction이어야 합니다.")
     if not isinstance(anchor_meal, Meal):
         raise TypeError("문서 기본 식종은 Meal이어야 합니다.")
     if action is DocumentAction.DELIVERY_SUBSTITUTE:
-        return (anchor_meal,)
+        return ()
     return tuple(Meal)
 
 
@@ -49,6 +50,7 @@ class DocumentMealSelection:
 
     period: DocumentPeriodSelection
     meals: tuple[Meal, ...]
+    substitute_options: SubstituteOptions | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.period, DocumentPeriodSelection):
@@ -66,6 +68,11 @@ class DocumentMealSelection:
             and len(canonical) != 1
         ):
             raise ValueError("배송대타는 식종 하나만 선택할 수 있습니다.")
+        if self.substitute_options is not None:
+            if not isinstance(self.substitute_options, SubstituteOptions):
+                raise TypeError("배송대타 설정이 올바르지 않습니다.")
+            if self.period.action is not DocumentAction.DELIVERY_SUBSTITUTE:
+                raise ValueError("다른 문서에는 배송대타 설정을 사용할 수 없습니다.")
         object.__setattr__(self, "meals", canonical)
 
 
@@ -221,10 +228,10 @@ class DocumentMealDialog(QDialog):
         copy.setSpacing(3)
         title = QLabel(f"{self._period.action.label} · {_period_text(self._period)}")
         title.setObjectName("sectionLabel")
-        detail = QLabel(
-            f"변경번호 {format_revision_timestamp(self._period.source.recorded_at)}  ·  "
-            f"화면 식종 {self._period.anchor_meal.value}"
-        )
+        detail_text = f"변경번호 {format_revision_timestamp(self._period.source.recorded_at)}"
+        if self._period.action is not DocumentAction.DELIVERY_SUBSTITUTE:
+            detail_text += f"  ·  화면 식종 {self._period.anchor_meal.value}"
+        detail = QLabel(detail_text)
         detail.setObjectName("documentMealContextDetail")
         copy.addWidget(title)
         copy.addWidget(detail)
@@ -238,7 +245,8 @@ class DocumentMealDialog(QDialog):
         card = QFrame()
         card.setObjectName("documentMealCard")
         card.setProperty("selected", meal in self._defaults)
-        card.setProperty("anchor", meal is self._period.anchor_meal)
+        card.setProperty("anchor", self._period.action is not DocumentAction.DELIVERY_SUBSTITUTE
+                         and meal is self._period.anchor_meal)
         layout = QVBoxLayout(card)
         layout.setContentsMargins(13, 12, 13, 12)
         layout.setSpacing(7)
@@ -254,13 +262,6 @@ class DocumentMealDialog(QDialog):
         button.toggled.connect(self._refresh_state)
         layout.addWidget(button)
 
-        if (
-            self._period.action is DocumentAction.DELIVERY_SUBSTITUTE
-            and meal is self._period.anchor_meal
-        ):
-            badge = QLabel("현재 화면 식종")
-            badge.setObjectName("documentMealAnchorBadge")
-            layout.addWidget(badge)
         description = QLabel(_MEAL_COPY[meal])
         description.setObjectName("documentMealDescription")
         description.setWordWrap(True)

@@ -1,6 +1,8 @@
 """User-confirmed historical restoration and branch switching."""
 from __future__ import annotations
 
+from .dialog_workflow import DialogRequest, dialog_workflow
+
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -15,6 +17,7 @@ from src.storage.database_session import DatabaseSession
 from src.storage.encrypted_database import RevisionConflictError
 from .import_controller import current_windows_actor
 from .theme import application_stylesheet
+from .startup_loading import run_progress_task
 
 
 @dataclass(frozen=True)
@@ -120,6 +123,7 @@ class RevisionRestoreController:
         self.dialog_type, self.messages, self.actor_provider = dialog_type, message_box, actor_provider
         self.restore_service, self.branch_service = restore_service, branch_service
 
+    @dialog_workflow
     def run(self, revision_id, parent=None):
         if revision_id is None:
             return
@@ -127,7 +131,7 @@ class RevisionRestoreController:
             head = self.session.database.latest_revision().metadata.revision_id
             code = self.session.database.revision_display_code(revision_id)
             dialog = self.dialog_type(self.session.path, code, parent)
-            if dialog.exec() != QDialog.DialogCode.Accepted:
+            if (yield DialogRequest(dialog, self.session)) != QDialog.DialogCode.Accepted:
                 return
             choice = dialog.selection()
             details = (
@@ -139,11 +143,22 @@ class RevisionRestoreController:
                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
                     QMessageBox.StandardButton.Cancel) != QMessageBox.StandardButton.Yes:
                 return
+            actor = self.actor_provider()
             if choice.branch:
-                result = self.branch_service(self.session, revision_id, head, self.actor_provider(),
-                                             choice.destination, choice.password, name=choice.name)
+                result = run_progress_task(
+                    lambda: self.branch_service(self.session, revision_id, head, actor,
+                                                choice.destination, choice.password, name=choice.name),
+                    title="이전 내용으로 새 파일을 만드는 중입니다",
+                    message="선택한 기록의 명단과 설정을 새 운영 파일에 저장하고 있습니다.",
+                    parent=parent,
+                )
             else:
-                result = self.restore_service(self.session, revision_id, head, self.actor_provider())
+                result = run_progress_task(
+                    lambda: self.restore_service(self.session, revision_id, head, actor),
+                    title="이전 내용으로 되돌리는 중입니다",
+                    message="선택한 기록의 명단과 설정을 복구하고 있습니다.",
+                    parent=parent,
+                )
         except RevisionConflictError:
             self.messages.warning(parent, "변경번호가 달라졌습니다", "작업 중 새 변경이 저장되었습니다. 변경 이력을 닫고 다시 선택해주세요.")
             return
@@ -193,9 +208,22 @@ class RevisionRestoreController:
         password, accepted = QInputDialog.getText(parent, "운영 파일 열기", "선택한 파일의 비밀번호", QLineEdit.EchoMode.Password)
         if not accepted:
             return
-        try:
-            with DatabaseSession.open(path, password) as opened:
+        def open_and_check():
+            opened = DatabaseSession.open(path, password)
+            try:
                 opened.database.check_integrity()
+            except Exception:
+                opened.close()
+                raise
+            return opened
+
+        try:
+            with run_progress_task(
+                open_and_check,
+                title="운영 파일을 확인하는 중입니다",
+                message="선택한 파일과 저장된 내용을 확인하고 있습니다.",
+                parent=parent,
+            ) as opened:
                 if self.messages.question(parent, "운영 파일 전환", f"{path} 파일로 전환하고 종료할까요? 다음 실행부터 선택한 파일을 사용합니다.",
                         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
                         QMessageBox.StandardButton.Cancel) != QMessageBox.StandardButton.Yes:

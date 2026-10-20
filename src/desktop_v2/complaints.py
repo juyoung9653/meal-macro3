@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from .dialog_workflow import DialogRequest, dialog_workflow
+
+from .startup_loading import save_revision
+
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -232,6 +236,7 @@ class ComplaintController:
         self._complaint_id_factory = complaint_id_factory
         self._revision_id_factory = revision_id_factory
 
+    @dialog_workflow
     def run(
         self,
         person_id: UUID,
@@ -264,7 +269,7 @@ class ComplaintController:
             )
         else:
             dialog = self._dialog_type(person, meal, received_at=received_at, parent=parent)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        if (yield DialogRequest(dialog, self._session)) != QDialog.DialogCode.Accepted:
             return ComplaintOutcome(ComplaintStatus.CANCELLED)
         try:
             selected_meals = (
@@ -288,7 +293,7 @@ class ComplaintController:
                 roster, complaints, actor=self._actor_provider(),
                 recorded_at=self._recorded_at_provider(), revision_id=self._revision_id_factory(),
             )
-            backup = self._session.append_revision(record)
+            backup = save_revision(self._session, record, parent=parent)
         except Exception as error:  # noqa: BLE001 - report save failures at UI boundary
             self._message_box.critical(parent, "민원을 접수하지 못했습니다", str(error))
             return ComplaintOutcome(ComplaintStatus.FAILED)

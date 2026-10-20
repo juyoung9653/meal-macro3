@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from .dialog_workflow import DialogRequest, dialog_workflow, invoke
+
+from .startup_loading import save_revision
+
 from src.storage.database_session import committed_roster_after_save
 
 from collections.abc import Callable, Mapping
@@ -535,6 +539,7 @@ class MealStatusChangeController:
         self._revision_id_factory = revision_id_factory
         self._event_id_factory = event_id_factory
 
+    @dialog_workflow
     def run_batch(
         self, targets, initial_status, anchor_day, parent=None
     ) -> MealStatusChangeOutcome:
@@ -542,10 +547,11 @@ class MealStatusChangeController:
         if not targets:
             return MealStatusChangeOutcome(MealStatusChangeStatus.CANCELLED)
         person_id, meal = targets[0]
-        return self.run(
+        return (yield from invoke(self.run,
             person_id, meal, initial_status, anchor_day, parent, targets=targets
-        )
+        ))
 
+    @dialog_workflow
     def run(
         self,
         person_id: UUID,
@@ -599,7 +605,7 @@ class MealStatusChangeController:
             parent,
             **kwargs,
         )
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        if (yield DialogRequest(dialog, self._session)) != QDialog.DialogCode.Accepted:
             return MealStatusChangeOutcome(MealStatusChangeStatus.CANCELLED)
         try:
             meals = dialog.selected_meals()
@@ -636,7 +642,7 @@ class MealStatusChangeController:
                     event_ids={meal: self._event_id_factory() for meal in meals},
                     intake_channel=intake_channel,
                 )
-            backup_result = self._session.append_revision(prepared.record)
+            backup_result = save_revision(self._session, prepared.record, parent=parent)
         except Exception as error:  # noqa: BLE001 - report persistence failures at the UI boundary
             self._message_box.critical(
                 parent,

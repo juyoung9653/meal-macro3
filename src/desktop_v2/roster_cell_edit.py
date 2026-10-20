@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .startup_loading import save_revision
+
 from src.storage.database_session import committed_roster_after_save
 
 from collections.abc import Callable
@@ -278,7 +280,7 @@ class RosterCellEditController:
                 revision_id=self._revision_id_factory(),
                 reason="명단 셀 수정",
             )
-            backup_result = self._session.append_revision(prepared.record)
+            backup_result = save_revision(self._session, prepared.record, parent=parent)
         except Exception as error:
             self._message_box.critical(
                 parent,

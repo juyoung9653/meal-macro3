@@ -1742,10 +1742,10 @@ def _refresh_saved_roster(monkeypatch, window, roster):
     monkeypatch.setattr(controller, "_revision_display_code", lambda *_args: "")
     monkeypatch.setattr(
         controller, "_refresh_school_calendar",
-        lambda _session, target, _roster: target.set_school_calendar(_calendar()),
+        lambda _session, target, _roster, **_kwargs: target.set_school_calendar(_calendar()),
     )
     monkeypatch.setattr(
-        controller, "_refresh_household_shared_columns", lambda *_args: None,
+        controller, "_refresh_household_shared_columns", lambda *_args, **_kwargs: None,
     )
     monkeypatch.setattr(controller, "_imported_profile_fields", lambda *_args: frozenset())
     monkeypatch.setattr(
@@ -1753,6 +1753,9 @@ def _refresh_saved_roster(monkeypatch, window, roster):
         "routing_state_from_snapshot",
         lambda _snapshot: RoutingState((), ()),
     )
+    monkeypatch.setattr(controller, "_prepare_startup", lambda _session, _roster: SimpleNamespace(
+        histories={}, revision_display_code="", snapshot=object(), imported_profile_fields=frozenset(),
+    ))
     session = SimpleNamespace(database=SimpleNamespace(snapshot=lambda _revision: object()))
     controller._replace_roster(session, window, roster)
 

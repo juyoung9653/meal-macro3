@@ -226,6 +226,10 @@ class SettingsManager:
             self.get_template_profile(meal_type).confirm_template_path
         )
 
+    def get_substitute_template_path(self) -> str:
+        """배송대타의 편집용 기본 Excel 양식 경로."""
+        return self._resource_path("assets/substitute_template.xlsx")
+
     def get_report_template_path(self) -> str:
         """배송리포트 템플릿의 실행 환경별 실제 경로를 반환한다."""
         configured = self.get(

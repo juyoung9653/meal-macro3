@@ -58,7 +58,6 @@ def _map_person_to_row(
     calculated = {value for key, value in mapping.items() if key.startswith("__calc_")}
     for col in template_columns:
         if col == "연번":
-            row_data[col] = person.delivery_sequence
             continue
         roster_key = mapping.get(col, "")
         secondary = (column_fallbacks or {}).get(col, "")
@@ -138,12 +137,14 @@ def _fill_invoice_sheet(
         global_note=global_note,
     )
 
-    for person in people:
+    for ordinal, person in enumerate(people, start=1):
         breakfast_cnt = person.breakfast_count
         dinner_cnt = person.dinner_count
         lunch_cnt = person.lunch_count
 
         row_data = _map_person_to_row(person, col_mapping, template_columns, column_fallbacks)
+        if sequence_col_idx is not None:
+            row_data["연번"] = ordinal
         mapped_targets = set(row_data) - {bf_col, dn_col, lh_col, price_col, col_mapping.get("__calc_total", "계")}
 
         # 식사 건수: 시트에 해당 컬럼이 있을 때만 기록
@@ -192,9 +193,9 @@ def _fill_invoice_sheet(
                 if est_height > (ws.row_dimensions[row_idx].height or 0):
                     ws.row_dimensions[row_idx].height = est_height
             elif c_idx == sequence_col_idx:
-                # 직접 배송 연번은 선행 0을 포함한 원본 표시값을 보존한다.
-                cell.value = "" if value is None else str(value)
-                cell.number_format = "@"
+                # 연번은 이 시트에 실제 출력한 행 순서다.
+                cell.value = value
+                cell.number_format = "0"
                 cell.alignment = CENTER_ALIGN
             else:
                 v = to_numeric(value)
@@ -354,6 +355,7 @@ def make_invoice_publication(
     meal_type: str = "급식",
     global_note: str | None = None,
     output_password: str | None = None,
+    overwrite: bool = True,
     column_fallbacks: Mapping[str, str] | None = None,
 ) -> tuple[int, WorkbookPublicationResult]:
     """월별 배송 배치 → 청구서템플릿 다중 시트 채워서 output_path 에 저장.
@@ -403,7 +405,7 @@ def make_invoice_publication(
             _rename_sheets(wb, rename_prefix)
 
         publication_started = True
-        publication = publish_workbook(wb, output_path, password=output_password)
+        publication = publish_workbook(wb, output_path, password=output_password, overwrite=overwrite)
         return total_count, publication
     finally:
         if not publication_started:

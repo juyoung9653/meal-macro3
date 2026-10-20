@@ -190,6 +190,7 @@ def make_confirm_publication(
     title_prefix: str = "",
     meal_type: str = "급식",
     output_password: str | None = None,
+    overwrite: bool = True,
     column_fallbacks: Mapping[str, str] | None = None,
 ) -> tuple[list[dict], WorkbookPublicationResult]:
     """명단 데이터 → 확인서템플릿 채워서 단일 엑셀 파일 생성."""
@@ -470,7 +471,7 @@ def make_confirm_publication(
 
     out_path = Path(output_path)
     fname = out_path.name
-    publication = publish_workbook(wb, out_path, password=output_password)
+    publication = publish_workbook(wb, out_path, password=output_password, overwrite=overwrite)
 
     for item in created:
         item["file"] = fname

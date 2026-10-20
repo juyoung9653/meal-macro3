@@ -1,4 +1,8 @@
 """Revision-backed per-person exclusions from household column sharing."""
+
+from .dialog_workflow import DialogRequest, dialog_workflow
+
+from .startup_loading import run_progress_task, save_revision
 from dataclasses import replace
 from datetime import UTC, datetime
 from uuid import uuid4
@@ -167,7 +171,7 @@ class HouseholdSharedExceptionsController:
     def set_exception(
         self, person_id, column_key, enabled, service_day, *, parent=None,
     ):
-        try:
+        def save():
             roster = self._session.database.current_roster()
             if roster is None:
                 raise ValueError("현재 명단이 없습니다.")
@@ -188,21 +192,31 @@ class HouseholdSharedExceptionsController:
                 revision_id=self._revision_id_factory(),
             )
             if record is None:
-                return HouseholdSharedColumnOutcome()
+                return None, None
             backup = self._session.append_revision(record)
+            return committed_roster_after_save(
+                self._session, replace(roster, revision_id=record.metadata.revision_id)), backup
+
+        try:
+            updated_roster, backup = run_progress_task(
+                save, parent=parent, title="공용 예외를 저장하는 중입니다",
+                message="공용 예외 설정을 확인하고 변경 내용과 자동 백업을 저장하는 중입니다.",
+            )
         except Exception as error:
             self._message_box.critical(
                 parent, "가구 공용 예외를 저장하지 못했습니다", str(error),
             )
+            return HouseholdSharedColumnOutcome()
+        if backup is None:
             return HouseholdSharedColumnOutcome()
         if backup.error is not None:
             self._message_box.warning(
                 parent, "가구 공용 예외는 저장됐지만 자동 백업에 실패했습니다",
                 str(backup.error),
             )
-        return HouseholdSharedColumnOutcome(committed_roster_after_save(
-            self._session, replace(roster, revision_id=record.metadata.revision_id)))
+        return HouseholdSharedColumnOutcome(updated_roster)
 
+    @dialog_workflow
     def run(self, service_day, *, labels=None, inactive_ids=(), parent=None):
         try:
             roster = self._session.database.current_roster()
@@ -211,7 +225,7 @@ class HouseholdSharedExceptionsController:
             snapshot = self._session.database.snapshot(roster.revision_id)
             stored = snapshot.entity(HOUSEHOLD_SHARED_KIND, HOUSEHOLD_SHARED_ID)
             dialog = self._dialog_type(roster, stored, service_day, labels=labels, inactive_ids=inactive_ids, parent=parent)
-            if dialog.exec() != QDialog.DialogCode.Accepted:
+            if (yield DialogRequest(dialog, self._session)) != QDialog.DialogCode.Accepted:
                 return HouseholdSharedColumnOutcome()
             current = self._session.database.current_roster()
             if current is None or current.revision_id != roster.revision_id:
@@ -223,7 +237,7 @@ class HouseholdSharedExceptionsController:
             )
             if record is None:
                 return HouseholdSharedColumnOutcome()
-            backup = self._session.append_revision(record)
+            backup = save_revision(self._session, record, parent=parent)
         except Exception as error:
             self._message_box.critical(parent, "가구 공용 예외를 저장하지 못했습니다", str(error))
             return HouseholdSharedColumnOutcome()

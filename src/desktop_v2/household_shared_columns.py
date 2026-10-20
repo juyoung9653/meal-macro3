@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from .dialog_workflow import DialogRequest, dialog_workflow
+
+from .startup_loading import save_revision
+
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 from math import ceil
@@ -431,6 +435,7 @@ class HouseholdSharedColumnController:
         self._recorded_at_provider = recorded_at_provider
         self._revision_id_factory = revision_id_factory
 
+    @dialog_workflow
     def run(self, column_key: str, column_label: str, service_day: date, parent=None):
         try:
             roster = self._session.database.current_roster()
@@ -459,7 +464,7 @@ class HouseholdSharedColumnController:
                     )
 
             dialog.validation_callback = validate
-            if dialog.exec() != QDialog.DialogCode.Accepted or not dialog.enabled.isChecked():
+            if (yield DialogRequest(dialog, self._session)) != QDialog.DialogCode.Accepted or not dialog.enabled.isChecked():
                 return HouseholdSharedColumnOutcome()
         try:
             if conflicts:
@@ -480,7 +485,7 @@ class HouseholdSharedColumnController:
                 else:
                     entities[reference] = change.after
             prepared_roster = roster_from_entity_states(record.metadata.revision_id, entities)
-            backup = self._session.append_revision(record)
+            backup = save_revision(self._session, record, parent=parent)
         except Exception as error:
             self._message_box.critical(parent, "가구 공용 설정을 저장하지 못했습니다", str(error))
             return HouseholdSharedColumnOutcome()

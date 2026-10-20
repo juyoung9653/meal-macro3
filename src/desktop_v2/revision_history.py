@@ -2,13 +2,27 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
+
+from .dialog_workflow import launch
+
 from datetime import datetime
+from functools import partial
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from PySide6.QtCore import QAbstractTableModel, QModelIndex, QSortFilterProxyModel, Qt
+from PySide6.QtCore import (
+    QAbstractTableModel,
+    QItemSelectionModel,
+    QModelIndex,
+    QSignalBlocker,
+    QSortFilterProxyModel,
+    Qt,
+    QTimer,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QDialog,
     QDialogButtonBox,
     QFrame,
@@ -24,11 +38,14 @@ from PySide6.QtWidgets import (
 
 from src.services.revision_history import build_revision_change_rows
 
+from .startup_loading import run_progress_task
 from .theme import application_stylesheet, register_application_fonts
 
 _KOREA_TIME_ZONE = ZoneInfo("Asia/Seoul")
-_SUMMARY_HEADINGS = ("변경번호", "사유", "변경자")
-_DETAIL_HEADINGS = ("대상", "식종", "구분", "변경 내용")
+_SUMMARY_HEADINGS = ("저장한 내용 · 변경번호",)
+_DETAIL_HEADINGS = ("대상", "항목", "변경 내용")
+_DETAIL_CACHE_MAX_ENTRIES = 8
+_DETAIL_CACHE_MAX_TEXT_SIZE = 250_000
 
 
 def _recorded_text(value: datetime) -> str:
@@ -61,12 +78,11 @@ class RevisionSummaryModel(QAbstractTableModel):
             Qt.ItemDataRole.ToolTipRole,
         ):
             return None
-        values = (
-            summary.display_code,
-            summary.reason,
-            summary.actor.username,
+        return (
+            f"{summary.reason}\n"
+            f"{_recorded_text(summary.recorded_at)} · {summary.actor.username}\n"
+            f"변경번호 {summary.display_code}"
         )
-        return values[index.column()]
 
     def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
         if role != Qt.ItemDataRole.DisplayRole:
@@ -78,7 +94,9 @@ class RevisionSummaryModel(QAbstractTableModel):
     def search_text(self, row: int) -> str:
         summary = self.summaries[row]
         return (
-            f"{summary.display_code}\n{summary.reason}\n{summary.actor.username}"
+            f"{summary.display_code}\n{summary.reason}\n{summary.actor.username}\n"
+            f"{_recorded_text(summary.recorded_at)}\n"
+            f"변경번호 {summary.display_code}\n변경자 {summary.actor.username}"
         ).casefold()
 
 
@@ -109,7 +127,7 @@ class RevisionChangeRowsModel(QAbstractTableModel):
         values = tuple(rows)
         if any(
             not isinstance(row, tuple)
-            or len(row) != len(_DETAIL_HEADINGS)
+            or len(row) != 4
             or any(not isinstance(value, str) for value in row)
             for row in values
         ):
@@ -130,7 +148,8 @@ class RevisionChangeRowsModel(QAbstractTableModel):
             Qt.ItemDataRole.ToolTipRole,
         ):
             return None
-        return self.rows[index.row()][index.column()]
+        target, _meal, column_label, change = self.rows[index.row()]
+        return (target, column_label, change)[index.column()]
 
     def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
         if role != Qt.ItemDataRole.DisplayRole:
@@ -153,10 +172,28 @@ class GlobalRevisionHistoryDialog(QDialog):
         super().__init__(parent)
         self._database = database
         self._restore_controller = None
-        self._change_rows_builder = change_rows_builder
+        columns = getattr(getattr(parent, "table_model", None), "columns", ())
+        column_labels = {column.key: column.label for column in columns}
+        self._change_rows_builder = (
+            partial(build_revision_change_rows, column_labels=column_labels)
+            if change_rows_builder is build_revision_change_rows
+            else change_rows_builder
+        )
         self._summary_load_failed = False
+        self._loading_detail = False
+        self._closed = False
+        self._displayed_revision_id: UUID | None = None
+        self._detail_cache: OrderedDict[
+            UUID, tuple[tuple[str, str, str, str], ...]
+        ] = OrderedDict()
+        self._detail_cache_text_size = 0
         try:
-            summaries = database.revision_summaries()
+            summaries = run_progress_task(
+                database.revision_summaries,
+                message="저장 기록 목록을 읽고 있습니다.",
+                parent=self,
+                title="변경 이력을 불러오는 중입니다",
+            )
         except Exception:  # noqa: BLE001 - display a generic, payload-safe read error
             summaries = ()
             self._summary_load_failed = True
@@ -185,14 +222,13 @@ class GlobalRevisionHistoryDialog(QDialog):
         from .revision_restore import RevisionRestoreController
         self._restore_controller = RevisionRestoreController(session, settings, on_restart)
         self._restore_button.show()
-        self._open_file_button.show()
         self._restore_button.setEnabled(self.selected_revision_id is not None)
         self._eyebrow.setText(f"운영 데이터 · {session.path.name}")
         self._eyebrow.setToolTip(str(session.path))
 
     def _restore_selected(self):
         if self._restore_controller is not None:
-            self._restore_controller.run(self.selected_revision_id, self)
+            launch(self._restore_controller.run, self.selected_revision_id, self)
 
     @property
     def selected_revision_id(self) -> UUID | None:
@@ -207,8 +243,8 @@ class GlobalRevisionHistoryDialog(QDialog):
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
-        root.setContentsMargins(20, 20, 20, 18)
-        root.setSpacing(12)
+        root.setContentsMargins(16, 16, 16, 14)
+        root.setSpacing(10)
 
         header = QFrame()
         header.setObjectName("editSection")
@@ -235,9 +271,9 @@ class GlobalRevisionHistoryDialog(QDialog):
         splitter.setChildrenCollapsible(False)
         splitter.addWidget(self._build_summary_panel())
         splitter.addWidget(self._build_detail_panel())
-        splitter.setStretchFactor(0, 4)
-        splitter.setStretchFactor(1, 7)
-        splitter.setSizes((410, 720))
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 8)
+        splitter.setSizes((350, 820))
         root.addWidget(splitter, 1)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
@@ -248,13 +284,8 @@ class GlobalRevisionHistoryDialog(QDialog):
         self._restore_button = QPushButton("선택한 변경번호로 복구·분기")
         self._restore_button.setObjectName("primaryAction")
         self._restore_button.clicked.connect(self._restore_selected)
-        self._restore_button.hide()
         buttons.addButton(self._restore_button, QDialogButtonBox.ButtonRole.ActionRole)
-        self._open_file_button = QPushButton("다른 운영 파일 열기")
-        self._open_file_button.setObjectName("quietAction")
-        self._open_file_button.clicked.connect(lambda: self._restore_controller.open_existing(self))
-        self._open_file_button.hide()
-        buttons.addButton(self._open_file_button, QDialogButtonBox.ButtonRole.ActionRole)
+        self._restore_button.hide()
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
 
@@ -264,7 +295,7 @@ class GlobalRevisionHistoryDialog(QDialog):
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(8)
-        label = QLabel("변경번호 목록")
+        label = QLabel("저장 기록")
         label.setObjectName("sectionLabel")
         layout.addWidget(label)
         self._search = QLineEdit()
@@ -272,7 +303,12 @@ class GlobalRevisionHistoryDialog(QDialog):
         self._search.setAccessibleName("전체 변경 이력 검색")
         self._search.setPlaceholderText("변경번호, 사유, 변경자 검색")
         self._search.setClearButtonEnabled(True)
-        self._search.textChanged.connect(self._apply_filter)
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(500)
+        self._search_timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._search_timer.timeout.connect(self._apply_pending_filter)
+        self._search.textChanged.connect(self._schedule_filter)
         layout.addWidget(self._search)
         self._summary_status = QLabel()
         self._summary_status.setObjectName("revisionHistorySummaryStatus")
@@ -291,14 +327,22 @@ class GlobalRevisionHistoryDialog(QDialog):
         self._summary_table.setSelectionMode(
             QAbstractItemView.SelectionMode.SingleSelection
         )
-        self._summary_table.setAlternatingRowColors(True)
-        self._summary_table.verticalHeader().setVisible(False)
-        self._summary_table.horizontalHeader().setSectionResizeMode(
-            QHeaderView.ResizeMode.Interactive
+        self._summary_table.setVerticalScrollMode(
+            QAbstractItemView.ScrollMode.ScrollPerPixel
         )
-        self._summary_table.setColumnWidth(0, 130)
-        self._summary_table.setColumnWidth(1, 145)
-        self._summary_table.setColumnWidth(2, 65)
+        self._summary_table.setHorizontalScrollMode(
+            QAbstractItemView.ScrollMode.ScrollPerPixel
+        )
+        self._summary_table.setAlternatingRowColors(True)
+        self._summary_table.setTextElideMode(Qt.TextElideMode.ElideNone)
+        self._summary_table.verticalHeader().setVisible(False)
+        self._summary_table.setWordWrap(True)
+        self._summary_table.verticalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents
+        )
+        self._summary_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.Stretch
+        )
         self._summary_table.selectionModel().currentRowChanged.connect(
             self._load_selected_revision
         )
@@ -311,15 +355,17 @@ class GlobalRevisionHistoryDialog(QDialog):
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(8)
-        label = QLabel("선택한 변경 내용")
+        label = QLabel("변경 상세")
         label.setObjectName("sectionLabel")
         layout.addWidget(label)
         self._selection_title = QLabel("변경번호를 선택하세요.")
         self._selection_title.setObjectName("revisionHistorySelectionTitle")
+        self._selection_title.setTextFormat(Qt.TextFormat.PlainText)
         self._selection_title.setWordWrap(True)
         layout.addWidget(self._selection_title)
         self._selection_meta = QLabel()
         self._selection_meta.setObjectName("revisionHistorySelectionMeta")
+        self._selection_meta.setTextFormat(Qt.TextFormat.PlainText)
         self._selection_meta.setWordWrap(True)
         layout.addWidget(self._selection_meta)
         self._detail_status = QLabel()
@@ -336,31 +382,90 @@ class GlobalRevisionHistoryDialog(QDialog):
         self._detail_table.setSelectionBehavior(
             QAbstractItemView.SelectionBehavior.SelectRows
         )
+        self._detail_table.setVerticalScrollMode(
+            QAbstractItemView.ScrollMode.ScrollPerPixel
+        )
+        self._detail_table.setHorizontalScrollMode(
+            QAbstractItemView.ScrollMode.ScrollPerPixel
+        )
         self._detail_table.setAlternatingRowColors(True)
         self._detail_table.setWordWrap(True)
+        self._detail_table.setTextElideMode(Qt.TextElideMode.ElideNone)
         self._detail_table.verticalHeader().setVisible(False)
         self._detail_table.verticalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.ResizeToContents
         )
         header = self._detail_table.horizontalHeader()
-        for column in range(3):
-            header.setSectionResizeMode(column, QHeaderView.ResizeMode.Interactive)
-        self._detail_table.setColumnWidth(0, 170)
-        self._detail_table.setColumnWidth(1, 80)
-        self._detail_table.setColumnWidth(2, 145)
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        self._detail_table.setColumnWidth(0, 130)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
+        self._detail_table.setColumnWidth(1, 140)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         layout.addWidget(self._detail_table, 1)
         return panel
 
+    def _schedule_filter(self, _text: str) -> None:
+        self._search_timer.start()
+
+    def _apply_pending_filter(self) -> None:
+        if self._loading_detail:
+            self._search_timer.start()
+            return
+        self._apply_filter(self._search.text())
+
+    def done(self, result: int) -> None:
+        self._closed = True
+        self._search_timer.stop()
+        self._dispose_detail_cache()
+        super().done(result)
+
+    def closeEvent(self, event) -> None:
+        self._closed = True
+        self._search_timer.stop()
+        self._dispose_detail_cache()
+        super().closeEvent(event)
+
+    def _dispose_detail_cache(self) -> None:
+        self._detail_cache.clear()
+        self._detail_cache_text_size = 0
+
     def _apply_filter(self, text: str) -> None:
-        self._summary_proxy.set_query(text)
-        self._update_summary_state()
-        if self._summary_proxy.rowCount():
-            self._summary_table.selectRow(0)
+        selected_revision_id = self.selected_revision_id
+        selection_model = self._summary_table.selectionModel()
+        with QSignalBlocker(selection_model):
+            self._summary_proxy.set_query(text)
+            self._update_summary_state()
+            selected_row = self._visible_row(selected_revision_id)
+            if selected_row is None and self._summary_proxy.rowCount():
+                selected_row = 0
+            if selected_row is None:
+                selection_model.clearSelection()
+                selection_model.setCurrentIndex(
+                    QModelIndex(), QItemSelectionModel.SelectionFlag.NoUpdate
+                )
+                current = QModelIndex()
+            else:
+                current = self._summary_proxy.index(selected_row, 0)
+                selection_model.setCurrentIndex(
+                    current,
+                    QItemSelectionModel.SelectionFlag.ClearAndSelect
+                    | QItemSelectionModel.SelectionFlag.Rows,
+                )
+        if current.isValid():
+            self._load_selected_revision(current, QModelIndex())
         else:
-            self._summary_table.clearSelection()
-            self._summary_table.setCurrentIndex(QModelIndex())
             self._clear_detail("검색 조건에 맞는 변경 기록이 없습니다.")
+
+    def _visible_row(self, revision_id: UUID | None) -> int | None:
+        if revision_id is None:
+            return None
+        for row in range(self._summary_proxy.rowCount()):
+            value = self._summary_proxy.data(
+                self._summary_proxy.index(row, 0), Qt.ItemDataRole.UserRole
+            )
+            if value == revision_id:
+                return row
+        return None
 
     def _update_summary_state(self) -> None:
         visible = self._summary_proxy.rowCount()
@@ -379,13 +484,16 @@ class GlobalRevisionHistoryDialog(QDialog):
 
     def _load_selected_revision(self, current, _previous) -> None:
         self._restore_button.setEnabled(current.isValid())
-        self._detail_model.set_rows(())
         if not current.isValid():
             return
         summary_index = self._summary_proxy.mapToSource(
             self._summary_proxy.index(current.row(), 0)
         )
         summary = self._summary_model.summaries[summary_index.row()]
+        if summary.revision_id == self._displayed_revision_id:
+            return
+        self._displayed_revision_id = summary.revision_id
+        self._detail_model.set_rows(())
         self._selection_title.setText(
             f"{summary.display_code} · {summary.reason}"
         )
@@ -397,34 +505,183 @@ class GlobalRevisionHistoryDialog(QDialog):
         self._selection_meta.setText(
             f"{_recorded_text(summary.recorded_at)} · 변경자 {summary.actor.username} · {applied}"
         )
+        cached_rows = self._detail_cache.get(summary.revision_id)
+        if cached_rows is not None:
+            self._detail_cache.move_to_end(summary.revision_id)
+            self._detail_model.set_rows(cached_rows)
+            self._update_detail_status()
+            return
+
         self._detail_status.setText("변경 내용을 읽는 중입니다.")
+        search_had_focus = self._search.hasFocus()
+        active_window = QApplication.activeWindow()
+        cursor_position = self._search.cursorPosition()
+        selection_start = self._search.selectionStart()
+        selected_text_length = len(self._search.selectedText())
+        search_text = self._search.text()
+        self._loading_detail = True
+        rows_loaded = False
+        load_failed = False
         try:
-            record = self._database.revision(summary.revision_id)
-            snapshot = self._database.snapshot(summary.revision_id)
-            parent_revision_id = record.metadata.parent_revision_id
-            previous_snapshot = (
-                None
-                if parent_revision_id is None
-                else self._database.snapshot(parent_revision_id)
+            def load_rows():
+                record = self._database.revision(summary.revision_id)
+                snapshot = self._database.snapshot(summary.revision_id)
+                parent_revision_id = record.metadata.parent_revision_id
+                previous_snapshot = (
+                    None
+                    if parent_revision_id is None
+                    else self._database.snapshot(parent_revision_id)
+                )
+                return self._change_rows_builder(
+                    record,
+                    snapshot,
+                    previous_snapshot=previous_snapshot,
+                )
+
+            rows = run_progress_task(
+                load_rows,
+                message="선택한 기록의 변경 내용을 읽고 있습니다.",
+                parent=self,
+                title="변경 내용을 불러오는 중입니다",
             )
-            rows = self._change_rows_builder(
-                record,
-                snapshot,
-                previous_snapshot=previous_snapshot,
-            )
+            if self._closed:
+                return
             self._detail_model.set_rows(rows)
+            rows_loaded = True
         except Exception:  # noqa: BLE001 - exception text may contain stored payloads
+            load_failed = True
+        finally:
+            self._loading_detail = False
+        if self._closed:
+            return
+        if load_failed:
             self._detail_model.set_rows(())
             self._detail_status.setText(
                 "선택한 변경 내용을 읽지 못했습니다. 다른 변경번호를 선택하거나 창을 다시 열어주세요."
             )
+        elif rows_loaded:
+            self._remember_detail_rows(summary.revision_id, self._detail_model.rows)
+            self._update_detail_status()
+        current_active_window = QApplication.activeWindow()
+        progress_window_just_closed = (
+            current_active_window is not None
+            and not current_active_window.isVisible()
+            and current_active_window.parentWidget() is self.window()
+        )
+        progress_left_no_active_window = (
+            current_active_window is None
+            and QApplication.applicationState()
+            is Qt.ApplicationState.ApplicationActive
+        )
+        if (
+            search_had_focus
+            and active_window is self.window()
+            and (
+                current_active_window is self.window()
+                or progress_window_just_closed
+                or progress_left_no_active_window
+            )
+        ):
+            state = (
+                cursor_position,
+                selection_start,
+                selected_text_length,
+                search_text,
+            )
+            if current_active_window is self.window():
+                self._restore_search_state(*state)
+            else:
+                self._activate_history_for_search_restore(*state)
+
+    def _activate_history_for_search_restore(
+        self,
+        cursor_position: int,
+        selection_start: int,
+        selected_text_length: int,
+        expected_text: str,
+    ) -> None:
+        if (
+            self._closed
+            or not self.isVisible()
+            or self._search.text() != expected_text
+            or QApplication.applicationState()
+            is not Qt.ApplicationState.ApplicationActive
+        ):
             return
+        active_window = QApplication.activeWindow()
+        if active_window is not None and not (
+            not active_window.isVisible()
+            and active_window.parentWidget() is self.window()
+        ):
+            return
+        self.activateWindow()
+        QTimer.singleShot(
+            0,
+            partial(
+                self._restore_search_state,
+                cursor_position,
+                selection_start,
+                selected_text_length,
+                expected_text,
+            ),
+        )
+
+    def _restore_search_state(
+        self,
+        cursor_position: int,
+        selection_start: int,
+        selected_text_length: int,
+        expected_text: str,
+    ) -> None:
+        if self._closed or self._search.text() != expected_text:
+            return
+        active_window = QApplication.activeWindow()
+        if active_window is not self.window():
+            return
+        self._search.setFocus(Qt.FocusReason.OtherFocusReason)
+        if selection_start >= 0:
+            if cursor_position == selection_start:
+                self._search.setSelection(
+                    selection_start + selected_text_length,
+                    -selected_text_length,
+                )
+            else:
+                self._search.setSelection(selection_start, selected_text_length)
+        else:
+            self._search.setCursorPosition(cursor_position)
+
+    def _remember_detail_rows(
+        self,
+        revision_id: UUID,
+        rows: tuple[tuple[str, str, str, str], ...],
+    ) -> None:
+        text_size = sum(len(value) for row in rows for value in row)
+        if text_size > _DETAIL_CACHE_MAX_TEXT_SIZE:
+            return
+        previous = self._detail_cache.pop(revision_id, None)
+        if previous is not None:
+            self._detail_cache_text_size -= sum(
+                len(value) for row in previous for value in row
+            )
+        while self._detail_cache and (
+            len(self._detail_cache) >= _DETAIL_CACHE_MAX_ENTRIES
+            or self._detail_cache_text_size + text_size > _DETAIL_CACHE_MAX_TEXT_SIZE
+        ):
+            _, evicted = self._detail_cache.popitem(last=False)
+            self._detail_cache_text_size -= sum(
+                len(value) for row in evicted for value in row
+            )
+        self._detail_cache[revision_id] = rows
+        self._detail_cache_text_size += text_size
+
+    def _update_detail_status(self) -> None:
         count = self._detail_model.rowCount()
         self._detail_status.setText(
             f"변경 내용 {count}건" if count else "표시할 변경 내용이 없습니다."
         )
 
     def _clear_detail(self, status: str) -> None:
+        self._displayed_revision_id = None
         self._restore_button.setEnabled(False)
         self._detail_model.set_rows(())
         self._selection_title.setText("변경번호를 선택하세요.")

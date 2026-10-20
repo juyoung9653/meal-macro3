@@ -39,6 +39,7 @@ from src.storage.database_backup import (
 )
 from src.storage.database_credentials import CredentialUnlockError
 from src.storage.database_session import DatabaseSession
+from src.storage.migrations import CURRENT_SCHEMA_VERSION
 from src.storage.database_backup import backup_has_recovery_password
 import src.storage.database_backup as backup_module
 
@@ -252,7 +253,7 @@ def test_older_schema_backup_rotates_without_migrating_archive_and_restores(tmp_
         with DatabaseSession.restore_and_open_with_user_password(
             archive_path, tmp_path / "restored.sqlite3", "second"
         ) as restored:
-            assert restored.database.schema_version == 8
+            assert restored.database.schema_version == CURRENT_SCHEMA_VERSION
             restored.database.check_integrity()
         assert hashlib.sha256((tmp_path / "restored.sqlite3").read_bytes()).hexdigest() != original_hash
 

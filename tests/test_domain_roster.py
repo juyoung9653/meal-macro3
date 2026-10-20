@@ -209,3 +209,58 @@ def test_meal_selection_rejects_empty_duplicate_or_untyped_values(selected, erro
 
     with pytest.raises(error):
         canonical_meals(selected)
+
+
+def test_indexed_roster_queries_do_not_scan_unrelated_people():
+    class CountedUUID(UUID):
+        comparisons = 0
+        __hash__ = UUID.__hash__
+
+        def __eq__(self, other):
+            type(self).comparisons += 1
+            return super().__eq__(other)
+
+    people = tuple(Person(CountedUUID(int=i + 100), PersonProfile(str(i))) for i in range(500))
+    snapshot = RosterSnapshot(
+        REVISION_ID, people, (Household(HOUSEHOLD_ID),),
+        tuple(HouseholdMembership(person.person_id, HOUSEHOLD_ID) for person in people),
+        tuple(MealEnrollment(person.person_id, meal) for person in people for meal in Meal),
+    )
+    CountedUUID.comparisons = 0
+    # A distinct equal UUID exercises dictionary equality rather than identity.
+    person_id = UUID(int=people[-1].person_id.int)
+    assert snapshot.meals_for(person_id, on=date(2026, 10, 19)) == tuple(Meal)
+    assert snapshot.household_for(person_id, on=date(2026, 10, 19)).household_id == HOUSEHOLD_ID
+    assert CountedUUID.comparisons <= 8
+
+
+def test_roster_indexes_preserve_boundaries_gaps_and_rebuild_after_replace():
+    from dataclasses import replace
+
+    second = UUID(int=99)
+    snapshot = RosterSnapshot(
+        REVISION_ID, (_person(),), (Household(HOUSEHOLD_ID), Household(second)),
+        (
+            HouseholdMembership(PERSON_ID, HOUSEHOLD_ID, InclusiveDateRange(None, date(2026, 12, 31))),
+            HouseholdMembership(PERSON_ID, second, InclusiveDateRange(date(2027, 1, 2), None)),
+        ),
+        (
+            MealEnrollment(PERSON_ID, Meal.DINNER, InclusiveDateRange(None, date(2026, 12, 31))),
+            MealEnrollment(PERSON_ID, Meal.LUNCH, InclusiveDateRange(date(2027, 1, 2), None)),
+            MealEnrollment(PERSON_ID, Meal.BREAKFAST),
+        ),
+    )
+    for day in (date(2026, 12, 31), date(2027, 1, 1), date(2027, 1, 2)):
+        expected_household = next((m.household_id for m in snapshot.memberships if m.period.contains(day)), None)
+        actual_household = snapshot.household_for(PERSON_ID, on=day)
+        assert (actual_household.household_id if actual_household else None) == expected_household
+        active = {e.meal for e in snapshot.enrollments if e.period.contains(day)}
+        assert snapshot.meals_for(PERSON_ID, on=day) == tuple(m for m in Meal if m in active)
+    changed = replace(snapshot, memberships=(), enrollments=())
+    assert changed.meals_for(PERSON_ID, on=date(2027, 1, 2)) == ()
+    assert changed.household_for(PERSON_ID, on=date(2027, 1, 2)) is None
+    assert snapshot.meals_for(PERSON_ID, on=date(2027, 1, 2)) == (Meal.BREAKFAST, Meal.LUNCH)
+    with pytest.raises(KeyError):
+        changed.meals_for(UUID(int=999), on=date(2027, 1, 2))
+    with pytest.raises(TypeError):
+        changed.household_for(PERSON_ID, on='2027-01-02')

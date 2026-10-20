@@ -405,7 +405,7 @@ def test_normal_roster_refresh_updates_shared_routing_display_and_search(app, tm
     controller = DesktopStartupController()
     monkeypatch.setattr(controller, "_histories", lambda *_: {})
     monkeypatch.setattr(controller, "_revision_display_code", lambda *_: None)
-    monkeypatch.setattr(controller, "_refresh_school_calendar", lambda *_: None)
+    monkeypatch.setattr(controller, "_refresh_school_calendar", lambda *_, **_kwargs: None)
     window = RosterWindow(before, column_settings=QSettings(str(tmp_path / "refresh.ini"), QSettings.Format.IniFormat))
     window.table_model.set_context(DAY, Meal.DINNER)
     window.table_model.set_search("새 공용 주소")

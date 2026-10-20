@@ -127,3 +127,103 @@ def test_restore_no_change_never_restarts():
     instance.run(uuid4())
     assert not restarts and not saved
     assert messages.events[-1][0] == "information"
+
+
+@pytest.mark.parametrize("branch", [False, True])
+@pytest.mark.parametrize("fail", [False, True])
+def test_restore_progress_keeps_ui_responsive_and_closes_before_result(app, branch, fail):
+    from threading import Event, get_ident
+    from PySide6.QtCore import QTimer
+    from src.desktop_v2.startup_loading import StartupLoadingDialog
+
+    choice = RevisionRestoreSelection(branch, Path("branch.sqlite3"), "password", "새 파일")
+    instance, calls, saved, restarts, messages = controller(
+        choice, (QMessageBox.StandardButton.Yes, QMessageBox.StandardButton.No),
+    )
+    original = instance.branch_service if branch else instance.restore_service
+    ui_thread = get_ident()
+    entered, released = Event(), Event()
+    observations = []
+
+    def service(*args, **kwargs):
+        assert get_ident() != ui_thread
+        entered.set()
+        assert released.wait(5), "UI did not respond during restore"
+        if fail:
+            raise OSError("private stored payload")
+        return original(*args, **kwargs)
+
+    if branch:
+        instance.branch_service = service
+    else:
+        instance.restore_service = service
+
+    def heartbeat():
+        if not entered.is_set() or released.is_set():
+            return
+        dialogs = [w for w in app.topLevelWidgets()
+                   if isinstance(w, StartupLoadingDialog) and w.isVisible()]
+        if dialogs:
+            observations.append(get_ident())
+            assert all(kind == "question" for kind, _ in messages.events)
+            released.set()
+
+    timer = QTimer()
+    timer.timeout.connect(heartbeat)
+    timer.start(10)
+    try:
+        instance.run(uuid4())
+    finally:
+        released.set()
+        timer.stop()
+    assert observations == [ui_thread]
+    assert not any(isinstance(w, StartupLoadingDialog) and w.isVisible()
+                   for w in app.topLevelWidgets())
+    if fail:
+        assert not calls and not saved and not restarts
+        assert messages.events[-1][0] == "critical"
+        assert "private stored payload" not in str(messages.events)
+    else:
+        assert len(calls) == 1
+        assert restarts == ([] if branch else [True])
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_open_existing_checks_off_thread_and_releases_session(app, monkeypatch, fail):
+    from threading import get_ident
+    import src.desktop_v2.revision_restore as module
+
+    ui_thread = get_ident()
+    closed, checked = [], []
+
+    class Opened:
+        @property
+        def database(self):
+            return self
+        def check_integrity(self):
+            checked.append(get_ident())
+            if fail:
+                raise OSError("private payload")
+        def close(self):
+            closed.append(True)
+        def __enter__(self):
+            return self
+        def __exit__(self, *_args):
+            self.close()
+
+    def open_file(*_args):
+        assert get_ident() != ui_thread
+        return Opened()
+
+    monkeypatch.setattr(module.DatabaseSession, "open", open_file)
+    monkeypatch.setattr(module.QFileDialog, "getOpenFileName", lambda *_: ("other.sqlite3", ""))
+    monkeypatch.setattr(module.QInputDialog, "getText", lambda *_: ("password", True))
+    instance, calls, saved, restarts, messages = controller(
+        RevisionRestoreSelection(False), (QMessageBox.StandardButton.Cancel,),
+    )
+    instance.open_existing()
+    assert len(checked) == 1 and checked[0] != ui_thread
+    assert closed == [True]
+    assert not calls and not saved and not restarts
+    assert messages.events[-1][0] == ("critical" if fail else "question")
+    assert "private payload" not in str(messages.events)

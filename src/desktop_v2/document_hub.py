@@ -52,7 +52,7 @@ _ACTION_COPY = {
         "선택한 기간의 급식 제공 내역을 확인서로 만듭니다.",
     ),
     DocumentAction.DELIVERY_REPORT: (
-        "배송 리포트",
+        "일일식수",
         "배송 대상과 담당·순서를 날짜별 Excel로 정리합니다.",
     ),
     DocumentAction.DELIVERY_SUBSTITUTE: (
@@ -184,7 +184,7 @@ class DocumentHubDialog(QDialog):
                 "배송 문서",
                 "현장 배포와 인수인계",
                 (
-                    (DocumentAction.DELIVERY_REPORT, "리포트"),
+                    (DocumentAction.DELIVERY_REPORT, "식수"),
                     (DocumentAction.DELIVERY_SUBSTITUTE, "대타"),
                 ),
                 category="route",

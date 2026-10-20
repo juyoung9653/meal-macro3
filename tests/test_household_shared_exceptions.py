@@ -368,3 +368,77 @@ def test_mixed_driver_event_keeps_nonexempt_meal_only(source_exempt):
     propagated=[e for e in routing_state_from_snapshot(result).events if e.person_id==b.person_id]
     assert len(propagated)==1
     assert dict(propagated[0].driver_ids)=={Meal.BREAKFAST:breakfast_driver}
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_exception_save_keeps_ui_responsive_and_errors_on_gui_thread(app, tmp_path, monkeypatch, fail):
+    from threading import Event, get_ident
+    from PySide6.QtCore import QTimer
+    from src.desktop_v2.startup_loading import StartupLoadingDialog
+
+    r = roster()
+    pair = (r.persons[0].person_id, "mobile")
+    path = tmp_path / "responsive.sqlite3"
+    initial = RevisionRecord(RevisionMetadata(r.revision_id, None, NOW, None, ACTOR, "initial", RevisionSource.IMPORT), roster_audit_changes(None, r))
+    ui_thread = get_ident()
+    entered, released = Event(), Event()
+    messages, calls, heartbeat = [], [], []
+    with DatabaseSession.create(path, "password") as session:
+        session.append_revision(initial)
+        current = session.database.current_roster()
+        snapshot = session.database.snapshot(current.revision_id)
+        rows = household_shared_rows(current, "mobile", DAY, snapshot=snapshot)
+        record = build_household_shared_revision(
+            current, None, "mobile", True,
+            {row.household_id: ("공용 연락처",) for row in rows},
+            actor=ACTOR, recorded_at=NOW, effective_on=DAY, revision_id=uuid4(), snapshot=snapshot,
+        )
+        session.append_revision(record)
+        before = session.database.current_roster().revision_id
+        original = session.append_revision
+
+        def append(record):
+            calls.append(get_ident())
+            entered.set()
+            assert released.wait(5), "GUI timer did not continue during the save"
+            if fail:
+                raise OSError("write unavailable")
+            return original(record)
+
+        monkeypatch.setattr(session, "append_revision", append)
+        def report(*args):
+            messages.append((get_ident(), args))
+            assert not isinstance(app.activeModalWidget(), StartupLoadingDialog)
+
+        controller = HouseholdSharedExceptionsController(
+            session, message_box=SimpleNamespace(critical=report, warning=report),
+            actor_provider=lambda: ACTOR, recorded_at_provider=lambda: NOW,
+        )
+        def tick():
+            if entered.is_set() and not released.is_set():
+                dialog = app.activeModalWidget()
+                heartbeat.append(isinstance(dialog, StartupLoadingDialog) and dialog.isVisible())
+                released.set()
+        timer = QTimer()
+        timer.timeout.connect(tick)
+        timer.start(10)
+        try:
+            result = controller.set_exception(*pair, True, DAY)
+        finally:
+            timer.stop()
+            released.set()
+        assert calls and all(thread != ui_thread for thread in calls)
+        assert heartbeat == [True]
+        assert bool(messages) == fail
+        assert all(thread == ui_thread for thread, _ in messages)
+        if fail:
+            assert result.roster is None
+            assert session.database.current_roster().revision_id == before
+        else:
+            assert result.roster.revision_id != before
+            assert controller.set_exception(*pair, True, DAY).roster is None
+            assert len(calls) == 1
+    with DatabaseSession.open(path, "password") as session:
+        current = session.database.current_roster()
+        stored = session.database.snapshot(current.revision_id).entity(HOUSEHOLD_SHARED_KIND, HOUSEHOLD_SHARED_ID)
+        assert (pair in shared_exceptions_from_state(stored)) != fail

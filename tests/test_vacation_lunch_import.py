@@ -62,7 +62,7 @@ def _preview(*names: str) -> WorkbookImportPreview:
     observations = tuple(
         PersonObservation(
             UUID(int=200 + index), SourceReference("synthetic.xlsx", "명단", (index + 2,)),
-            {ProfileField.NAME: name, ProfileField.BIRTH_DATE: date(2015, 1, {"유지": 1, "제외": 2, "재개": 3}[name]), ProfileField.SCHOOL_NAME: "새 학교"},
+            {ProfileField.NAME: name, ProfileField.BIRTH_DATE: date(2015, 1, {"유지": 1, "제외": 2, "재개": 3, "신규": 4}[name]), ProfileField.SCHOOL_NAME: "새 학교"},
             (Meal.LUNCH,),
         )
         for index, name in enumerate(names)
@@ -124,6 +124,30 @@ def test_vacation_lunch_retains_present_restores_stopped_and_stops_only_omitted_
         (str(OMIT), MealStatus.STOPPED.value),
     }
     assert all(change.after["starts_on"] == START.isoformat() and change.after["ends_on"] is None for change in status_changes)
+
+
+def test_vacation_lunch_new_person_gets_standalone_household():
+    roster = _roster()
+    preview = _preview("신규")
+    plan = stage_reconciliation(roster, preview.observations, effective_on=START)
+    new_id = UUID(int=109)
+    prepared = build_import_revision(
+        roster, preview, plan,
+        decisions={preview.observations[0].observation_id: ReconciliationDecision(
+            preview.observations[0].observation_id, IdentityResolution.CREATE_NEW, new_id,
+        )},
+        actor=RevisionActor("tester", "S-1-5-21-test"),
+        recorded_at=datetime(2026, 8, 2, tzinfo=UTC),
+        revision_id=NEW_REVISION, batch_id=UUID(int=107),
+        purpose=ImportPurpose.VACATION_LUNCH,
+    )
+    result = prepared.result.snapshot
+    members = [item for item in result.memberships if item.person_id == new_id]
+    assert len(members) == 1
+    assert members[0].period.starts_on == START
+    assert members[0].household_id in {item.household_id for item in result.households}
+    assert members[0].household_id not in {item.household_id for item in roster.households}
+    assert result.meals_for(new_id, on=START) == (Meal.LUNCH,)
 
 
 def test_vacation_lunch_rejects_future_status_and_skipped_rows():

@@ -10,7 +10,6 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6")
 
 from PySide6.QtCore import QSettings
-from PySide6.QtCore import QTimer
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialogButtonBox
@@ -143,8 +142,9 @@ def test_window_archive_switch_follows_view_day_and_restores_after_roster_refres
         assert _visible_ids(window) == set()
         assert not settings.contains(InactiveRosterSettings.SETTINGS_KEY)
         dialog.findChild(QDialogButtonBox).button(QDialogButtonBox.StandardButton.Save).click()
-    QTimer.singleShot(0, save_days)
     window._archive_threshold_button.click()
+    save_days()
+    app.processEvents()
     assert settings.value(InactiveRosterSettings.SETTINGS_KEY, type=int) == 36500
     assert window._roster_title.text() == "장기 미배송 보관함 (0명)"
     assert _visible_ids(window) == set()
@@ -421,8 +421,9 @@ def test_threshold_cancel_restores_filtered_roster(app, tmp_path, close_method):
         else:
             dialog.close()
 
-    QTimer.singleShot(0, cancel)
     window._archive_threshold_button.click()
+    cancel()
+    app.processEvents()
     assert window._archive_settings.days == 365
     assert not settings.contains(InactiveRosterSettings.SETTINGS_KEY)
     assert window._search_input.text() == "보관"
@@ -442,7 +443,13 @@ def test_more_menu_click_and_global_search_combine_with_header_filter(app, tmp_p
     assert "보관 기준 설정" not in {action.text() for action in menu.actions()}
     menu.popup(window._more_button.mapToGlobal(window._more_button.rect().bottomLeft()))
     app.processEvents()
-    QTest.mouseClick(menu, Qt.MouseButton.LeftButton, pos=menu.actionGeometry(window._archive_action).center())
+    group = next(action for action in menu.actions() if action.text() == "명단 관리")
+    QTest.mouseMove(menu, pos=menu.actionGeometry(group).center())
+    QTest.keyClick(menu, Qt.Key.Key_Right)
+    app.processEvents()
+    submenu = group.menu()
+    assert submenu.isVisible()
+    QTest.mouseClick(submenu, Qt.MouseButton.LeftButton, pos=submenu.actionGeometry(window._archive_action).center())
     assert window._archive_action.isChecked()
     assert _visible_ids(window) == {ARCHIVED}
     window._search_input.setText("보관")

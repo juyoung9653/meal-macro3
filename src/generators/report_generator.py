@@ -1,4 +1,4 @@
-"""리포트 엑셀 출력 — openpyxl만 사용. 템플릿 복사 + water-filling + 페이지설정."""
+"""일일식수 엑셀 출력 — openpyxl만 사용. 템플릿 복사 + water-filling + 페이지설정."""
 
 from __future__ import annotations
 
@@ -48,7 +48,7 @@ def export_multi(
     *,
     output_password: str | None = None,
 ) -> None:
-    """여러 날짜 리포트를 하나의 Excel 파일로 저장 (날짜별 시트)."""
+    """여러 날짜 일일식수를 하나의 Excel 파일로 저장 (날짜별 시트)."""
     make_report_publication(
         results,
         filepath,
@@ -63,18 +63,24 @@ def make_report_publication(
     template_path: str | Path,
     *,
     output_password: str | None = None,
+    overwrite: bool = True,
+    preserve_template_styles: bool = False,
 ) -> WorkbookPublicationResult:
     """Publish one verified report workbook from an explicit template."""
 
     if not results:
-        raise ValueError("내보낼 리포트 결과가 없습니다.")
+        raise ValueError("내보낼 일일식수 결과가 없습니다.")
 
     out_file = Path(filepath)
     tpl_file = Path(template_path)
     if not tpl_file.is_file():
         raise FileNotFoundError(
-            f"배송 리포트 템플릿을 찾을 수 없습니다: {tpl_file}"
+            f"일일식수 템플릿을 찾을 수 없습니다: {tpl_file}"
         )
+
+    if preserve_template_styles:
+        from src.excel.delivery_templates import validate_delivery_template
+        validate_delivery_template(tpl_file, "delivery_report")
 
     log.info("export: %d시트 → %s", len(results), out_file)
     tpl = load_workbook(tpl_file)
@@ -89,20 +95,20 @@ def make_report_publication(
             ws = out.create_sheet(title=f"{report.day:%Y%m%d}({report.meal})")
             _copy_sheet(src, ws)
             ws["A1"] = _format_korean_date(report.day.strftime("%Y%m%d"))
-            _fill_data(ws, report)
+            _fill_data(ws, report, preserve_template_styles=preserve_template_styles)
 
             last_row = ws.max_row
             ws.print_area = f"A1:I{last_row}"
             _stretch_rows_to_page(ws, last_row)
             _apply_page_setup(ws)
 
-        publication = publish_workbook(out, out_file, password=output_password)
+        publication = publish_workbook(out, out_file, password=output_password, overwrite=overwrite)
     finally:
         tpl.close()
         out.close()
 
     if not out_file.is_file():
-        raise OSError(f"리포트 파일이 생성되지 않았습니다: {out_file}")
+        raise OSError(f"일일식수 파일이 생성되지 않았습니다: {out_file}")
     return publication
 
 
@@ -221,9 +227,10 @@ def _apply_page_setup(ws) -> None:
 _FILL_DIFF = PatternFill(start_color="C5D9F1", end_color="C5D9F1", fill_type="solid")
 
 
-def _fill_data(ws, report: DeliveryReport) -> None:
-    """템플릿 시트에 리포트 데이터를 채움."""
+def _fill_data(ws, report: DeliveryReport, *, preserve_template_styles=False) -> None:
+    """템플릿 시트에 일일식수 데이터를 채움."""
     data_count = len(report.rows)
+    summary_styles = [copy(ws.cell(9, col)._style) for col in range(1, 10)]
 
     ws["A2"] = f"*아동급식 {report.meal}*"
     if data_count > 5:
@@ -249,14 +256,14 @@ def _fill_data(ws, report: DeliveryReport) -> None:
 
         c_a = ws.cell(gr, 1)
         c_a.value = row.staff_label
-        if row_has_diff:
+        if row_has_diff and not preserve_template_styles:
             c_a.fill = _FILL_DIFF
 
         for column, raw in enumerate(row.household_size_cells, start=2):
             c = ws.cell(gr, column)
             stripped = strip_diff(raw)
             c.value = int(stripped) if stripped != "" else ""
-            if has_diff(raw):
+            if has_diff(raw) and not preserve_template_styles:
                 c.fill = _FILL_DIFF
 
         ws.cell(gr, 7).value = row.person_total
@@ -265,44 +272,63 @@ def _fill_data(ws, report: DeliveryReport) -> None:
         c_h = ws.cell(gr, 8)
 
         if raw:
-            # 컬럼 폭 대비 텍스트 길이에 맞춰 폰트 크기 자동 조절
-            col_w = ws.column_dimensions["H"].width or 23
-            col_px = max(1, int(col_w * 8) - 12)  # 184px - 여유 12px
-            lines = raw.split("\n")
+            if preserve_template_styles:
+                c_h.value = raw
+                c_h.data_type = "s"
+                align = copy(c_h.alignment)
+                align.wrap_text = True
+                c_h.alignment = align
+                size = c_h.font.sz or 11
+                width = max(1, (ws.column_dimensions["H"].width or 23) * 8 - 12)
+                lines = sum(max(1, ceil(sum(1.33 if ord(c) > 127 else .67 for c in line) * size / width))
+                            for line in raw.split("\n"))
+                ws.row_dimensions[gr].height = max(ws.row_dimensions[gr].height or 15, lines * size * 1.55)
+            else:
+                # 컬럼 폭 대비 텍스트 길이에 맞춰 폰트 크기 자동 조절
+                col_w = ws.column_dimensions["H"].width or 23
+                col_px = max(1, int(col_w * 8) - 12)  # 184px - 여유 12px
+                lines = raw.split("\n")
 
-            # 줄별 필요한 폰트 크기 계산
-            font_sizes: list[int] = []
-            visual_line_count = 0
-            for line in lines:
-                cnt_k = sum(1 for c in line if ord(c) > 127)
-                cnt_a = sum(1 for c in line if ord(c) <= 127)
-                coeff = cnt_k * 1.33 + cnt_a * 0.67
-                if coeff > 0:
-                    ideal = col_px / coeff
-                    font_size = max(6, min(11, int(ideal)))
-                    font_sizes.append(font_size)
-                    visual_line_count += max(1, ceil(coeff * font_size / col_px))
-                else:
-                    font_sizes.append(_FONT_SIZE)
-                    visual_line_count += 1
+                # 줄별 필요한 폰트 크기 계산
+                font_sizes: list[int] = []
+                visual_line_count = 0
+                for line in lines:
+                    cnt_k = sum(1 for c in line if ord(c) > 127)
+                    cnt_a = sum(1 for c in line if ord(c) <= 127)
+                    coeff = cnt_k * 1.33 + cnt_a * 0.67
+                    if coeff > 0:
+                        ideal = col_px / coeff
+                        font_size = max(6, min(11, int(ideal)))
+                        font_sizes.append(font_size)
+                        visual_line_count += max(1, ceil(coeff * font_size / col_px))
+                    else:
+                        font_sizes.append(_FONT_SIZE)
+                        visual_line_count += 1
 
-            c_h.value = _make_memo_rich_text(raw, font_sizes)
+                c_h.value = _make_memo_rich_text(raw, font_sizes)
 
-            # plain string이면 셀 폰트 직접 설정
-            if isinstance(c_h.value, str) and "\n" not in raw:
-                c_h.font = Font(name=_FONT_NAME, size=font_sizes[0])
+                # plain string이면 셀 폰트 직접 설정
+                if isinstance(c_h.value, str) and "\n" not in raw:
+                    c_h.font = Font(name=_FONT_NAME, size=font_sizes[0])
 
-            align = copy(c_h.alignment)
-            align.wrap_text = True
-            c_h.alignment = align
+                align = copy(c_h.alignment)
+                align.wrap_text = True
+                c_h.alignment = align
 
-            est_height = max(17, visual_line_count * 17)
-            if est_height > (ws.row_dimensions[gr].height or 0):
-                ws.row_dimensions[gr].height = est_height
+                est_height = max(17, visual_line_count * 17)
+                if est_height > (ws.row_dimensions[gr].height or 0):
+                    ws.row_dimensions[gr].height = est_height
         else:
             c_h.value = ""
 
         ws.cell(gr, 9).value = row.reference_areas
+
+    if preserve_template_styles:
+        for col, style in enumerate(summary_styles, 1):
+            ws.cell(summary_row_num, col)._style = style
+        ws.cell(summary_row_num, 1).value = "합계"
+        if data_count < 5:
+            ws.delete_rows(summary_row_num + 1, 9 - summary_row_num)
 
     totals = report.totals
     for column, count in enumerate(totals.household_counts, start=2):
@@ -310,6 +336,9 @@ def _fill_data(ws, report: DeliveryReport) -> None:
     ws.cell(summary_row_num, 7).value = totals.person_total
     ws.cell(summary_row_num, 8).value = ""
     ws.cell(summary_row_num, 9).value = ""
+
+    if preserve_template_styles:
+        return
 
     thin = Side(style="thin")
     medium = Side(style="medium")

@@ -19,6 +19,7 @@ a = Analysis(
     binaries=[],
     datas=[
         ("assets/report_template.xlsx", "assets"),
+        ("assets/substitute_template.xlsx", "assets"),
         ("assets/급식_청구서템플릿.xlsx", "assets"),
         ("assets/급식_확인서템플릿.xlsx", "assets"),
         ("assets/행복도시락_청구서템플릿.xlsx", "assets"),

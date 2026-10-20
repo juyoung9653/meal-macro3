@@ -571,7 +571,8 @@ def test_publishes_encrypted_delivery_report_records_run_and_backup(
         assert run.template_manifest["writer"] == (
             "report_generator.make_report_publication"
         )
-        assert "template_setting" not in run.template_manifest
+        assert run.template_manifest["template_setting"]["profile"] == "급식"
+        assert run.template_manifest["delivery_template_profile"] == "급식"
         assert run.template_manifest["export_password"]["protected"] is True
         backup_path = outcome.backup_result.record.path
 

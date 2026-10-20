@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from .dialog_workflow import DialogRequest, dialog_workflow, invoke, launch
+
+from .startup_loading import run_progress_task, save_revision
+
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -39,6 +43,8 @@ from src.storage.database_session import (
 )
 
 from .import_controller import current_windows_actor
+from .document_hub import DocumentAction
+from .delivery_template import DeliveryTemplateDialog, DeliveryTemplateStore
 from .theme import application_stylesheet, register_application_fonts
 
 
@@ -63,11 +69,17 @@ class DocumentTemplateDialog(QDialog):
         self,
         current: DocumentTemplateSetting | None,
         parent: QWidget | None = None,
+        *,
+        delivery_dialog_type=DeliveryTemplateDialog,
     ) -> None:
         if current is not None and not isinstance(current, DocumentTemplateSetting):
             raise TypeError("current는 DocumentTemplateSetting 또는 None이어야 합니다.")
         super().__init__(parent)
         self._current = current
+        self._database_id = None
+        self._delivery_dialog_type = delivery_dialog_type
+        self._delivery_buttons = {}
+        self._delivery_status = {}
         self._buttons: dict[DocumentTemplateProfile, QRadioButton] = {}
         self._cards: dict[DocumentTemplateProfile, QFrame] = {}
         self._group = QButtonGroup(self)
@@ -75,13 +87,33 @@ class DocumentTemplateDialog(QDialog):
 
         register_application_fonts()
         self.setObjectName("documentTemplateDialog")
-        self.setWindowTitle("설정 · 청구서·확인서 양식")
+        self.setWindowTitle("설정 · 문서 양식")
         self.setModal(True)
-        self.resize(790, 520)
-        self.setMinimumSize(700, 480)
+        self.resize(850, 620)
+        self.setMinimumSize(790, 590)
         self.setStyleSheet(application_stylesheet())
         self._build_ui()
+        self._refresh_delivery_status()
         self._refresh()
+
+    def set_preferences_scope(self, database_id: str) -> None:
+        self._database_id = database_id
+        for button in self._delivery_buttons.values():
+            button.setEnabled(True)
+        self._refresh_delivery_status()
+
+    def _refresh_delivery_status(self) -> None:
+        for (profile, action), label in self._delivery_status.items():
+            path = (DeliveryTemplateStore(self._database_id, profile=profile).selected(action)
+                    if self._database_id is not None else None)
+            status = "연결된 양식" if path else "기본 양식" if profile is DocumentTemplateProfile.SCHOOL_MEAL else "미설정"
+            label.setText(f"{profile.value} · {action.label}: {status}")
+
+    @dialog_workflow
+    def _edit_delivery(self, profile, action) -> None:
+        dialog = self._delivery_dialog_type(action, self._database_id, self, profile=profile)
+        (yield DialogRequest(dialog))
+        self._refresh_delivery_status()
 
     @property
     def selected_profile(self) -> DocumentTemplateProfile:
@@ -102,10 +134,10 @@ class DocumentTemplateDialog(QDialog):
         header_layout.setSpacing(4)
         eyebrow = QLabel("문서 양식 · 공통 설정")
         eyebrow.setObjectName("editEyebrow")
-        title = QLabel("청구서·확인서 양식 선택")
+        title = QLabel("문서 양식 선택")
         title.setObjectName("workspaceTitle")
         subtitle = QLabel(
-            "이 운영 데이터는 업체 한 곳의 양식을 기억합니다. 이후 문서를 만들 때 자동으로 같은 양식을 사용합니다."
+            "청구서·확인서·일일식수·배송대타에 사용할 양식을 선택합니다. 현재 연결된 배송 기본 양식은 급식입니다."
         )
         subtitle.setObjectName("workspaceSubtitle")
         subtitle.setWordWrap(True)
@@ -148,11 +180,22 @@ class DocumentTemplateDialog(QDialog):
                 card_layout.addWidget(current_badge)
                 button.setChecked(True)
             card_layout.addStretch(1)
+            for action in (DocumentAction.DELIVERY_REPORT, DocumentAction.DELIVERY_SUBSTITUTE):
+                status = QLabel()
+                status.setObjectName("documentTemplateDescription")
+                self._delivery_status[profile, action] = status
+                card_layout.addWidget(status)
+                edit = QPushButton(f"{action.label} 양식 확인/수정")
+                edit.setObjectName("quietAction")
+                edit.setEnabled(False)
+                edit.clicked.connect(lambda _checked=False, p=profile, a=action: launch(self._edit_delivery, p, a))
+                self._delivery_buttons[profile, action] = edit
+                card_layout.addWidget(edit)
             cards.addWidget(card, 1)
         root.addLayout(cards, 1)
 
         note = QLabel(
-            "양식을 바꾸면 새 변경번호와 자동 백업이 만들어집니다. 예전에 만든 Excel 파일은 바뀌지 않습니다."
+            "급식/행복도시락 선택은 ‘이 양식 사용’을 눌러 운영 파일에 저장합니다. 배송 양식 파일 연결은 각 편집창에서 별도로 저장하며 이 PC에서 기억합니다."
         )
         note.setObjectName("settingsHubNote")
         note.setWordWrap(True)
@@ -239,6 +282,7 @@ class DocumentTemplateController:
         self._recorded_at_provider = recorded_at_provider or _utc_now
         self._revision_id_factory = revision_id_factory
 
+    @dialog_workflow
     def ensure_configured(
         self,
         parent: QWidget | None = None,
@@ -253,8 +297,9 @@ class DocumentTemplateController:
                 current,
                 changed=False,
             )
-        return self._choose_and_save(roster, state, current, parent)
+        return (yield from invoke(self._choose_and_save, roster, state, current, parent))
 
+    @dialog_workflow
     def run(
         self,
         parent: QWidget | None = None,
@@ -262,36 +307,33 @@ class DocumentTemplateController:
         roster, state, current = self._current(parent)
         if roster is None:
             return DocumentTemplateChangeOutcome(DocumentTemplateChangeStatus.FAILED)
-        return self._choose_and_save(roster, state, current, parent)
+        return (yield from invoke(self._choose_and_save, roster, state, current, parent))
 
     def _current(self, parent):
-        roster = self._session.database.current_roster()
-        if roster is None:
-            self._message_box.critical(
-                parent,
-                "문서 양식을 설정하지 못했습니다",
-                "현재 명단이 없습니다. 기존 명단 가져오기를 먼저 완료해주세요.",
-            )
-            return None, None, None
-        snapshot = self._session.database.snapshot(roster.revision_id)
-        state = snapshot.entity(
-            DOCUMENT_TEMPLATE_SETTING_KIND,
-            DOCUMENT_TEMPLATE_SETTING_ID,
-        )
-        try:
-            current = document_template_setting_from_state(state)
-        except Exception as error:
-            self._message_box.critical(
-                parent,
-                "문서 양식 설정을 읽지 못했습니다",
-                str(error),
-            )
-            return None, None, None
-        return roster, state, current
+        def load():
+            roster = self._session.database.current_roster()
+            if roster is None:
+                raise ValueError("현재 명단이 없습니다. 기존 명단 가져오기를 먼저 완료해주세요.")
+            snapshot = self._session.database.snapshot(roster.revision_id)
+            state = snapshot.entity(DOCUMENT_TEMPLATE_SETTING_KIND, DOCUMENT_TEMPLATE_SETTING_ID)
+            return roster, state, document_template_setting_from_state(state)
 
+        try:
+            return run_progress_task(
+                load, title="문서 양식 설정을 불러오는 중입니다",
+                message="문서 생성에 사용할 저장된 설정을 확인하는 중입니다.", parent=parent,
+            )
+        except Exception as error:
+            self._message_box.critical(parent, "문서 양식 설정을 읽지 못했습니다", str(error))
+            return None, None, None
+
+    @dialog_workflow
     def _choose_and_save(self, roster, state, current, parent):
         dialog = self._dialog_type(current, parent)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        scope_setter = getattr(dialog, "set_preferences_scope", None)
+        if callable(scope_setter):
+            scope_setter(str(self._session.credentials.database_id))
+        if (yield DialogRequest(dialog, self._session)) != QDialog.DialogCode.Accepted:
             return DocumentTemplateChangeOutcome(
                 DocumentTemplateChangeStatus.CANCELLED,
                 roster,
@@ -319,8 +361,12 @@ class DocumentTemplateController:
                     else "문서 양식 변경"
                 ),
             )
-            backup_result = self._session.append_revision(prepared.record)
-            updated_roster = self._session.database.current_roster()
+            backup_result = save_revision(self._session, prepared.record, parent=parent)
+            updated_roster = run_progress_task(
+                self._session.database.current_roster,
+                title="저장된 설정을 불러오는 중입니다",
+                message="문서 생성에 사용할 최신 설정을 읽는 중입니다.", parent=parent,
+            )
             if updated_roster is None:
                 raise RuntimeError("저장 뒤 현재 명단을 다시 읽지 못했습니다.")
         except Exception as error:

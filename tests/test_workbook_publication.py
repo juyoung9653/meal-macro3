@@ -195,3 +195,33 @@ def test_publish_workbook_preserves_target_and_removes_staging_when_replace_fail
     assert workbook.closed
     assert target.read_text(encoding="utf-8") == "previous"
     assert list(tmp_path.iterdir()) == [target]
+
+
+def test_no_overwrite_preserves_file_created_during_workbook_save(tmp_path):
+    target = tmp_path / "concurrent.xlsx"
+    class ConcurrentWorkbook(_Workbook):
+        def save(self, staging):
+            super().save(staging)
+            target.write_bytes(b"other process")
+    workbook = ConcurrentWorkbook()
+    with pytest.raises(FileExistsError):
+        publication.publish_workbook(workbook, target, overwrite=False)
+    assert workbook.closed
+    assert target.read_bytes() == b"other process"
+    assert list(tmp_path.iterdir()) == [target]
+
+
+def test_default_publication_still_allows_explicit_overwrite_exports(tmp_path):
+    target = tmp_path / "confirmed-overwrite.xlsx"
+    target.write_bytes(b"previous export")
+    publication.publish_workbook(_Workbook("replacement"), target)
+    assert target.read_text(encoding="utf-8") == "replacement"
+    assert list(tmp_path.iterdir()) == [target]
+
+
+def test_no_overwrite_publishes_complete_file_and_cleans_staging(tmp_path):
+    target = tmp_path / "new.xlsx"
+    result = publication.publish_workbook(_Workbook("complete"), target, overwrite=False)
+    assert result.output_path == target
+    assert target.read_text(encoding="utf-8") == "complete"
+    assert list(tmp_path.iterdir()) == [target]

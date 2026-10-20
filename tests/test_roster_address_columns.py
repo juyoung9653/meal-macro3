@@ -142,4 +142,5 @@ def test_document_source_aliases_do_not_relabel_full_address():
     assert spec.source_labels["도로명주소"] == "배송 도로"
     assert spec.source_labels["상세주소"] == "동호수"
     assert spec.source_labels[FULL_ADDRESS_FIELD] == "전체 주소 (도로명주소 + 상세주소)"
-    assert {"도로명주소", "상세주소", FULL_ADDRESS_FIELD} <= set(spec.selectable_source_options)
+    assert {"도로명주소", "상세주소"} <= set(spec.selectable_source_options)
+    assert FULL_ADDRESS_FIELD not in spec.selectable_source_options

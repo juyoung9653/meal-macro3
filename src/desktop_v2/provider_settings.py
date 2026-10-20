@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from .dialog_workflow import DialogRequest, dialog_workflow
+
+from .startup_loading import save_revision
+
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -105,6 +109,7 @@ class ProviderSettingsController:
         self._recorded_at_provider = recorded_at_provider or (lambda: datetime.now(UTC))
         self._revision_id_factory = revision_id_factory
 
+    @dialog_workflow
     def run(self, parent: QWidget | None = None) -> ProviderSettingsOutcome:
         roster = self._session.database.current_roster()
         if roster is None:
@@ -122,7 +127,7 @@ class ProviderSettingsController:
             stored_state is None and len(legacy_values) > 1,
             parent,
         )
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        if (yield DialogRequest(dialog, self._session)) != QDialog.DialogCode.Accepted:
             return ProviderSettingsOutcome(ProviderSettingsStatus.CANCELLED)
         provider = dialog.provider()
         if stored_state is not None and stored_state.get("provider") == provider:
@@ -136,7 +141,7 @@ class ProviderSettingsController:
                 recorded_at=self._recorded_at_provider(),
                 revision_id=self._revision_id_factory(),
             )
-            backup = self._session.append_revision(prepared.record)
+            backup = save_revision(self._session, prepared.record, parent=parent)
         except Exception as error:  # noqa: BLE001 - report save failures at the UI boundary
             self._message_box.critical(
                 parent, "공통 제공기관을 저장하지 못했습니다", str(error)

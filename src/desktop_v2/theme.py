@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from weakref import ref
 
 from PySide6.QtCore import QEvent, QObject, Qt
 from PySide6.QtGui import QFontDatabase
@@ -129,7 +130,14 @@ class _TextClippingGuard(QObject):
             f"color: rgba({color.red()}, {color.green()}, {color.blue()}, {color.alpha()}); "
             "background: transparent; border: none; padding: 0;"
         )
-        line.textChanged.connect(lambda _text, target=line: _TextClippingGuard._sync_placeholder(target))
+        line_ref = ref(line)
+
+        def sync_text(_text):
+            target = line_ref()
+            if target is not None:
+                _TextClippingGuard._sync_placeholder(target)
+
+        line.textChanged.connect(sync_text)
         _TextClippingGuard._sync_placeholder(line)
 
     @staticmethod

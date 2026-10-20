@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from .dialog_workflow import DialogRequest, dialog_workflow
+
+from .startup_loading import save_revision
+
 from src.storage.database_session import committed_roster_after_save
 
 import csv
@@ -88,6 +92,7 @@ class GuidedRosterImportController:
         self._review_type = review_type
         self._message_box = message_box
 
+    @dialog_workflow
     def run(self, parent: QWidget | None = None) -> GuidedImportOutcome:
         current_roster = self._session.database.current_roster()
         profiles, existing_household_rule = self._current_import_settings()
@@ -98,7 +103,9 @@ class GuidedRosterImportController:
             allow_vacation_lunch=current_roster is not None,
             parent=parent,
         )
-        if wizard.exec() != QDialog.DialogCode.Accepted:
+        if current_roster is None and hasattr(wizard, "set_initial_import_defaults"):
+            wizard.set_initial_import_defaults()
+        if (yield DialogRequest(wizard, self._session)) != QDialog.DialogCode.Accepted:
             return GuidedImportOutcome(GuidedImportStatus.CANCELLED)
         selection = wizard.selection()
         purpose = getattr(selection, "purpose", ImportPurpose.DATABASE)
@@ -148,7 +155,7 @@ class GuidedRosterImportController:
                 household_plan=household_plan,
                 **({"purpose": purpose, "lunch_delivering_ids": lunch_delivering_ids} if purpose is ImportPurpose.VACATION_LUNCH else {}),
             )
-            if review.exec() != QDialog.DialogCode.Accepted:
+            if (yield DialogRequest(review, self._session)) != QDialog.DialogCode.Accepted:
                 return GuidedImportOutcome(GuidedImportStatus.CANCELLED)
         try:
             prepared = build_import_revision(
@@ -181,7 +188,7 @@ class GuidedRosterImportController:
                 purpose=purpose,
                 lunch_status_events=lunch_events,
             )
-            backup_result = self._session.append_revision(prepared.record)
+            backup_result = save_revision(self._session, prepared.record, parent=parent)
         except Exception as error:
             self._message_box.critical(
                 parent,

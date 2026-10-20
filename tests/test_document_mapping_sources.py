@@ -61,7 +61,7 @@ def test_source_labels_match_roster_and_keep_field_ids(kind):
     assert renamed.source_labels["성명"] == "대상자"
 
 
-@pytest.mark.parametrize("source", ["이름", "도로명주소", "상세주소"])
+@pytest.mark.parametrize("source", ["이름", "도로명주소", "상세주소", FULL_ADDRESS_FIELD])
 def test_saved_legacy_source_is_preserved_without_new_revision(source):
     revision_id = uuid4()
     state = {
@@ -96,11 +96,11 @@ def test_new_choices_only_include_roster_columns_and_clear_missing_binding(profi
     view = DocumentColumnMappingDialog(specs, overrides)
     view._profile_combo.setCurrentIndex(view._profile_combo.findData(profile))
     view._document_combo.setCurrentIndex(view._document_combo.findData(kind))
-    expected = {"", "성명", "생년월일", "학교명", "학년", "전화번호", "핸드폰", "관할동", FULL_ADDRESS_FIELD, "도로명주소", "상세주소", "비고", "세대주 성명"}
+    expected = {"", "성명", "생년월일", "학교명", "학년", "전화번호", "핸드폰", "관할동", "도로명주소", "상세주소", "비고", "세대주 성명"}
     expected.update(f"custom:{field.definition_id}" for field in roster.custom_fields)
     try:
         assert set(specs[(profile, kind)].selectable_source_options) == expected
-        for combo in view._combos.values():
+        for combo in (*view._combos.values(), *view._fallback_combos.values()):
             enabled = {combo.itemData(i) for i in range(combo.count()) if combo.model().item(i).isEnabled()}
             assert enabled == expected
         combo = view._combos["성명"]
@@ -125,7 +125,8 @@ def test_new_choices_only_include_roster_columns_and_clear_missing_binding(profi
         head.setCurrentIndex(head.findData("학교명"))
         view._reset_scope()
         assert head.currentData() == "세대주 성명"
-        combo.setCurrentIndex(combo.findData(FULL_ADDRESS_FIELD))
+        assert combo.findData(FULL_ADDRESS_FIELD) == -1
+        combo.setCurrentIndex(combo.findData("도로명주소"))
         desired = view.desired_mapping()
         revision_id = uuid4()
         changed = build_mapping_revision(
@@ -133,7 +134,7 @@ def test_new_choices_only_include_roster_columns_and_clear_missing_binding(profi
             roster=roster, actor=RevisionActor("tester", "synthetic"),
             recorded_at=datetime.now(UTC), revision_id=uuid4(),
         )
-        assert changed.setting.overrides["성명"] == FULL_ADDRESS_FIELD
+        assert changed.setting.overrides["성명"] == "도로명주소"
     finally:
         view.close()
 
@@ -208,3 +209,46 @@ def test_mapping_controller_uses_current_roster_column_labels(monkeypatch):
         assert not outcome.completed
     finally:
         parent.close()
+
+
+@pytest.mark.parametrize("profile,kind", tuple((p, k) for p in ("급식", "행복도시락") for k in ("invoice", "confirmation")))
+def test_synthetic_address_is_unselectable_but_same_named_real_column_is_available(profile, kind):
+    from dataclasses import replace
+    from PySide6.QtWidgets import QApplication
+    from src.desktop_v2.document_column_mapping import DocumentColumnMappingDialog
+    from src.desktop_v2.roster_window import RosterTableModel
+    app = QApplication.instance() or QApplication([])
+    roster = _roster()
+    field = CustomFieldDefinition(uuid4(), FULL_ADDRESS_FIELD, CustomFieldType.TEXT, 3)
+    roster = replace(roster, custom_fields=(*roster.custom_fields, field))
+    labels = {column.key: column.label for column in RosterTableModel(roster).columns}
+    scopes = tuple((p, k) for p in ("급식", "행복도시락") for k in ("invoice", "confirmation"))
+    specs = {scope: mapping_editor_spec(*scope, roster=roster, column_labels=labels) for scope in scopes}
+    overrides = {scope: {"성명": FULL_ADDRESS_FIELD} for scope in scopes}
+    fallbacks = {scope: {"성명": FULL_ADDRESS_FIELD} for scope in scopes}
+    view = DocumentColumnMappingDialog(specs, overrides, fallbacks=fallbacks)
+    view._profile_combo.setCurrentIndex(view._profile_combo.findData(profile))
+    view._document_combo.setCurrentIndex(view._document_combo.findData(kind))
+    try:
+        for combo in (*view._combos.values(), *view._fallback_combos.values()):
+            assert combo.findData(FULL_ADDRESS_FIELD) == -1
+            assert combo.findData("도로명주소") >= 0 and combo.findData("상세주소") >= 0
+            assert combo.findData(f"custom:{field.definition_id}") >= 0
+        assert view.desired_mapping()["성명"] == ""
+        assert "성명" not in view.desired_fallbacks()
+        assert not view._dirty()
+        revision_id = uuid4()
+        state = {"policy_version": 2, "version": 1, "profile": profile, "document_kind": kind,
+                 "overrides": overrides[(profile,kind)], "fallbacks": fallbacks[(profile,kind)],
+                 "changed_in_revision_id": str(revision_id)}
+        snapshot = HistoricalSnapshot(revision_id, {EntityRef(MAPPING_ENTITY_KIND, mapping_entity_id(profile,kind)): state})
+        changed = build_mapping_revision(revision_id, snapshot, profile, kind, view.desired_mapping(),
+            desired_fallbacks=view.desired_fallbacks(), roster=roster, actor=RevisionActor("tester","synthetic"),
+            recorded_at=datetime.now(UTC), revision_id=uuid4())
+        assert changed.setting.overrides["성명"] == ""
+        assert not changed.setting.fallbacks
+        view.reject()
+        assert state["overrides"]["성명"] == FULL_ADDRESS_FIELD
+        assert state["fallbacks"]["성명"] == FULL_ADDRESS_FIELD
+    finally:
+        view.close()

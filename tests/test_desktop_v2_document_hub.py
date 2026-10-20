@@ -40,7 +40,7 @@ def test_hub_groups_exact_four_document_jobs_without_default_choice(app):
     assert [action.label for action in dialog._cards] == [
         "청구서",
         "확인서",
-        "배송 리포트",
+        "일일식수",
         "배송대타",
     ]
     assert dialog._cards[DocumentAction.INVOICE].property("category") == "settlement"

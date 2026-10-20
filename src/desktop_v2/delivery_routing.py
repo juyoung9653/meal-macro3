@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from .dialog_workflow import DialogRequest, dialog_workflow, invoke
+
+from .startup_loading import save_revision
+
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from uuid import UUID, uuid4
@@ -624,7 +628,7 @@ class DeliveryRoutingController:
         return roster, state
 
     def _commit(self, record, parent):
-        backup = self._session.append_revision(record)
+        backup = save_revision(self._session, record, parent=parent)
         if backup.error is not None:
             self._message_box.warning(
                 parent,
@@ -634,14 +638,15 @@ class DeliveryRoutingController:
         roster, state = self._load()
         return DeliveryRoutingOutcome(roster, state)
 
-    def run_drivers(self, parent=None):
+    @dialog_workflow
+    def run_drivers(self, parent=None, *, on_saved=None):
         outcome = DeliveryRoutingOutcome()
         while True:
             try:
                 roster, state = self._load()
                 dialog = self._registry_dialog_type(state, parent)
-                if dialog.exec() != QDialog.DialogCode.Accepted:
-                    return outcome
+                if (yield DialogRequest(dialog, self._session)) != QDialog.DialogCode.Accepted:
+                    return DeliveryRoutingOutcome(*self._load()) if outcome.roster is not None else outcome
                 driver = dialog.request()
                 record = build_driver_revision(
                     roster,
@@ -654,17 +659,20 @@ class DeliveryRoutingController:
                     revision_id=uuid4(),
                 )
                 outcome = self._commit(record, parent)
+                if on_saved is not None:
+                    on_saved(outcome)
             except Exception as error:  # noqa: BLE001 - report storage failures at the UI boundary
                 self._message_box.critical(
                     parent, "배송기사를 저장하지 못했습니다", str(error)
                 )
                 return outcome
 
+    @dialog_workflow
     def run_replacement(self, day, parent=None):
         try:
             roster, state = self._load()
             dialog = self._replacement_dialog_type(roster, state, day, parent)
-            if dialog.exec() != QDialog.DialogCode.Accepted:
+            if (yield DialogRequest(dialog, self._session)) != QDialog.DialogCode.Accepted:
                 return DeliveryRoutingOutcome()
             request = dialog.request()
             record = build_driver_replacement_revision(
@@ -678,9 +686,11 @@ class DeliveryRoutingController:
             self._message_box.critical(parent, "배송기사를 교체하지 못했습니다", str(error))
             return DeliveryRoutingOutcome()
 
+    @dialog_workflow
     def run_assignment(self, person_id, meal, day, parent=None):
-        return self._run_change(person_id, day, parent, meal=meal)
+        return (yield from invoke(self._run_change, person_id, day, parent, meal=meal))
 
+    @dialog_workflow
     def run_batch_assignment(self, targets, day, parent=None):
         try:
             roster, state = self._load()
@@ -688,7 +698,7 @@ class DeliveryRoutingController:
             if not targets:
                 raise ValueError("배송담당을 변경할 식종 셀을 선택해주세요.")
             dialog = self._batch_change_dialog_type(roster, state, targets, day, parent)
-            if dialog.exec() != QDialog.DialogCode.Accepted:
+            if (yield DialogRequest(dialog, self._session)) != QDialog.DialogCode.Accepted:
                 return DeliveryRoutingOutcome()
             request = dialog.request()
             record = build_batch_assignment_revision(
@@ -701,16 +711,18 @@ class DeliveryRoutingController:
             self._message_box.critical(parent, "배송담당을 저장하지 못했습니다", str(error))
             return DeliveryRoutingOutcome()
 
+    @dialog_workflow
     def run_relocation(self, person_id, day, parent=None):
-        return self._run_change(person_id, day, parent)
+        return (yield from invoke(self._run_change, person_id, day, parent))
 
+    @dialog_workflow
     def _run_change(self, person_id, day, parent, *, meal=None):
         try:
             roster, state = self._load()
             dialog = self._change_dialog_type(
                 roster, state, person_id, day, parent, meal=meal
             )
-            if dialog.exec() != QDialog.DialogCode.Accepted:
+            if (yield DialogRequest(dialog, self._session)) != QDialog.DialogCode.Accepted:
                 return DeliveryRoutingOutcome()
             request = dialog.request()
             record = build_routing_revision(

@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from .delivery_routing import ROUTING_EVENT_KIND, RoutingEvent, RoutingState, _routing_event_state
 from .projections import roster_audit_changes, status_event_audit_change
 from .revisions import AuditChange, ChangeOperation, RevisionActor, RevisionMetadata, RevisionRecord, RevisionSource
-from .roster import DeliveryAssignment, HouseholdMembership, InclusiveDateRange, Meal, MealEnrollment, Person, RosterSnapshot
+from .roster import DeliveryAssignment, Household, HouseholdMembership, InclusiveDateRange, Meal, MealEnrollment, Person, RosterSnapshot
 from .status import MealStatus, StatusEvent
 
 
@@ -66,7 +66,11 @@ def build_roster_row_revision(
         enrollments = (*current_roster.enrollments, *(MealEnrollment(add_person.person_id, meal, InclusiveDateRange(starts_on=starts_on)) for meal in enroll_meals))
         if household_id is not None and household_id not in {item.household_id for item in current_roster.households}:
             raise ValueError("선택한 가구가 현재 명단에 없습니다.")
-        memberships = (*current_roster.memberships, HouseholdMembership(add_person.person_id, household_id, InclusiveDateRange(starts_on=starts_on))) if household_id is not None else current_roster.memberships
+        # An unmatched row is its own household, as it is in the Excel import.
+        # Never infer a later join from mutable contact fields.
+        selected_household_id = household_id or uuid4()
+        households = current_roster.households if household_id is not None else (*current_roster.households, Household(selected_household_id))
+        memberships = (*current_roster.memberships, HouseholdMembership(add_person.person_id, selected_household_id, InclusiveDateRange(starts_on=starts_on)))
         if any(item.person_id != add_person.person_id or item.meal not in enroll_meals for item in meal_assignments):
             raise ValueError("배송 배정은 새 대상자의 가입 식종에만 지정할 수 있습니다.")
         assignments = (*current_roster.assignments, *meal_assignments)
@@ -94,6 +98,7 @@ def build_roster_row_revision(
             raise TypeError("person ID는 UUID여야 합니다.")
         current_roster.person(delete_person_id)
         persons = tuple(person for person in current_roster.persons if person.person_id != delete_person_id)
+        households = current_roster.households
         memberships = tuple(item for item in current_roster.memberships if item.person_id != delete_person_id)
         enrollments = tuple(item for item in current_roster.enrollments if item.person_id != delete_person_id)
         assignments = tuple(item for item in current_roster.assignments if item.person_id != delete_person_id)
@@ -102,7 +107,7 @@ def build_roster_row_revision(
     snapshot = RosterSnapshot(
         revision_id,
         persons=persons,
-        households=current_roster.households,
+        households=households,
         memberships=memberships,
         enrollments=enrollments,
         assignments=assignments,

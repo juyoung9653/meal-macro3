@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 
 from src.excel.publication import publish_workbook
 
+from .startup_loading import run_progress_task, run_worker_with_delayed_progress, take_worker_result
 from .theme import application_stylesheet
 
 
@@ -279,7 +280,11 @@ class CurrentSheetExportController:
             target = Path(chosen)
             if target.suffix.lower() != ".xlsx":
                 target = target.with_suffix(".xlsx")
-            if target.exists() and self._messages.question(
+            exists = run_progress_task(
+                target.exists, title="Excel 저장 위치를 확인하는 중입니다",
+                message="저장 폴더와 같은 이름의 파일을 확인하는 중입니다.", parent=parent,
+            )
+            if exists and self._messages.question(
                 parent,
                 "파일 덮어쓰기",
                 f"{target.name} 파일을 덮어쓸까요?",
@@ -293,12 +298,8 @@ class CurrentSheetExportController:
             progress = self._progress_dialog_type(worker, parent)
             if multi_sheet:
                 progress.setWindowTitle(export_title)
-            QTimer.singleShot(0, worker.start)
-            progress.exec()
-            worker.wait()
-            if worker.error is not None:
-                raise worker.error
-            result = worker.result
+            run_worker_with_delayed_progress(worker, progress)
+            result = take_worker_result(worker)
         except Exception as error:  # noqa: BLE001 - output failure is reported at the UI boundary
             failure_title = (
                 "기사·식종별 Excel을 내보내지 못했습니다"
