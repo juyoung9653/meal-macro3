@@ -925,11 +925,10 @@ def test_setting_history_names_enabled_disabled_builtin_and_custom_columns():
     rows = build_revision_change_rows(
         record, apply(snap, record), previous_snapshot=snap
     )
-    assert rows[0][2] == "가구 공용 칼럼"
-    assert rows[0][3] == "가구 공용 해제: 개인 항목"
+    assert rows == (("전체 명단", "", "개인 항목", "가구 공용 해제"),)
     initial = activate(r, "mobile", ("shared",))
     initial_rows = build_revision_change_rows(initial, apply(historical(r), initial))
-    assert any(row[3] == "가구 공용 지정: 핸드폰" for row in initial_rows)
+    assert ("전체 명단", "", "핸드폰", "가구 공용 지정") in initial_rows
 
 
 @pytest.mark.parametrize(
