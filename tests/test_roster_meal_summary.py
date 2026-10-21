@@ -37,6 +37,15 @@ from src.domain.school_calendar import (
     SchoolLunchDay,
     SchoolLunchSchoolSchedule,
 )
+from src.domain.service_adjustments import (
+    SERVICE_ADJUSTMENT_SCHEDULE_ID,
+    SERVICE_ADJUSTMENT_SCHEDULE_KIND,
+    ServiceAdjustmentChange,
+    ServiceAdjustmentSchedule,
+    ServiceTreatment,
+    service_adjustment_schedule_state,
+)
+from src.domain.revisions import EntityRef, HistoricalSnapshot
 
 
 DAY = date(2026, 8, 21)
@@ -235,3 +244,101 @@ def test_sidebar_refreshes_default_delivery_mapping_and_filtered_counts(app):
         assert window._meal_summary_widgets[Meal.BREAKFAST].isHidden()
     finally:
         window.close()
+
+
+def test_sidebar_hides_only_meal_explicitly_marked_not_provided(app):
+    recorded_at = datetime(2026, 8, 20, tzinfo=UTC)
+
+    def change(identifier, treatment, *, delivery_on=None):
+        return ServiceAdjustmentChange(
+            UUID(identifier),
+            InclusiveDateRange(DAY, DAY),
+            (Meal.BREAKFAST,),
+            treatment,
+            delivery_on,
+            (),
+            "공휴일 운영 검토",
+            recorded_at,
+        )
+
+    not_provided = change(
+        "90000000-0000-0000-0000-000000000031",
+        ServiceTreatment.NOT_PROVIDED,
+    )
+    normal = change(
+        "90000000-0000-0000-0000-000000000032",
+        ServiceTreatment.NORMAL,
+    )
+    replacement = change(
+        "90000000-0000-0000-0000-000000000033",
+        ServiceTreatment.REPLACEMENT,
+        delivery_on=DAY - timedelta(days=1),
+    )
+    window = RosterWindow(_roster(), {}, school_calendar=_calendar())
+    window._set_day(DAY)
+    window.show()
+    try:
+        breakfast_column = next(
+            index for index, item in enumerate(window.table_model.columns)
+            if item.meal is Meal.BREAKFAST
+        )
+        status_before = window.table_model.index(0, breakfast_column).data()
+        assert window._meal_summary_widgets[Meal.BREAKFAST].isVisible()
+        assert window._meal_summary_widgets[Meal.LUNCH].isVisible()
+
+        window.set_service_adjustment_schedule(
+            ServiceAdjustmentSchedule((not_provided,))
+        )
+        assert window._meal_summary_widgets[Meal.BREAKFAST].isHidden()
+        assert window._meal_summary_widgets[Meal.LUNCH].isVisible()
+        assert window.table_model.index(0, breakfast_column).data() == status_before
+
+        window._set_day(DAY + timedelta(days=7))
+        assert window._meal_summary_widgets[Meal.BREAKFAST].isVisible()
+        window._set_day(DAY)
+        assert window._meal_summary_widgets[Meal.BREAKFAST].isHidden()
+
+        window.set_service_adjustment_schedule(
+            ServiceAdjustmentSchedule((not_provided, normal))
+        )
+        assert window._meal_summary_widgets[Meal.BREAKFAST].isVisible()
+        window.set_service_adjustment_schedule(
+            ServiceAdjustmentSchedule((replacement,))
+        )
+        assert window._meal_summary_widgets[Meal.BREAKFAST].isVisible()
+    finally:
+        window.close()
+
+
+def test_application_restores_saved_service_adjustments_from_snapshot():
+    from types import SimpleNamespace
+
+    from src.desktop_v2.application import DesktopStartupController
+
+    change = ServiceAdjustmentChange(
+        UUID("90000000-0000-0000-0000-000000000041"),
+        InclusiveDateRange(DAY, DAY),
+        (Meal.BREAKFAST,),
+        ServiceTreatment.NOT_PROVIDED,
+        None,
+        (),
+        "저장된 공휴일 미제공",
+        datetime(2026, 8, 20, tzinfo=UTC),
+    )
+    saved = ServiceAdjustmentSchedule((change,))
+    snapshot = HistoricalSnapshot(REVISION_ID, {
+        EntityRef(
+            SERVICE_ADJUSTMENT_SCHEDULE_KIND,
+            SERVICE_ADJUSTMENT_SCHEDULE_ID,
+        ): service_adjustment_schedule_state(saved),
+    })
+    received = []
+    window = SimpleNamespace(
+        set_service_adjustment_schedule=received.append,
+    )
+
+    DesktopStartupController._refresh_service_adjustment_schedule(
+        SimpleNamespace(), window, _roster(), snapshot=snapshot,
+    )
+
+    assert received == [saved]

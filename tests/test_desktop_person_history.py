@@ -253,7 +253,7 @@ def test_person_history_provider_uses_ui_projection_without_changing_shared_tabl
     dialog.close()
 
 
-def test_other_history_tabs_focus_values_and_keep_full_details():
+def test_info_history_has_no_lower_details_and_other_tabs_keep_details():
     from PySide6.QtWidgets import QPlainTextEdit
     from src.services.person_history import _INFO_HEADINGS, _COMPLAINT_HEADINGS
     from src.domain.status import resolve_status_history
@@ -281,9 +281,7 @@ def test_other_history_tabs_focus_values_and_keep_full_details():
     info = dialog.findChild(QTableView, "history_정보 변경")
     assert info.model().headings == ("항목", "이전 값", "변경 값", "변경자", "변경번호")
     assert info.model().rows[0] == ("주소", "이전 주소", "새 주소", "합성 담당자", "20261020-001")
-    detail = dialog.findChild(QPlainTextEdit, "historyDetails_정보 변경").toPlainText()
-    assert "적용일: 2026-10-01" in detail and "합성 정정 사유" in detail
-    assert str(person.person_id) not in detail
+    assert dialog.findChild(QPlainTextEdit, "historyDetails_정보 변경") is None
     complaint = dialog.findChild(QTableView, "history_민원")
     assert complaint.model().headings == ("접수일시", "식종", "접수 경로", "내용", "기록자")
     assert complaint.model().data(complaint.model().index(0, 3)) == text

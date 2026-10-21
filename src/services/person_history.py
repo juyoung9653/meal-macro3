@@ -67,8 +67,11 @@ def build_history_tables(
                 custom_labels[str(change.entity_id)] = state["name"]
     custom_labels.update({str(item.definition_id): item.name for item in roster.custom_fields})
     drivers = {str(item.driver_id): item.name for item in routing_state_from_snapshot(snapshot).drivers}
+    profiles: dict[UUID, Mapping] = {}
+    routing_events: dict[UUID, Mapping] = {}
     for record in sorted(revisions, key=lambda item: item.metadata.recorded_at):
         if is_roster_import_history(record):
+            _remember_routing_history(record, profiles, routing_events)
             continue
         metadata = record.metadata
         stamp = _kst(metadata.recorded_at)
@@ -90,7 +93,7 @@ def build_history_tables(
                             _mapping(old), _mapping(new)
                         ):
                             label = custom_labels.get(custom_field, custom_field)
-                            info.append((stamp, applied, code, str(target), name, "개인정보", f"사용자 정의: {label}", _text(custom_old), _text(custom_new), metadata.reason, metadata.actor.username))
+                            info.append((stamp, applied, code, str(target), name, "개인정보", f"사용자 정의: {label}", _custom_value_text(custom_old), _custom_value_text(custom_new), metadata.reason, metadata.actor.username))
                     else:
                         info.append((stamp, applied, code, str(target), name, "개인정보", _label(field), _text(old), _text(new), metadata.reason, metadata.actor.username))
             elif change.entity_kind == ROUTING_EVENT_KIND and target is not None:
@@ -101,6 +104,8 @@ def build_history_tables(
                     if target_rows is meals:
                         target_rows.append((stamp, applied, code, str(target), name, "식종별", "배송담당", _driver_text(old, drivers), _driver_text(new, drivers), intake, metadata.reason, metadata.actor.username))
                     else:
+                        if field == "jurisdiction" and change.before is None:
+                            old = _jurisdiction_before(after, profiles, routing_events)
                         target_rows.append((stamp, applied, code, str(target), name, "배송·주소", f"{_label(field)} 등록" if not before else _label(field), _text(old), _text(new), metadata.reason, metadata.actor.username))
             elif change.entity_kind == STATUS_EVENT_KIND:
                 meal = after.get("meal", before.get("meal", "공통"))
@@ -130,6 +135,7 @@ def build_history_tables(
                     old_text = _meal_text(field, old) if field == "기록" or field in before else ""
                     new_text = _meal_text(field, new) if field == "기록" or field in after else ""
                     meals.append((stamp, applied, code, str(target), name, _text(meal), f"{category}: {_label(field)}", old_text, new_text, intake, metadata.reason, metadata.actor.username))
+        _remember_routing_history(record, profiles, routing_events)
 
     complaints = _complaint_rows(roster, snapshot, revisions, person_id, historical_names)
     return {
@@ -137,6 +143,33 @@ def build_history_tables(
         "식종 변경": (_MEAL_HEADINGS, tuple(meals)),
         "민원": (_COMPLAINT_HEADINGS, tuple(complaints)),
     }
+
+
+def _remember_routing_history(record, profiles, routing_events):
+    for change in record.changes:
+        if change.entity_kind not in {PERSON_KIND, ROUTING_EVENT_KIND}:
+            continue
+        target = profiles if change.entity_kind == PERSON_KIND else routing_events
+        if change.after is None:
+            target.pop(change.entity_id, None)
+        else:
+            target[change.entity_id] = change.after
+
+
+def _jurisdiction_before(event, profiles, routing_events):
+    """An inserted event inherits the jurisdiction already effective that day."""
+    person_id = UUID(event["person_id"])
+    value = profiles.get(person_id, {}).get("jurisdiction")
+    prior = sorted(
+        (state for state in routing_events.values()
+         if state.get("person_id") == str(person_id)
+         and state.get("jurisdiction") is not None
+         and state["effective_on"] <= event["effective_on"]),
+        key=lambda state: (state["effective_on"], state["position"]),
+    )
+    for state in prior:
+        value = state["jurisdiction"]
+    return value
 
 
 def _complaint_rows(roster: RosterSnapshot, snapshot: HistoricalSnapshot, revisions: tuple[RevisionRecord, ...], person_id: UUID | None, historical_names: Mapping) -> list[tuple[object, ...]]:
@@ -183,6 +216,12 @@ def _text(value: object) -> str:
     if isinstance(value, (tuple, list)):
         return "; ".join(_text(item) for item in value)
     return str(value)
+
+
+def _custom_value_text(value: object) -> str:
+    if isinstance(value, Mapping) and value.get("kind") in {"scalar", "date"}:
+        return _text(value.get("value"))
+    return _text(value)
 
 
 def _meal_text(field: str, value: object) -> str:

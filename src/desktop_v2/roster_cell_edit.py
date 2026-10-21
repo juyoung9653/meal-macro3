@@ -29,6 +29,7 @@ from src.domain.household_shared import (
     profile_with_shared_routing,
 )
 from src.domain.profile_edits import build_person_profile_revision
+from src.domain.column_input_rules import load_rules, rule_for, validate_input
 from src.domain.revisions import RevisionActor
 from src.domain.roster import (
     CustomFieldDefinition,
@@ -44,6 +45,7 @@ from src.storage.database_session import (
 
 from .import_controller import current_windows_actor
 from .person_edit import _custom_value, _optional_text, _parse_optional_date
+from .column_input_rules import make_rule_editor
 
 
 _PROFILE_FIELDS = {
@@ -138,6 +140,9 @@ class RosterCellEditDelegate(QStyledItemDelegate):
     save_requested = Signal(object, str, str)
     editing_cancelled = Signal()
 
+    def set_input_rules(self, rules) -> None:
+        self._input_rules = rules
+
     def createEditor(self, parent, option, index):
         model = index.model()
         column = model.columns[index.column()]
@@ -153,7 +158,7 @@ class RosterCellEditDelegate(QStyledItemDelegate):
             editor = QPlainTextEdit(parent)
             editor.setTabChangesFocus(True)
         else:
-            editor = QLineEdit(parent)
+            editor = make_rule_editor(column.key, getattr(self, "_input_rules", {}), parent)
             if column.key == "birth_date" or (
                 column.custom_field is not None
                 and column.custom_field.field_type is CustomFieldType.DATE
@@ -335,6 +340,11 @@ class RosterCellEditController:
             )
             if updated_profile == editing_person.profile and not forced_routing_fields:
                 return RosterCellEditOutcome(RosterCellEditStatus.CANCELLED)
+            snapshot_reader = getattr(self._session.database, "snapshot", None)
+            rules = load_rules(snapshot_reader(roster.revision_id) if snapshot_reader else None)
+            value = roster_cell_text(replace(editing_person, profile=updated_profile), column_key,
+                                     next((item for item in roster.custom_fields if f"custom:{item.definition_id}" == column_key), None))
+            validate_input(column_key, value, rule_for(rules, column_key))
             build_revision = (
                 build_profile_correction_revision
                 if column_key in _ROUTING_PROFILE_FIELDS

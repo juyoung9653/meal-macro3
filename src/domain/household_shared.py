@@ -891,6 +891,25 @@ def build_household_shared_revision(
     )
 
 
+def row_add_comparison_days(roster, person_id, effective_on):
+    """Check the add date, delivery starts, and household membership boundaries."""
+    days = {effective_on}
+    households = {item.household_id for item in roster.memberships if item.person_id == person_id}
+    for enrollment in roster.enrollments:
+        if enrollment.person_id == person_id and enrollment.period.starts_on is not None:
+            days.add(enrollment.period.starts_on)
+    for membership in roster.memberships:
+        if membership.household_id not in households:
+            continue
+        if membership.period.starts_on is not None:
+            days.add(membership.period.starts_on)
+        if membership.period.ends_on is not None:
+            days.add(membership.period.ends_on)
+            if membership.period.ends_on < date.max:
+                days.add(membership.period.ends_on + timedelta(days=1))
+    return tuple(sorted(days))
+
+
 def expand_household_shared_revision(snapshot, record):
     """Expand explicit changed components before the ledger transaction commits."""
     selected = shared_columns_from_state(
@@ -903,12 +922,23 @@ def expand_household_shared_revision(snapshot, record):
             entities.pop(ref, None)
         else:
             entities[ref] = change.after
+    row_add = record.metadata.decisions.get("roster_row_change", {}).get("operation") == "add"
     # A deliberate settings revision already supplies every household value.
-    if "household_shared_setting" in record.metadata.decisions or any(
+    if not row_add and ("household_shared_setting" in record.metadata.decisions or any(
         c.entity_kind == HOUSEHOLD_SHARED_KIND for c in record.changes
-    ):
+    )):
         return record
     exceptions = shared_exceptions_from_state(snapshot.entity(HOUSEHOLD_SHARED_KIND, HOUSEHOLD_SHARED_ID))
+    if row_add:
+        pid = UUID(record.metadata.decisions["roster_row_change"]["person_id"])
+        proposed_state = entities.get(EntityRef(HOUSEHOLD_SHARED_KIND, HOUSEHOLD_SHARED_ID))
+        proposed_exceptions = shared_exceptions_from_state(proposed_state)
+        if (shared_columns_from_state(proposed_state) != selected
+                or not exceptions <= proposed_exceptions
+                or any(person_id != pid or key not in selected
+                       for person_id, key in proposed_exceptions - exceptions)):
+            raise ValueError("행 추가에서는 새 대상자의 공용 항목 예외만 지정할 수 있습니다.")
+        exceptions = proposed_exceptions
     if not selected and not exceptions:
         return record
     before = roster_from_historical_snapshot(snapshot)
@@ -931,30 +961,38 @@ def expand_household_shared_revision(snapshot, record):
     old_ids = {p.person_id for p in before.persons}
     # New memberships are an explicit merge boundary. Reject differing values
     # before propagation can turn a newly imported member into an arbitrary winner.
-    for person in after.persons:
-        household = after.household_for(person.person_id, on=on)
-        old_household = (
-            before.household_for(person.person_id, on=on)
-            if person.person_id in old_ids
-            else None
-        )
-        if household is None or (
-            old_household is not None
-            and old_household.household_id == household.household_id
-        ):
-            continue
-        for key in active:
-            if (person.person_id, key) in exceptions:
+    if row_add and (pid in old_ids or {p.person_id for p in after.persons} - old_ids != {pid}):
+        raise ValueError("행 추가 대상자가 올바르지 않습니다.")
+    comparison_days = row_add_comparison_days(after, pid, on) if row_add else (on,)
+    for comparison_day in comparison_days:
+        for person in after.persons:
+            household = after.household_for(person.person_id, on=comparison_day)
+            old_household = (
+                before.household_for(person.person_id, on=comparison_day)
+                if person.person_id in old_ids
+                else None
+            )
+            if household is None or (
+                old_household is not None
+                and old_household.household_id == household.household_id
+            ):
                 continue
-            values = {
-                _values(after, key, member.person_id, on, context=after_context)
-                for member in after.household_members(household.household_id, on=on)
-                if (member.person_id, key) not in exceptions
-            }
-            if len(values) > 1:
-                raise ValueError(
-                    f"가구 공용 값 충돌: {key}. 가구를 합치기 전에 공용 값을 일치시켜주세요."
-                )
+            for key in active:
+                if (person.person_id, key) in exceptions:
+                    continue
+                values = {
+                    _values(after, key, member.person_id, comparison_day, context=after_context)
+                    for member in after.household_members(household.household_id, on=comparison_day)
+                    if (member.person_id, key) not in exceptions
+                }
+                if len(values) > 1:
+                    raise ValueError(
+                        f"가구 공용 값 충돌: {key}. 가구를 합치기 전에 공용 값을 일치시켜주세요."
+                    )
+    # Registration must not rewrite existing members or create duplicate routing
+    # events. The merge check above already requires matching non-exempt values.
+    if row_add:
+        return record
     for person in after.persons:
         household = after.household_for(person.person_id, on=on)
         if household is None:

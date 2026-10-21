@@ -69,6 +69,7 @@ class RosterColumnLayout(QObject):
         *,
         column_key: str | None = None,
         rename_callback: Callable[[str], None] | None = None,
+        include_reset: bool = True,
     ) -> QMenu:
         menu = QMenu(parent or self._table)
         target = self._column_for_key(column_key) if column_key is not None else None
@@ -96,9 +97,10 @@ class RosterColumnLayout(QObject):
             action.triggered.connect(
                 lambda _checked=False, column_key=key: self._set_hidden(column_key, False)
             )
-        menu.addSeparator()
-        reset_action = menu.addAction("기본 열 구성으로 되돌리기")
-        reset_action.triggered.connect(self.reset)
+        if include_reset:
+            menu.addSeparator()
+            reset_action = menu.addAction("기본 열 구성으로 되돌리기")
+            reset_action.triggered.connect(self.reset)
         return menu
 
     def replace_columns(self, columns: Sequence[object]) -> None:

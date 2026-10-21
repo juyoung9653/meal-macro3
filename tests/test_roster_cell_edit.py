@@ -177,9 +177,9 @@ def test_controller_commits_once_skips_unchanged_and_does_not_copy_mobile_to_hou
     unchanged = controller.save(PERSON_A, "note", "첫 줄\n둘째 줄")
     assert unchanged.status is RosterCellEditStatus.CANCELLED
     assert records == []
-    changed = controller.save(PERSON_A, "mobile", "010-9999")
+    changed = controller.save(PERSON_A, "mobile", "010-9999-9999")
     assert changed.completed and len(records) == 1
-    assert changed.roster.person(PERSON_A).profile.mobile_phone == "010-9999"
+    assert changed.roster.person(PERSON_A).profile.mobile_phone == "010-9999-9999"
     assert changed.roster.person(PERSON_B).profile.mobile_phone is None
     assert changed.roster.person(PERSON_A).profile.note == roster.person(PERSON_A).profile.note
 

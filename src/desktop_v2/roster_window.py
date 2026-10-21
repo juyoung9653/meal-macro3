@@ -62,6 +62,10 @@ from src.domain.school_calendar import (
     SchoolLunchCalendar,
     SchoolLunchScheduleMissingError,
 )
+from src.domain.service_adjustments import (
+    ServiceAdjustmentSchedule,
+    ServiceTreatment,
+)
 from src.domain.status import MealStatus, StatusHistory
 from src.services.inactive_roster import inactive_person_ids
 from src.services.meal_service_availability import default_service_weekdays, regular_service_available
@@ -1357,6 +1361,8 @@ class RosterWindow(QMainWindow):
     custom_fields_requested = Signal()
     household_shared_column_requested = Signal(str)
     household_shared_exception_requested = Signal(object, str, bool)
+    column_input_rule_requested = Signal(str)
+    monthly_statistics_requested = Signal()
 
     def __init__(
         self,
@@ -1370,6 +1376,7 @@ class RosterWindow(QMainWindow):
         inactive_settings: QSettings | None = None,
         routing_state: RoutingState | None = None,
         school_calendar: SchoolLunchCalendar | None = None,
+        service_adjustment_schedule: ServiceAdjustmentSchedule | None = None,
         cell_edit_callback: Callable[[UUID, str, str], object] | None = None,
         imported_profile_fields: frozenset[str] = frozenset(),
     ) -> None:
@@ -1414,6 +1421,18 @@ class RosterWindow(QMainWindow):
         self._routing_state = RoutingState() if routing_state is None else routing_state
         self._school_calendar = (
             SchoolLunchCalendar() if school_calendar is None else school_calendar
+        )
+        if (
+            service_adjustment_schedule is not None
+            and not isinstance(service_adjustment_schedule, ServiceAdjustmentSchedule)
+        ):
+            raise TypeError(
+                "service_adjustment_schedule은 ServiceAdjustmentSchedule이어야 합니다."
+            )
+        self._service_adjustment_schedule = (
+            ServiceAdjustmentSchedule()
+            if service_adjustment_schedule is None
+            else service_adjustment_schedule
         )
         self._revision_display_code = revision_display_code
         if cell_edit_callback is not None:
@@ -1603,6 +1622,15 @@ class RosterWindow(QMainWindow):
         self._model.set_school_calendar(calendar)
         self._refresh_archive()
 
+    def set_service_adjustment_schedule(
+        self,
+        schedule: ServiceAdjustmentSchedule,
+    ) -> None:
+        if not isinstance(schedule, ServiceAdjustmentSchedule):
+            raise TypeError("schedule은 ServiceAdjustmentSchedule이어야 합니다.")
+        self._service_adjustment_schedule = schedule
+        self._after_model_reset()
+
     def _build_ui(self) -> None:
         root = QWidget()
         root_layout = QHBoxLayout(root)
@@ -1771,7 +1799,7 @@ class RosterWindow(QMainWindow):
         heading.addWidget(self._documents_button)
         self._more_button = QPushButton("더보기")
         self._more_button.setObjectName("quietAction")
-        self._more_button.setToolTip("명단 관리, 이력·민원, 내보내기, 기사 관리, 운영, 화면·설정")
+        self._more_button.setToolTip("명단 관리, 이력·민원, 통계, 내보내기, 기사 관리, 운영, 화면·설정")
         self._more_menu = self._build_more_menu()
         self._more_button.setCheckable(True)
         self._more_panel = MoreActionsPanel(self._more_menu, self)
@@ -1794,7 +1822,8 @@ class RosterWindow(QMainWindow):
         self._special_only_filter = QCheckBox("별도 설정만")
         self._special_only_filter.setToolTip("개인별 적용 배송 설정이 기본값과 다른 대상자만 표시합니다")
         self._special_only_filter.toggled.connect(self._on_special_only_changed)
-        filters.addWidget(self._special_only_filter)
+        self._special_only_filter.toggled.connect(self._special_only_action.setChecked)
+        self._special_only_action.toggled.connect(self._special_only_filter.setChecked)
         self._driver_households_button = QPushButton("기사별 가구")
         self._driver_households_button.setObjectName("quietAction")
         self._driver_households_button.setToolTip(
@@ -1989,14 +2018,16 @@ class RosterWindow(QMainWindow):
             ("명단 관리", (
                 ("_import_action", "Excel 명단 가져오기", self.import_review_requested.emit,
                  "신규 명단을 가져오거나 기존 명단을 업데이트합니다"),
-                ("_add_person_action", "명단 행 추가", lambda: self.person_add_requested.emit(self._model.meal),
-                 "새 대상자와 가입 식종을 명단에 추가합니다"),
             )),
             ("이력·민원", (
                 ("_revision_history_action", "전체 변경 이력", self.revision_history_requested.emit,
                  "저장된 모든 변경번호와 변경 내용을 읽기 전용으로 확인합니다"),
                 ("_complaint_history_action", "전체 민원", self.complaint_history_requested.emit,
                  "명단 검색·필터와 관계없이 모든 대상자의 민원을 확인합니다"),
+            )),
+            ("통계", (
+                ("_monthly_statistics_action", "월별 식수", self.monthly_statistics_requested.emit,
+                 "실제 배송일 기준 전체 명단의 월별 식수를 조회합니다"),
             )),
             ("내보내기", (
                 ("_current_sheet_export_action", "현재 시트 Excel 내보내기", self._request_current_sheet_export,
@@ -2019,6 +2050,8 @@ class RosterWindow(QMainWindow):
                  "조식·중식·석식 청구 단가와 적용일을 관리합니다"),
             )),
             ("화면·설정", (
+                ("_special_only_action", "별도 설정만", lambda checked=False: self._special_only_filter.setChecked(checked),
+                 "개인별 배송 설정이 다른 대상자만 표시합니다"),
                 ("_columns_action", "칼럼 설정", self._show_column_menu,
                  "칼럼 숨기기 해제, 기본 배치 복원, 사용자 항목 추가·삭제"),
                 ("_settings_action", "설정", self.settings_requested.emit,
@@ -2032,6 +2065,8 @@ class RosterWindow(QMainWindow):
             for attribute, text, callback, tooltip in entries:
                 action = submenu.addAction(text)
                 action.setToolTip(tooltip)
+                if attribute == "_special_only_action":
+                    action.setCheckable(True)
                 action.triggered.connect(callback)
                 setattr(self, attribute, action)
             if label == "명단 관리":
@@ -2209,12 +2244,22 @@ class RosterWindow(QMainWindow):
                 self,
                 column_key=column_key,
                 rename_callback=rename_callback,
+                include_reset=False,
             )
         )
-        menu.addSeparator()
-        self._add_household_shared_column_actions(menu, column)
-        manage = menu.addAction("사용자 항목 추가·삭제")
-        manage.triggered.connect(self.custom_fields_requested.emit)
+        if column is None:
+            menu.addSeparator()
+            self._add_household_shared_column_actions(menu, column)
+            manage = menu.addAction("사용자 항목 추가·삭제")
+            manage.triggered.connect(self.custom_fields_requested.emit)
+        elif column.meal is None:
+            menu.addSeparator()
+            input_action = menu.addAction("입력 제한 설정…")
+            if column.key == "delivery_settings" or (column.custom_field is not None and column.custom_field.field_type is CustomFieldType.CHOICE):
+                input_action.setEnabled(False)
+                input_action.setToolTip("직접 입력하는 칼럼에서 설정할 수 있습니다." if column.key == "delivery_settings" else "선택 목록형 항목은 사용자 항목의 선택지를 사용합니다.")
+            else:
+                input_action.triggered.connect(lambda checked=False, key=column.key: self.column_input_rule_requested.emit(key))
         if position is None or isinstance(position, bool):
             position = self._more_button.mapToGlobal(self._more_button.rect().bottomLeft())
         menu.exec(position)
@@ -2944,6 +2989,9 @@ class RosterWindow(QMainWindow):
             )
             summary.setVisible(
                 self._model.service_day.weekday() in delivery_weekdays
+                and self._service_adjustment_schedule.provision_for(
+                    meal, self._model.service_day
+                ).treatment is not ServiceTreatment.NOT_PROVIDED
                 and (
                     counts[MealStatus.DELIVERY.value] > 0
                     or counts[MealStatus.PAUSED.value] > 0

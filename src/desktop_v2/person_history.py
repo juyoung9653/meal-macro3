@@ -147,16 +147,17 @@ class PersonHistoryDialog(QDialog):
                 for index, width in enumerate(widths):
                     view.setColumnWidth(index, width)
             page_layout.addWidget(view, 1)
-            details = QPlainTextEdit()
-            details.setObjectName(f"historyDetails_{name}")
-            details.setReadOnly(True)
-            details.setPlaceholderText("기록을 선택하면 전체 내용을 확인할 수 있습니다.")
-            details.setMaximumHeight(170)
-            page_layout.addWidget(details)
-            view.selectionModel().currentRowChanged.connect(
-                lambda current, previous, table=view, target=details:
-                self._show_row_details(table, target, current)
-            )
+            if name != "정보 변경":
+                details = QPlainTextEdit()
+                details.setObjectName(f"historyDetails_{name}")
+                details.setReadOnly(True)
+                details.setPlaceholderText("기록을 선택하면 전체 내용을 확인할 수 있습니다.")
+                details.setMaximumHeight(170)
+                page_layout.addWidget(details)
+                view.selectionModel().currentRowChanged.connect(
+                    lambda current, previous, table=view, target=details:
+                    self._show_row_details(table, target, current)
+                )
             if rows:
                 view.selectRow(0)
             self.tabs.addTab(page, name)

@@ -75,6 +75,7 @@ def test_actual_dialog_controller_saves_profile_household_and_dated_drivers_atom
          *(AuditChange(DRIVER_KIND, driver.driver_id, ChangeOperation.INSERT, None, {"name": driver.name, "telephone": driver.telephone}) for driver in drivers)),
     )
     starts_on = date(2026, 11, 1)
+    delivery_start = date(2026, 11, 2)
     parent = QWidget()
     parent.table_model = RosterTableModel(roster, column_aliases={"school": "학교 이름", "mobile": "연락처"})
 
@@ -116,7 +117,8 @@ def test_actual_dialog_controller_saves_profile_household_and_dated_drivers_atom
             assert updated.household_for(new_person, on=starts_on).household_id == household.household_id
             state = routing_state_from_snapshot(session.database.snapshot(updated.revision_id))
             assert all(value is None for value in state.resolve(updated, new_person, date(2026, 10, 31)).driver_ids.values())
-            assert state.resolve(updated, new_person, starts_on).driver_ids == {Meal.DINNER: drivers[0].driver_id, Meal.BREAKFAST: None, Meal.LUNCH: drivers[1].driver_id}
+            assert state.resolve(updated, new_person, starts_on).driver_ids == {meal: None for meal in Meal}
+            assert state.resolve(updated, new_person, delivery_start).driver_ids == {Meal.DINNER: drivers[0].driver_id, Meal.BREAKFAST: None, Meal.LUNCH: drivers[1].driver_id}
             assert updated.meals_for(new_person, on=date(2026, 10, 31)) == ()
     finally:
         parent.close()

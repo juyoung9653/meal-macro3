@@ -43,18 +43,20 @@ def test_more_menu_actions_keep_their_original_workflows(window, action_name, si
 
 def test_more_menu_has_one_level_of_task_submenus(window):
     expected = {
-        "명단 관리": ("_import_action", "_add_person_action", "_archive_action"),
+        "명단 관리": ("_import_action", "_archive_action"),
         "이력·민원": ("_revision_history_action", "_complaint_history_action"),
+        "통계": ("_monthly_statistics_action",),
         "내보내기": ("_current_sheet_export_action", "_database_export_action"),
         "기사 관리": ("_drivers_action", "_driver_replacement_action"),
         "운영": ("_school_calendar_action", "_service_adjustment_action", "_unit_price_action"),
-        "화면·설정": ("_columns_action", "_settings_action"),
+        "화면·설정": ("_special_only_action", "_columns_action", "_settings_action"),
     }
     assert [action.text() for action in window._more_menu.actions()] == list(expected)
     for group in window._more_menu.actions():
         assert group.menu().actions() == [getattr(window, name) for name in expected[group.text()]]
         assert all(action.menu() is None for action in group.menu().actions())
     assert window._archive_action.isCheckable()
+    assert window._special_only_action.isCheckable()
 
 
 def test_current_sheet_export_action_emits_frozen_snapshot(window):
@@ -65,6 +67,13 @@ def test_current_sheet_export_action_emits_frozen_snapshot(window):
     assert snapshots[0].sheet_name == "명단"
     assert snapshots[0].headers
     assert len(snapshots[0].rows) == window.table_model.rowCount()
+
+
+def test_monthly_statistics_action_emits_once(window):
+    called = []
+    window.monthly_statistics_requested.connect(lambda: called.append(True))
+    window._monthly_statistics_action.trigger()
+    assert called == [True]
 
 
 def test_header_only_exposes_frequent_actions(window):
@@ -154,12 +163,21 @@ def test_row_actions_emit_selected_meal_and_person(window):
     window.person_add_requested.connect(added.append)
     window.person_delete_requested.connect(deleted.append)
     window._add_person_button.click()
-    window._add_person_action.trigger()
-    assert added == [Meal.LUNCH, Meal.LUNCH]
+    assert added == [Meal.LUNCH]
     person = window.table_model.person_at(0)
     menu = window._create_context_menu(person, column_key="name")
     menu.actions()[-1].trigger()
     assert deleted == [person.person_id]
+
+
+def test_more_filter_actions_sync_with_roster_state(window):
+    assert not window._include_hidden_filter.isChecked()
+    assert not window._special_only_filter.isChecked()
+    window._special_only_action.trigger()
+    assert window._special_only_filter.isChecked()
+    window._special_only_filter.setChecked(False)
+    assert not window._special_only_action.isChecked()
+    assert window._include_hidden_filter.parentWidget() is not None
 
 
 def test_column_settings_remains_reachable_from_more_menu(window, monkeypatch):
@@ -179,6 +197,26 @@ def test_column_settings_remains_reachable_from_more_menu(window, monkeypatch):
     assert len(menus) == 1
     assert "기본 열 구성으로 되돌리기" in {action.text() for action in menus[0].actions()}
     assert "사용자 항목 추가·삭제" in {action.text() for action in menus[0].actions()}
+
+
+def test_header_context_keeps_unhide_and_input_rule_but_moves_three_actions_to_more(window, monkeypatch):
+    from PySide6.QtCore import QPoint, QTimer
+
+    menus = []
+    original = window._column_layout.create_menu
+
+    def create_menu(parent, **kwargs):
+        menu = original(parent, **kwargs)
+        menus.append(menu)
+        QTimer.singleShot(0, menu.close)
+        return menu
+
+    monkeypatch.setattr(window._column_layout, "create_menu", create_menu)
+    window._show_column_menu(QPoint(0, 0), column_key="name")
+    texts = {action.text() for action in menus[-1].actions()}
+    assert "숨기기 해제" in texts
+    assert "입력 제한 설정…" in texts
+    assert not texts & {"기본 열 구성으로 되돌리기", "가구 공용 설정", "사용자 항목 추가·삭제"}
 
 
 def test_driver_view_uses_all_delivery_meals_and_current_date_despite_roster_filters(window, monkeypatch):

@@ -246,14 +246,6 @@ class RoutingChangeDialog(QDialog):
             layout.addWidget(self.whole_household)
             layout.addWidget(self.household_targets)
             self._refresh_household_targets()
-        if meal is not None:
-            shared_row = QHBoxLayout()
-            self.shared_driver = _driver_combo(state, None)
-            self.apply_shared = QPushButton("선택 식종에 같은 기사 지정")
-            self.apply_shared.clicked.connect(self._apply_shared)
-            shared_row.addWidget(self.shared_driver)
-            shared_row.addWidget(self.apply_shared)
-            layout.addLayout(shared_row)
         layout.addWidget(QLabel("이후 날짜에 예약된 담당 변경은 해당 날짜부터 그대로 적용됩니다."))
         if not state.drivers:
             layout.addWidget(
@@ -272,12 +264,6 @@ class RoutingChangeDialog(QDialog):
         buttons.accepted.connect(self._save)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
-
-    def _apply_shared(self):
-        selected = self.shared_driver.currentData()
-        for meal, check in self.meal_checks.items():
-            if check.isChecked():
-                self.drivers[meal].setCurrentIndex(self.drivers[meal].findData(selected))
 
     def _save(self):
         if self._meal is not None and not any(check.isChecked() for check in self.meal_checks.values()):

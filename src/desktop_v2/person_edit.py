@@ -43,6 +43,7 @@ from src.domain.household_shared import (
     build_profile_correction_revision,
 )
 from src.domain.profile_edits import profile_household_members
+from src.domain.column_input_rules import InputRule, load_rules, rule_for, validate_input, validate_profile_changes
 from src.domain.roster import CustomFieldDefinition, CustomFieldType, HouseholdDeliverySetting, Meal
 from src.storage.database_session import (
     AutomaticBackupResult,
@@ -51,6 +52,7 @@ from src.storage.database_session import (
 from src.services.meal_service_availability import default_delivery_weekdays, default_service_weekdays
 
 from .import_controller import current_windows_actor
+from .column_input_rules import column_key_for_profile_field, make_rule_editor
 from .theme import application_stylesheet, register_application_fonts
 
 _FIELD_LABELS = {
@@ -111,6 +113,7 @@ class PersonProfileEditDialog(QDialog):
         member_delivery_settings: dict[UUID, tuple[HouseholdDeliverySetting, ...]] | None = None,
         delivery_only: bool = False,
         defaults_roster: RosterSnapshot | None = None,
+        input_rules: dict[str, InputRule] | None = None,
     ) -> None:
         if not isinstance(person, Person):
             raise TypeError("person은 Person이어야 합니다.")
@@ -119,6 +122,7 @@ class PersonProfileEditDialog(QDialog):
         self._original = person.profile
         self._message_box = message_box
         self._custom_fields = custom_fields
+        self._input_rules = input_rules or {}
         self._household_members = household_members or (person,)
         self._original_delivery_settings = person.delivery_settings
         self._effective_delivery_settings = (
@@ -299,7 +303,7 @@ class PersonProfileEditDialog(QDialog):
             row = (index // 2) * 2
             field_label = QLabel(_FIELD_LABELS[key] + (" *" if key == "name" else ""))
             field_label.setObjectName("fieldLabel")
-            editor = QLineEdit()
+            editor = make_rule_editor(column_key_for_profile_field(key), self._input_rules)
             editor.setPlaceholderText(_PLACEHOLDERS.get(key, ""))
             editor.setClearButtonEnabled(True)
             editor.setObjectName(f"profileField_{key}")
@@ -531,7 +535,7 @@ class PersonProfileEditDialog(QDialog):
         for row, definition in enumerate(self._custom_fields, 1):
             key = f"custom:{definition.definition_id}"
             layout.addWidget(QLabel(definition.name), row, 0)
-            editor = QLineEdit()
+            editor = make_rule_editor(key, self._input_rules)
             editor.setObjectName(f"profileField_{key}")
             self._editors[key] = editor
             layout.addWidget(editor, row, 1)
@@ -577,7 +581,7 @@ class PersonProfileEditDialog(QDialog):
                 custom_values.pop(definition.definition_id, None)
             else:
                 custom_values[definition.definition_id] = value
-        return PersonProfile(
+        candidate = PersonProfile(
             name=self._editor_text("name"),
             birth_date=_parse_optional_date(self._editor_text("birth_date")),
             school_type=_optional_text(self._editor_text("school_type")),
@@ -600,6 +604,10 @@ class PersonProfileEditDialog(QDialog):
             note=_optional_text(self._editor_text("note")),
             custom_values=custom_values,
         )
+        validate_profile_changes(self._original, candidate, self._input_rules)
+        if self._household_phone_changed(candidate):
+            validate_input("mobile", candidate.mobile_phone or "", rule_for(self._input_rules, "mobile"))
+        return candidate
 
     def _refresh_form_state(self, *_args) -> None:
         cleared = self.cleared_fields()
@@ -789,6 +797,7 @@ class PersonProfileEditController:
                 },
                 delivery_only=delivery_only,
                 defaults_roster=roster,
+                input_rules=load_rules(snapshot),
             )
         else:
             dialog = self._dialog_type(editing_person, parent, message_box=self._message_box)
@@ -796,6 +805,12 @@ class PersonProfileEditController:
             return PersonProfileEditOutcome(PersonProfileEditStatus.CANCELLED)
         try:
             updated_profile = dialog.profile()
+            rules = load_rules(snapshot)
+            validate_profile_changes(editing_person.profile, updated_profile, rules)
+            if getattr(dialog, "apply_mobile_to_household", lambda: False)() and any(
+                member.profile.mobile_phone != updated_profile.mobile_phone for member in household_members
+            ):
+                validate_input("mobile", updated_profile.mobile_phone or "", rule_for(rules, "mobile"))
             updated_delivery_settings = getattr(dialog, "delivery_settings", lambda: None)()
             copy_delivery = getattr(dialog, "apply_delivery_to_household", lambda: False)()
             if copy_delivery and updated_delivery_settings is None:

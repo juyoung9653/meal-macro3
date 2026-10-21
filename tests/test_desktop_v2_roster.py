@@ -1747,6 +1747,14 @@ def _refresh_saved_roster(monkeypatch, window, roster):
         lambda _session, target, _roster, **_kwargs: target.set_school_calendar(_calendar()),
     )
     monkeypatch.setattr(
+        controller, "_refresh_service_adjustment_schedule",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        controller, "_refresh_column_input_rules",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
         controller, "_refresh_household_shared_columns", lambda *_args, **_kwargs: None,
     )
     monkeypatch.setattr(controller, "_imported_profile_fields", lambda *_args: frozenset())

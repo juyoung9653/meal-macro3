@@ -274,7 +274,7 @@ def test_application_routing_actions_use_selected_day_and_refresh(monkeypatch):
 
 
 
-def test_assignment_multi_meal_shared_driver_preserves_unchecked_meal(app):
+def test_assignment_multi_meal_individual_selectors_preserve_unchecked_meal(app):
     roster = base_roster()
     driver = Driver(uuid4(), "새 기사")
     dialog = RoutingChangeDialog(
@@ -283,8 +283,8 @@ def test_assignment_multi_meal_shared_driver_preserves_unchecked_meal(app):
     )
     dialog.day.setDate(QDate(DAY.year, DAY.month, DAY.day))
     dialog.meal_checks[Meal.DINNER].setChecked(True)
-    dialog.shared_driver.setCurrentIndex(1)
-    dialog.apply_shared.click()
+    dialog.drivers[Meal.BREAKFAST].setCurrentIndex(1)
+    dialog.drivers[Meal.DINNER].setCurrentIndex(1)
     dialog._save()
     assert dialog.request().driver_ids == {
         Meal.BREAKFAST: driver.driver_id, Meal.DINNER: driver.driver_id,
@@ -791,8 +791,8 @@ def test_multi_meal_assignment_real_controller_preserves_before_date_and_other_m
         def exec(self):
             self.day.setDate(QDate(DAY.year, DAY.month, DAY.day))
             self.meal_checks[Meal.DINNER].setChecked(True)
-            self.shared_driver.setCurrentIndex(1)
-            self.apply_shared.click()
+            self.drivers[Meal.BREAKFAST].setCurrentIndex(1)
+            self.drivers[Meal.DINNER].setCurrentIndex(1)
             self._save()
             return self.result()
 

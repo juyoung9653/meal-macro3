@@ -7,13 +7,14 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from uuid import UUID
 
+from .delivery_dates import validate_actual_delivery_date
 from .intake import IntakeChannel
 from .projections import roster_audit_changes, status_event_audit_change
 from .revisions import RevisionActor, RevisionMetadata, RevisionRecord, RevisionSource
 from .roster import InclusiveDateRange, Meal, MealEnrollment, RosterSnapshot, canonical_meals
 from .status import MealStatus, StatusEvent
 
-MEAL_STATUS_CHANGE_POLICY_VERSION = 1
+MEAL_STATUS_CHANGE_POLICY_VERSION = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,6 +36,7 @@ def build_meal_status_revision(
     recorded_at: datetime,
     revision_id: UUID,
     event_ids: Mapping[Meal, UUID],
+    periods_by_meal: Mapping[Meal, InclusiveDateRange] | None = None,
     reason: str = "배송 상태 변경",
     intake_channel: IntakeChannel | None = None,
 ) -> PreparedMealStatusRevision:
@@ -50,12 +52,9 @@ def build_meal_status_revision(
         raise TypeError("status는 MealStatus여야 합니다.")
     if intake_channel is not None and not isinstance(intake_channel, IntakeChannel):
         raise TypeError("접수 경로는 IntakeChannel이어야 합니다.")
-    if not isinstance(period, InclusiveDateRange):
-        raise TypeError("period는 InclusiveDateRange여야 합니다.")
-    if period.starts_on is None:
-        raise ValueError("배송 상태 변경에는 시작일이 필요합니다.")
-    if status is MealStatus.PAUSED and period.ends_on is None:
-        raise ValueError("일시중지는 종료일이 필요합니다.")
+    periods = _resolve_periods(
+        current_roster, selected_meals, status, period, periods_by_meal
+    )
     if not isinstance(actor, RevisionActor):
         raise TypeError("actor는 RevisionActor여야 합니다.")
     if not isinstance(recorded_at, datetime):
@@ -75,8 +74,11 @@ def build_meal_status_revision(
     if len(set(ids_by_meal.values())) != len(ids_by_meal):
         raise ValueError("상태 사건 ID는 중복될 수 없습니다.")
 
-    active_meals = set(current_roster.meals_for(person_id, on=period.starts_on))
-    not_enrolled = tuple(meal for meal in selected_meals if meal not in active_meals)
+    not_enrolled = tuple(
+        meal
+        for meal in selected_meals
+        if meal not in current_roster.meals_for(person_id, on=periods[meal].starts_on)
+    )
     if status is not MealStatus.DELIVERY and not_enrolled:
         labels = " · ".join(meal.value for meal in not_enrolled)
         raise ValueError(
@@ -91,7 +93,7 @@ def build_meal_status_revision(
                 enrollments,
                 person_id,
                 meal,
-                period,
+                periods[meal],
             )
             if updated != enrollments:
                 auto_enrolled.append(meal)
@@ -107,7 +109,6 @@ def build_meal_status_revision(
         custom_fields=current_roster.custom_fields,
         delivery_defaults=current_roster.delivery_defaults,
     )
-    period_text = _period_text(period)
     events = tuple(
         StatusEvent(
             event_id=ids_by_meal[meal],
@@ -115,9 +116,9 @@ def build_meal_status_revision(
             person_id=person_id,
             meal=meal,
             status=status,
-            period=period,
+            period=periods[meal],
             recorded_at=recorded_at,
-            source_text=f"{meal.value} {status.value} · {period_text}",
+            source_text=f"{meal.value} {status.value} · {_period_text(periods[meal])}",
         )
         for meal in selected_meals
     )
@@ -130,8 +131,19 @@ def build_meal_status_revision(
             "person_id": str(person_id),
             "meals": [meal.value for meal in selected_meals],
             "status": status.value,
-            "starts_on": period.starts_on.isoformat(),
-            "ends_on": (None if period.ends_on is None else period.ends_on.isoformat()),
+            "starts_on": _common_value(periods, "starts_on"),
+            "ends_on": _common_value(periods, "ends_on"),
+            "periods": {
+                meal.value: {
+                    "starts_on": periods[meal].starts_on.isoformat(),
+                    "ends_on": (
+                        periods[meal].ends_on.isoformat()
+                        if periods[meal].ends_on is not None
+                        else None
+                    ),
+                }
+                for meal in selected_meals
+            },
             "auto_enrolled_meals": [meal.value for meal in auto_enrolled],
         }
     }
@@ -141,7 +153,7 @@ def build_meal_status_revision(
         revision_id=revision_id,
         parent_revision_id=current_roster.revision_id,
         recorded_at=recorded_at,
-        effective_on=period.starts_on,
+        effective_on=min(item.starts_on for item in periods.values()),
         actor=actor,
         reason=reason,
         source=RevisionSource.UI,
@@ -176,6 +188,7 @@ def build_batch_meal_status_revision(
     recorded_at: datetime,
     revision_id: UUID,
     event_ids: Mapping[tuple[UUID, Meal], UUID],
+    periods_by_meal: Mapping[Meal, InclusiveDateRange] | None = None,
     intake_channel: IntakeChannel | None = None,
 ) -> PreparedBatchMealStatusRevision:
     """Validate every target and prepare one atomic revision for the whole batch."""
@@ -195,12 +208,6 @@ def build_batch_meal_status_revision(
         raise TypeError("status는 MealStatus여야 합니다.")
     if intake_channel is not None and not isinstance(intake_channel, IntakeChannel):
         raise TypeError("접수 경로는 IntakeChannel이어야 합니다.")
-    if not isinstance(period, InclusiveDateRange):
-        raise TypeError("period는 InclusiveDateRange여야 합니다.")
-    if period.starts_on is None:
-        raise ValueError("배송 상태 변경에는 시작일이 필요합니다.")
-    if status is MealStatus.PAUSED and period.ends_on is None:
-        raise ValueError("일시중지는 종료일이 필요합니다.")
     if not isinstance(actor, RevisionActor):
         raise TypeError("actor는 RevisionActor여야 합니다.")
     if not isinstance(recorded_at, datetime):
@@ -217,13 +224,22 @@ def build_batch_meal_status_revision(
         if not isinstance(meal, Meal):
             raise TypeError("적용할 식종을 확인해주세요.")
         grouped.setdefault(person_id, []).append(meal)
+    all_selected_meals = canonical_meals(
+        tuple(dict.fromkeys(meal for _person_id, meal in targets))
+    )
+    periods = _resolve_periods(
+        current_roster, all_selected_meals, status, period, periods_by_meal
+    )
     enrollments = current_roster.enrollments
     events: list[StatusEvent] = []
     enrolled: list[tuple[UUID, Meal]] = []
     for person_id, meals in grouped.items():
         selected_meals = canonical_meals(meals)
-        active_meals = set(current_roster.meals_for(person_id, on=period.starts_on))
-        not_enrolled = tuple(meal for meal in selected_meals if meal not in active_meals)
+        not_enrolled = tuple(
+            meal
+            for meal in selected_meals
+            if meal not in current_roster.meals_for(person_id, on=periods[meal].starts_on)
+        )
         if status is not MealStatus.DELIVERY and not_enrolled:
             labels = " · ".join(meal.value for meal in not_enrolled)
             raise ValueError(
@@ -231,11 +247,12 @@ def build_batch_meal_status_revision(
             )
         if status is MealStatus.DELIVERY:
             for meal in selected_meals:
-                updated = _cover_delivery_period(enrollments, person_id, meal, period)
+                updated = _cover_delivery_period(
+                    enrollments, person_id, meal, periods[meal]
+                )
                 if updated != enrollments:
                     enrolled.append((person_id, meal))
                     enrollments = updated
-        period_text = _period_text(period)
         events.extend(
             StatusEvent(
                 event_id=event_ids[(person_id, meal)],
@@ -243,9 +260,9 @@ def build_batch_meal_status_revision(
                 person_id=person_id,
                 meal=meal,
                 status=status,
-                period=period,
+                period=periods[meal],
                 recorded_at=recorded_at,
-                source_text=f"{meal.value} {status.value} · {period_text}",
+                source_text=f"{meal.value} {status.value} · {_period_text(periods[meal])}",
             )
             for meal in selected_meals
         )
@@ -269,8 +286,19 @@ def build_batch_meal_status_revision(
                 {"person_id": str(pid), "meal": meal.value} for pid, meal in targets
             ],
             "status": status.value,
-            "starts_on": period.starts_on.isoformat(),
-            "ends_on": period.ends_on.isoformat() if period.ends_on else None,
+            "starts_on": _common_value(periods, "starts_on"),
+            "ends_on": _common_value(periods, "ends_on"),
+            "periods": {
+                meal.value: {
+                    "starts_on": periods[meal].starts_on.isoformat(),
+                    "ends_on": (
+                        periods[meal].ends_on.isoformat()
+                        if periods[meal].ends_on is not None
+                        else None
+                    ),
+                }
+                for meal in all_selected_meals
+            },
             "auto_enrolled_targets": [
                 {"person_id": str(pid), "meal": meal.value}
                 for pid, meal in enrolled
@@ -283,7 +311,7 @@ def build_batch_meal_status_revision(
         revision_id=revision_id,
         parent_revision_id=current_roster.revision_id,
         recorded_at=recorded_at,
-        effective_on=period.starts_on,
+        effective_on=min(item.starts_on for item in periods.values()),
         actor=actor,
         reason=f"배송 상태 일괄 변경 · {len(grouped)}명 {len(targets)}개",
         source=RevisionSource.UI,
@@ -295,6 +323,54 @@ def build_batch_meal_status_revision(
     return PreparedBatchMealStatusRevision(
         working, tuple(events), RevisionRecord(metadata, changes), tuple(enrolled)
     )
+
+
+def _resolve_periods(
+    roster: RosterSnapshot,
+    meals: tuple[Meal, ...],
+    status: MealStatus,
+    common_period: InclusiveDateRange,
+    periods_by_meal: Mapping[Meal, InclusiveDateRange] | None,
+) -> dict[Meal, InclusiveDateRange]:
+    if periods_by_meal is None:
+        if not isinstance(common_period, InclusiveDateRange):
+            raise TypeError("period는 InclusiveDateRange여야 합니다.")
+        periods = {meal: common_period for meal in meals}
+    else:
+        periods = dict(periods_by_meal)
+        if set(periods) != set(meals):
+            raise ValueError("선택한 식종마다 적용 기간이 필요합니다.")
+        if any(not isinstance(item, InclusiveDateRange) for item in periods.values()):
+            raise TypeError("식종별 기간은 InclusiveDateRange여야 합니다.")
+    for meal, selected_period in periods.items():
+        if selected_period.starts_on is None:
+            raise ValueError(f"{meal.value} 배송 상태 변경에는 시작일이 필요합니다.")
+        if status is MealStatus.PAUSED and selected_period.ends_on is None:
+            raise ValueError(f"{meal.value} 일시중지는 종료일이 필요합니다.")
+        validate_actual_delivery_date(
+            roster.delivery_defaults,
+            meal,
+            selected_period.starts_on,
+            field_name="시작일",
+        )
+        if selected_period.ends_on is not None:
+            validate_actual_delivery_date(
+                roster.delivery_defaults,
+                meal,
+                selected_period.ends_on,
+                field_name="종료일",
+            )
+    return periods
+
+
+def _common_value(
+    periods: Mapping[Meal, InclusiveDateRange], field: str
+) -> str | None:
+    values = {getattr(period, field) for period in periods.values()}
+    if len(values) != 1:
+        return None
+    value = next(iter(values))
+    return value.isoformat() if value is not None else None
 
 
 def _cover_delivery_period(

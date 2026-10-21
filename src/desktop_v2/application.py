@@ -15,6 +15,7 @@ from src.domain.roster import Meal
 from src.domain.status import resolve_status_history
 from src.domain.revisions import format_revision_timestamp
 from src.domain.school_calendar import school_lunch_calendar_from_snapshot
+from src.domain.service_adjustments import service_adjustment_schedule_from_snapshot
 from src.storage.database_session import DatabaseSession
 from src.importing.profile_history import import_profiles_from_snapshot
 
@@ -56,6 +57,10 @@ from .person_edit import PersonProfileEditController
 from .roster_cell_edit import RosterCellEditController, is_roster_routing_cell
 from .roster_row_edit import RosterRowEditController
 from .provider_settings import ProviderSettingsController
+from .column_input_rules import ColumnInputRuleController
+from src.domain.column_input_rules import load_rules
+from .monthly_statistics import MonthlyStatisticsDialog
+from src.services.monthly_meal_statistics import build_monthly_meal_statistics
 from .delivery_defaults import DeliveryDefaultsController
 from .initial_roster_date import InitialRosterDateController
 from .missing_household_repair import MissingHouseholdRepairController
@@ -301,7 +306,11 @@ class DesktopStartupController:
         if callable(path_setter):
             path_setter(session.path)
         self._refresh_school_calendar(session, window, roster, snapshot=preparation.snapshot)
+        self._refresh_service_adjustment_schedule(
+            session, window, roster, snapshot=preparation.snapshot,
+        )
         self._refresh_household_shared_columns(session, window, roster, snapshot=preparation.snapshot)
+        self._refresh_column_input_rules(window, preparation.snapshot)
         routing_setter = getattr(window, "set_routing_state", None)
         if callable(routing_setter):
             routing_setter(routing_state_from_snapshot(preparation.snapshot))
@@ -338,6 +347,8 @@ class DesktopStartupController:
             ("person_delete_requested", lambda person_id: launch(self._run_roster_row_delete, session, window, person_id)),
             ("relocation_requested", lambda person_id: launch(self._run_relocation, session, window, person_id)),
             ("cell_edit_requested", lambda person_id, column_key, text: launch(self._run_roster_cell_edit, session, window, person_id, column_key, text)),
+            ("column_input_rule_requested", lambda column_key: launch(self._run_column_input_rule, session, window, column_key)),
+            ("monthly_statistics_requested", lambda: launch(self._run_monthly_statistics, session, window)),
             ("household_shared_column_requested", lambda column_key: launch(self._run_household_shared_column, session, window, column_key)),
             ("household_shared_exception_requested", lambda person_id, column_key, enabled: launch(self._run_household_shared_exception, session, window, person_id, column_key, enabled)),
         ):
@@ -592,6 +603,39 @@ class DesktopStartupController:
         outcome = yield from invoke(controller.run, parent=window, **options)
         if outcome.roster is not None:
             self._replace_roster_if_changed(session, window, outcome.roster)
+
+    @dialog_workflow
+    def _run_monthly_statistics(self, session, window):
+        def load(year, month):
+            current = session.database.current_roster()
+            if current is None:
+                raise ValueError("현재 명단이 없습니다.")
+            snapshot = session.database.snapshot(current.revision_id)
+            return run_progress_task(
+                lambda: build_monthly_meal_statistics(snapshot, year, month),
+                title="월별 식수를 계산하는 중입니다",
+                message="실제 배송일별 식수를 집계하는 중입니다.",
+                parent=window if isinstance(window, QWidget) else None,
+            )
+
+        dialog = MonthlyStatisticsDialog(window.table_model.service_day, load, parent=window)
+        yield DialogRequest(dialog)
+
+    @dialog_workflow
+    def _run_column_input_rule(self, session, window, column_key):
+        column = next((item for item in window.table_model.columns if item.key == column_key), None)
+        if column is None:
+            return
+        changed = (yield from invoke(ColumnInputRuleController(session).run, column_key, column.label, parent=window))
+        if changed:
+            self._replace_roster(session, window, session.database.current_roster())
+
+    @staticmethod
+    def _refresh_column_input_rules(window, snapshot) -> None:
+        delegate = getattr(window, "_cell_edit_delegate", None)
+        setter = getattr(delegate, "set_input_rules", None)
+        if callable(setter):
+            setter(load_rules(snapshot))
 
     @dialog_workflow
     def _run_household_shared_column(self, session, window, column_key) -> None:
@@ -1177,7 +1221,11 @@ class DesktopStartupController:
             revision_display_code=preparation.revision_display_code,
         )
         self._refresh_school_calendar(session, window, roster, snapshot=preparation.snapshot)
+        self._refresh_service_adjustment_schedule(
+            session, window, roster, snapshot=preparation.snapshot,
+        )
         self._refresh_household_shared_columns(session, window, roster, snapshot=preparation.snapshot)
+        self._refresh_column_input_rules(window, preparation.snapshot)
         routing_setter = getattr(window, "set_routing_state", None)
         if callable(routing_setter):
             routing_setter(routing_state_from_snapshot(preparation.snapshot))
@@ -1228,6 +1276,16 @@ class DesktopStartupController:
             setter(school_lunch_calendar_from_snapshot(
                 snapshot
             ))
+
+    @staticmethod
+    def _refresh_service_adjustment_schedule(
+        session, window, roster, *, snapshot=None,
+    ) -> None:
+        setter = getattr(window, "set_service_adjustment_schedule", None)
+        if callable(setter):
+            if snapshot is None:
+                snapshot = session.database.snapshot(roster.revision_id)
+            setter(service_adjustment_schedule_from_snapshot(snapshot))
 
     @staticmethod
     def _histories(session: DatabaseSession, roster):

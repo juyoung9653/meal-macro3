@@ -48,19 +48,22 @@ def _actor() -> RevisionActor:
     return RevisionActor("tester", "S-1-5-21-test")
 
 
-def test_one_revision_applies_same_pause_period_to_multiple_enrolled_meals():
+def test_one_revision_applies_per_meal_pause_periods_to_multiple_enrolled_meals():
     roster = _roster(
         MealEnrollment(PERSON_ID, Meal.BREAKFAST),
         MealEnrollment(PERSON_ID, Meal.LUNCH),
     )
-    period = InclusiveDateRange(STARTS_ON, date(2026, 9, 5))
+    periods = {
+        Meal.BREAKFAST: InclusiveDateRange(date(2026, 9, 4), date(2026, 9, 4)),
+        Meal.LUNCH: InclusiveDateRange(STARTS_ON, date(2026, 9, 4)),
+    }
 
     prepared = build_meal_status_revision(
         roster,
         PERSON_ID,
         (Meal.LUNCH, Meal.BREAKFAST),
         MealStatus.PAUSED,
-        period,
+        periods[Meal.LUNCH],
         actor=_actor(),
         recorded_at=RECORDED_AT,
         revision_id=NEW_REVISION_ID,
@@ -68,6 +71,7 @@ def test_one_revision_applies_same_pause_period_to_multiple_enrolled_meals():
             Meal.BREAKFAST: BREAKFAST_EVENT_ID,
             Meal.LUNCH: LUNCH_EVENT_ID,
         },
+        periods_by_meal=periods,
     )
 
     assert tuple(event.meal for event in prepared.events) == (
@@ -75,7 +79,7 @@ def test_one_revision_applies_same_pause_period_to_multiple_enrolled_meals():
         Meal.LUNCH,
     )
     assert all(event.status is MealStatus.PAUSED for event in prepared.events)
-    assert all(event.period == period for event in prepared.events)
+    assert {event.meal: event.period for event in prepared.events} == periods
     assert prepared.auto_enrolled_meals == ()
     assert prepared.snapshot.enrollments == roster.enrollments
     assert {change.entity_kind for change in prepared.record.changes} == {
@@ -86,8 +90,18 @@ def test_one_revision_applies_same_pause_period_to_multiple_enrolled_meals():
         "person_id": str(PERSON_ID),
         "meals": (Meal.BREAKFAST.value, Meal.LUNCH.value),
         "status": MealStatus.PAUSED.value,
-        "starts_on": STARTS_ON.isoformat(),
-        "ends_on": "2026-09-05",
+        "starts_on": None,
+        "ends_on": "2026-09-04",
+        "periods": {
+            Meal.BREAKFAST.value: {
+                "starts_on": "2026-09-04",
+                "ends_on": "2026-09-04",
+            },
+            Meal.LUNCH.value: {
+                "starts_on": "2026-09-01",
+                "ends_on": "2026-09-04",
+            },
+        },
         "auto_enrolled_meals": (),
     }
 
@@ -98,7 +112,7 @@ def test_single_change_records_selected_intake_channel_in_revision_metadata():
         PERSON_ID,
         (Meal.BREAKFAST,),
         MealStatus.STOPPED,
-        InclusiveDateRange(STARTS_ON, None),
+        InclusiveDateRange(date(2026, 9, 4), None),
         actor=_actor(),
         recorded_at=RECORDED_AT,
         revision_id=NEW_REVISION_ID,
@@ -111,14 +125,17 @@ def test_single_change_records_selected_intake_channel_in_revision_metadata():
 
 def test_delivery_auto_enrolls_unenrolled_meal_for_requested_period():
     roster = _roster(MealEnrollment(PERSON_ID, Meal.BREAKFAST))
-    period = InclusiveDateRange(STARTS_ON, date(2026, 9, 5))
+    periods = {
+        Meal.BREAKFAST: InclusiveDateRange(date(2026, 9, 4), date(2026, 9, 4)),
+        Meal.DINNER: InclusiveDateRange(STARTS_ON, date(2026, 9, 3)),
+    }
 
     prepared = build_meal_status_revision(
         roster,
         PERSON_ID,
         (Meal.BREAKFAST, Meal.DINNER),
         MealStatus.DELIVERY,
-        period,
+        periods[Meal.DINNER],
         actor=_actor(),
         recorded_at=RECORDED_AT,
         revision_id=NEW_REVISION_ID,
@@ -126,6 +143,7 @@ def test_delivery_auto_enrolls_unenrolled_meal_for_requested_period():
             Meal.BREAKFAST: BREAKFAST_EVENT_ID,
             Meal.DINNER: DINNER_EVENT_ID,
         },
+        periods_by_meal=periods,
     )
 
     assert prepared.auto_enrolled_meals == (Meal.DINNER,)
@@ -185,7 +203,7 @@ def test_pause_or_stop_rejects_meal_not_enrolled_on_start_date():
     for status, period in (
         (
             MealStatus.PAUSED,
-            InclusiveDateRange(STARTS_ON, date(2026, 9, 5)),
+            InclusiveDateRange(STARTS_ON, date(2026, 9, 3)),
         ),
         (MealStatus.STOPPED, InclusiveDateRange(STARTS_ON, None)),
     ):
@@ -201,3 +219,34 @@ def test_pause_or_stop_rejects_meal_not_enrolled_on_start_date():
                 revision_id=NEW_REVISION_ID,
                 event_ids={Meal.DINNER: DINNER_EVENT_ID},
             )
+
+
+def test_invalid_one_of_per_meal_dates_rejects_the_whole_revision():
+    roster = _roster(
+        MealEnrollment(PERSON_ID, Meal.DINNER),
+        MealEnrollment(PERSON_ID, Meal.BREAKFAST),
+    )
+    with pytest.raises(ValueError, match="조식.*금요일"):
+        build_meal_status_revision(
+            roster,
+            PERSON_ID,
+            (Meal.DINNER, Meal.BREAKFAST),
+            MealStatus.STOPPED,
+            InclusiveDateRange(STARTS_ON, None),
+            actor=_actor(),
+            recorded_at=RECORDED_AT,
+            revision_id=NEW_REVISION_ID,
+            event_ids={
+                Meal.DINNER: DINNER_EVENT_ID,
+                Meal.BREAKFAST: BREAKFAST_EVENT_ID,
+            },
+            periods_by_meal={
+                Meal.DINNER: InclusiveDateRange(STARTS_ON, None),
+                Meal.BREAKFAST: InclusiveDateRange(STARTS_ON, None),
+            },
+        )
+    assert roster.revision_id == CURRENT_REVISION_ID
+    assert roster.enrollments == (
+        MealEnrollment(PERSON_ID, Meal.DINNER),
+        MealEnrollment(PERSON_ID, Meal.BREAKFAST),
+    )

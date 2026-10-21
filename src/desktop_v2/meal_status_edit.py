@@ -37,6 +37,12 @@ from src.domain.roster import (
     Person,
     RosterSnapshot,
 )
+from src.domain.delivery_dates import (
+    actual_delivery_weekdays,
+    next_actual_delivery_date,
+    validate_actual_delivery_date,
+    weekday_text,
+)
 from src.domain.status import (
     MealStatus,
     StatusHistory,
@@ -142,6 +148,9 @@ class MealStatusChangeDialog(QDialog):
         self._meal_cards: dict[Meal, QFrame] = {}
         self._current_labels: dict[Meal, QLabel] = {}
         self._status_buttons: dict[MealStatus, QPushButton] = {}
+        self._starts_on_by_meal: dict[Meal, WheelSafeDateEdit] = {}
+        self._ends_on_by_meal: dict[Meal, WheelSafeDateEdit] = {}
+        self._continue_by_meal: dict[Meal, QCheckBox] = {}
         self._last_status: MealStatus | None = None
         register_application_fonts()
         self.setObjectName("mealStatusChangeDialog")
@@ -159,7 +168,12 @@ class MealStatusChangeDialog(QDialog):
         ):
             self._meal_checks[meal].setChecked(True)
         self._status_buttons[initial_status].setChecked(True)
-        self._continue.setChecked(initial_status is not MealStatus.PAUSED)
+        for check in self._continue_by_meal.values():
+            check.setChecked(initial_status is not MealStatus.PAUSED)
+        # Compatibility for older dialog adapters that inspect one common period.
+        self._starts_on = self._starts_on_by_meal[initial_meal]
+        self._ends_on = self._ends_on_by_meal[initial_meal]
+        self._continue = self._continue_by_meal[initial_meal]
         self._last_status = initial_status
         self._refresh_state()
 
@@ -173,20 +187,38 @@ class MealStatusChangeDialog(QDialog):
         raise ValueError("변경할 상태를 선택해야 합니다.")
 
     def selected_period(self) -> InclusiveDateRange:
-        starts_on = _python_date(self._starts_on)
-        ends_on = None if self._continue.isChecked() else _python_date(self._ends_on)
-        period = InclusiveDateRange(starts_on, ends_on)
-        if self.selected_status() is MealStatus.PAUSED and ends_on is None:
-            raise ValueError("일시중지는 종료일이 필요합니다.")
-        return period
+        periods = self.selected_periods()
+        return periods[next(meal for meal in Meal if meal in periods)]
+
+    def selected_periods(self) -> dict[Meal, InclusiveDateRange]:
+        status = self.selected_status()
+        periods = {}
+        for meal in self.selected_meals():
+            starts_on = _python_date(self._starts_on_by_meal[meal])
+            ends_on = (
+                None
+                if self._continue_by_meal[meal].isChecked()
+                else _python_date(self._ends_on_by_meal[meal])
+            )
+            if status is MealStatus.PAUSED and ends_on is None:
+                raise ValueError(f"{meal.value} 일시중지는 종료일이 필요합니다.")
+            periods[meal] = InclusiveDateRange(starts_on, ends_on)
+        return periods
 
     def selected_intake_channel(self) -> IntakeChannel | None:
         value = self._intake_channel.currentData()
         return None if value is None else IntakeChannel(value)
 
     def _build_ui(self, anchor_day: date) -> None:
-        root = QVBoxLayout(self)
-        root.setContentsMargins(18, 18, 18, 16)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(12, 12, 12, 12)
+        outer.setSpacing(8)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        body = QWidget()
+        root = QVBoxLayout(body)
+        root.setContentsMargins(6, 6, 6, 4)
         root.setSpacing(11)
 
         header = QFrame()
@@ -204,7 +236,9 @@ class MealStatusChangeDialog(QDialog):
         )
         title.setObjectName("workspaceTitle")
         header_layout.addWidget(title)
-        guide = QLabel("여러 식종을 선택하면 같은 상태와 기간이 한 번에 적용됩니다.")
+        guide = QLabel(
+            "여러 식종에 같은 상태를 적용하면서 시작일·종료일은 식종별로 입력합니다."
+        )
         guide.setObjectName("workspaceSubtitle")
         guide.setWordWrap(True)
         header_layout.addWidget(guide)
@@ -285,18 +319,43 @@ class MealStatusChangeDialog(QDialog):
         period_layout.addWidget(_section_label("기간"))
         period_grid = QGridLayout()
         period_grid.setHorizontalSpacing(12)
-        period_grid.addWidget(_field_label("시작일"), 0, 0)
-        period_grid.addWidget(_field_label("종료일"), 0, 1)
-        self._starts_on = _date_edit(anchor_day)
-        self._ends_on = _date_edit(anchor_day)
-        self._starts_on.dateChanged.connect(self._refresh_state)
-        self._ends_on.dateChanged.connect(self._refresh_state)
-        period_grid.addWidget(self._starts_on, 1, 0)
-        period_grid.addWidget(self._ends_on, 1, 1)
+        period_grid.addWidget(_field_label("식종"), 0, 0)
+        period_grid.addWidget(_field_label("시작일"), 0, 1)
+        period_grid.addWidget(_field_label("종료일"), 0, 2)
+        period_grid.addWidget(_field_label("기간"), 0, 3)
+        for row, meal in enumerate((Meal.DINNER, Meal.BREAKFAST, Meal.LUNCH), 1):
+            default_day = next_actual_delivery_date(
+                self._roster.delivery_defaults, meal, anchor_day
+            )
+            starts_on = _date_edit(default_day)
+            ends_on = _date_edit(default_day)
+            starts_on.setObjectName(f"statusStartsOn_{meal.name}")
+            ends_on.setObjectName(f"statusEndsOn_{meal.name}")
+            starts_on.dateChanged.connect(self._refresh_state)
+            ends_on.dateChanged.connect(self._refresh_state)
+            no_end = QCheckBox("종료일 없음")
+            no_end.toggled.connect(
+                lambda checked, selected=meal: self._on_continue_toggled(
+                    selected, checked
+                )
+            )
+            label = QLabel(
+                f"{meal.value}\n실제 배송: "
+                + _compact_weekday_text(
+                    actual_delivery_weekdays(self._roster.delivery_defaults, meal)
+                )
+            )
+            label.setObjectName("muted")
+            label.setWordWrap(True)
+            label.setMaximumWidth(170)
+            period_grid.addWidget(label, row, 0)
+            period_grid.addWidget(starts_on, row, 1)
+            period_grid.addWidget(ends_on, row, 2)
+            period_grid.addWidget(no_end, row, 3)
+            self._starts_on_by_meal[meal] = starts_on
+            self._ends_on_by_meal[meal] = ends_on
+            self._continue_by_meal[meal] = no_end
         period_layout.addLayout(period_grid)
-        self._continue = QCheckBox("종료일 없음 · 계속")
-        self._continue.toggled.connect(self._on_continue_toggled)
-        period_layout.addWidget(self._continue)
         root.addWidget(period_frame)
 
         summary = QFrame()
@@ -315,10 +374,13 @@ class MealStatusChangeDialog(QDialog):
         summary_layout.addWidget(summary_scroll)
         root.addWidget(summary)
 
+        scroll.setWidget(body)
+        outer.addWidget(scroll, 1)
+
         self._error = QLabel()
         self._error.setObjectName("errorMessage")
         self._error.setWordWrap(True)
-        root.addWidget(self._error)
+        outer.addWidget(self._error)
 
         actions = QHBoxLayout()
         actions.addStretch(1)
@@ -330,18 +392,22 @@ class MealStatusChangeDialog(QDialog):
         self._save_button.setObjectName("primaryAction")
         self._save_button.clicked.connect(self._save)
         actions.addWidget(self._save_button)
-        root.addLayout(actions)
+        outer.addLayout(actions)
 
-    def _on_continue_toggled(self, checked: bool) -> None:
-        self._ends_on.setEnabled(not checked)
+    def _on_continue_toggled(self, meal: Meal, checked: bool) -> None:
+        self._ends_on_by_meal[meal].setEnabled(
+            self._meal_checks[meal].isChecked() and not checked
+        )
         self._refresh_state()
 
     def _on_status_clicked(self, status: MealStatus) -> None:
         if status is not self._last_status and status is MealStatus.STOPPED:
-            self._continue.blockSignals(True)
-            self._continue.setChecked(True)
-            self._continue.blockSignals(False)
-            self._ends_on.setEnabled(False)
+            for meal in Meal:
+                no_end = self._continue_by_meal[meal]
+                no_end.blockSignals(True)
+                no_end.setChecked(True)
+                no_end.blockSignals(False)
+                self._ends_on_by_meal[meal].setEnabled(False)
         self._last_status = status
         self._refresh_state()
 
@@ -352,21 +418,26 @@ class MealStatusChangeDialog(QDialog):
             card.style().polish(card)
 
         status = self._checked_status()
-        if status is MealStatus.PAUSED and self._continue.isChecked():
-            self._continue.blockSignals(True)
-            self._continue.setChecked(False)
-            self._continue.blockSignals(False)
-            self._ends_on.setEnabled(True)
-        self._continue.setEnabled(status is not MealStatus.PAUSED)
+        for meal in Meal:
+            selected = self._meal_checks[meal].isChecked()
+            no_end = self._continue_by_meal[meal]
+            if status is MealStatus.PAUSED and selected and no_end.isChecked():
+                no_end.blockSignals(True)
+                no_end.setChecked(False)
+                no_end.blockSignals(False)
+            self._starts_on_by_meal[meal].setEnabled(selected)
+            no_end.setEnabled(selected and status is not MealStatus.PAUSED)
+            self._ends_on_by_meal[meal].setEnabled(
+                selected and not no_end.isChecked()
+            )
 
-        starts_on = _python_date(self._starts_on)
         for meal, label in self._current_labels.items():
             if self._seed_targets is not None:
                 count = sum(selected is meal for _, selected in self._seed_targets)
                 label.setText(f"명단에서 선택한 셀 {count}개")
             else:
                 label.setText(
-                    f"현재  {_current_state(self._roster, self._histories, self._person, meal, starts_on)}"
+                    f"현재  {_current_state(self._roster, self._histories, self._person, meal, _python_date(self._starts_on_by_meal[meal]))}"
                 )
 
         error = self._validation_error()
@@ -395,9 +466,26 @@ class MealStatusChangeDialog(QDialog):
         if status is None:
             return "변경할 상태를 선택해주세요."
         try:
-            period = self.selected_period()
+            periods = self.selected_periods()
         except ValueError as error:
             return str(error)
+        for meal, period in periods.items():
+            try:
+                validate_actual_delivery_date(
+                    self._roster.delivery_defaults,
+                    meal,
+                    period.starts_on,
+                    field_name="시작일",
+                )
+                if period.ends_on is not None:
+                    validate_actual_delivery_date(
+                        self._roster.delivery_defaults,
+                        meal,
+                        period.ends_on,
+                        field_name="종료일",
+                    )
+            except (TypeError, ValueError) as error:
+                return str(error)
         if status is MealStatus.DELIVERY:
             return None if self.selected_targets() else "적용할 항목을 선택해주세요."
         targets = self.selected_targets()
@@ -406,7 +494,9 @@ class MealStatusChangeDialog(QDialog):
         invalid = [
             (pid, meal)
             for pid, meal in targets
-            if meal not in self._roster.meals_for(pid, on=period.starts_on)
+            if meal not in self._roster.meals_for(
+                pid, on=periods[meal].starts_on
+            )
         ]
         if invalid:
             labels = " · ".join(
@@ -422,10 +512,9 @@ class MealStatusChangeDialog(QDialog):
         if not meals or status is None:
             return "식종과 상태를 선택하면 변경 결과가 표시됩니다."
         try:
-            period = self.selected_period()
+            periods = self.selected_periods()
         except ValueError:
             return "기간을 확인해주세요."
-        period_text = _period_text(period)
         targets = self.selected_targets()
         requested = self._requested_targets()
         lines = [
@@ -439,7 +528,7 @@ class MealStatusChangeDialog(QDialog):
                 {meal: history} if history else {},
                 person,
                 meal,
-                period.starts_on,
+                periods[meal].starts_on,
             )
             if (person_id, meal) not in targets:
                 lines.append(
@@ -452,7 +541,7 @@ class MealStatusChangeDialog(QDialog):
                 else _status_text(status)
             )
             lines.append(
-                f"{person.profile.name} · {meal.value}   {current} → {after}   ·   {period_text}"
+                f"{person.profile.name} · {meal.value}   {current} → {after}   ·   {_period_text(periods[meal])}"
             )
         return "\n".join(lines)
 
@@ -465,8 +554,8 @@ class MealStatusChangeDialog(QDialog):
         )
         targets = dict.fromkeys(seeds)
         if self._same_household.isChecked():
-            on = _python_date(self._starts_on)
             for person_id, meal in seeds:
+                on = _python_date(self._starts_on_by_meal[meal])
                 household_ids = {
                     m.household_id
                     for m in self._roster.memberships
@@ -481,11 +570,13 @@ class MealStatusChangeDialog(QDialog):
         targets = self._requested_targets()
         bulk = self._same_household.isChecked() or self._seed_targets is not None
         if bulk and self._checked_status() in (MealStatus.PAUSED, MealStatus.STOPPED):
-            on = _python_date(self._starts_on)
             return tuple(
                 (pid, meal)
                 for pid, meal in targets
-                if meal in self._roster.meals_for(pid, on=on)
+                if meal
+                in self._roster.meals_for(
+                    pid, on=_python_date(self._starts_on_by_meal[meal])
+                )
             )
         return targets
 
@@ -609,6 +700,13 @@ class MealStatusChangeController:
             return MealStatusChangeOutcome(MealStatusChangeStatus.CANCELLED)
         try:
             meals = dialog.selected_meals()
+            periods_getter = getattr(dialog, "selected_periods", None)
+            common_period = dialog.selected_period()
+            periods = (
+                periods_getter()
+                if callable(periods_getter)
+                else {meal: common_period for meal in meals}
+            )
             intake_getter = getattr(dialog, "selected_intake_channel", None)
             intake_channel = intake_getter() if callable(intake_getter) else None
             target_getter = getattr(dialog, "selected_targets", None)
@@ -618,15 +716,21 @@ class MealStatusChangeController:
                 for selected_person_id, _meal in selected
             )
             if is_batch:
+                used_meals = {meal for _person_id, meal in selected}
                 prepared = build_batch_meal_status_revision(
                     roster,
                     selected,
                     dialog.selected_status(),
-                    dialog.selected_period(),
+                    common_period,
                     actor=self._actor_provider(),
                     recorded_at=self._recorded_at_provider(),
                     revision_id=self._revision_id_factory(),
                     event_ids={target: self._event_id_factory() for target in selected},
+                    periods_by_meal={
+                        meal: period
+                        for meal, period in periods.items()
+                        if meal in used_meals
+                    },
                     intake_channel=intake_channel,
                 )
             else:
@@ -635,11 +739,12 @@ class MealStatusChangeController:
                     person_id,
                     meals,
                     dialog.selected_status(),
-                    dialog.selected_period(),
+                    common_period,
                     actor=self._actor_provider(),
                     recorded_at=self._recorded_at_provider(),
                     revision_id=self._revision_id_factory(),
                     event_ids={meal: self._event_id_factory() for meal in meals},
+                    periods_by_meal=periods,
                     intake_channel=intake_channel,
                 )
             backup_result = save_revision(self._session, prepared.record, parent=parent)
@@ -668,6 +773,11 @@ class MealStatusChangeController:
 
 def _status_text(status: MealStatus) -> str:
     return "중지" if status is MealStatus.STOPPED else status.value
+
+
+def _compact_weekday_text(weekdays: tuple[int, ...]) -> str:
+    text = weekday_text(weekdays)
+    return text if text == "없음" else text.replace("요일", "") + "요일"
 
 
 def _current_state(

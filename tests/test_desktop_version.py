@@ -28,7 +28,7 @@ def test_entry_exposes_version_without_changing_settings_identity(monkeypatch, t
     try:
         assert entry.main() == expected
         assert errors == []
-        assert app.applicationVersion() == APP_VERSION == "0.1.2"
+        assert app.applicationVersion() == APP_VERSION == "0.1.3"
         assert app.organizationName() == "분당구"
         assert app.applicationName() == "급식 배송 운영 SQLite v2"
     finally:
@@ -54,8 +54,8 @@ def test_packaging_uses_shared_windows_resource_and_stable_name(monkeypatch):
     resource = captured["version"]
     assert isinstance(resource, VSVersionInfo)
     assert resource.ffi.fileVersionMS == resource.ffi.productVersionMS == 1
-    assert resource.ffi.fileVersionLS == resource.ffi.productVersionLS == 131072
-    assert WINDOWS_VERSION == (0, 1, 2, 0)
+    assert resource.ffi.fileVersionLS == resource.ffi.productVersionLS == 196608
+    assert WINDOWS_VERSION == (0, 1, 3, 0)
     assert captured["name"] == "meal_delivery"
     assert captured["console"] is False
     strings = {item.name: item.val for item in resource.kids[0].kids[0].kids}

@@ -16,7 +16,7 @@ from PySide6.QtWidgets import QApplication, QDialog, QLabel, QPushButton, QWidge
 from src.desktop_v2.roster_row_edit import RosterRowCreateDialog, RosterRowCreateRequest, RosterRowDeleteDialog, RosterRowEditController, RosterRowEditStatus
 from src.desktop_v2.application import DesktopStartupController
 from src.domain.delivery_routing import DRIVER_KIND, routing_state_from_snapshot
-from src.domain.roster import CustomFieldDefinition, CustomFieldType, Household, HouseholdMembership, Meal, Person, PersonProfile
+from src.domain.roster import CustomFieldDefinition, CustomFieldType, Household, HouseholdDeliverySetting, HouseholdMembership, Meal, Person, PersonProfile, standard_delivery_defaults
 from src.domain.projections import roster_audit_changes
 from src.domain.revisions import AuditChange, ChangeOperation, RevisionActor, RevisionMetadata, RevisionRecord, RevisionSource
 from src.domain.roster import RosterSnapshot
@@ -64,7 +64,7 @@ def test_create_dialog_collects_simplified_profile_custom_fields_and_meals(app):
         "name": "새 대상", "birth_date": "20150302", "school_name": "학교",
         "grade": "3", "jurisdiction": "정자동", "address": "도로 1",
         "detail_address": "101호",
-        "telephone": "031-123", "mobile_phone": "010-123", "note": "메모",
+        "telephone": "031-123-4567", "mobile_phone": "010-1234-5678", "note": "메모",
     }.items():
         editor = dialog._editors[key]
         editor.setPlainText(value) if key == "note" else editor.setText(value)
@@ -118,6 +118,56 @@ def test_start_date_ignores_wheel_but_keeps_keyboard_and_calendar(app):
     assert editor.date() != original
     assert editor.calendarPopup()
     dialog.close()
+
+
+def test_create_dialog_uses_per_meal_actual_delivery_dates_and_earliest_household_match(app):
+    matched_on = []
+    dialog = RosterRowCreateDialog(
+        Meal.BREAKFAST,
+        date(2026, 10, 7),
+        household_matcher=lambda _profile, starts_on: matched_on.append(starts_on),
+    )
+    dialog._editors["name"].setText("식종별 시작")
+    dialog._meal_checks[Meal.DINNER].setChecked(True)
+    assert dialog._start_date_edits[Meal.DINNER].date() == QDate(2026, 10, 7)
+    assert dialog._start_date_edits[Meal.BREAKFAST].date() == QDate(2026, 10, 9)
+    dialog._start_date_edits[Meal.DINNER].setDate(QDate(2026, 10, 8))
+
+    dialog._accept_valid()
+
+    assert dialog.result() == QDialog.DialogCode.Accepted
+    assert matched_on == [date(2026, 10, 8)]
+    assert dialog.request().meal_starts_on == {
+        Meal.DINNER: date(2026, 10, 8),
+        Meal.BREAKFAST: date(2026, 10, 9),
+    }
+    assert dialog.request().starts_on == date(2026, 10, 8)
+
+
+def test_create_dialog_rejects_invalid_manual_meal_date_and_uses_reconfigured_mapping(app):
+    defaults = tuple(
+        HouseholdDeliverySetting(
+            item.meal,
+            (5, 6) if item.meal is Meal.BREAKFAST else item.weekdays,
+            delivery_weekdays=(0, 1, 2, 3, 4, 0, 0)
+            if item.meal is Meal.BREAKFAST
+            else item.delivery_weekdays,
+        )
+        for item in standard_delivery_defaults()
+    )
+    dialog = RosterRowCreateDialog(
+        Meal.BREAKFAST,
+        date(2026, 10, 7),
+        delivery_defaults=defaults,
+    )
+    dialog._editors["name"].setText("재설정 요일")
+    assert dialog.start_date_edit.date() == QDate(2026, 10, 12)
+    dialog.start_date_edit.setDate(QDate(2026, 10, 8))
+
+    dialog._accept_valid()
+
+    assert dialog.result() != QDialog.DialogCode.Accepted
+    assert "월요일" in dialog._error.text()
 
 
 def test_create_dialog_keeps_typed_values_open_when_household_match_is_ambiguous(app):
@@ -289,7 +339,7 @@ def test_controller_ambiguous_household_reports_error_without_saving(app):
 
         def request(self):
             return RosterRowCreateRequest(
-                PersonProfile("신규", mobile_phone="010 1234 5678"),
+                PersonProfile("신규", mobile_phone="010-1234-5678"),
                 (Meal.LUNCH,), date(2026, 10, 5), {}, None, {},
             )
 

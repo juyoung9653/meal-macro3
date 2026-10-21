@@ -863,9 +863,9 @@ def test_cell_controller_returns_committed_expanded_roster_and_failed_save_is_un
             "try_backup_now",
             lambda: AutomaticBackupResult(error=OSError("backup offline")),
         )
-        saved = controller.save(first.person_id, "mobile", "changed")
+        saved = controller.save(first.person_id, "mobile", "010-2345-6789")
         assert saved.completed and warnings
-        assert saved.roster.person(second.person_id).profile.mobile_phone == "changed"
+        assert saved.roster.person(second.person_id).profile.mobile_phone == "010-2345-6789"
         previous = session.database.current_roster()
         failed = controller.save(first.person_id, "birth_date", "invalid")
         assert not failed.completed and failures

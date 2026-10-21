@@ -9,7 +9,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 from PySide6.QtCore import QDate, Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QDialog
+from PySide6.QtWidgets import QApplication, QDialog, QLabel
 
 from src.desktop_v2.meal_status_edit import MealStatusChangeDialog
 from src.domain.roster import (
@@ -127,7 +127,7 @@ def test_open_ended_stop_keeps_selected_meal_set(app: QApplication):
     app.processEvents()
 
     assert dialog.selected_meals() == (Meal.BREAKFAST, Meal.DINNER)
-    assert dialog.selected_period() == InclusiveDateRange(ANCHOR_DAY, None)
+    assert dialog.selected_period() == InclusiveDateRange(date(2026, 9, 4), None)
     assert "중지" in dialog._summary_text.text()
     dialog.close()
 
@@ -144,7 +144,7 @@ def test_selecting_stop_after_pause_defaults_to_no_end_and_keeps_entered_date(
         Meal.BREAKFAST,
         MealStatus.PAUSED,
     )
-    entered_end = ANCHOR_DAY + timedelta(days=6)
+    entered_end = ANCHOR_DAY + timedelta(days=10)
     dialog._ends_on.setDate(
         QDate(entered_end.year, entered_end.month, entered_end.day)
     )
@@ -153,7 +153,7 @@ def test_selecting_stop_after_pause_defaults_to_no_end_and_keeps_entered_date(
     app.processEvents()
 
     assert dialog.selected_status() is MealStatus.STOPPED
-    assert dialog.selected_period() == InclusiveDateRange(ANCHOR_DAY, None)
+    assert dialog.selected_period() == InclusiveDateRange(date(2026, 9, 4), None)
     assert dialog._ends_on.date() == QDate(
         entered_end.year, entered_end.month, entered_end.day
     )
@@ -162,7 +162,10 @@ def test_selecting_stop_after_pause_defaults_to_no_end_and_keeps_entered_date(
     dialog._continue.click()
     dialog._meal_checks[Meal.DINNER].setChecked(True)
     app.processEvents()
-    assert dialog.selected_period() == InclusiveDateRange(ANCHOR_DAY, entered_end)
+    assert dialog.selected_period() == InclusiveDateRange(
+        date(2026, 9, 4), entered_end
+    )
+    assert dialog.selected_periods()[Meal.DINNER].ends_on is None
     dialog.close()
 
 
@@ -222,6 +225,68 @@ def test_disabled_batch_meal_card_does_not_toggle(app: QApplication):
     QTest.mouseClick(lunch, Qt.MouseButton.LeftButton)
     assert not lunch.isChecked()
     dialog.close()
+
+
+def test_selected_meals_keep_independent_valid_periods(app: QApplication):
+    roster = _roster()
+    dialog = MealStatusChangeDialog(
+        roster.person(PERSON_ID),
+        roster,
+        _histories(),
+        ANCHOR_DAY,
+        Meal.DINNER,
+        MealStatus.DELIVERY,
+    )
+    try:
+        dialog._meal_checks[Meal.BREAKFAST].setChecked(True)
+        assert dialog.selected_periods() == {
+            Meal.BREAKFAST: InclusiveDateRange(date(2026, 9, 4), None),
+            Meal.DINNER: InclusiveDateRange(ANCHOR_DAY, None),
+        }
+        assert dialog._save_button.isEnabled()
+        assert any(
+            "실제 배송: 금요일" in label.text()
+            for label in dialog.findChildren(QLabel)
+        )
+    finally:
+        dialog.close()
+
+
+def test_invalid_calendar_date_disables_save_and_deselect_keeps_meal_period(app: QApplication):
+    roster = _roster()
+    dialog = MealStatusChangeDialog(
+        roster.person(PERSON_ID),
+        roster,
+        _histories(),
+        ANCHOR_DAY,
+        Meal.BREAKFAST,
+        MealStatus.PAUSED,
+    )
+    try:
+        breakfast_start = dialog._starts_on_by_meal[Meal.BREAKFAST]
+        breakfast_end = dialog._ends_on_by_meal[Meal.BREAKFAST]
+        breakfast_start.setFocus()
+        QTest.keyClick(
+            breakfast_start, Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier
+        )
+        QTest.keyClicks(breakfast_start, "2026.09.03")
+        QTest.keyClick(breakfast_start, Qt.Key.Key_Enter)
+        breakfast_end.setDate(QDate(2026, 9, 4))
+        assert breakfast_start.date() == QDate(2026, 9, 3)
+        assert not dialog._save_button.isEnabled()
+        assert "조식 시작일" in dialog._error.text()
+        assert "금요일" in dialog._error.text()
+
+        breakfast_start.setDate(QDate(2026, 9, 4))
+        breakfast_end.setDate(QDate(2026, 9, 11))
+        dialog._meal_checks[Meal.BREAKFAST].setChecked(False)
+        dialog._meal_checks[Meal.BREAKFAST].setChecked(True)
+        assert dialog.selected_periods()[Meal.BREAKFAST] == InclusiveDateRange(
+            date(2026, 9, 4), date(2026, 9, 11)
+        )
+        assert dialog._save_button.isEnabled()
+    finally:
+        dialog.close()
 
 
 def test_intake_channel_is_optional_and_returns_selected_channel(app: QApplication):

@@ -34,6 +34,7 @@ from src.domain.revisions import (
 from src.domain.roster import Meal, RosterSnapshot
 from src.domain.school_calendar import (
     SchoolLunchCalendarError,
+    SchoolLunchScheduleMissingError,
     school_lunch_calendar_from_snapshot,
 )
 from src.domain.service_adjustments import (
@@ -131,14 +132,18 @@ def prepare_physical_delivery_data(
     period_start: date,
     period_end: date,
     meals: Sequence[Meal],
+    *,
+    missing_lunch_schedule_as_zero: bool = False,
 ) -> PreparedDeliveryReportData:
     """Prepare physical shipments without report grouping or driver requirements.
 
     ``reports`` is empty; shipments and calculation provenance use the same
     entitlement rules and evaluation window as delivery reports.
+    Monthly statistics may omit lunch on dates without a reviewed schedule.
     """
     return _prepare_delivery_data(
-        snapshot, period_start, period_end, meals, staff_sort=None, build_reports=False
+        snapshot, period_start, period_end, meals, staff_sort=None, build_reports=False,
+        missing_lunch_schedule_as_zero=missing_lunch_schedule_as_zero,
     )
 
 
@@ -150,6 +155,7 @@ def _prepare_delivery_data(
     *,
     staff_sort: Mapping[Meal | str, Sequence[str]] | None,
     build_reports: bool,
+    missing_lunch_schedule_as_zero: bool = False,
 ) -> PreparedDeliveryReportData:
     if not isinstance(snapshot, HistoricalSnapshot):
         raise TypeError("snapshot은 HistoricalSnapshot이어야 합니다.")
@@ -221,7 +227,10 @@ def _prepare_delivery_data(
                         service_on,
                         school_calendar,
                     )
-                except SchoolLunchCalendarError:
+                except SchoolLunchCalendarError as error:
+                    if (missing_lunch_schedule_as_zero and meal is Meal.LUNCH
+                            and isinstance(error, SchoolLunchScheduleMissingError)):
+                        continue
                     if candidate_delivery is not None and _contains(
                         period_start,
                         period_end,

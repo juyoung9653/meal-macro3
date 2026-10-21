@@ -35,6 +35,7 @@ from src.domain.revisions import RevisionMetadata, RevisionRecord, RevisionSourc
 from src.storage.database_session import DatabaseSession
 
 DAY = date(2026, 9, 9)
+BREAKFAST_DAY = date(2026, 9, 11)
 ACTOR = RevisionActor("담당자", "batch-test-sid")
 NOW = datetime(2026, 9, 9, tzinfo=UTC)
 
@@ -119,7 +120,38 @@ def test_exact_cells_do_not_become_person_meal_cross_product_and_show_exclusions
         view.close()
 
 
+def test_household_expansion_uses_each_meals_own_start_date(app, roster):
+    view = MealStatusChangeDialog(
+        roster.persons[0],
+        roster,
+        {},
+        DAY,
+        Meal.DINNER,
+        MealStatus.DELIVERY,
+    )
+    try:
+        view._meal_checks[Meal.BREAKFAST].setChecked(True)
+        view._same_household.setChecked(True)
+        assert set(view.selected_targets()) == {
+            (roster.persons[0].person_id, Meal.DINNER),
+            (roster.persons[1].person_id, Meal.DINNER),
+            (roster.persons[0].person_id, Meal.BREAKFAST),
+        }
+        assert view.selected_periods()[Meal.DINNER].starts_on == DAY
+        assert view.selected_periods()[Meal.BREAKFAST].starts_on == BREAKFAST_DAY
+    finally:
+        view.close()
+
+
 def prepare(roster, targets, status=MealStatus.DELIVERY, **kwargs):
+    meals = tuple(dict.fromkeys(meal for _person_id, meal in targets))
+    periods = {
+        meal: InclusiveDateRange(
+            BREAKFAST_DAY if meal is Meal.BREAKFAST else DAY,
+            BREAKFAST_DAY if meal is Meal.BREAKFAST else DAY,
+        )
+        for meal in meals
+    }
     return build_batch_meal_status_revision(
         roster,
         targets,
@@ -129,6 +161,7 @@ def prepare(roster, targets, status=MealStatus.DELIVERY, **kwargs):
         recorded_at=NOW,
         revision_id=uuid4(),
         event_ids=kwargs.get("event_ids", {target: uuid4() for target in targets}),
+        periods_by_meal=kwargs.get("periods_by_meal", periods),
     )
 
 
@@ -211,6 +244,14 @@ def test_batch_matches_single_change_semantics_and_diffs_once(
         for person in (second, first)
     )
     ids = {target: uuid4() for target in selected}
+    periods = {
+        meal: (
+            InclusiveDateRange(BREAKFAST_DAY, BREAKFAST_DAY)
+            if meal is Meal.BREAKFAST
+            else period
+        )
+        for meal in targets
+    }
     revision_id = uuid4()
     expected_roster = roster
     expected_events = []
@@ -227,6 +268,7 @@ def test_batch_matches_single_change_semantics_and_diffs_once(
             recorded_at=NOW,
             revision_id=revision_id,
             event_ids={meal: ids[(person.person_id, meal)] for meal in meals},
+            periods_by_meal={meal: periods[meal] for meal in meals},
         )
         expected_roster = single.snapshot
         expected_events.extend(single.events)
@@ -253,6 +295,7 @@ def test_batch_matches_single_change_semantics_and_diffs_once(
         recorded_at=NOW,
         revision_id=revision_id,
         event_ids=ids,
+        periods_by_meal=periods,
     )
 
     assert result.snapshot == expected_roster
@@ -325,6 +368,12 @@ def test_controller_persists_each_target_in_one_revision_and_reopens(
         def selected_period(self):
             return InclusiveDateRange(DAY, None)
 
+        def selected_periods(self):
+            return {
+                Meal.DINNER: InclusiveDateRange(DAY, None),
+                Meal.BREAKFAST: InclusiveDateRange(BREAKFAST_DAY, None),
+            }
+
         def selected_intake_channel(self):
             return IntakeChannel.EMAIL
 
@@ -358,11 +407,72 @@ def test_controller_persists_each_target_in_one_revision_and_reopens(
                 history = session.database.status_history(pid, meal)
                 assert len(history.events) == 1
                 assert history.events[0].revision_id == saved_id
+                assert history.events[0].period.starts_on == (
+                    BREAKFAST_DAY if meal is Meal.BREAKFAST else DAY
+                )
             assert not session.database.status_history(
                 roster.persons[2].person_id, Meal.DINNER
             ).events
             old = session.database.snapshot(roster.revision_id)
             assert all(ref.entity_kind != "status.event" for ref in old.entities)
+
+
+def test_controller_invalid_meal_date_writes_no_revision(tmp_path, roster):
+    target = ((roster.persons[0].person_id, Meal.BREAKFAST),)
+    initial = RevisionRecord(
+        RevisionMetadata(
+            roster.revision_id,
+            None,
+            NOW,
+            None,
+            ACTOR,
+            "명단 가져오기",
+            RevisionSource.IMPORT,
+        ),
+        roster_audit_changes(RosterSnapshot(uuid4()), roster),
+    )
+
+    class InvalidDateDialog:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+        def selected_meals(self):
+            return (Meal.BREAKFAST,)
+
+        def selected_targets(self):
+            return target
+
+        def selected_status(self):
+            return MealStatus.DELIVERY
+
+        def selected_period(self):
+            return InclusiveDateRange(DAY, None)
+
+        def selected_periods(self):
+            return {Meal.BREAKFAST: InclusiveDateRange(DAY, None)}
+
+    errors = []
+    messages = SimpleNamespace(
+        critical=lambda *args: errors.append(args),
+        warning=lambda *args: pytest.fail(str(args)),
+    )
+    path = tmp_path / "invalid-date.sqlite3"
+    with DatabaseSession.create(path, "password", "recovery") as session:
+        session.append_revision(initial)
+        before = session.database.current_roster().revision_id
+        outcome = MealStatusChangeController(
+            session,
+            dialog_type=InvalidDateDialog,
+            message_box=messages,
+            actor_provider=lambda: ACTOR,
+            recorded_at_provider=lambda: NOW,
+        ).run_batch(target, MealStatus.DELIVERY, DAY)
+        assert not outcome.completed
+        assert session.database.current_roster().revision_id == before
+        assert "금요일" in errors[0][2]
 
 
 def test_application_routes_exact_batch_and_refreshes_after_save(monkeypatch):

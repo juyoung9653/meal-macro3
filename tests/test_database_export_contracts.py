@@ -51,6 +51,7 @@ from src.services.database_export import build_database_workbook
 from src.services.person_history import build_history_tables
 
 DAY = date(2026, 9, 21)
+BREAKFAST_DAY = date(2026, 9, 18)
 STAMP = datetime(2026, 9, 21, 1, 30, tzinfo=UTC)
 ACTOR = RevisionActor("접수담당", "test-sid")
 
@@ -107,6 +108,10 @@ def test_wide_mode_actual_status_custom_columns_and_literal_roundtrip(base):
         base, person.person_id, (Meal.BREAKFAST, Meal.DINNER), MealStatus.STOPPED,
         InclusiveDateRange(DAY, None), actor=ACTOR, recorded_at=STAMP,
         revision_id=uuid4(), event_ids={m: uuid4() for m in (Meal.BREAKFAST, Meal.DINNER)},
+        periods_by_meal={
+            Meal.BREAKFAST: InclusiveDateRange(BREAKFAST_DAY, None),
+            Meal.DINNER: InclusiveDateRange(DAY, None),
+        },
     )
     roster, snapshot = project(base, (change.record,))
     book = build_database_workbook(roster, snapshot, (initial(base), change.record), day=DAY)
@@ -224,12 +229,18 @@ def test_status_history_has_intake_for_canonical_single_and_batch(base, batch, c
             base, targets, MealStatus.PAUSED, InclusiveDateRange(DAY, DAY),
             actor=ACTOR, recorded_at=STAMP, revision_id=uuid4(),
             event_ids={target: uuid4() for target in targets}, intake_channel=channel,
+            periods_by_meal={
+                Meal.BREAKFAST: InclusiveDateRange(BREAKFAST_DAY, BREAKFAST_DAY),
+            },
         )
     else:
         change = build_meal_status_revision(
             base, person.person_id, (Meal.BREAKFAST,), MealStatus.PAUSED, InclusiveDateRange(DAY, DAY),
             actor=ACTOR, recorded_at=STAMP, revision_id=uuid4(),
             event_ids={Meal.BREAKFAST: uuid4()}, intake_channel=channel,
+            periods_by_meal={
+                Meal.BREAKFAST: InclusiveDateRange(BREAKFAST_DAY, BREAKFAST_DAY),
+            },
         )
     roster, snapshot = project(base, (change.record,))
     headings, data = build_history_tables(roster, snapshot, (change.record,), person_id=person.person_id)["식종 변경"]
@@ -241,7 +252,7 @@ def test_status_history_has_intake_for_canonical_single_and_batch(base, batch, c
     assert len(status_rows) == 1
     assert status_rows[0]["이전 값"] == ""
     assert "상태: 일시중지" in status_rows[0]["변경 값"]
-    assert "기간: 2026-09-21 ~ 2026-09-21" in status_rows[0]["변경 값"]
+    assert "기간: 2026-09-18 ~ 2026-09-18" in status_rows[0]["변경 값"]
     assert "조식 일시중지" not in status_rows[0]["변경 값"]
 
 

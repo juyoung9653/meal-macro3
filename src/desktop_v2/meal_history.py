@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Mapping
 from uuid import UUID
 
-from src.domain.projections import STATUS_EVENT_KIND, status_event_from_state
-from src.domain.revisions import RevisionRecord, format_revision_timestamp
+from src.domain.projections import ENROLLMENT_KIND, STATUS_EVENT_KIND, enrollments_from_state, status_event_from_state
+from src.domain.revisions import ChangeOperation, RevisionRecord, RevisionSource, format_revision_timestamp
 from src.domain.status import MealStatus, StatusEvent
 from src.services.person_history import is_roster_import_history
 
@@ -46,13 +47,32 @@ def build_meal_history_rows_by_person(
         if is_roster_import_history(record):
             continue
         metadata = record.metadata
+        details = (
+            metadata.actor.username,
+            metadata.display_code or format_revision_timestamp(metadata.recorded_at),
+        )
+        events = [
+            status_event_from_state(change.entity_id, change.after)
+            for change in record.changes
+            if change.entity_kind == STATUS_EVENT_KIND and change.after is not None
+        ]
+        for event in events:
+            rows[event.person_id].append((*meal_status_summary(event), *details))
+        added = metadata.decisions.get("roster_row_change")
+        if (metadata.source is not RevisionSource.UI
+                or not isinstance(added, Mapping) or added.get("operation") != "add"):
+            continue
+        explicit_statuses = {(event.person_id, event.meal) for event in events}
         for change in record.changes:
-            if change.entity_kind != STATUS_EVENT_KIND or change.after is None:
+            if (change.entity_kind != ENROLLMENT_KIND
+                    or change.operation is not ChangeOperation.INSERT
+                    or change.after is None
+                    or change.after.get("person_id") != added.get("person_id")):
                 continue
-            event = status_event_from_state(change.entity_id, change.after)
-            rows[event.person_id].append((
-                *meal_status_summary(event),
-                metadata.actor.username,
-                metadata.display_code or format_revision_timestamp(metadata.recorded_at),
-            ))
+            for enrollment in enrollments_from_state(change.entity_id, change.after):
+                if (enrollment.person_id, enrollment.meal) in explicit_statuses:
+                    continue
+                start = enrollment.period.starts_on
+                period = f"{start.isoformat() if start is not None else '시작일 미지정'} ~ "
+                rows[enrollment.person_id].append((enrollment.meal.value, "시작", period, *details))
     return {person_id: tuple(items) for person_id, items in rows.items()}

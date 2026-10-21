@@ -22,8 +22,10 @@ from PySide6.QtWidgets import (
 from src.domain.roster import Meal, RosterSnapshot
 from src.domain.sequence_edits import build_sequence_revision, build_scoped_sequence_revision
 from src.domain.sequence_settings import SequenceMode, sequence_mode_from_snapshot
+from src.domain.column_input_rules import InputRule, load_rules, rule_for, validate_input
 
 from .import_controller import current_windows_actor
+from .column_input_rules import make_rule_editor
 from .theme import application_stylesheet, register_application_fonts
 
 MEALS = (Meal.DINNER, Meal.BREAKFAST, Meal.LUNCH)
@@ -37,10 +39,12 @@ class SequenceEditDialog(QDialog):
         parent=None,
         *,
         mode: SequenceMode = SequenceMode.SEPARATE,
+        input_rules: dict[str, InputRule] | None = None,
     ):
         super().__init__(parent)
         keys = MEALS
         self._mode = mode
+        self._input_rules = input_rules or {}
         self._initial = {meal: roster.resolve_assignment(person_id, meal).sequence or "" for meal in keys}
         self._labels = {meal: meal.value for meal in keys}
         name = roster.person(person_id).profile.name
@@ -79,7 +83,8 @@ class SequenceEditDialog(QDialog):
                 current.setObjectName("sequenceMixedValues")
                 current.setWordWrap(True)
                 form.addRow("현재 순서", current)
-            field = QLineEdit("" if self._unified_mixed else self._initial[keys[0]])
+            field = make_rule_editor("sequence", self._input_rules)
+            field.setText("" if self._unified_mixed else self._initial[keys[0]])
             field.setObjectName("unifiedSequence")
             field.setAccessibleName("모든 식종 배송순서")
             field.setToolTip("새 값을 입력해 저장한 경우에만 세 식종에 함께 적용합니다")
@@ -91,7 +96,8 @@ class SequenceEditDialog(QDialog):
             form.addRow("모든 식종", field)
         else:
             for meal in keys:
-                field = QLineEdit(self._initial[meal])
+                field = make_rule_editor("sequence", self._input_rules)
+                field.setText(self._initial[meal])
                 field.setAccessibleName(f"{self._labels[meal]} 배송순서")
                 field.setToolTip(f"{self._labels[meal]} 배송순서")
                 self.fields[meal] = field
@@ -144,6 +150,12 @@ class SequenceEditDialog(QDialog):
                 self.error.setText(f"{self._labels[meal]} 순서는 한 줄로 입력해주세요.")
                 self.fields[meal].setFocus()
                 return
+            try:
+                validate_input("sequence", value, rule_for(self._input_rules, "sequence"))
+            except ValueError as error:
+                self.error.setText(str(error))
+                self.fields[meal].setFocus()
+                return
         self.accept()
 
 
@@ -184,7 +196,10 @@ class SequenceEditController:
                 for parameter in parameters
             )
             if accepts_mode:
-                dialog = self._dialog_type(roster, person_id, parent, mode=mode)
+                if self._dialog_type is SequenceEditDialog:
+                    dialog = self._dialog_type(roster, person_id, parent, mode=mode, input_rules=load_rules(snapshot))
+                else:
+                    dialog = self._dialog_type(roster, person_id, parent, mode=mode)
             else:
                 # Keep older injected test/dialog factories compatible.
                 dialog = self._dialog_type(roster, person_id, parent)
@@ -198,6 +213,9 @@ class SequenceEditController:
                 for meal, value in values.items()
             ):
                 return None
+            for meal, value in values.items():
+                if value != (roster.resolve_assignment(person_id, meal).sequence or ""):
+                    validate_input("sequence", value, rule_for(load_rules(snapshot), "sequence"))
             prepared = build_sequence_revision(
                 roster, person_id, values, actor=self._actor_provider(),
                 recorded_at=datetime.now(UTC), revision_id=uuid4(),
@@ -229,6 +247,8 @@ class SequenceEditController:
                 raise ValueError("배송순서는 한 줄로 입력해주세요.")
             if all(normalized == (roster.resolve_assignment(*key).sequence or "") for key in targets):
                 return SequenceSaveResult(SequenceSaveStatus.UNCHANGED, roster, "변경된 배송순서가 없습니다.")
+            snapshot = self._session.database.snapshot(roster.revision_id)
+            validate_input("sequence", normalized, rule_for(load_rules(snapshot), "sequence"))
             prepared = build_scoped_sequence_revision(
                 roster, {key: normalized for key in targets}, actor=self._actor_provider(),
                 recorded_at=datetime.now(UTC), revision_id=uuid4(),

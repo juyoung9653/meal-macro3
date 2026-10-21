@@ -55,7 +55,16 @@ def test_defaults_roundtrip_reopen_history_and_no_person_rewrites(tmp_path):
         assert current.persons == first.persons
         assert roster_from_historical_snapshot(session.database.snapshot(first.revision_id)).delivery_defaults == standard_delivery_defaults()
         added = Person(uuid4(), PersonProfile("신규 합성 아동"))
-        prepared_add = build_roster_row_revision(current, actor=actor, recorded_at=datetime.now(UTC), effective_on=date(2026, 10, 12), revision_id=uuid4(), add_person=added, enroll_meals=(Meal.BREAKFAST,))
+        prepared_add = build_roster_row_revision(
+            current,
+            actor=actor,
+            recorded_at=datetime.now(UTC),
+            effective_on=date(2026, 10, 12),
+            revision_id=uuid4(),
+            add_person=added,
+            enroll_meals=(Meal.BREAKFAST,),
+            delivery_starts_by_meal={Meal.BREAKFAST: date(2026, 10, 11)},
+        )
         assert prepared_add.snapshot.delivery_defaults == changed_defaults()
         session.append_revision(prepared_add.record)
         saved = session.database.current_roster()
