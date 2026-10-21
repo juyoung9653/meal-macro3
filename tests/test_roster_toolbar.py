@@ -25,6 +25,7 @@ def window():
     ("_database_export_action", "database_export_requested"),
     ("_revision_history_action", "revision_history_requested"),
     ("_complaint_history_action", "complaint_history_requested"),
+    ("_monthly_meal_history_action", "monthly_meal_history_requested"),
     ("_drivers_action", "drivers_requested"),
     ("_driver_replacement_action", "driver_replacement_requested"),
     ("_school_calendar_action", "school_calendar_requested"),
@@ -44,7 +45,7 @@ def test_more_menu_actions_keep_their_original_workflows(window, action_name, si
 def test_more_menu_has_one_level_of_task_submenus(window):
     expected = {
         "명단 관리": ("_import_action", "_archive_action"),
-        "이력·민원": ("_revision_history_action", "_complaint_history_action"),
+        "이력·민원": ("_revision_history_action", "_complaint_history_action", "_monthly_meal_history_action"),
         "통계": ("_monthly_statistics_action",),
         "내보내기": ("_current_sheet_export_action", "_database_export_action"),
         "기사 관리": ("_drivers_action", "_driver_replacement_action"),

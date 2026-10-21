@@ -21,6 +21,7 @@ from src.domain.status import resolve_status_history
 from src.domain.projections import status_events_from_historical_snapshot
 from src.domain.delivery_routing import (
     DRIVER_KIND,
+    DRIVER_ORDER_KIND,
     ROUTING_EVENT_KIND,
     routing_state_from_snapshot,
 )
@@ -52,6 +53,7 @@ _ENTITY_LABELS = {
     PERSON_KIND: "사람", HOUSEHOLD_KIND: "가구", MEMBERSHIP_KIND: "가구원",
     ENROLLMENT_KIND: "식종 가입", ASSIGNMENT_KIND: "배송배정",
     STATUS_EVENT_KIND: "식종 상태", DRIVER_KIND: "배송담당",
+    DRIVER_ORDER_KIND: "기사 표시 순서",
     ROUTING_EVENT_KIND: "배송 변경", CUSTOM_FIELD_KIND: "사용자 항목",
     "complaint": "민원",
 }

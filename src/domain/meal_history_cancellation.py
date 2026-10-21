@@ -51,6 +51,8 @@ def cancelled_meal_history_targets(revisions):
     """Replay cancellation markers so a later snapshot restore also restores visibility."""
     markers = {}
     for record in revisions:
+        if "workspace_branch" in record.metadata.decisions:
+            continue
         for change in record.changes:
             if change.entity_kind == CANCELLATION_KIND:
                 if change.after is None:
@@ -68,7 +70,7 @@ def build_meal_history_cancellation(current: HistoricalSnapshot, revisions, targ
     if target in cancelled:
         raise ValueError("이미 취소한 식종 변경 이력입니다.")
     source = next((r for r in revisions if r.metadata.revision_id == target.revision_id), None)
-    if source is None:
+    if source is None or "workspace_branch" in source.metadata.decisions:
         raise ValueError("선택한 식종 변경 이력을 찾을 수 없습니다.")
     change = next((c for c in source.changes if c.entity_kind == target.entity_kind
                    and c.entity_id == target.entity_id), None)

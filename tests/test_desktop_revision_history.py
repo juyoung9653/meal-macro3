@@ -31,6 +31,7 @@ from src.desktop_v2.person_history import PersonHistoryDialog
 from src.desktop_v2.revision_history import GlobalRevisionHistoryDialog
 from src.domain.revisions import HistoricalSnapshot, RevisionActor, RevisionSource, RevisionSummary
 from src.domain.roster import Meal
+from tests.test_revision_restore import history
 
 REVISION_1 = UUID("96000000-0000-0000-0000-000000000001")
 REVISION_2 = UUID("96000000-0000-0000-0000-000000000002")
@@ -568,7 +569,7 @@ def test_person_meal_history_has_five_columns_and_matching_details(app):
         "식종 변경": (headings, rows),
         "민원": (("성명",), ()),
     }
-    person = SimpleNamespace(profile=SimpleNamespace(name="합성 대상자"))
+    person = SimpleNamespace(person_id=UUID(int=41), profile=SimpleNamespace(name="합성 대상자"))
     dialog = PersonHistoryDialog(person, tables, {}, Meal.LUNCH)
     dialog.resize(1080, 680)
     dialog.show()
@@ -640,3 +641,116 @@ def test_default_builder_shows_roster_headers_and_household_names(app):
     assert dialog._detail_table.rowHeight(0) > dialog.fontMetrics().height() * 2
     dialog.close()
     parent.close()
+
+
+def test_named_branch_view_keeps_shared_history_and_marks_fork_boundary(app):
+    from uuid import uuid4
+    from src.services.revision_branches import RevisionBranch
+
+    database = _Database()
+    main_id, branch_id = uuid4(), uuid4()
+    database.branches = lambda: (
+        RevisionBranch(main_id, "main", REVISION_3, False),
+        RevisionBranch(branch_id, "검토용", REVISION_2, True, REVISION_2, main_id),
+    )
+    ancestry = {REVISION_1: (REVISION_1,), REVISION_2: (REVISION_1, REVISION_2),
+                REVISION_3: (REVISION_1, REVISION_2, REVISION_3)}
+    database.branch_revision_ids = lambda revision_id=None: ancestry[revision_id or REVISION_2]
+    dialog = GlobalRevisionHistoryDialog(database, change_rows_builder=_safe_rows)
+    assert dialog._branch_selector.currentData() == branch_id
+    assert "검토용" in dialog._current_branch.text()
+    assert dialog._summary_proxy.rowCount() == 2
+    assert dialog.selected_revision_id == REVISION_2
+    assert dialog._summary_proxy.data(dialog._summary_proxy.index(0, 0)).startswith("분기 시작점 · ")
+    assert dialog._summary_proxy.data(dialog._summary_proxy.index(1, 0)).startswith("분기 전 기록 · ")
+    _select_revision(dialog, REVISION_1)
+    assert dialog.selected_revision_id == REVISION_1
+    dialog.configure_actions(SimpleNamespace(path=Path("synthetic.sqlite3")), SimpleNamespace(), lambda: None)
+    assert not dialog._checkout_button.isEnabled()
+    switches = []
+    dialog._restore_controller = SimpleNamespace(checkout=lambda *args: switches.append(args))
+    dialog._branch_selector.setCurrentIndex(1)
+    assert dialog._summary_proxy.rowCount() == 3
+    assert dialog._checkout_button.isEnabled()
+    assert dialog.selected_revision_id == REVISION_1
+    assert not switches  # Browsing alone never switches the operating state.
+    dialog._checkout_selected_branch()
+    assert switches[0][:2] == (main_id, "main")
+    dialog._branch_selector.setCurrentIndex(0)
+    assert dialog._summary_proxy.rowCount() == 3
+    assert not dialog._summary_model.branch_labels
+    assert not dialog._checkout_button.isEnabled()
+    dialog.close()
+
+
+def test_branch_list_failure_is_observable_and_keeps_audit_available(app):
+    database = _Database()
+    database.branch_revision_ids = lambda revision_id=None: ()
+    def fail():
+        raise OSError("private stored data")
+    database.branches = fail
+    dialog = GlobalRevisionHistoryDialog(database, change_rows_builder=_safe_rows)
+    assert "읽지 못했습니다" in dialog._current_branch.text()
+    assert not dialog._current_branch.isHidden()
+    assert "private stored data" not in dialog._current_branch.text()
+    assert dialog._summary_proxy.rowCount() == 3
+    dialog.close()
+
+
+@pytest.mark.parametrize("operation", ["create", "checkout"])
+def test_audit_branch_events_show_named_korean_details_without_synthetic_entity(operation, app):
+    from src.services.revision_branches import BRANCH_EVENT_KEY, RevisionBranch
+    from src.services.revision_restore import RESTORE_TARGET_KEY
+
+    database = _Database()
+    branch_id = UUID(int=123)
+    database.branches = lambda: (RevisionBranch(branch_id, "검토 분기", REVISION_2, True, REVISION_1),)
+    database.branch_revision_ids = lambda revision_id=None: (REVISION_1, REVISION_2)
+    database.revision_display_code = lambda revision_id: "20261014-100000"
+    original = database.revision
+    def revision(revision_id):
+        record = original(revision_id)
+        record.metadata.decisions = {} if revision_id != REVISION_3 else {
+            BRANCH_EVENT_KEY: {"operation": operation, "branch_id": str(branch_id), "name": "검토 분기"},
+            RESTORE_TARGET_KEY: str(REVISION_1),
+        }
+        return record
+    database.revision = revision
+    dialog = GlobalRevisionHistoryDialog(database, change_rows_builder=_safe_rows)
+    dialog._branch_selector.setCurrentIndex(0)
+    _select_revision(dialog, REVISION_3)
+    rows = dialog._detail_model.rows
+    assert len(rows) == 1
+    assert rows[0][0] == "운영 데이터"
+    assert rows[0][2] == ("분기 생성" if operation == "create" else "분기 전환")
+    assert "검토 분기" in rows[0][3] and "20261014-100000" in rows[0][3]
+    assert str(branch_id) not in str(rows)
+    dialog.close()
+
+
+def test_encrypted_branch_history_displays_shared_revisions_once(app, history):
+    from tests.test_revision_restore import ACTOR
+    from tests.test_revision_branches import append_setting
+    from src.services.revision_branches import MAIN_BRANCH_ID, create_branch, checkout_branch
+
+    session, first, second, _ = history
+    branch = create_branch(session, second, second, ACTOR, name="실제 DB 검토")
+    edited = append_setting(session, "검토 값")
+    main = checkout_branch(session, MAIN_BRANCH_ID, edited, ACTOR)
+    dialog = GlobalRevisionHistoryDialog(session.database)
+    assert dialog._branch_selector.currentData() == MAIN_BRANCH_ID
+    assert dialog._summary_proxy.rowCount() == 2
+    dialog._branch_selector.setCurrentIndex(2)
+    visible = tuple(dialog._summary_proxy.data(dialog._summary_proxy.index(row, 0), Qt.ItemDataRole.UserRole)
+                    for row in range(dialog._summary_proxy.rowCount()))
+    assert visible == (edited, second, first)
+    assert branch.revision_id not in visible and main.revision_id not in visible
+    assert dialog._summary_model.branch_labels[first] == "분기 전 기록"
+    assert dialog._summary_model.branch_labels[second] == "분기 시작점"
+    _select_revision(dialog, first)
+    assert dialog._detail_model.rowCount() > 0
+    dialog._branch_selector.setCurrentIndex(0)
+    _select_revision(dialog, main.revision_id)
+    assert dialog._detail_model.rows[0][2] == "분기 전환"
+    assert "main" in dialog._detail_model.rows[0][3]
+    dialog.close()

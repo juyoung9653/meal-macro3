@@ -12,12 +12,13 @@ from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.page import PageMargins
 
 from src.domain.delivery_substitute import PreparedSubstituteData, SubstituteOptions
+from src.domain.roster import Meal
 from src.excel.delivery_templates import load_substitute_styles, substitute_styles_are_default, STYLE_COLUMNS
 from src.excel.publication import WorkbookPublicationResult, publish_workbook
 from src.excel.substitute_excel_metrics import apply_excel_metrics
 from src.excel.substitute_page_layout import SheetGroup, SheetLayout
 
-SUBSTITUTE_RENDER_CONTRACT_VERSION = 5
+SUBSTITUTE_RENDER_CONTRACT_VERSION = 6
 _LABELS = {"name": "이름", "road_address": "신주소", "note": "비고2"}
 _FILLS = {2: "E6B8B7", 3: "B8CCE4", 4: "D8E4BC", 5: "CCC0DA"}
 _THIN = Side(style="thin", color="000000")
@@ -74,9 +75,11 @@ def _build_sheet(data: PreparedSubstituteData, options: SubstituteOptions):
         if index < len(rows) and previous_phone and previous_phone == _phone(rows[index].values.get("mobile_phone", "")):
             continue
         members = rows[start:index]
+        meal_count = (len(members) if data.meal is Meal.BREAKFAST else
+                      sum(member.entitlement_count for member in members))
         groups.append(SheetGroup(start, index - 1, start + 3, index + 2,
                                  members[0].values.get("jurisdiction", ""),
-                                 sum(member.entitlement_count for member in members)))
+                                 meal_count))
         start = index
     labels = {column.key: _LABELS.get(column.key, column.label) for column in data.columns}
     columns = [labels[key] for key in options.columns]
@@ -107,7 +110,7 @@ def _build_sheet(data: PreparedSubstituteData, options: SubstituteOptions):
                 if key != "name" and group.start_row < group.end_row:
                     ws.merge_cells(start_row=group.start_row, end_row=group.end_row,
                                    start_column=col, end_column=col)
-        color = _FILLS.get(group.meal_count)
+        color = _FILLS.get(group.source_end - group.source_start + 1)
         for row in range(group.start_row, group.end_row + 1):
             for col in range(1, used_cols + 1):
                 if color:
@@ -175,7 +178,7 @@ def _apply_template_styles(workbook, layout, data, options, styles):
     rows = data.selected_rows(options)
 
     for group in layout.groups:
-        fill = styles.get(f"household{group.meal_count}")
+        fill = styles.get(f"household{group.source_end - group.source_start + 1}")
         box = any(item.box for item in rows[group.source_start:group.source_end + 1])
         for row in range(group.start_row, group.end_row + 1):
             for col in range(1, layout.used_cols + 1):

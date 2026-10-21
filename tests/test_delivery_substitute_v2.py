@@ -30,7 +30,7 @@ from src.domain.projections import roster_entity_states, status_event_state
 from src.domain.revisions import AuditChange, ChangeOperation, EntityRef, HistoricalSnapshot, RevisionActor, RevisionMetadata, RevisionRecord, RevisionSource
 from src.domain.roster import CustomFieldDefinition, CustomFieldType, DeliveryAssignment, Household, HouseholdDeliverySetting, HouseholdMembership, InclusiveDateRange, Meal, MealEnrollment, Person, PersonProfile, RosterSnapshot
 from src.domain.status import MealStatus, StatusEvent
-from src.generators.substitute_generator import build_substitute_workbook, make_substitute_publication
+from src.generators.substitute_generator import _build_sheet, build_substitute_workbook, make_substitute_publication
 from src.services.sqlite_delivery_substitute_service import prepare_delivery_substitute_data
 from src.services.revision_restore import create_revision_branch, restore_revision
 from src.storage.database_session import DatabaseSession, AutomaticBackupResult
@@ -103,14 +103,14 @@ def test_physical_breakfast_household_ids_hidden_fields_and_box():
     assert data.default_columns[-1] == f"custom:{CUSTOM}"
     assert len({row.household_id for row in data.rows}) == 3  # DB household identities remain available; display grouping uses phones.
     assert sum(row.box for row in data.rows) == 2
-    wb = build_substitute_workbook(data, replace(options(data), columns=("name",)))
+    wb, _, _ = _build_sheet(data, replace(options(data), columns=("name",)))
     ws = wb.active
-    assert ws["B3"].value == 9
+    assert ws["B3"].value == 3
     assert "B3:B5" in {str(r) for r in ws.merged_cells.ranges}
     assert ws["A3"].border.left.style == "thick"
     assert ws["A5"].border.bottom.style == "thick"
     assert ws["A7"].value == ""
-    assert ws["K10"].value == 12
+    assert ws["G10"].value == 4
     assert prepare_delivery_substitute_data(snapshot, date(2026, 8, 29), Meal.BREAKFAST).rows == ()
     wb.close()
 
@@ -166,8 +166,9 @@ def test_more_than_five_people_and_missing_driver_do_not_use_report_constraints(
     data = prepare_delivery_substitute_data(HistoricalSnapshot(snapshot.revision_id, roster_entity_states(roster)), DAY, Meal.BREAKFAST)
     assert len(data.rows) == 6
     assert data.rows[0].driver_key == "unassigned"
-    wb = build_substitute_workbook(data, options(data))
-    assert wb.active["S9"].value == "18식"
+    wb, _, _ = _build_sheet(data, options(data))
+    assert wb.active["G9"].value == "6식"
+    assert wb.active["H10"].value == 6
     wb.close()
 
 

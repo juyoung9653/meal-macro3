@@ -82,7 +82,7 @@ def validate_snapshot_restore_changes(current, target, changes, decisions) -> No
         UUID(branch["source_database_id"])
         if branch.get("source_revision_id") != str(target.revision_id) or branch.get("source_head_revision_id") != str(current.revision_id):
             raise ValueError("분기 원본 변경번호가 일치하지 않습니다.")
-    expected = _branch_marker_changes(current, target, branch)
+    expected = _branch_marker_changes(current, target, branch or decisions.get("workspace_branch"))
     if tuple(changes) != expected:
         raise ValueError("복구 변경 내용이 선택한 변경번호의 전체 상태와 일치하지 않습니다.")
 

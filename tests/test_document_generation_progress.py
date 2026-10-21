@@ -151,7 +151,9 @@ def test_all_document_kinds_keep_gui_alive_through_real_writer_snapshot_verifica
     assert all(thread != gate.gui for _, thread in gate.threads)
     assert len(session.database.document_runs()) == 1
     with outcome.result.output_path.open("rb") as stream:
-        assert msoffcrypto.OfficeFile(stream).is_encrypted()
+        assert msoffcrypto.OfficeFile(stream).is_encrypted() is (
+            action is not DocumentAction.DELIVERY_REPORT
+        )
     session.database.check_integrity()
 
 

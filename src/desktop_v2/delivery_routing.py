@@ -10,7 +10,8 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from uuid import UUID, uuid4
 
-from PySide6.QtCore import QDate
+from PySide6.QtCore import QDate, Qt, Signal
+from PySide6.QtGui import QDrag
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -36,11 +37,13 @@ from src.domain.delivery_routing import (
     build_batch_assignment_revision,
     build_driver_replacement_revision,
     build_driver_revision,
+    build_driver_order_revision,
     build_routing_revision,
     preview_driver_replacement,
     routing_state_from_snapshot,
 )
 from src.domain.roster import Meal, RosterSnapshot
+from src.storage.encrypted_database import RevisionConflictError
 
 from .date_edit import WheelSafeDateEdit
 
@@ -79,14 +82,90 @@ def _chosen_driver(combo):
     return UUID(raw) if raw else None
 
 
+class DriverOrderTable(QTableWidget):
+    """Move complete rows without changing the UUID stored on each item."""
+
+    orderChanged = Signal()
+
+    def __init__(self, rows, parent=None):
+        super().__init__(rows, 2, parent)
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.setDragDropOverwriteMode(False)
+        self.setDropIndicatorShown(True)
+        self._drag_source_row = None
+
+    def startDrag(self, supported_actions):
+        drag = QDrag(self)
+        drag.setMimeData(self.mimeData(self.selectedItems()))
+        self._drag_source_row = self.currentRow()
+        try:
+            drag.exec(Qt.DropAction.MoveAction)
+        finally:
+            self._drag_source_row = None
+
+    def dragEnterEvent(self, event):
+        if event.source() is self:
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):
+        super().dragMoveEvent(event)
+        if event.source() is self:
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):
+        if event.source() is not self:
+            event.ignore()
+            return
+        point = event.position().toPoint()
+        destination = self.rowAt(point.y())
+        if destination < 0:
+            destination = self.rowCount()
+        elif point.y() > self.visualItemRect(self.item(destination, 0)).center().y():
+            destination += 1
+        source = self.currentRow() if self._drag_source_row is None else self._drag_source_row
+        self.move_row(source, destination)
+        event.setDropAction(Qt.DropAction.MoveAction)
+        event.accept()
+
+    def move_row(self, source, destination):
+        """Destination is an insertion boundary, including after the last row."""
+        if source < 0 or source >= self.rowCount() or destination in (source, source + 1):
+            return
+        self.blockSignals(True)
+        items = [self.takeItem(source, column) for column in range(self.columnCount())]
+        self.removeRow(source)
+        if destination > source:
+            destination -= 1
+        self.insertRow(destination)
+        for column, item in enumerate(items):
+            self.setItem(destination, column, item)
+        self.selectRow(destination)
+        self.blockSignals(False)
+        self.itemSelectionChanged.emit()
+        self.orderChanged.emit()
+
+
+@dataclass(frozen=True)
+class DriverOrderRequest:
+    ordered_driver_ids: tuple[UUID, ...]
+
+
 class DriverRegistryDialog(QDialog):
     """Only name and phone are user-facing driver attributes."""
 
     def __init__(self, state: RoutingState, parent=None):
         super().__init__(parent)
         _style(self, "배송기사 관리")
-        self.resize(580, 430)
+        self.resize(620, 470)
         self._state = state
+        self._saved_order = tuple(driver.driver_id for driver in state.drivers)
         self._request = None
         layout = QVBoxLayout(self)
         layout.addWidget(
@@ -94,17 +173,33 @@ class DriverRegistryDialog(QDialog):
                 "기사를 등록하면 식종별 배송담당과 기사 필터에서 선택할 수 있습니다."
             )
         )
-        self.table = QTableWidget(len(state.drivers), 2)
+        guidance = QLabel("기사 행을 드래그해 순서를 바꾼 뒤 ‘순서 저장’을 누르세요.")
+        guidance.setWordWrap(True)
+        layout.addWidget(guidance)
+        self.table = DriverOrderTable(len(state.drivers))
         self.table.setHorizontalHeaderLabels(("이름", "전화번호"))
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.horizontalHeader().setStretchLastSection(True)
         for row, driver in enumerate(state.drivers):
-            self.table.setItem(row, 0, QTableWidgetItem(driver.name))
+            item = QTableWidgetItem(driver.name)
+            item.setData(Qt.ItemDataRole.UserRole, driver.driver_id)
+            self.table.setItem(row, 0, item)
             self.table.setItem(row, 1, QTableWidgetItem(driver.telephone))
         self.table.itemSelectionChanged.connect(self._select)
         layout.addWidget(self.table)
+        order_row = QHBoxLayout()
+        self.order_note = QLabel("저장된 기사 순서입니다.")
+        self.order_button = QPushButton("순서 저장")
+        self.order_button.setObjectName("primaryAction")
+        self.order_button.setEnabled(False)
+        self.order_button.clicked.connect(self._save_order)
+        order_row.addWidget(self.order_note)
+        order_row.addStretch(1)
+        order_row.addWidget(self.order_button)
+        layout.addLayout(order_row)
+        self.table.orderChanged.connect(self._order_changed)
         self.name = QLineEdit()
         self.phone = QLineEdit()
         form = QFormLayout()
@@ -131,7 +226,7 @@ class DriverRegistryDialog(QDialog):
         row = self.table.currentRow()
         self.edit_button.setEnabled(row >= 0)
         if row >= 0:
-            driver = self._state.drivers[row]
+            driver = self._state._drivers_by_id[self.table.item(row, 0).data(Qt.ItemDataRole.UserRole)]
             self.name.setText(driver.name)
             self.phone.setText(driver.telephone)
 
@@ -139,7 +234,7 @@ class DriverRegistryDialog(QDialog):
         row = self.table.currentRow()
         if edit and row < 0:
             return
-        driver_id = self._state.drivers[row].driver_id if edit else uuid4()
+        driver_id = self.table.item(row, 0).data(Qt.ItemDataRole.UserRole) if edit else uuid4()
         try:
             driver = Driver(driver_id, self.name.text(), self.phone.text())
             if any(
@@ -153,8 +248,46 @@ class DriverRegistryDialog(QDialog):
         except (TypeError, ValueError) as error:
             self.error.setText(str(error))
             return
+        if edit and driver == self._state._drivers_by_id[driver_id] and not self._order_pending():
+            self.error.setText("변경된 기사 정보가 없습니다.")
+            return
         self._request = driver
         self.accept()
+
+    def ordered_driver_ids(self):
+        return tuple(self.table.item(row, 0).data(Qt.ItemDataRole.UserRole) for row in range(self.table.rowCount()))
+
+    def _order_pending(self):
+        return self.ordered_driver_ids() != self._saved_order
+
+    def mark_saved(self):
+        self._saved_order = self.ordered_driver_ids()
+        self._order_changed()
+
+    def _order_changed(self):
+        pending = self._order_pending()
+        self.order_button.setEnabled(pending)
+        self.order_note.setText("변경한 순서를 저장해주세요." if pending else "저장된 기사 순서입니다.")
+
+    def _save_order(self):
+        if not self._order_pending():
+            return
+        self._request = DriverOrderRequest(self.ordered_driver_ids())
+        self.accept()
+
+    def reject(self):
+        if self._order_pending():
+            choice = QMessageBox.question(
+                self, "기사 순서 저장", "변경한 기사 순서를 저장할까요?",
+                QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Save,
+            )
+            if choice == QMessageBox.StandardButton.Save:
+                self._save_order()
+                return
+            if choice != QMessageBox.StandardButton.Discard:
+                return
+        super().reject()
 
     def request(self):
         if self._request is None:
@@ -627,30 +760,54 @@ class DeliveryRoutingController:
     @dialog_workflow
     def run_drivers(self, parent=None, *, on_saved=None):
         outcome = DeliveryRoutingOutcome()
+        dialog = None
         while True:
             try:
-                roster, state = self._load()
-                dialog = self._registry_dialog_type(state, parent)
+                if dialog is None:
+                    roster, state = self._load()
+                    dialog = self._registry_dialog_type(state, parent)
                 if (yield DialogRequest(dialog, self._session)) != QDialog.DialogCode.Accepted:
                     return DeliveryRoutingOutcome(*self._load()) if outcome.roster is not None else outcome
-                driver = dialog.request()
-                record = build_driver_revision(
-                    roster,
-                    state,
-                    driver_id=driver.driver_id,
-                    name=driver.name,
-                    telephone=driver.telephone,
-                    actor=self._actor_provider(),
-                    recorded_at=datetime.now(UTC),
-                    revision_id=uuid4(),
-                )
+                request = dialog.request()
+                metadata = dict(actor=self._actor_provider(), recorded_at=datetime.now(UTC), revision_id=uuid4())
+                if isinstance(request, DriverOrderRequest):
+                    record = build_driver_order_revision(roster, state, ordered_driver_ids=request.ordered_driver_ids, **metadata)
+                else:
+                    order = getattr(dialog, "ordered_driver_ids", lambda: None)()
+                    if order is not None:
+                        order = tuple(order)
+                        if request.driver_id not in order:
+                            order += (request.driver_id,)
+                        if order == tuple(driver.driver_id for driver in state.drivers):
+                            order = None
+                    record = build_driver_revision(
+                        roster, state, driver_id=request.driver_id, name=request.name,
+                        telephone=request.telephone, ordered_driver_ids=order, **metadata,
+                    )
+                if record is None:
+                    dialog = None
+                    continue
                 outcome = self._commit(record, parent)
+                if isinstance(dialog, DriverRegistryDialog):
+                    dialog.mark_saved()
+                dialog = None
                 if on_saved is not None:
                     on_saved(outcome)
             except Exception as error:  # noqa: BLE001 - report storage failures at the UI boundary
-                self._message_box.critical(
-                    parent, "배송기사를 저장하지 못했습니다", str(error)
+                message = (
+                    "다른 창에서 운영 자료가 변경되어 저장하지 않았습니다. "
+                    "입력한 내용과 순서는 이 창에 남아 있습니다. 필요한 내용을 확인한 뒤 "
+                    "창을 닫고 변경 내용을 버린 다음, 기사 관리를 다시 열어 최신 자료에서 수정해주세요."
+                    if isinstance(error, RevisionConflictError) else str(error)
                 )
+                self._message_box.critical(
+                    parent, "배송기사를 저장하지 못했습니다", message
+                )
+                if isinstance(dialog, DriverRegistryDialog):
+                    dialog.error.setText(f"저장하지 못했습니다: {message}")
+                    dialog.error.setWordWrap(True)
+                    dialog.setResult(QDialog.DialogCode.Rejected)
+                    continue
                 return outcome
 
     @dialog_workflow

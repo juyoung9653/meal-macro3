@@ -44,7 +44,8 @@ from src.domain.service_adjustments import (
     service_adjustment_schedule_from_snapshot,
     service_adjustment_schedule_state,
 )
-from src.domain.status import StatusEvent, resolve_status_history
+from src.domain.status import StatusEvent, StatusHistory, resolve_status_history
+from src.services.delivery_report_remarks import build_status_remarks
 from src.services.delivery_service import (
     DeliveryReport,
     DeliveryReportRow,
@@ -103,6 +104,10 @@ class _DeliveryAggregate:
     buckets_by_staff: Mapping[str, tuple[int, int, int, int, int]]
     areas_by_staff: Mapping[str, frozenset[str]]
     forms_by_staff: Mapping[str, Mapping[str | None, tuple[int, int]]]
+
+
+class _MissingDeliveryDriverError(ValueError):
+    """A shipment cannot be grouped because its dated driver is missing."""
 
 
 _EMPTY_BUCKETS = (0, 0, 0, 0, 0)
@@ -208,13 +213,19 @@ def _prepare_delivery_data(
         events_by_key[(event.person_id, event.meal)].append(event)
 
     comparison_start = date(period_start.year, 1, 1)
+    # Remarks sample one active weekday before the target week (up to 22 days),
+    # including December for January reports. Count comparisons remain same-year.
+    evaluation_start = min(
+        comparison_start,
+        period_start - timedelta(days=period_start.weekday() + 22),
+    ) if build_reports else comparison_start
     normal_evaluation_end = period_end + timedelta(days=6)
-    service_days = set(_days(comparison_start, normal_evaluation_end))
+    service_days = set(_days(evaluation_start, normal_evaluation_end))
     service_days.update(
         _replacement_service_days(
             adjustments,
             selected_meals,
-            comparison_start,
+            evaluation_start,
             period_end,
         )
     )
@@ -228,6 +239,7 @@ def _prepare_delivery_data(
     shipments: list[PhysicalShipment] = []
     exclusions: Counter[str] = Counter()
     allowed_forms = set(selected_forms) if selected_forms is not None else None
+    histories: dict[tuple[UUID, Meal], StatusHistory] = {}
     for person in roster.persons:
         for meal in selected_meals:
             eligible_service_days = (
@@ -243,6 +255,7 @@ def _prepare_delivery_data(
                 meal,
                 tuple(events_by_key[(person.person_id, meal)]),
             )
+            histories[(person.person_id, meal)] = history
             for service_on in eligible_service_days:
                 if meal not in roster.meals_for(person.person_id, on=service_on):
                     continue
@@ -339,7 +352,7 @@ def _prepare_delivery_data(
     coalesced_shipments = _coalesce_shipments(
         item
         for item in shipments
-        if comparison_start <= item.delivery_on <= period_end
+        if evaluation_start <= item.delivery_on <= period_end
     )
     if selected_forms is not None:
         coalesced_shipments = tuple(
@@ -360,28 +373,51 @@ def _prepare_delivery_data(
             )
         )
         previous_by_key = _previous_delivery_keys(coalesced_shipments, target_keys)
-        relevant_keys = set(target_keys) | set(previous_by_key.values())
-        relevant_shipments = tuple(
-            item
-            for item in coalesced_shipments
-            if (item.delivery_on, item.meal) in relevant_keys
+        target_key_set = set(target_keys)
+        shipments_by_key: defaultdict[tuple[date, Meal], list[PhysicalShipment]] = defaultdict(list)
+        for item in coalesced_shipments:
+            shipments_by_key[(item.delivery_on, item.meal)].append(item)
+        # Validate every selected date before consulting earlier comparison data.
+        presences = _shipment_presences(
+            roster,
+            tuple(item for item in coalesced_shipments
+                  if (item.delivery_on, item.meal) in target_key_set),
+            routing,
         )
-        presences = _shipment_presences(roster, relevant_shipments, routing)
         aggregates = {
             key: _aggregate_presences(
                 presences.get(key, ()),
                 roster,
                 context=f"{key[0]:%Y%m%d} {key[1].value}",
             )
-            for key in relevant_keys
+            for key in target_keys
         }
+        previous_aggregates: dict[tuple[date, Meal], _DeliveryAggregate | None] = dict(aggregates)
+        for key in dict.fromkeys(previous_by_key.values()):
+            if key in target_key_set:
+                continue
+            try:
+                previous_presences = _shipment_presences(roster, tuple(shipments_by_key[key]), routing)
+            except _MissingDeliveryDriverError:
+                # An incomplete earlier day is unknown, never an empty or partial
+                # delivery count. Suppress its deltas without blocking this period.
+                previous_aggregates[key] = None
+            else:
+                previous_aggregates[key] = _aggregate_presences(
+                    previous_presences.get(key, ()), roster,
+                    context=f"{key[0]:%Y%m%d} {key[1].value}",
+                )
         reports = tuple(
             _build_report(
                 day,
                 meal,
                 aggregates[(day, meal)],
-                aggregates.get(previous_by_key.get((day, meal)), _empty_aggregate()),
+                previous_aggregates.get(previous_by_key.get((day, meal)), _empty_aggregate()),
                 normalized_staff_sort.get(meal, ()),
+                build_status_remarks(
+                    roster, routing, histories, day, meal,
+                    coalesced_shipments, allowed_forms,
+                ),
             )
             for day, meal in target_keys
         )
@@ -607,9 +643,9 @@ def _shipment_presences(
         delivery_view = routing.resolve(
             roster, shipment.person_id, shipment.delivery_on
         )
-        driver = "" if assignment.driver is None else assignment.driver.strip()
+        driver = delivery_view.drivers[shipment.meal].strip()
         if not driver:
-            raise ValueError(
+            raise _MissingDeliveryDriverError(
                 f"{shipment.delivery_on:%Y.%m.%d} {shipment.meal.value} 배송 대상 "
                 f"{person.profile.name}님의 배송담당이 비어 있습니다."
             )
@@ -734,10 +770,14 @@ def _build_report(
     day: date,
     meal: Meal,
     current: _DeliveryAggregate,
-    previous: _DeliveryAggregate,
+    previous: _DeliveryAggregate | None,
     staff_sort: Sequence[str],
+    status_remarks: Mapping[str, str],
 ) -> DeliveryReport:
-    all_staff = set(current.buckets_by_staff) | set(previous.buckets_by_staff)
+    # None denotes unavailable comparison data; equal buckets suppress deltas.
+    if previous is None:
+        previous = current
+    all_staff = set(current.buckets_by_staff) | set(previous.buckets_by_staff) | set(status_remarks)
     configured_order = {
         name: index for index, name in enumerate(_normalized_names(staff_sort))
     }
@@ -771,7 +811,10 @@ def _build_report(
                     for index in range(5)
                 ),
                 people,
-                _form_memo(current.forms_by_staff.get(staff, {})),
+                "\n".join(filter(None, (
+                    status_remarks.get(staff, ""),
+                    _form_memo(current.forms_by_staff.get(staff, {})),
+                ))),
                 "\n".join(
                     ", ".join(ordered_areas[index : index + 2])
                     for index in range(0, len(ordered_areas), 2)

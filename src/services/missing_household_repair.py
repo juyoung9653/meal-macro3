@@ -71,6 +71,8 @@ def load_missing_household_context(database) -> MissingHouseholdContext:
         parent = record.metadata.parent_revision_id
         record = database.revision(parent) if parent is not None else None
     records.reverse()
+    if hasattr(database, "branch_revision_ids"):
+        records = [database.revision(value) for value in database.branch_revision_ids(latest.metadata.revision_id)]
     snapshot = database.snapshot(latest.metadata.revision_id)
     roster = roster_from_historical_snapshot(snapshot)
     # Track the entire lineage: a later insert/delete of membership is an

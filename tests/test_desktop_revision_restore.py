@@ -10,7 +10,8 @@ import pytest
 from PySide6.QtWidgets import QApplication, QDialog, QDialogButtonBox, QMessageBox
 
 from src.desktop_v2.revision_restore import RevisionRestoreController, RevisionRestoreDialog, RevisionRestoreSelection
-from src.services.revision_restore import RevisionRestoreResult, RevisionBranchResult
+from src.services.revision_restore import RevisionRestoreResult
+from src.storage.encrypted_database import RevisionConflictError
 from src.storage.database_session import AutomaticBackupResult
 
 
@@ -53,7 +54,7 @@ def controller(choice, answers=(), *, accepted=True, save_error=False, backup=No
         saved.append(path)
     def branch(*args, **kwargs):
         calls.append(("branch", args, kwargs))
-        return RevisionBranchResult(choice.destination, uuid4(), uuid4(), backup or AutomaticBackupResult())
+        return SimpleNamespace(revision_id=uuid4(), branch=SimpleNamespace(name=choice.name), backup=backup or AutomaticBackupResult())
     def restore(*args):
         calls.append(("restore", args))
         return RevisionRestoreResult(uuid4(), backup or AutomaticBackupResult())
@@ -63,17 +64,17 @@ def controller(choice, answers=(), *, accepted=True, save_error=False, backup=No
     return instance, calls, saved, restarts, messages
 
 
-def test_dialog_defaults_to_branch_masks_password_and_validates_confirmation(app):
+def test_dialog_defaults_to_same_database_branch_without_file_or_password_fields(app):
     dialog = RevisionRestoreDialog(Path("source.sqlite3"), "20261001-001")
     assert dialog.branch_radio.isChecked()
-    assert dialog.password_edit.echoMode() == dialog.password_edit.EchoMode.Password
-    dialog.password_edit.setText("password")
-    dialog.confirm_edit.setText("wrong")
+    assert not hasattr(dialog, "path_edit")
+    assert not hasattr(dialog, "password_edit")
+    dialog.name_edit.clear()
     dialog._submit()
     assert dialog.result() != QDialog.DialogCode.Accepted
     assert dialog.error_label.text()
-    dialog.confirm_edit.setText("password")
-    assert dialog.selection().branch
+    dialog.name_edit.setText("  시험 분기  ")
+    assert dialog.selection() == RevisionRestoreSelection(True, "시험 분기")
     dialog.restore_radio.setChecked(True)
     assert not dialog.selection().branch
     assert not dialog.branch_fields.isEnabled()
@@ -87,29 +88,61 @@ def test_cancel_at_either_stage_never_writes_or_switches(accepted, answers):
     assert not calls and not saved and not restarts
 
 
-def test_create_branch_keeps_current_file_until_user_chooses_switch():
-    choice = RevisionRestoreSelection(True, Path("branch.sqlite3"), "password", "분기")
-    instance, calls, saved, restarts, messages = controller(choice, (QMessageBox.StandardButton.Yes, QMessageBox.StandardButton.No))
-    instance.run(uuid4())
+def test_create_branch_uses_same_session_and_restarts_without_path_change():
+    choice = RevisionRestoreSelection(True, "분기")
+    instance, calls, saved, restarts, messages = controller(choice, (QMessageBox.StandardButton.Yes,))
+    revision_id = uuid4()
+    instance.run(revision_id)
     assert calls[0][0] == "branch"
-    assert not saved and not restarts
+    assert calls[0][1][0] is instance.session
+    assert calls[0][1][1] == revision_id
+    assert len(calls[0][1]) == 4
+    assert calls[0][2] == {"name": "분기"}
+    assert not saved and restarts == [True]
+    assert len([event for event in messages.events if event[0] == "question"]) == 1
 
 
-def test_branch_switch_saves_verified_path_then_restarts():
-    choice = RevisionRestoreSelection(True, Path("branch.sqlite3"), "password", "분기")
-    instance, calls, saved, restarts, messages = controller(choice, (QMessageBox.StandardButton.Yes, QMessageBox.StandardButton.Yes))
+@pytest.mark.parametrize("error", [OSError("secret payload"), RevisionConflictError("secret payload")])
+def test_failed_create_keeps_window_and_shows_safe_observable_error(error):
+    instance, calls, saved, restarts, messages = controller(
+        RevisionRestoreSelection(True, "분기"), (QMessageBox.StandardButton.Yes,),
+    )
+    def fail(*_args, **_kwargs):
+        raise error
+    instance.branch_service = fail
     instance.run(uuid4())
-    assert saved == [choice.destination]
-    assert restarts == [True]
+    assert not calls and not saved and not restarts
+    assert messages.events[-1][0] == ("warning" if isinstance(error, RevisionConflictError) else "critical")
+    assert "secret payload" not in str(messages.events)
 
 
-def test_failed_switch_keeps_created_branch_and_current_window():
-    choice = RevisionRestoreSelection(True, Path("branch.sqlite3"), "password", "분기")
-    instance, calls, saved, restarts, messages = controller(choice, (QMessageBox.StandardButton.Yes, QMessageBox.StandardButton.Yes), save_error=True)
-    instance.run(uuid4())
-    assert calls[0][0] == "branch"
+@pytest.mark.parametrize("answer", [QMessageBox.StandardButton.Cancel, QMessageBox.StandardButton.Yes])
+def test_checkout_keeps_database_path_and_guards_head(answer):
+    instance, calls, saved, restarts, messages = controller(RevisionRestoreSelection(False), (answer,))
+    branch_id = uuid4()
+    def checkout(*args):
+        calls.append(("checkout", args))
+        return RevisionRestoreResult(uuid4(), AutomaticBackupResult())
+    instance.checkout_service = checkout
+    instance.checkout(branch_id, "main")
+    assert not saved
+    if answer == QMessageBox.StandardButton.Cancel:
+        assert not calls and not restarts
+    else:
+        assert calls[0][1] == (instance.session, branch_id, instance._head(), "actor")
+        assert restarts == [True]
+
+
+@pytest.mark.parametrize("error", [OSError("secret payload"), RevisionConflictError("secret payload")])
+def test_checkout_failure_does_not_restart_or_echo_payload(error):
+    instance, calls, saved, restarts, messages = controller(RevisionRestoreSelection(False), (QMessageBox.StandardButton.Yes,))
+    def fail(*_args):
+        raise error
+    instance.checkout_service = fail
+    instance.checkout(uuid4(), "main")
     assert not saved and not restarts
-    assert messages.events[-1][0] == "warning"
+    assert messages.events[-1][0] == ("warning" if isinstance(error, RevisionConflictError) else "critical")
+    assert "secret payload" not in str(messages.events)
 
 
 def test_restore_backup_failure_still_reports_committed_restore_and_restarts():
@@ -136,7 +169,7 @@ def test_restore_progress_keeps_ui_responsive_and_closes_before_result(app, bran
     from PySide6.QtCore import QTimer
     from src.desktop_v2.startup_loading import StartupLoadingDialog
 
-    choice = RevisionRestoreSelection(branch, Path("branch.sqlite3"), "password", "새 파일")
+    choice = RevisionRestoreSelection(branch, "새 분기")
     instance, calls, saved, restarts, messages = controller(
         choice, (QMessageBox.StandardButton.Yes, QMessageBox.StandardButton.No),
     )
@@ -185,7 +218,7 @@ def test_restore_progress_keeps_ui_responsive_and_closes_before_result(app, bran
         assert "private stored payload" not in str(messages.events)
     else:
         assert len(calls) == 1
-        assert restarts == ([] if branch else [True])
+        assert restarts == [True]
 
 
 @pytest.mark.parametrize("fail", [False, True])
@@ -227,3 +260,22 @@ def test_open_existing_checks_off_thread_and_releases_session(app, monkeypatch, 
     assert not calls and not saved and not restarts
     assert messages.events[-1][0] == ("critical" if fail else "question")
     assert "private payload" not in str(messages.events)
+
+
+@pytest.mark.parametrize("branch", [False, True])
+def test_committed_branch_or_restore_backup_failure_still_restarts(branch):
+    instance, calls, saved, restarts, messages = controller(
+        RevisionRestoreSelection(branch, "검토"), (QMessageBox.StandardButton.Yes,),
+        backup=AutomaticBackupResult(error=OSError("backup offline")),
+    )
+    instance.run(uuid4())
+    assert restarts == [True] and not saved
+    assert [kind for kind, _ in messages.events] == ["question", "warning", "information"]
+
+
+def test_checkout_no_change_never_restarts():
+    instance, calls, saved, restarts, messages = controller(RevisionRestoreSelection(False), (QMessageBox.StandardButton.Yes,))
+    instance.checkout_service = lambda *_: RevisionRestoreResult(None, AutomaticBackupResult())
+    instance.checkout(uuid4(), "main")
+    assert not restarts and not saved
+    assert messages.events[-1][0] == "information"

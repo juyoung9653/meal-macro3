@@ -336,6 +336,12 @@ class _AcceptedMealStatusDialog:
     def selected_period(self):
         return InclusiveDateRange(date(2026, 8, 18), None)
 
+    def selected_periods(self):
+        return {
+            Meal.BREAKFAST: InclusiveDateRange(date(2026, 8, 21), None),
+            Meal.LUNCH: self.selected_period(),
+        }
+
 
 def _session(tmp_path: Path) -> DatabaseSession:
     backup_directory = tmp_path / "backups"
@@ -1303,7 +1309,36 @@ def test_startup_builds_roster_window_only_after_guided_import_completes(
     outcome.close()
 
 
-def test_delivery_report_hub_skips_monthly_template_prerequisite(tmp_path: Path):
+@pytest.mark.parametrize("action", [DocumentAction.INVOICE, DocumentAction.CONFIRMATION, DocumentAction.DELIVERY_SUBSTITUTE])
+def test_protected_document_prerequisites_still_require_password_configuration(action):
+    calls = []
+    session, window = object(), object()
+
+    class Template:
+        def __init__(self, opened):
+            assert opened is session
+
+        def ensure_configured(self, parent):
+            return SimpleNamespace(completed=True, roster=None)
+
+    class Password:
+        def __init__(self, opened):
+            assert opened is session
+
+        def ensure_configured(self, parent):
+            calls.append(parent)
+            return SimpleNamespace(completed=False, roster=None)
+
+    controller = DesktopStartupController(
+        settings=SimpleNamespace(),
+        document_template_controller_type=Template,
+        export_password_controller_type=Password,
+    )
+    assert controller._ensure_document_prerequisites(session, window, action) is False
+    assert calls == [window]
+
+
+def test_delivery_report_hub_skips_template_and_password_prerequisites(tmp_path: Path):
     document_directory = tmp_path / "documents"
     document_directory.mkdir()
     summary = RevisionSummary(
@@ -1423,7 +1458,7 @@ def test_delivery_report_hub_skips_monthly_template_prerequisite(tmp_path: Path)
 
     controller._run_document_hub(session, window)
 
-    assert prerequisite_calls == [("password", window)]
+    assert prerequisite_calls == []
     assert len(emitted) == 1
     assert emitted[0].document.period.action is DocumentAction.DELIVERY_REPORT
     assert emitted[0].document.meals == tuple(Meal)

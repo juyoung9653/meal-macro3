@@ -73,6 +73,8 @@ def load_initial_roster_date_context(database) -> InitialRosterDateContext:
         parent = record.metadata.parent_revision_id
         record = None if parent is None else database.revision(parent)
     records.reverse()
+    if hasattr(database, "branch_revision_ids"):
+        records = [database.revision(value) for value in database.branch_revision_ids(latest.metadata.revision_id)]
     # Settings-only revisions may precede the first roster. A later reimport
     # must never become the baseline, even if older people were deleted.
     initial = next((item for item in records if any(

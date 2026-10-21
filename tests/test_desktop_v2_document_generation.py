@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from io import BytesIO
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -510,8 +511,9 @@ def test_confirmation_saved_name_mapping_changes_actual_workbook(
             plaintext.close()
 
 
-def test_publishes_encrypted_delivery_report_records_run_and_backup(
-    tmp_path: Path,
+@pytest.mark.parametrize("password_configured", [True, False])
+def test_publishes_unprotected_delivery_report_records_run_and_backup(
+    tmp_path: Path, password_configured: bool,
 ):
     backups = tmp_path / "backups-report"
     outputs = tmp_path / "outputs-report"
@@ -529,7 +531,13 @@ def test_publishes_encrypted_delivery_report_records_run_and_backup(
         "institution-recovery",
         backup_directory=backups,
     ) as session:
-        session.append_revision(_initial_revision())
+        initial = _initial_revision()
+        if not password_configured:
+            initial = replace(initial, changes=tuple(
+                change for change in initial.changes
+                if change.entity_kind != EXPORT_PASSWORD_SETTING_KIND
+            ))
+        session.append_revision(initial)
         source = session.database.revision_summaries()[0]
         report_day = date(2026, 6, 17)
         period = DocumentPeriodSelection(
@@ -574,17 +582,13 @@ def test_publishes_encrypted_delivery_report_records_run_and_backup(
         )
         assert run.template_manifest["template_setting"]["profile"] == "급식"
         assert run.template_manifest["delivery_template_profile"] == "급식"
-        assert run.template_manifest["export_password"]["protected"] is True
+        assert run.template_manifest["export_password"] == {"protected": False}
         backup_path = outcome.backup_result.record.path
 
         with selection.output_path.open("rb") as source_file:
             office_file = msoffcrypto.OfficeFile(source_file)
-            assert office_file.is_encrypted()
-            office_file.load_key(password="xlsx-secret")
-            plaintext = BytesIO()
-            office_file.decrypt(plaintext)
-        plaintext.seek(0)
-        workbook = openpyxl.load_workbook(plaintext, data_only=False)
+            assert not office_file.is_encrypted()
+        workbook = openpyxl.load_workbook(selection.output_path, data_only=False)
         try:
             assert workbook.sheetnames == ["20260617(중식)"]
             worksheet = workbook["20260617(중식)"]
@@ -595,7 +599,6 @@ def test_publishes_encrypted_delivery_report_records_run_and_backup(
             assert worksheet["G4"].value == 1
         finally:
             workbook.close()
-            plaintext.close()
 
     restored_path = tmp_path / "restored-delivery-report.sqlite3"
     with DatabaseSession.restore_and_open_with_user_password(

@@ -65,21 +65,53 @@ def test_phone_groups_db_entitlements_and_hidden_columns():
     data = replace(data, rows=tuple(replace(row, values={**row.values, "mobile_phone": phone}, entitlement_count=3)
                                     for row, phone in zip(data.rows, phones, strict=True)))
     wb, _, layout = _build_sheet(data, SubstituteOptions("synthetic", ("name", "sequence")))
-    assert [(g.source_start, g.source_end, g.meal_count) for g in layout.groups] == [(0, 1, 6), (2, 2, 3), (3, 3, 3), (4, 4, 3), (5, 5, 3), (6, 6, 3)]
+    assert [(g.source_start, g.source_end, g.meal_count) for g in layout.groups] == [(0, 1, 2), (2, 2, 1), (3, 3, 1), (4, 4, 1), (5, 5, 1), (6, 6, 1)]
     ws = wb.active
     assert [ws.cell(r, 1).value for r in range(3, 10)] == [row.values["name"] for row in data.rows]
     assert ws["B3"].value == "1번" and "B3:B4" in {str(r) for r in ws.merged_cells.ranges}
-    assert ws["C3"].value == 6
+    assert ws["C3"].value == 2
     assert ws["C3"].number_format == "General"
-    assert ws["A3"].fill.patternType is None  # Palette ends at five meals.
-    assert ws["A5"].fill.fgColor.rgb.endswith("B8CCE4")
-    assert ws["G10"].value == "6식"
-    assert ws["H13"].value == 21
-    assert ws["D13"].value == 5 and ws["G13"].value == 1
-    assert ws["B13"].value == ""
+    assert ws["A3"].fill.fgColor.rgb.endswith("E6B8B7")
+    assert ws["A5"].fill.patternType is None
+    assert ws["F10"].value == "5식"
+    assert ws["G13"].value == 7
+    assert ws["B13"].value == 5 and ws["C13"].value == 1
+    assert ws["D13"].value == ""
+    assert (ws["B11"].value, ws["C11"].value, ws["G11"].value) == (1, 1, 3)
+    assert (ws["B12"].value, ws["G12"].value) == (4, 4)
     assert ws["A11"].font.bold
     assert ws.freeze_panes is None and ws.oddFooter.center.text is None
+    serialized = BytesIO()
+    wb.save(serialized)
+    serialized.seek(0)
+    reopened = openpyxl.load_workbook(serialized)
+    assert reopened.active["A3"].fill.fgColor.rgb.endswith("E6B8B7")
+    assert reopened.active["C3"].value == 2
+    assert reopened.active["G13"].value == 7
+    reopened.close()
     wb.close()
+
+
+@pytest.mark.parametrize("meal,expected_counts,expected_total", (
+    (Meal.BREAKFAST, (1, 2, 3), 6),
+    (Meal.DINNER, (3, 4, 6), 13),
+))
+def test_household_fill_uses_member_rows_and_nonbreakfast_counts_stay_intact(meal, expected_counts, expected_total):
+    data = synthetic((1, 2, 3))
+    entitlements = (3, 1, 3, 3, 1, 2)
+    data = replace(data, meal=meal, rows=tuple(
+        replace(row, entitlement_count=count)
+        for row, count in zip(data.rows, entitlements, strict=True)
+    ))
+    workbook, _, layout = _build_sheet(data, SubstituteOptions("synthetic", ("name", "sequence")))
+    sheet = workbook.active
+    assert [group.meal_count for group in layout.groups] == list(expected_counts)
+    assert sheet["A3"].fill.patternType is None
+    assert sheet["A4"].fill.fgColor.rgb.endswith("E6B8B7")
+    assert sheet["A6"].fill.fgColor.rgb.endswith("B8CCE4")
+    assert sheet["C3"].value == expected_counts[0]
+    assert sheet.cell(layout.used_rows, layout.used_cols).value == expected_total
+    workbook.close()
 
 
 @pytest.mark.parametrize("cleanup_failure", [None, "close", "quit"])

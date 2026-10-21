@@ -68,7 +68,48 @@ def test_sequence_revision_roundtrips_per_meal_and_preserves_driver(tmp_path):
         assert reopened.resolve_assignment(person_id, Meal.BREAKFAST).driver == "조식 기사"
 
 
-def test_sequence_dialog_validates_changed_empty_and_controller_skips_cancel_noop(app, tmp_path):
+def test_clear_common_sequence_preserves_other_meals_and_driver_after_reopen(tmp_path):
+    roster = base_roster()
+    person_id = roster.persons[0].person_id
+    prepared = build_sequence_revision(
+        roster, person_id, {Meal.DINNER: ""},
+        actor=RevisionActor("tester", "test-sid"),
+        recorded_at=datetime.now(UTC), revision_id=uuid4(),
+    )
+    saved = prepared.snapshot
+    assert saved.resolve_assignment(person_id, Meal.DINNER).sequence is None
+    assert saved.resolve_assignment(person_id, Meal.BREAKFAST).sequence == "001"
+    assert saved.resolve_assignment(person_id, Meal.LUNCH).sequence == "001"
+    assert all(saved.resolve_assignment(person_id, meal).driver == "기존 기사" for meal in Meal)
+    path = tmp_path / "clear-sequence.sqlite3"
+    with DatabaseSession.create(path, "password", "recovery") as session:
+        initialize(session, roster)
+        session.append_revision(prepared.record)
+        assert session.database.current_roster().resolve_assignment(person_id, Meal.DINNER).sequence is None
+    with DatabaseSession.open(path, "password") as session:
+        saved = session.database.current_roster()
+        assert saved.resolve_assignment(person_id, Meal.DINNER).sequence is None
+        assert saved.resolve_assignment(person_id, Meal.BREAKFAST).sequence == "001"
+        assert saved.resolve_assignment(person_id, Meal.LUNCH).sequence == "001"
+        assert all(saved.resolve_assignment(person_id, meal).driver == "기존 기사" for meal in Meal)
+
+
+def test_clear_sequence_only_common_assignment_removes_empty_record():
+    roster = base_roster()
+    person_id = roster.persons[0].person_id
+    roster = replace(roster, assignments=(DeliveryAssignment(person_id, sequence="001"),))
+    prepared = build_sequence_revision(
+        roster, person_id, {Meal.DINNER: ""},
+        actor=RevisionActor("tester", "test-sid"),
+        recorded_at=datetime.now(UTC), revision_id=uuid4(),
+    )
+    assert all(assignment.meal is not None for assignment in prepared.snapshot.assignments)
+    assert prepared.snapshot.resolve_assignment(person_id, Meal.DINNER).sequence is None
+    assert prepared.snapshot.resolve_assignment(person_id, Meal.BREAKFAST).sequence == "001"
+    assert prepared.snapshot.resolve_assignment(person_id, Meal.LUNCH).sequence == "001"
+
+
+def test_sequence_dialog_accepts_changed_empty_and_controller_skips_cancel_noop(app, tmp_path):
     roster = _mixed_roster()
     person_id = roster.persons[0].person_id
     dialog = SequenceEditDialog(roster, person_id)
@@ -76,8 +117,7 @@ def test_sequence_dialog_validates_changed_empty_and_controller_skips_cancel_noo
     assert dialog.fields[Meal.BREAKFAST].text() == "010"
     dialog.fields[Meal.LUNCH].clear()
     dialog._save()
-    assert dialog.result() != QDialog.DialogCode.Accepted
-    assert "비울 수 없습니다" in dialog.error.text()
+    assert dialog.result() == QDialog.DialogCode.Accepted
     dialog.close()
 
     class StubDialog:
@@ -126,6 +166,11 @@ def test_unified_dialog_keeps_mixed_values_distinguishable_until_explicit_input(
     dialog = SequenceEditDialog(roster, person_id, mode=SequenceMode.UNIFIED)
     dialog.fields[Meal.DINNER].setText("007")
     assert dialog.values() == {meal: "007" for meal in (Meal.DINNER, Meal.BREAKFAST, Meal.LUNCH)}
+    dialog.close()
+
+    dialog = SequenceEditDialog(roster, person_id, mode=SequenceMode.UNIFIED)
+    dialog.clear_button.click()
+    assert dialog.values() == {meal: "" for meal in Meal}
     dialog.close()
 
 

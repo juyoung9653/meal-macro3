@@ -454,6 +454,7 @@ def test_right_click_stop_keeps_dated_driver_in_window_and_reload(
     from src.desktop_v2.meal_status_edit import MealStatusChangeController
     from src.desktop_v2.roster_window import RosterWindow
     from src.domain.delivery_routing import build_driver_revision
+    from src.domain.delivery_dates import next_actual_delivery_date
     from src.domain.revisions import RevisionActor
     from src.domain.roster import InclusiveDateRange
     from src.domain.status import MealStatus
@@ -514,6 +515,14 @@ def test_right_click_stop_keeps_dated_driver_in_window_and_reload(
 
         def selected_period(self):
             return InclusiveDateRange(DAY, None)
+
+        def selected_periods(self):
+            return {
+                meal: InclusiveDateRange(
+                    next_actual_delivery_date(roster.delivery_defaults, meal, DAY), None
+                )
+                for meal in self.selected_meals()
+            }
 
     class StopController(MealStatusChangeController):
         def __init__(self, session):
@@ -588,6 +597,7 @@ def test_right_click_stop_keeps_dated_driver_in_window_and_reload(
         )
         next(action for action in menu.actions() if action.text() == stop_text).trigger()
         app.processEvents()
+        window._set_day(date(2026, 10, 2))  # Breakfast's first allowed stop date.
 
         model = window.table_model
         row = next(
@@ -751,9 +761,11 @@ def test_right_click_stop_keeps_excel_imported_meal_driver_in_window_and_reload(
         assert not dialog.isModal()
         assert dialog.selected_meals() == (Meal.BREAKFAST,)
         assert dialog.selected_status() is MealStatus.STOPPED
-        assert dialog.selected_period() == InclusiveDateRange(imported_on, None)
+        stopped_on = date(2026, 10, 2)  # First actual breakfast delivery after import.
+        assert dialog.selected_period() == InclusiveDateRange(stopped_on, None)
         dialog._save()
         app.processEvents()
+        window._set_day(stopped_on)
 
         row = next(
             row for row in range(model.rowCount())

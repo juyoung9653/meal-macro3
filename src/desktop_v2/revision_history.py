@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+from collections.abc import Mapping
 
 from .dialog_workflow import launch
 
@@ -25,6 +26,8 @@ from PySide6.QtWidgets import (
     QApplication,
     QDialog,
     QDialogButtonBox,
+    QComboBox,
+    QHBoxLayout,
     QFrame,
     QHeaderView,
     QLabel,
@@ -37,6 +40,8 @@ from PySide6.QtWidgets import (
 )
 
 from src.services.revision_history import build_revision_change_rows
+from src.services.revision_branches import BRANCH_EVENT_KEY, list_branches
+from src.services.revision_restore import RESTORE_TARGET_KEY
 
 from .startup_loading import run_progress_task
 from .theme import application_stylesheet, register_application_fonts
@@ -57,6 +62,7 @@ class RevisionSummaryModel(QAbstractTableModel):
 
     def __init__(self, summaries, parent=None):
         super().__init__(parent)
+        self.branch_labels: dict[UUID, str] = {}
         self.summaries = tuple(
             sorted(summaries, key=lambda item: item.sequence, reverse=True)
         )
@@ -78,8 +84,10 @@ class RevisionSummaryModel(QAbstractTableModel):
             Qt.ItemDataRole.ToolTipRole,
         ):
             return None
+        label = self.branch_labels.get(summary.revision_id, "")
+        prefix = f"{label} · " if label else ""
         return (
-            f"{summary.reason}\n"
+            f"{prefix}{summary.reason}\n"
             f"{_recorded_text(summary.recorded_at)} · {summary.actor.username}\n"
             f"변경번호 {summary.display_code}"
         )
@@ -104,12 +112,20 @@ class RevisionSummaryFilterModel(QSortFilterProxyModel):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._query = ""
+        self._revision_ids: frozenset[UUID] | None = None
 
     def set_query(self, value: str) -> None:
         self._query = value.casefold().strip()
         self.invalidate()
 
+    def set_revision_ids(self, revision_ids) -> None:
+        self._revision_ids = None if revision_ids is None else frozenset(revision_ids)
+        self.invalidate()
+
     def filterAcceptsRow(self, source_row, source_parent):
+        model = self.sourceModel()
+        if self._revision_ids is not None and model.summaries[source_row].revision_id not in self._revision_ids:
+            return False
         if not self._query:
             return True
         model = self.sourceModel()
@@ -172,6 +188,8 @@ class GlobalRevisionHistoryDialog(QDialog):
         super().__init__(parent)
         self._database = database
         self._restore_controller = None
+        self._branches = ()
+        self._branch_read_failed = False
         columns = getattr(getattr(parent, "table_model", None), "columns", ())
         column_labels = {column.key: column.label for column in columns}
         self._change_rows_builder = (
@@ -211,6 +229,7 @@ class GlobalRevisionHistoryDialog(QDialog):
         self._summary_proxy.setSourceModel(self._summary_model)
         self._detail_model = RevisionChangeRowsModel(self)
         self._build_ui()
+        self._load_branches()
         self._update_summary_state()
         if self._summary_proxy.rowCount():
             self._summary_table.selectRow(0)
@@ -222,6 +241,7 @@ class GlobalRevisionHistoryDialog(QDialog):
         from .revision_restore import RevisionRestoreController
         self._restore_controller = RevisionRestoreController(session, settings, on_restart)
         self._restore_button.show()
+        self._update_checkout_action()
         self._restore_button.setEnabled(self.selected_revision_id is not None)
         self._eyebrow.setText(f"운영 데이터 · {session.path.name}")
         self._eyebrow.setToolTip(str(session.path))
@@ -229,6 +249,84 @@ class GlobalRevisionHistoryDialog(QDialog):
     def _restore_selected(self):
         if self._restore_controller is not None:
             launch(self._restore_controller.run, self.selected_revision_id, self)
+
+    def _load_branches(self) -> None:
+        # Older read-only adapters have no branch API; retain their audit view.
+        if not hasattr(self._database, "branch_revision_ids"):
+            return
+        try:
+            self._branches = run_progress_task(
+                lambda: list_branches(self._database),
+                message="분기 목록을 읽고 있습니다.", parent=self,
+                title="분기를 불러오는 중입니다",
+            )
+        except Exception:
+            self._branch_read_failed = True
+            self._current_branch.setText("현재 분기를 읽지 못했습니다. 창을 다시 열어주세요.")
+            self._current_branch.show()
+            return
+        active_index = 0
+        with QSignalBlocker(self._branch_selector):
+            for branch in self._branches:
+                self._branch_selector.addItem(
+                    branch.name + (" · 현재 사용 중" if branch.is_active else ""), branch.branch_id,
+                )
+                if branch.is_active:
+                    active_index = self._branch_selector.count() - 1
+                    self._current_branch.setText(f"현재 사용 중인 분기: {branch.name}")
+            self._branch_selector.setCurrentIndex(active_index)
+        self._branch_selector.setVisible(bool(self._branches))
+        self._current_branch.setVisible(True)
+        self._branch_changed()
+
+    def _selected_branch(self):
+        branch_id = self._branch_selector.currentData()
+        return next((branch for branch in self._branches if branch.branch_id == branch_id), None)
+
+    def _branch_changed(self, *_args) -> None:
+        branch = self._selected_branch()
+        labels = {}
+        try:
+            if branch is None:
+                ids = None
+            else:
+                def read_branch_history():
+                    ids = self._database.branch_revision_ids(branch.tip_revision_id)
+                    source = branch.source_revision_id
+                    before = () if source is None else self._database.branch_revision_ids(source)
+                    return ids, source, before
+                ids, source, before = run_progress_task(
+                    read_branch_history, message="선택한 분기의 변경 기록을 읽고 있습니다.",
+                    parent=self, title="분기 이력을 불러오는 중입니다",
+                )
+                labels = {revision_id: "분기 전 기록" for revision_id in before}
+                if source is not None:
+                    labels[source] = "분기 시작점"
+        except Exception:
+            self._current_branch.setText("분기의 변경 이력을 읽지 못했습니다. 창을 다시 열어주세요.")
+            ids = ()
+        self._summary_model.branch_labels = labels
+        with QSignalBlocker(self._summary_table.selectionModel()):
+            self._summary_proxy.set_revision_ids(ids)
+        self._branch_note.setText(
+            "모든 분기의 저장·전환 기록을 함께 표시합니다."
+            if branch is None else
+            f"‘{branch.name}’의 변경 기록입니다. 분기 시작점과 그 이전 기록도 선택할 수 있습니다. "
+            "목록 선택만으로 사용 중인 분기는 바뀌지 않습니다."
+        )
+        self._update_checkout_action()
+        self._apply_filter(self._search.text())
+        self._summary_table.resizeRowsToContents()
+
+    def _update_checkout_action(self) -> None:
+        branch = self._selected_branch()
+        self._checkout_button.setVisible(self._restore_controller is not None and bool(self._branches))
+        self._checkout_button.setEnabled(branch is not None and not branch.is_active)
+
+    def _checkout_selected_branch(self) -> None:
+        branch = self._selected_branch()
+        if self._restore_controller is not None and branch is not None and not branch.is_active:
+            launch(self._restore_controller.checkout, branch.branch_id, branch.name, self)
 
     @property
     def selected_revision_id(self) -> UUID | None:
@@ -264,6 +362,12 @@ class GlobalRevisionHistoryDialog(QDialog):
         header_layout.addWidget(eyebrow)
         header_layout.addWidget(title)
         header_layout.addWidget(subtitle)
+        self._current_branch = QLabel()
+        self._current_branch.setObjectName("revisionHistoryCurrentBranch")
+        self._current_branch.setTextFormat(Qt.TextFormat.PlainText)
+        self._current_branch.setWordWrap(True)
+        self._current_branch.hide()
+        header_layout.addWidget(self._current_branch)
         root.addWidget(header)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -298,6 +402,24 @@ class GlobalRevisionHistoryDialog(QDialog):
         label = QLabel("저장 기록")
         label.setObjectName("sectionLabel")
         layout.addWidget(label)
+        branch_row = QHBoxLayout()
+        self._branch_selector = QComboBox()
+        self._branch_selector.setObjectName("revisionHistoryBranchSelector")
+        self._branch_selector.setAccessibleName("표시할 분기")
+        self._branch_selector.addItem("전체 분기 · 감사 기록", None)
+        self._branch_selector.hide()
+        self._branch_selector.currentIndexChanged.connect(self._branch_changed)
+        branch_row.addWidget(self._branch_selector, 1)
+        self._checkout_button = QPushButton("이 분기로 전환")
+        self._checkout_button.setObjectName("quietAction")
+        self._checkout_button.clicked.connect(self._checkout_selected_branch)
+        self._checkout_button.hide()
+        branch_row.addWidget(self._checkout_button)
+        layout.addLayout(branch_row)
+        self._branch_note = QLabel()
+        self._branch_note.setObjectName("revisionHistoryBranchNote")
+        self._branch_note.setWordWrap(True)
+        layout.addWidget(self._branch_note)
         self._search = QLineEdit()
         self._search.setObjectName("revisionHistorySearch")
         self._search.setAccessibleName("전체 변경 이력 검색")
@@ -470,6 +592,9 @@ class GlobalRevisionHistoryDialog(QDialog):
     def _update_summary_state(self) -> None:
         visible = self._summary_proxy.rowCount()
         total = self._summary_model.rowCount()
+        if self._summary_proxy._revision_ids is not None:
+            total = sum(summary.revision_id in self._summary_proxy._revision_ids
+                        for summary in self._summary_model.summaries)
         if self._summary_load_failed:
             text = "변경 이력 목록을 읽지 못했습니다. 창을 닫고 다시 시도해주세요."
         elif not total:
@@ -525,6 +650,17 @@ class GlobalRevisionHistoryDialog(QDialog):
         try:
             def load_rows():
                 record = self._database.revision(summary.revision_id)
+                decisions = getattr(record.metadata, "decisions", {})
+                event = decisions.get(BRANCH_EVENT_KEY)
+                if isinstance(event, Mapping) and event.get("operation") in {"create", "checkout"}:
+                    branch = next((item for item in self._branches
+                                   if str(item.branch_id) == event.get("branch_id")), None)
+                    name = branch.name if branch is not None else event.get("name", "선택한 분기")
+                    target = UUID(decisions[RESTORE_TARGET_KEY])
+                    code = self._database.revision_display_code(target)
+                    operation = "분기 생성" if event["operation"] == "create" else "분기 전환"
+                    target_label = "시작 변경번호" if event["operation"] == "create" else "전환 변경번호"
+                    return (("운영 데이터", "", operation, f"분기: {name}\n{target_label}: {code}"),)
                 snapshot = self._database.snapshot(summary.revision_id)
                 parent_revision_id = record.metadata.parent_revision_id
                 previous_snapshot = (

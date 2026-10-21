@@ -16,7 +16,7 @@ from uuid import uuid4
 
 from PySide6.QtWidgets import (
     QDialog, QDialogButtonBox, QFormLayout, QLabel, QLineEdit,
-    QMessageBox, QVBoxLayout, QScrollArea, QWidget,
+    QMessageBox, QPushButton, QVBoxLayout, QScrollArea, QWidget,
 )
 
 from src.domain.roster import Meal, RosterSnapshot
@@ -69,6 +69,7 @@ class SequenceEditDialog(QDialog):
         form.setSpacing(10)
         self.fields = {}
         self._unified_mixed = False
+        self._clear_unified = False
         if mode is SequenceMode.UNIFIED:
             distinct = set(self._initial.values())
             self._unified_mixed = len(distinct) > 1
@@ -94,6 +95,11 @@ class SequenceEditDialog(QDialog):
             )
             self.fields = {meal: field for meal in keys}
             form.addRow("모든 식종", field)
+            if self._unified_mixed:
+                self.clear_button = QPushButton("모든 식종 순서 비우기")
+                self.clear_button.setObjectName("quietAction")
+                self.clear_button.clicked.connect(self._clear_mixed_values)
+                form.addRow("", self.clear_button)
         else:
             for meal in keys:
                 field = make_rule_editor("sequence", self._input_rules)
@@ -127,10 +133,14 @@ class SequenceEditDialog(QDialog):
     def values(self):
         if self._mode is SequenceMode.UNIFIED:
             value = self.fields[MEALS[0]].text().strip()
-            if self._unified_mixed and not value:
+            if self._unified_mixed and not value and not self._clear_unified:
                 return {}
             return {meal: value for meal in MEALS}
         return {meal: field.text().strip() for meal, field in self.fields.items()}
+
+    def _clear_mixed_values(self):
+        self._clear_unified = True
+        self.fields[MEALS[0]].clear()
 
     def _save(self):
         values = self.values()
@@ -140,12 +150,6 @@ class SequenceEditDialog(QDialog):
         for meal, value in values.items():
             if value == self._initial[meal]:
                 continue
-            if not value:
-                self.error.setText(
-                    f"{self._labels[meal]} 순서를 비울 수 없습니다. 기존 순서는 그대로 두거나 새 순서를 입력해주세요."
-                )
-                self.fields[meal].setFocus()
-                return
             if "\n" in value or "\r" in value:
                 self.error.setText(f"{self._labels[meal]} 순서는 한 줄로 입력해주세요.")
                 self.fields[meal].setFocus()
@@ -241,8 +245,6 @@ class SequenceEditController:
             if not targets:
                 raise ValueError("수정할 식종이 없습니다.")
             normalized = value.strip()
-            if not normalized:
-                raise ValueError("배송순서를 비울 수 없습니다. 순서를 입력해주세요.")
             if "\n" in normalized or "\r" in normalized:
                 raise ValueError("배송순서는 한 줄로 입력해주세요.")
             if all(normalized == (roster.resolve_assignment(*key).sequence or "") for key in targets):

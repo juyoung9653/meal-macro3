@@ -111,7 +111,7 @@ def start_editor(dialog, app, row=0, *, mouse=True):
     return editor
 
 
-def test_inline_enter_uses_captured_exact_pairs_and_esc_focus_loss_never_save(app):
+def test_inline_enter_and_focus_loss_save_exact_pairs_while_escape_cancels(app):
     roster = roster_fixture()
     merged, dinner, breakfast = manifest_rows(roster)
     other = replace(dinner, household_key=uuid4(), member_ids=(roster.persons[2].person_id,), member_names=("별도",), sequences=("10",))
@@ -140,8 +140,8 @@ def test_inline_enter_uses_captured_exact_pairs_and_esc_focus_loss_never_save(ap
     editor.setText("88")
     dialog.split_button.setFocus()
     app.processEvents()
-    assert len(received) == 1 and dialog.table.item(0, 3).text() == "001, 2"
-    assert "취소" in dialog.sequence_status.text()
+    assert received[-1] == (targets, "88") and len(received) == 2
+    assert dialog.table.item(0, 3).text() == "001, 2"
     # Only sequence cells are editable, including real double-clicks.
     point = dialog.table.visualItemRect(dialog.table.item(0, 1)).center()
     QTest.mouseDClick(dialog.table.viewport(), Qt.LeftButton, pos=point)
@@ -155,6 +155,21 @@ def test_inline_enter_uses_captured_exact_pairs_and_esc_focus_loss_never_save(ap
     editor.setText("007")
     QTest.keyClick(editor, Qt.Key_Return)
     assert received[-1] == (((roster.persons[1].person_id, Meal.BREAKFAST),), "007")
+    assert len(received) == 3
+    dialog.split_button.setFocus()
+    app.processEvents()
+    assert len(received) == 3
+    editor = start_editor(dialog, app)
+    assert editor.text() == "2"
+    QTest.keyClick(editor, Qt.Key_Backspace)
+    dialog.split_button.setFocus()
+    app.processEvents()
+    assert received[-1] == (((roster.persons[1].person_id, Meal.BREAKFAST),), "")
+    assert len(received) == 4
+    editor = start_editor(dialog, app)
+    dialog.split_button.setFocus()
+    app.processEvents()
+    assert len(received) == 4
     dialog.close()
 
 
@@ -184,7 +199,7 @@ def test_save_value_atomic_noop_invalid_failure_and_backup_warning(tmp_path):
         appends = []
         original = session.append_revision
         session.append_revision = lambda record: (appends.append(record), original(record))[1]
-        for bad in ("", "  ", "1\n2", "1\r2"):
+        for bad in ("1\n2", "1\r2"):
             assert controller.save_value(targets, bad).status is SequenceSaveStatus.FAILED
         assert not appends and session.database.current_roster().revision_id == roster.revision_id
         outcome = controller.save_value(targets, " 001 ")
@@ -196,12 +211,20 @@ def test_save_value_atomic_noop_invalid_failure_and_backup_warning(tmp_path):
         assert outcome.roster.resolve_assignment(roster.persons[2].person_id, Meal.DINNER).sequence == "10"
         assert controller.save_value(targets, "001").status is SequenceSaveStatus.UNCHANGED
         assert len(appends) == 1
+        cleared = controller.save_value(targets, "  ")
+        assert cleared.status is SequenceSaveStatus.SAVED
+        assert cleared.roster.resolve_assignment(*targets[0]).sequence is None
+        assert cleared.roster.resolve_assignment(*targets[1]).sequence is None
+        assert cleared.roster.resolve_assignment(*targets[0]).driver == "기사"
+        assert cleared.roster.resolve_assignment(*targets[1]).driver == "기사"
+        assert controller.save_value(targets, "").status is SequenceSaveStatus.UNCHANGED
+        assert len(appends) == 2
         def fail(record):
             raise OSError("저장소 오류")
         session.append_revision = fail
         failed = controller.save_value(targets, "002")
         assert failed.status is SequenceSaveStatus.FAILED and "저장소 오류" in failed.message
-        assert session.database.current_roster().revision_id == outcome.roster.revision_id
+        assert session.database.current_roster().revision_id == cleared.roster.revision_id
         def backup_warning(record):
             appends.append(record)
             original(record)
@@ -209,7 +232,7 @@ def test_save_value_atomic_noop_invalid_failure_and_backup_warning(tmp_path):
         session.append_revision = backup_warning
         outcome = controller.save_value(targets, "003")
         assert outcome.status is SequenceSaveStatus.SAVED and outcome.backup_warning
-        assert "저장됐지만" in outcome.message and len(appends) == 2
+        assert "저장됐지만" in outcome.message and len(appends) == 3
         assert outcome.roster.revision_id == session.database.current_roster().revision_id
     with DatabaseSession.open(tmp_path / "inline.sqlite3", "password") as session:
         assert session.database.current_roster().resolve_assignment(*targets[1]).sequence == "003"
@@ -227,7 +250,14 @@ def test_application_inline_commit_refreshes_preserves_filters_and_failure_displ
         initialize(session, roster)
         window = RosterWindow(roster, column_settings=settings, inactive_settings=settings)
         window._set_day(date(2026, 10, 13))
-        manifest = DriverHouseholdsDialog((merged,), service_day=date(2026, 10, 13), drivers=())
+        manifest = DriverHouseholdsDialog(
+            (merged,), service_day=date(2026, 10, 13), drivers=(),
+            rows_provider=lambda _include_hidden: (
+                replace(merged, sequences=tuple(sorted({
+                    window.roster.resolve_assignment(*target).sequence or "" for target in targets
+                }))),
+            ),
+        )
         manifest.show()
         manifest._set_column_search("members", "하나")
         manifest.table.sortItems(3, Qt.DescendingOrder)
@@ -304,7 +334,7 @@ def test_real_projection_prefills_only_uniform_values_including_missing(app, tmp
         assert len(editor._sequence_targets) == 2
         assert "이 행의 가구원 식종에 같은 순서 적용" in dialog.sequence_status.text()
         QTest.keyClick(editor, Qt.Key_Return)
-        assert results[-1].status is (SequenceSaveStatus.FAILED if second_sequence is None else SequenceSaveStatus.UNCHANGED)
+        assert results == []
         assert session.database.current_roster().revision_id == roster.revision_id
         assert session.database.current_roster().resolve_assignment(second.person_id, Meal.DINNER).sequence == second_sequence
         dialog.split_button.click()

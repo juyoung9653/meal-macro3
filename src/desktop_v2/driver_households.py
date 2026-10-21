@@ -103,6 +103,7 @@ class _SequenceDelegate(QStyledItemDelegate):
     def setEditorData(self, editor, index):
         values = editor._sequence_row.sequences
         editor.setText(values[0] if len(values) == 1 and not editor._sequence_row.has_empty_sequence else "")
+        editor._sequence_initial = editor.text()
         editor.selectAll()
 
     def setModelData(self, editor, model, index):
@@ -115,19 +116,25 @@ class _SequenceDelegate(QStyledItemDelegate):
             return super().eventFilter(editor, event)
         if event.type() == QEvent.Type.KeyPress:
             key = event.key()
-            if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-                targets, value = editor._sequence_targets, editor.text()
-                editor._sequence_finished = True
-                self.closeEditor.emit(editor, QAbstractItemDelegate.EndEditHint.RevertModelCache)
-                self.save_requested.emit(targets, value)
+            if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Tab, Qt.Key.Key_Backtab):
+                self._commit(editor)
                 return True
-            if key in (Qt.Key.Key_Escape, Qt.Key.Key_Tab, Qt.Key.Key_Backtab):
+            if key == Qt.Key.Key_Escape:
                 self._cancel(editor)
                 return True
         if event.type() == QEvent.Type.FocusOut:
-            self._cancel(editor)
+            self._commit(editor)
             return True
         return super().eventFilter(editor, event)
+
+    def _commit(self, editor):
+        if not editor._sequence_finished:
+            targets, value = editor._sequence_targets, editor.text()
+            modified = editor.isModified() or value != editor._sequence_initial
+            editor._sequence_finished = True
+            self.closeEditor.emit(editor, QAbstractItemDelegate.EndEditHint.RevertModelCache)
+            if modified:
+                self.save_requested.emit(targets, value)
 
     def _cancel(self, editor):
         if not editor._sequence_finished:
@@ -252,10 +259,10 @@ class DriverHouseholdsDialog(QDialog):
         self.table.setItemDelegateForColumn(3, self._sequence_delegate)
         self._sequence_delegate.save_requested.connect(self.sequence_save_requested.emit)
         self._sequence_delegate.editing_started.connect(
-            lambda _count: self.sequence_status.setText("이 행의 가구원 식종에 같은 순서 적용 · Enter 저장 · Esc 또는 다른 곳 클릭 취소")
+            lambda _count: self.sequence_status.setText("이 행의 가구원 식종에 같은 순서 적용 · Enter·Tab·다른 곳 클릭 저장 · Esc 취소")
         )
         self._sequence_delegate.editing_cancelled.connect(
-            lambda: self.sequence_status.setText("수정을 취소했습니다. · 더블클릭하여 수정 · Enter 저장 · Esc 취소")
+            lambda: self.sequence_status.setText("수정을 취소했습니다. · 더블클릭하여 수정 · Enter·Tab·다른 곳 클릭 저장 · Esc 취소")
         )
         self.table.setAlternatingRowColors(True)
         header = self.table.horizontalHeader()
@@ -270,7 +277,7 @@ class DriverHouseholdsDialog(QDialog):
         self.table.setSortingEnabled(True)
         layout.addWidget(self.table, 1)
 
-        self.sequence_status = QLabel("더블클릭하여 가구 배송순서 수정 · Enter 저장 · Esc 또는 다른 곳 클릭 취소")
+        self.sequence_status = QLabel("더블클릭하여 가구 배송순서 수정 · Enter·Tab·다른 곳 클릭 저장 · Esc 취소")
         self.sequence_status.setObjectName("householdSequenceStatus")
         self.sequence_status.setWordWrap(True)
         layout.addWidget(self.sequence_status)
@@ -549,7 +556,7 @@ class DriverHouseholdsDialog(QDialog):
                         item.setData(Qt.ItemDataRole.UserRole, row)
                         if _sequence_targets(row):
                             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
-                        item.setToolTip(f"{value or '순서 미지정'}\n더블클릭하여 가구에 같은 순서 적용 · Enter 저장 · Esc 취소")
+                        item.setToolTip(f"{value or '순서 미지정'}\n더블클릭하여 가구에 같은 순서 적용 · Enter·Tab·다른 곳 클릭 저장 · Esc 취소")
                     if column == 0:
                         item.setData(Qt.ItemDataRole.UserRole, (
                             row.household_key, row.driver_id, row.driver_name, row.address,

@@ -151,6 +151,9 @@ class EncryptedDatabase:
                     "parent revision이 현재 최신 revision과 다릅니다. "
                     f"expected={expected_parent}, actual={actual_parent}"
                 )
+            from src.services.revision_branches import registry_from_connection
+            registry = registry_from_connection(connection)
+            registry.apply(record.metadata.revision_id, record.metadata.decisions)
             restoring = "snapshot_restore_target" in record.metadata.decisions
             from src.domain.meal_history_cancellation import (
                 CANCELLATION_DECISION, CANCELLATION_KIND, validate_meal_history_cancellation,
@@ -159,14 +162,9 @@ class EncryptedDatabase:
             if cancelling:
                 if restoring or actual_parent is None:
                     raise ValueError("식종 변경 취소는 현재 명단에서 한 건씩 처리해야 합니다.")
-                chain = []
-                cursor = actual_parent
-                while cursor is not None:
-                    previous = self.revision(cursor)
-                    chain.append(previous)
-                    cursor = previous.metadata.parent_revision_id
+                chain = self.branch_revision_chain(actual_parent)
                 validate_meal_history_cancellation(
-                    self._current_entity_snapshot(actual_parent), tuple(reversed(chain)), record,
+                    self._current_entity_snapshot(actual_parent), chain, record,
                 )
             elif not restoring and any(c.entity_kind == CANCELLATION_KIND for c in record.changes):
                 raise ValueError("식종 변경 취소 기록은 검증된 취소 작업으로만 저장할 수 있습니다.")
@@ -418,6 +416,26 @@ class EncryptedDatabase:
         if row is None:
             raise KeyError(f"없는 revision ID입니다: {revision_id}")
         return str(row[0])
+
+    def branches(self):
+        from src.services.revision_branches import registry_from_connection
+        return registry_from_connection(self._require_connection()).listed()
+
+    def branch_revision_ids(self, revision_id=None):
+        from src.services.revision_branches import registry_from_connection
+        registry = registry_from_connection(self._require_connection())
+        target = registry.head if revision_id is None else revision_id
+        if target is None:
+            return ()
+        return registry.revision_ids(target)
+
+    def branch_revision_chain(self, revision_id):
+        ids = self.branch_revision_ids(revision_id)
+        records = tuple(self.revision(value) for value in ids)
+        # Cancellation commands require their last record to identify current state.
+        if not ids or ids[-1] != revision_id:
+            records += (self.revision(revision_id),)
+        return records
 
     def revision_summaries(self) -> tuple[RevisionSummary, ...]:
         """List sealed revisions newest-first for history/source selection."""
@@ -1048,6 +1066,11 @@ def _verify_encrypted_header(path: Path) -> None:
 
 
 def _validate_ledger(connection: apsw.Connection) -> None:
+    from src.services.revision_branches import registry_from_connection
+    try:
+        registry_from_connection(connection)
+    except (KeyError, TypeError, ValueError) as error:
+        raise DatabaseIntegrityError("분기 기록이 올바르지 않습니다.") from error
     rows = tuple(
         connection.execute(
             """

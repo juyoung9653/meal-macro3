@@ -1,6 +1,7 @@
 """Offscreen multi-meal delivery-status editor checks."""
 
 import os
+from dataclasses import replace
 from datetime import date, timedelta
 from uuid import UUID
 
@@ -14,6 +15,7 @@ from PySide6.QtWidgets import QApplication, QDialog, QLabel
 from src.desktop_v2.meal_status_edit import MealStatusChangeDialog
 from src.domain.roster import (
     InclusiveDateRange,
+    HouseholdDeliverySetting,
     Meal,
     MealEnrollment,
     Person,
@@ -252,7 +254,7 @@ def test_selected_meals_keep_independent_valid_periods(app: QApplication):
         dialog.close()
 
 
-def test_invalid_calendar_date_disables_save_and_deselect_keeps_meal_period(app: QApplication):
+def test_invalid_date_commit_is_prevented_and_deselect_keeps_meal_period(app: QApplication):
     roster = _roster()
     dialog = MealStatusChangeDialog(
         roster.person(PERSON_ID),
@@ -272,10 +274,9 @@ def test_invalid_calendar_date_disables_save_and_deselect_keeps_meal_period(app:
         QTest.keyClicks(breakfast_start, "2026.09.03")
         QTest.keyClick(breakfast_start, Qt.Key.Key_Enter)
         breakfast_end.setDate(QDate(2026, 9, 4))
-        assert breakfast_start.date() == QDate(2026, 9, 3)
-        assert not dialog._save_button.isEnabled()
-        assert "조식 시작일" in dialog._error.text()
-        assert "금요일" in dialog._error.text()
+        assert breakfast_start.date() == QDate(2026, 9, 4)
+        assert breakfast_start.text() == "2026.09.04"
+        assert dialog._save_button.isEnabled()
 
         breakfast_start.setDate(QDate(2026, 9, 4))
         breakfast_end.setDate(QDate(2026, 9, 11))
@@ -284,6 +285,35 @@ def test_invalid_calendar_date_disables_save_and_deselect_keeps_meal_period(app:
         assert dialog.selected_periods()[Meal.BREAKFAST] == InclusiveDateRange(
             date(2026, 9, 4), date(2026, 9, 11)
         )
+        assert dialog._save_button.isEnabled()
+    finally:
+        dialog.close()
+
+
+def test_period_editor_uses_configured_delivery_mapping_not_service_weekdays(app):
+    roster = _roster()
+    roster = replace(roster, delivery_defaults=tuple(
+        HouseholdDeliverySetting(
+            Meal.BREAKFAST, (4, 5, 6), delivery_weekdays=(0, 1, 2, 3, 0, 3, 3)
+        ) if setting.meal is Meal.BREAKFAST else setting
+        for setting in roster.delivery_defaults
+    ))
+    dialog = MealStatusChangeDialog(
+        roster.person(PERSON_ID), roster, _histories(), ANCHOR_DAY,
+        Meal.BREAKFAST, MealStatus.DELIVERY,
+    )
+    try:
+        editor = dialog._starts_on_by_meal[Meal.BREAKFAST]
+        assert editor.date() == QDate(2026, 9, 3)
+        editor.setFocus()
+        editor.selectAll()
+        QTest.keyClicks(editor, "2026.09.04")
+        QTest.keyClick(editor, Qt.Key.Key_Return)
+        assert editor.date() == QDate(2026, 9, 3)
+        editor.selectAll()
+        QTest.keyClicks(editor, "2026.09.07")
+        QTest.keyClick(editor, Qt.Key.Key_Return)
+        assert dialog.selected_period() == InclusiveDateRange(date(2026, 9, 7), None)
         assert dialog._save_button.isEnabled()
     finally:
         dialog.close()

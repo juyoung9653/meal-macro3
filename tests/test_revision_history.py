@@ -147,10 +147,65 @@ def test_revision_rows_redact_password_and_summarize_unknown_kind_without_payloa
 
     assert rows[0][3] == "비밀번호 설정 변경"
     assert rows[1][2:] == ("제공기관", "이전: 기존 기관\n이후: 새 기관")
-    assert rows[2][2] == "future.secret_setting"
-    assert rows[2][3] == "future.secret_setting · 추가"
+    assert rows[2][2] == "기타 변경"
+    assert rows[2][3] == "항목을 추가했습니다."
+    assert "future.secret_setting" not in rendered
     assert secret not in rendered
     assert "old-secret" not in rendered
+
+
+def test_cancellation_marker_explains_person_meal_and_cancelled_action_in_korean():
+    from dataclasses import replace
+    from src.domain.meal_history_cancellation import CANCELLATION_KIND, CANCELLATION_DECISION
+
+    person, event, marker_id = uuid4(), uuid4(), uuid4()
+    state = {"person_id": str(person), "meal": "석식", "status": "일시중지",
+             "starts_on": "2026-10-14", "ends_on": "2026-10-16"}
+    marker = {"source_revision_id": str(uuid4()), "entity_kind": STATUS_EVENT_KIND,
+              "entity_id": str(event), "starts_on": None, "ends_on": None}
+    record = _record((
+        AuditChange(STATUS_EVENT_KIND, event, ChangeOperation.DELETE, state, None),
+        AuditChange(CANCELLATION_KIND, marker_id, ChangeOperation.INSERT, None, marker),
+    ))
+    record = replace(record, metadata=replace(record.metadata, decisions={CANCELLATION_DECISION: marker}))
+    snapshot = HistoricalSnapshot(record.metadata.revision_id, {
+        EntityRef(PERSON_KIND, person): {"name": "김하늘"},
+    })
+    rows = build_revision_change_rows(record, snapshot)
+    assert rows[-1] == ("김하늘", "석식", "식종 변경 등록 취소",
+                        "석식 일시중지 등록을 취소했습니다.\n적용 기간: 2026-10-14 ~ 2026-10-16")
+    assert "meal.history_cancellation" not in repr(rows)
+    assert str(event) not in repr(rows)
+
+
+def test_batch_delivery_combines_automatic_enrollment_with_status_without_duplicate_people():
+    from src.domain.meal_status_changes import build_batch_meal_status_revision
+    from src.domain.projections import roster_audit_changes
+    from src.domain.roster import Household, HouseholdMembership, InclusiveDateRange, Meal, Person, PersonProfile, RosterSnapshot
+    from src.domain.status import MealStatus
+
+    first, second, home, revision_id = uuid4(), uuid4(), uuid4(), uuid4()
+    roster = RosterSnapshot(uuid4(),
+        persons=(Person(first, PersonProfile("김하늘")), Person(second, PersonProfile("이수민"))),
+        households=(Household(home),),
+        memberships=(HouseholdMembership(first, home), HouseholdMembership(second, home)))
+    targets = ((first, Meal.DINNER), (second, Meal.DINNER))
+    prepared = build_batch_meal_status_revision(roster, targets, MealStatus.DELIVERY,
+        InclusiveDateRange(DAY), actor=ACTOR, recorded_at=STAMP, revision_id=revision_id,
+        event_ids={target: uuid4() for target in targets})
+    before = {EntityRef(c.entity_kind, c.entity_id): c.after for c in roster_audit_changes(None, roster)}
+    after = dict(before)
+    for change in prepared.record.changes:
+        after[EntityRef(change.entity_kind, change.entity_id)] = change.after
+    rows = build_revision_change_rows(prepared.record, HistoricalSnapshot(revision_id, after),
+        previous_snapshot=HistoricalSnapshot(roster.revision_id, before))
+    assert len(rows) == 1
+    assert rows[0][0] == "김하늘\n이수민"
+    assert rows[0][3].startswith("석식 배송\n")
+    assert "가입 기간 변경" in rows[0][3]
+    assert "이전: 미지정" in rows[0][3]
+    assert repr(rows).count("김하늘") == 1
+    assert repr(rows).count("이수민") == 1
 
 
 def test_revision_rows_reject_invalid_snapshots_explicitly():

@@ -2,6 +2,8 @@
 
 
 def load_revision_chain(database, revision_id):
+    if hasattr(database, "branch_revision_chain"):
+        return database.branch_revision_chain(revision_id)
     records = []
     visited = set()
     while revision_id is not None:

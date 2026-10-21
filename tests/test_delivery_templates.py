@@ -37,7 +37,10 @@ def test_real_template_column_styles_reach_measurement_and_serialized_output(tmp
     wb.close()
     snapshot, _ = source()
     data = prepare_delivery_substitute_data(snapshot, DAY, Meal.BREAKFAST)
-    data = replace(data, rows=tuple(replace(row, entitlement_count=1) for row in data.rows))
+    data = replace(data, rows=tuple(
+        replace(row, entitlement_count=count)
+        for row, count in zip(data.rows, (3, 1, 2, 3), strict=True)
+    ))
     selected = replace(options(data), columns=("name", "road_address"))
     observed = []
     def measure(workbook, columns, layout, selected, *, preserve_styles=False):
@@ -53,6 +56,7 @@ def test_real_template_column_styles_reach_measurement_and_serialized_output(tmp
     assert observed == [True]
     assert actual["A3"].font.color.rgb == "00123456"
     assert actual["A3"].fill.fgColor.rgb == "00135790"
+    assert actual["C3"].value == 3
     assert actual["A3"].border.left.style == "double"
     assert actual["A6"].border.bottom.style == "double"
     assert actual["B3"].font.name != "Arial"

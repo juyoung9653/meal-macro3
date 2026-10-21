@@ -20,6 +20,8 @@ from .revisions import (
 from .roster import Meal, RosterSnapshot
 
 DRIVER_KIND = "delivery.driver"
+DRIVER_ORDER_KIND = "delivery.driver_order"
+DRIVER_ORDER_ID = UUID("32fbf66a-4498-4a30-965d-a7b3b1b433cd")
 ROUTING_EVENT_KIND = "delivery.routing_event"
 MEAL_ORDER = (Meal.DINNER, Meal.BREAKFAST, Meal.LUNCH)
 
@@ -121,6 +123,7 @@ class DriverReplacementTarget:
 class RoutingState:
     drivers: tuple[Driver, ...] = ()
     events: tuple[RoutingEvent, ...] = ()
+    driver_order: tuple[UUID, ...] | None = None
     _drivers_by_id: Mapping[UUID, Driver] = field(init=False, repr=False)
     _events_by_person: Mapping[UUID, tuple[RoutingEvent, ...]] = field(
         init=False, repr=False
@@ -133,6 +136,13 @@ class RoutingState:
         drivers_by_id = {driver.driver_id: driver for driver in drivers}
         if len(drivers_by_id) != len(drivers):
             raise ValueError("기사 ID가 중복되었습니다.")
+        if self.driver_order is not None:
+            order = tuple(self.driver_order)
+            if any(not isinstance(item, UUID) for item in order):
+                raise TypeError("기사 표시 순서의 ID가 올바르지 않습니다.")
+            if len(set(order)) != len(order) or not set(order) <= drivers_by_id.keys():
+                raise ValueError("기사 표시 순서에 중복되거나 등록되지 않은 기사가 있습니다.")
+            object.__setattr__(self, "driver_order", order)
         if len({event.event_id for event in events}) != len(events):
             raise ValueError("이사·배정 기록 ID가 중복되었습니다.")
         if len({event.position for event in events}) != len(events):
@@ -210,11 +220,21 @@ class RoutingState:
 
 def routing_state_from_snapshot(snapshot: HistoricalSnapshot) -> RoutingState:
     drivers, events = [], []
+    driver_order = None
     for reference, state in snapshot.entities.items():
         if reference.entity_kind == DRIVER_KIND:
             drivers.append(
                 Driver(reference.entity_id, state["name"], state["telephone"])
             )
+        elif reference.entity_kind == DRIVER_ORDER_KIND:
+            if reference.entity_id != DRIVER_ORDER_ID:
+                raise ValueError("기사 표시 순서 기록 ID가 올바르지 않습니다.")
+            raw_order = state["ordered_driver_ids"]
+            if not isinstance(raw_order, (list, tuple)):
+                raise ValueError("저장된 기사 표시 순서가 올바르지 않습니다.")
+            if any(not isinstance(item, str) for item in raw_order):
+                raise ValueError("저장된 기사 표시 순서의 ID가 올바르지 않습니다.")
+            driver_order = tuple(UUID(item) for item in raw_order)
         elif reference.entity_kind == ROUTING_EVENT_KIND:
             events.append(
                 RoutingEvent(
@@ -231,19 +251,11 @@ def routing_state_from_snapshot(snapshot: HistoricalSnapshot) -> RoutingState:
                     state.get("jurisdiction"),
                 )
             )
-    return RoutingState(
-        tuple(
-            sorted(
-                drivers,
-                key=lambda driver: (
-                    driver.name,
-                    driver.telephone,
-                    str(driver.driver_id),
-                ),
-            )
-        ),
-        tuple(events),
-    )
+    drivers.sort(key=lambda driver: (driver.name, driver.telephone, str(driver.driver_id)))
+    if driver_order is not None:
+        positions = {driver_id: index for index, driver_id in enumerate(driver_order)}
+        drivers.sort(key=lambda driver: positions.get(driver.driver_id, len(positions)))
+    return RoutingState(tuple(drivers), tuple(events), driver_order)
 
 
 def _driver_state(driver: Driver):
@@ -278,6 +290,7 @@ def build_driver_revision(
     actor: RevisionActor,
     recorded_at: datetime,
     revision_id: UUID,
+    ordered_driver_ids: tuple[UUID, ...] | None = None,
 ) -> RevisionRecord:
     driver = Driver(driver_id, name, telephone)
     if any(
@@ -287,18 +300,59 @@ def build_driver_revision(
     ):
         raise ValueError("같은 이름과 전화번호의 기사가 이미 등록되어 있습니다.")
     original = state._drivers_by_id.get(driver_id)
-    if original == driver:
+    if original == driver and ordered_driver_ids is None:
         raise ValueError("변경된 기사 정보가 없습니다.")
-    change = AuditChange(
+    changes = [] if original == driver else [AuditChange(
         DRIVER_KIND,
         driver_id,
         ChangeOperation.INSERT if original is None else ChangeOperation.UPDATE,
         None if original is None else _driver_state(original),
         _driver_state(driver),
+    )]
+    if ordered_driver_ids is not None:
+        updated_drivers = tuple(item for item in state.drivers if item.driver_id != driver_id) + (driver,)
+        order_state = RoutingState(updated_drivers, state.events, state.driver_order)
+        order_change = _driver_order_change(order_state, ordered_driver_ids)
+        if order_change is not None:
+            changes.append(order_change)
+    if not changes:
+        raise ValueError("변경된 기사 정보나 순서가 없습니다.")
+    record = _record(roster, changes[0], actor, recorded_at, revision_id, None, "배송기사 등록·수정")
+    return RevisionRecord(record.metadata, tuple(changes))
+
+
+def _driver_order_change(state: RoutingState, ordered_driver_ids: tuple[UUID, ...]) -> AuditChange | None:
+    order = tuple(ordered_driver_ids)
+    if any(not isinstance(item, UUID) for item in order):
+        raise TypeError("기사 표시 순서의 ID가 올바르지 않습니다.")
+    if len(order) != len(state.drivers) or set(order) != set(state._drivers_by_id):
+        raise ValueError("기사 표시 순서는 등록된 기사를 한 번씩 포함해야 합니다.")
+    if state.driver_order == order:
+        return None
+    return AuditChange(
+        DRIVER_ORDER_KIND,
+        DRIVER_ORDER_ID,
+        ChangeOperation.INSERT if state.driver_order is None else ChangeOperation.UPDATE,
+        None if state.driver_order is None else {"ordered_driver_ids": tuple(str(item) for item in state.driver_order)},
+        {"ordered_driver_ids": tuple(str(item) for item in order)},
     )
-    return _record(
-        roster, change, actor, recorded_at, revision_id, None, "배송기사 등록·수정"
-    )
+
+
+def build_driver_order_revision(
+    roster: RosterSnapshot,
+    state: RoutingState,
+    *,
+    ordered_driver_ids: tuple[UUID, ...],
+    actor: RevisionActor,
+    recorded_at: datetime,
+    revision_id: UUID,
+) -> RevisionRecord | None:
+    if tuple(ordered_driver_ids) == tuple(driver.driver_id for driver in state.drivers):
+        return None
+    change = _driver_order_change(state, ordered_driver_ids)
+    if change is None:
+        return None
+    return _record(roster, change, actor, recorded_at, revision_id, None, "배송기사 표시 순서 변경")
 
 
 def build_routing_revision(

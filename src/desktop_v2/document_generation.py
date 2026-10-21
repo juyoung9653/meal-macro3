@@ -221,7 +221,10 @@ class DocumentGenerationController:
             current_snapshot = self._session.database.snapshot(
                 current_roster.revision_id
             )
-            password_setting = require_export_password_setting(current_snapshot)
+            password_setting = (
+                None if action is DocumentAction.DELIVERY_REPORT
+                else require_export_password_setting(current_snapshot)
+            )
             template_setting = (
                 require_document_template_setting(current_snapshot)
                 if action in (DocumentAction.INVOICE, DocumentAction.CONFIRMATION)
@@ -363,7 +366,7 @@ class DocumentGenerationController:
                     prepared.reports,
                     refreshed.output_path,
                     template_path,
-                    output_password=password_setting.password,
+                    output_password=None,
                     overwrite=False,
                     **({"preserve_template_styles": True} if custom_delivery_template is not None else {}),
                 )
@@ -382,7 +385,10 @@ class DocumentGenerationController:
                 "column_mapping": dict(sorted(column_mapping.items())),
                 "column_fallbacks": dict(sorted(column_fallbacks.items())),
                 "content_sha256": publication.content_sha256,
-                "export_password": password_setting.public_manifest(),
+                "export_password": (
+                    password_setting.public_manifest()
+                    if password_setting is not None else {"protected": False}
+                ),
             }
             if action is DocumentAction.DELIVERY_SUBSTITUTE:
                 template_manifest["substitute_render_contract_version"] = SUBSTITUTE_RENDER_CONTRACT_VERSION

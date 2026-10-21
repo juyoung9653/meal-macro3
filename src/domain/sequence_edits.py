@@ -58,8 +58,6 @@ def build_scoped_sequence_revision(
         normalized = value.strip()
         if normalized == (roster.resolve_assignment(person_id, meal).sequence or ""):
             continue
-        if not normalized:
-            raise ValueError(f"{meal.value} 순서를 비울 수 없습니다. 기존 순서는 그대로 두거나 새 순서를 입력해주세요.")
         if "\n" in normalized or "\r" in normalized:
             raise ValueError(f"{meal.value} 순서는 한 줄로 입력해주세요.")
         changed[(person_id, meal)] = normalized
@@ -67,13 +65,38 @@ def build_scoped_sequence_revision(
         raise ValueError("변경된 배송순서가 없습니다.")
 
     assignments = {(item.person_id, item.meal): item for item in roster.assignments}
+    # A blank meal sequence must not reveal an older person-wide sequence.
+    # Move that common value to unaffected meals before removing it.
+    for person_id in {person_id for person_id, _ in changed}:
+        common_key = (person_id, None)
+        common = assignments.get(common_key)
+        if common is None or common.sequence is None or not any(
+            changed.get((person_id, meal)) == "" for meal in Meal
+        ):
+            continue
+        for meal in Meal:
+            key = (person_id, meal)
+            if key in changed:
+                continue
+            existing = assignments.get(key)
+            if existing is None:
+                assignments[key] = DeliveryAssignment(person_id, meal, sequence=common.sequence)
+            elif existing.sequence is None:
+                assignments[key] = replace(existing, sequence=common.sequence)
+        if common.driver is None:
+            del assignments[common_key]
+        else:
+            assignments[common_key] = replace(common, sequence=None)
     for (person_id, meal), sequence in changed.items():
         key = (person_id, meal)
         existing = assignments.get(key)
-        assignments[key] = (
-            DeliveryAssignment(person_id, meal, sequence=sequence)
-            if existing is None else replace(existing, sequence=sequence)
-        )
+        if existing is None:
+            if sequence:
+                assignments[key] = DeliveryAssignment(person_id, meal, sequence=sequence)
+        elif not sequence and existing.driver is None:
+            del assignments[key]
+        else:
+            assignments[key] = replace(existing, sequence=sequence or None)
     snapshot = replace(roster, revision_id=revision_id, assignments=tuple(assignments.values()))
     people = {person_id for person_id, _ in changed}
     decisions = (

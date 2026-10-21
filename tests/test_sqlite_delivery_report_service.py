@@ -5,7 +5,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from src.domain.entitlements import ClosedFridayMode, LunchDayRule, SchoolLunchMark
-from src.domain.delivery_routing import ROUTING_EVENT_KIND
+from src.domain.delivery_routing import DRIVER_KIND, ROUTING_EVENT_KIND
 from src.domain.projections import roster_entity_states, roster_from_historical_snapshot, status_event_state
 from src.domain.revisions import EntityRef, HistoricalSnapshot
 from src.domain.roster import (
@@ -683,3 +683,112 @@ def test_shipment_household_change_inside_bundled_weekend_remains_error():
     states.update(roster_entity_states(changed))
     with pytest.raises(ValueError, match='서로 다른 가구'):
         prepare_delivery_report_data(HistoricalSnapshot(snapshot.revision_id, states), friday, friday, (Meal.BREAKFAST,))
+
+
+
+def _with_routing(snapshot, *changes):
+    states = dict(snapshot.entities)
+    for position, (person_id, meal, effective_on, driver_name) in enumerate(changes, start=1):
+        driver_id = None if driver_name is None else uuid4()
+        if driver_id is not None:
+            states[EntityRef(DRIVER_KIND, driver_id)] = {"name": driver_name, "telephone": ""}
+        states[EntityRef(ROUTING_EVENT_KIND, uuid4())] = {
+            "person_id": str(person_id),
+            "effective_on": effective_on.isoformat(),
+            "position": position,
+            "driver_ids": {meal.value: None if driver_id is None else str(driver_id)},
+            "road_address": None,
+            "detail_address": None,
+            "jurisdiction": None,
+        }
+    return HistoricalSnapshot(snapshot.revision_id, states)
+
+
+@pytest.mark.parametrize("include_sequence", [True, False])
+def test_report_accepts_registered_driver_without_legacy_driver(include_sequence):
+    day = date(2026, 10, 23)
+    snapshot, person_ids = _snapshot(include_driver=False)
+    if not include_sequence:
+        roster = roster_from_historical_snapshot(snapshot)
+        states = dict(snapshot.entities)
+        states.update(roster_entity_states(replace(roster, assignments=())))
+        snapshot = HistoricalSnapshot(snapshot.revision_id, states)
+    snapshot = _with_routing(snapshot, (person_ids[0], Meal.BREAKFAST, day, "새기사"))
+
+    prepared = prepare_delivery_report_data(snapshot, day, day, (Meal.BREAKFAST,))
+
+    report = prepared.reports[0]
+    assert report.day == day
+    assert report.rows[0].staff_label == "새기사\n(1)"
+    assert report.rows[0].household_size_cells == ("1", "", "", "", "")
+    assert report.totals.person_total == 1
+
+
+@pytest.mark.parametrize("change_on", [date(2026, 8, 21), date(2026, 8, 22)])
+def test_report_driver_change_uses_physical_delivery_day(change_on):
+    friday = date(2026, 8, 21)
+    snapshot, person_ids = _snapshot()
+    snapshot = _with_routing(snapshot, (person_ids[0], Meal.BREAKFAST, change_on, "새기사"))
+
+    prepared = prepare_delivery_report_data(snapshot, friday, friday, (Meal.BREAKFAST,))
+
+    rows = {row.staff_label: row.household_size_cells for row in prepared.reports[0].rows}
+    assert prepared.shipments[0].service_dates == (friday, friday + timedelta(days=1), friday + timedelta(days=2))
+    if change_on == friday:
+        assert rows == {"김기사\n(0)": ("0(-1)", "", "", "", ""),
+                        "새기사\n(1)": ("1(+1)", "", "", "", "")}
+    else:
+        assert rows == {"김기사\n(1)": ("1", "", "", "", "")}
+
+
+def test_report_driver_clear_rejects_selected_physical_day():
+    day = date(2026, 10, 23)
+    snapshot, person_ids = _snapshot()
+    snapshot = _with_routing(snapshot, (person_ids[0], Meal.BREAKFAST, day, None))
+
+    with pytest.raises(ValueError, match=r"2026\.10\.23 조식.*배송담당이 비어 있습니다"):
+        prepare_delivery_report_data(snapshot, day, day, (Meal.BREAKFAST,))
+
+
+def test_report_missing_driver_error_uses_selected_day_before_comparison():
+    day = date(2026, 10, 23)
+    snapshot, _ = _snapshot(include_driver=False)
+
+    with pytest.raises(ValueError, match=r"2026\.10\.23 조식.*배송담당이 비어 있습니다"):
+        prepare_delivery_report_data(snapshot, day, day, (Meal.BREAKFAST,))
+
+
+def test_incomplete_previous_driver_discards_entire_comparison_without_false_deltas():
+    day = date(2026, 10, 23)
+    previous = day - timedelta(days=1)
+    snapshot, person_ids = _snapshot(people=2, delivery_settings=(
+        HouseholdDeliverySetting(Meal.BREAKFAST, (0, 1, 2, 3, 4)),
+    ))
+    snapshot = _with_routing(
+        snapshot,
+        (person_ids[0], Meal.BREAKFAST, previous, None),
+        (person_ids[0], Meal.BREAKFAST, day, "새기사"),
+    )
+
+    prepared = prepare_delivery_report_data(snapshot, day, day, (Meal.BREAKFAST,))
+
+    rows = {row.staff_label: row.household_size_cells for row in prepared.reports[0].rows}
+    assert rows == {"김기사\n(1)": ("1", "", "", "", ""),
+                    "새기사\n(1)": ("1", "", "", "", "")}
+    assert prepared.reports[0].totals.person_total == 2
+
+
+def test_previous_day_inside_selected_period_still_requires_driver():
+    day = date(2026, 10, 23)
+    previous = day - timedelta(days=1)
+    snapshot, person_ids = _snapshot(delivery_settings=(
+        HouseholdDeliverySetting(Meal.BREAKFAST, (0, 1, 2, 3, 4)),
+    ))
+    snapshot = _with_routing(
+        snapshot,
+        (person_ids[0], Meal.BREAKFAST, previous, None),
+        (person_ids[0], Meal.BREAKFAST, day, "새기사"),
+    )
+
+    with pytest.raises(ValueError, match=r"2026\.10\.22 조식.*배송담당이 비어 있습니다"):
+        prepare_delivery_report_data(snapshot, previous, day, (Meal.BREAKFAST,))

@@ -1386,6 +1386,7 @@ class RosterWindow(QMainWindow):
     household_shared_exception_requested = Signal(object, str, bool)
     column_input_rule_requested = Signal(str)
     monthly_statistics_requested = Signal()
+    monthly_meal_history_requested = Signal()
 
     def __init__(
         self,
@@ -2047,6 +2048,8 @@ class RosterWindow(QMainWindow):
                  "저장된 모든 변경번호와 변경 내용을 읽기 전용으로 확인합니다"),
                 ("_complaint_history_action", "전체 민원", self.complaint_history_requested.emit,
                  "명단 검색·필터와 관계없이 모든 대상자의 민원을 확인합니다"),
+                ("_monthly_meal_history_action", "월별 식종 변경 이력", self.monthly_meal_history_requested.emit,
+                 "선택한 달과 관련된 전체 명단의 배송·일시중지·중지 이력을 조회합니다"),
             )),
             ("통계", (
                 ("_monthly_statistics_action", "월별 식수", self.monthly_statistics_requested.emit,

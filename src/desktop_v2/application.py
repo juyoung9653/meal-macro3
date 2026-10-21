@@ -63,6 +63,9 @@ from .column_input_rules import ColumnInputRuleController
 from src.domain.column_input_rules import load_rules
 from .monthly_statistics import MonthlyStatisticsDialog
 from src.services.monthly_meal_statistics import build_monthly_meal_statistics
+from .monthly_meal_history import MonthlyMealHistoryDialog
+from .ledger_reader import load_revision_chain
+from src.services.monthly_meal_history import build_monthly_meal_history
 from .delivery_defaults import DeliveryDefaultsController
 from .initial_roster_date import InitialRosterDateController
 from .missing_household_repair import MissingHouseholdRepairController
@@ -352,6 +355,7 @@ class DesktopStartupController:
             ("cell_edit_requested", lambda person_id, column_key, text: launch(self._run_roster_cell_edit, session, window, person_id, column_key, text)),
             ("column_input_rule_requested", lambda column_key: launch(self._run_column_input_rule, session, window, column_key)),
             ("monthly_statistics_requested", lambda: launch(self._run_monthly_statistics, session, window)),
+            ("monthly_meal_history_requested", lambda: launch(self._run_monthly_meal_history, session, window)),
             ("household_shared_column_requested", lambda column_key: launch(self._run_household_shared_column, session, window, column_key)),
             ("household_shared_exception_requested", lambda person_id, column_key, enabled: launch(self._run_household_shared_exception, session, window, person_id, column_key, enabled)),
         ):
@@ -647,6 +651,26 @@ class DesktopStartupController:
             )
 
         dialog = MonthlyStatisticsDialog(window.table_model.service_day, load, parent=window)
+        yield DialogRequest(dialog)
+
+    @dialog_workflow
+    def _run_monthly_meal_history(self, session, window):
+        def load(year, month):
+            def read():
+                current = session.database.current_roster()
+                if current is None:
+                    raise ValueError("현재 명단이 없습니다.")
+                snapshot = session.database.snapshot(current.revision_id)
+                revisions = load_revision_chain(session.database, current.revision_id)
+                return build_monthly_meal_history(snapshot, revisions, year, month)
+
+            return run_progress_task(
+                read, title="월별 식종 변경 이력을 읽는 중입니다",
+                message="선택한 달의 적용 기간과 변경 이력을 확인하는 중입니다.",
+                parent=window if isinstance(window, QWidget) else None,
+            )
+
+        dialog = MonthlyMealHistoryDialog(window.table_model.service_day, load, parent=window)
         yield DialogRequest(dialog)
 
     @dialog_workflow
@@ -1238,6 +1262,8 @@ class DesktopStartupController:
         window,
         action: DocumentAction,
     ) -> bool:
+        if action is DocumentAction.DELIVERY_REPORT:
+            return True
         if action in (DocumentAction.INVOICE, DocumentAction.CONFIRMATION):
             template = (yield from invoke(self._document_template_controller_type(
                 session

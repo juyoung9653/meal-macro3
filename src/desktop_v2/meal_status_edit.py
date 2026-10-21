@@ -53,6 +53,7 @@ from src.domain.meal_status_changes import build_batch_meal_status_revision
 from src.domain.intake import IntakeChannel
 
 from .date_edit import WheelSafeDateEdit
+from .delivery_date_edit import DeliveryDateEdit
 from src.storage.database_session import (
     AutomaticBackupResult,
     DatabaseSession,
@@ -327,8 +328,9 @@ class MealStatusChangeDialog(QDialog):
             default_day = next_actual_delivery_date(
                 self._roster.delivery_defaults, meal, anchor_day
             )
-            starts_on = _date_edit(default_day)
-            ends_on = _date_edit(default_day)
+            weekdays = actual_delivery_weekdays(self._roster.delivery_defaults, meal)
+            starts_on = _date_edit(default_day, weekdays)
+            ends_on = _date_edit(default_day, weekdays)
             starts_on.setObjectName(f"statusStartsOn_{meal.name}")
             ends_on.setObjectName(f"statusEndsOn_{meal.name}")
             starts_on.dateChanged.connect(self._refresh_state)
@@ -797,9 +799,8 @@ def _current_state(
     )
 
 
-def _date_edit(value: date) -> WheelSafeDateEdit:
-    editor = WheelSafeDateEdit(QDate(value.year, value.month, value.day))
-    editor.setCalendarPopup(True)
+def _date_edit(value: date, weekdays: tuple[int, ...]) -> WheelSafeDateEdit:
+    editor = DeliveryDateEdit(QDate(value.year, value.month, value.day), weekdays)
     editor.setDisplayFormat("yyyy.MM.dd")
     return editor
 

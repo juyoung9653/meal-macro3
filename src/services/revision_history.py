@@ -8,10 +8,11 @@ from uuid import UUID
 
 from src.domain.complaints import COMPLAINT_KIND
 from src.domain.delivery_defaults import DELIVERY_DEFAULTS_KIND
-from src.domain.delivery_routing import DRIVER_KIND, ROUTING_EVENT_KIND
+from src.domain.delivery_routing import DRIVER_KIND, DRIVER_ORDER_KIND, ROUTING_EVENT_KIND
 from src.domain.document_column_mappings import MAPPING_ENTITY_KIND
 from src.domain.document_templates import DOCUMENT_TEMPLATE_SETTING_KIND
 from src.domain.export_security import EXPORT_PASSWORD_SETTING_KIND
+from src.domain.meal_history_cancellation import CANCELLATION_KIND, CANCELLATION_DECISION
 from src.domain.projections import (
     ASSIGNMENT_KIND,
     CUSTOM_FIELD_KIND,
@@ -44,7 +45,9 @@ _KIND_LABELS = {
     ASSIGNMENT_KIND: "배송배정",
     CUSTOM_FIELD_KIND: "사용자 정의 항목",
     STATUS_EVENT_KIND: "상태 변경",
+    CANCELLATION_KIND: "식종 변경 등록 취소",
     DRIVER_KIND: "배송담당",
+    DRIVER_ORDER_KIND: "기사 표시 순서",
     ROUTING_EVENT_KIND: "배송 변경",
     COMPLAINT_KIND: "민원",
     DELIVERY_DEFAULTS_KIND: "식종별 배송 기본값",
@@ -91,6 +94,7 @@ _FIELD_LABELS = {
     "source_text": "원문",
     "driver": "배송담당",
     "driver_ids": "배송담당",
+    "ordered_driver_ids": "기사 표시 순서",
     "sequence": "배송순서",
     "content": "내용",
     "channel": "채널",
@@ -186,10 +190,15 @@ def build_revision_change_rows(
     current_assignments = _household_assignments(snapshot)
     previous_assignments = _household_assignments(previous_snapshot)
     grouped_meals, grouped_followers = _status_groups(record.changes)
+    linked_enrollments = _delivery_enrollment_changes(record)
+    enrollment_indices = {index for index, _ in linked_enrollments.values()}
     rows = []
     changed_people = {}
     for index, change in enumerate(record.changes):
-        if index in grouped_followers:
+        if index in grouped_followers or index in enrollment_indices:
+            continue
+        if change.entity_kind == CANCELLATION_KIND:
+            rows.append(_cancellation_row(change, record, snapshot, previous_snapshot))
             continue
         target = _target_text(change, snapshot, previous_snapshot)
         if change.entity_kind == HOUSEHOLD_KIND:
@@ -209,9 +218,19 @@ def build_revision_change_rows(
             continue
         if change.entity_kind == STATUS_EVENT_KIND:
             field_label = " · ".join(_status_column_label(meal, column_labels) for meal in meals)
+            content = _status_change_text(change, grouped_meals=meal_text)
+            for meal in meals:
+                linked = linked_enrollments.get(((change.after or {}).get("person_id"), meal))
+                if linked is not None:
+                    for _key, _label, detail in _field_change_rows(
+                        linked[1], snapshot, previous_snapshot,
+                        current_households=current_households,
+                        previous_households=previous_households,
+                        column_labels=column_labels,
+                    ):
+                        content += f"\n{meal} 가입 기간 변경:\n{detail}"
             row_index = len(rows)
-            rows.append((target, meal_text, field_label,
-                         _status_change_text(change, grouped_meals=meal_text)))
+            rows.append((target, meal_text, field_label, content))
             changed_people[row_index] = (_uuid((change.after or {}).get("person_id")),
                                          (change.after or {}).get("starts_on") or record.metadata.effective_on,
                                          (STATUS_EVENT_KIND, meals))
@@ -234,12 +253,62 @@ def build_revision_change_rows(
                 rows.append((target, meal_text, _KIND_LABELS[change.entity_kind], "민감한 설정 변경"))
             continue
         rows.append((
-            target, meal_text, _KIND_LABELS.get(change.entity_kind, change.entity_kind),
+            target, meal_text, _KIND_LABELS.get(change.entity_kind, "기타 변경"),
             _change_text(change, snapshot, previous_snapshot),
         ))
     return _group_household_rows(
         rows, changed_people, current_assignments, previous_assignments,
     )
+
+
+def _delivery_enrollment_changes(record):
+    """Keep automatic enrollment details in their delivery row, not duplicate rows."""
+    if not any(key in record.metadata.decisions for key in ("meal_status_change", "batch_meal_status_change")):
+        return {}
+    delivery_targets = {
+        (change.after.get("person_id"), change.after.get("meal"))
+        for change in record.changes
+        if change.entity_kind == STATUS_EVENT_KIND
+        and change.operation is ChangeOperation.INSERT
+        and change.after is not None and change.after.get("status") == "배송"
+    }
+    return {
+        (change.after.get("person_id"), change.after.get("meal")): (index, change)
+        for index, change in enumerate(record.changes)
+        if change.entity_kind == ENROLLMENT_KIND and change.after is not None
+        and (change.after.get("person_id"), change.after.get("meal")) in delivery_targets
+    }
+
+
+def _cancellation_row(change, record, snapshot, previous_snapshot):
+    marker = change.after or change.before or {}
+    kind, entity_id = marker.get("entity_kind"), _uuid(marker.get("entity_id"))
+    state = None
+    for related in record.changes:
+        if related.entity_kind == kind and related.entity_id == entity_id:
+            state = related.before or related.after
+            break
+    if state is None and entity_id is not None:
+        for source in (previous_snapshot, snapshot):
+            if source is not None:
+                state = source.entity(kind, entity_id)
+                if state is not None:
+                    break
+    state = state or {}
+    person_id = _uuid(state.get("person_id"))
+    target = (_person_name(person_id, snapshot, previous_snapshot) if person_id else "") or "식종 변경 기록"
+    meal = str(state.get("meal") or "")
+    category = "가입 시작" if kind == ENROLLMENT_KIND else str(state.get("status") or "상태 변경")
+    action = (
+        "등록 취소를 되돌렸습니다." if change.after is None else
+        "등록을 취소했습니다." if CANCELLATION_DECISION in record.metadata.decisions else
+        "등록 취소 상태를 복구했습니다."
+    )
+    text = f"{meal} {category} {action}".strip()
+    period = marker if kind == ENROLLMENT_KIND else state
+    if period.get("starts_on") or period.get("ends_on"):
+        text += f"\n적용 기간: {_period_text(period.get('starts_on'), period.get('ends_on'))}"
+    return target, meal, "식종 변경 등록 취소", text
 
 
 def _status_groups(changes: tuple[AuditChange, ...]) -> tuple[dict[int, tuple[str, ...]], set[int]]:
@@ -499,7 +568,7 @@ def _target_text(
     previous_snapshot: HistoricalSnapshot | None,
 ) -> str:
     if change.entity_kind not in _KNOWN_KINDS:
-        return change.entity_kind
+        return "기타 변경"
     state = change.after or change.before or {}
     if change.entity_kind == PERSON_KIND:
         name = _person_name(change.entity_id, snapshot, previous_snapshot, state)
@@ -593,7 +662,11 @@ def _change_text(change: AuditChange, snapshot=None, previous_snapshot=None) -> 
     if change.entity_kind == EXPORT_PASSWORD_SETTING_KIND:
         return "비밀번호 설정 변경"
     if change.entity_kind not in _KNOWN_KINDS:
-        return f"{change.entity_kind} · {_OPERATION_LABELS[change.operation]}"
+        return {
+            ChangeOperation.INSERT: "항목을 추가했습니다.",
+            ChangeOperation.UPDATE: "항목을 수정했습니다.",
+            ChangeOperation.DELETE: "항목을 삭제했습니다.",
+        }[change.operation]
     if change.entity_kind == STATUS_EVENT_KIND:
         return _status_change_text(change)
     return _OPERATION_LABELS[change.operation]
@@ -690,6 +763,8 @@ def _value_text(
             f"{meal}: {_named_entity(DRIVER_KIND, driver_id, snapshot, previous_snapshot) if driver_id else '미지정'}"
             for meal, driver_id in value.items()
         ) or "없음"
+    if field == "ordered_driver_ids" and isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        return " → ".join(_named_entity(DRIVER_KIND, driver_id, snapshot, previous_snapshot) for driver_id in value) or "없음"
     if field == "household_id":
         return _household_text(value, households)
     if field == "custom_values" and isinstance(value, Mapping):

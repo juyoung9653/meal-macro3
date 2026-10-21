@@ -35,6 +35,8 @@ _COMPLAINT_HEADINGS = ("접수 시각(KST)", "기록 시각(KST)", "변경자", 
 
 def is_roster_import_history(record: RevisionRecord) -> bool:
     """Exclude ordinary Excel roster imports from user-facing change histories."""
+    if "workspace_branch" in record.metadata.decisions:
+        return True
     if record.metadata.source is not RevisionSource.IMPORT or record.import_batch is None:
         return False
     purpose = record.metadata.decisions.get("import_purpose")
@@ -54,6 +56,7 @@ def build_history_tables(
     """Build stable tables for the passed immutable revision ancestry only."""
     if person_id is not None and not isinstance(person_id, UUID):
         raise TypeError("person_id는 UUID 또는 None이어야 합니다.")
+    revisions = tuple(record for record in revisions if "workspace_branch" not in record.metadata.decisions)
     info: list[tuple[object, ...]] = []
     meals: list[tuple[object, ...]] = []
     historical_names = {}
