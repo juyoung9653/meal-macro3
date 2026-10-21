@@ -55,8 +55,9 @@ def _summaries() -> tuple[RevisionSummary, ...]:
     return first, latest
 
 
-def test_latest_revision_is_default_with_history_visible_on_right(app):
-    dialog = DocumentSourceDialog(_summaries())
+def test_latest_revision_is_default_and_history_starts_hidden(app):
+    first, latest = _summaries()
+    dialog = DocumentSourceDialog((latest, first))
     dialog.show()
     app.processEvents()
 
@@ -64,12 +65,13 @@ def test_latest_revision_is_default_with_history_visible_on_right(app):
     assert dialog.using_latest
     assert dialog._source_code.text() == "20260826-110000"
     assert "2026.08.26 11:00" not in dialog._source_detail.text()
+    assert dialog._history_button.text() == "이전 변경번호 선택"
+    assert dialog._history_button.isVisible()
+    assert not dialog._archive_frame.isVisible()
     assert "20260826-110000" in dialog._archive_list.item(0).text()
     assert "2026.08.26 11:00" not in dialog._archive_list.item(0).text()
-    assert dialog._archive_frame.isVisible()
     assert dialog._archive_list.count() == 2
     assert dialog._archive_list.currentRow() == 0
-    assert dialog._archive_frame.geometry().left() > dialog._ticket.geometry().right()
     assert dialog.selected_revision_id == LATEST_ID
     dialog.close()
 
@@ -77,6 +79,10 @@ def test_latest_revision_is_default_with_history_visible_on_right(app):
 def test_previous_revision_requires_explicit_row_selection_and_can_return_latest(app):
     dialog = DocumentSourceDialog(_summaries())
     dialog.show()
+    dialog._history_button.click()
+    app.processEvents()
+    assert dialog._archive_frame.isVisible()
+    assert dialog._history_button.text() == "변경번호 목록 닫기"
     dialog._archive_list.setCurrentRow(1)
     app.processEvents()
 
@@ -98,6 +104,8 @@ def test_single_revision_shows_latest_in_list(app):
     latest = _summaries()[1]
     dialog = DocumentSourceDialog((latest,))
 
+    assert not dialog._history_button.isVisible()
+    assert not dialog._archive_frame.isVisible()
     assert dialog._archive_list.count() == 1
     assert dialog._archive_list.currentRow() == 0
     assert dialog.selected_revision_id == LATEST_ID
@@ -110,6 +118,7 @@ def test_same_second_revisions_remain_individually_selectable(app):
     dialog = DocumentSourceDialog((first, latest))
     assert dialog.selected_revision_id == LATEST_ID
     code = dialog._source_code.text()
+    dialog._history_button.click()
     dialog._archive_list.setCurrentRow(1)
     assert dialog._source_code.text() == code
     assert dialog.selected_revision_id == FIRST_ID

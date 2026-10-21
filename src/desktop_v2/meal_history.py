@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Mapping
+from dataclasses import dataclass
 from uuid import UUID
 
+from src.domain.meal_history_cancellation import MealHistoryTarget, cancelled_meal_history_targets
 from src.domain.projections import ENROLLMENT_KIND, STATUS_EVENT_KIND, enrollments_from_state, status_event_from_state
 from src.domain.revisions import ChangeOperation, RevisionRecord, RevisionSource, format_revision_timestamp
 from src.domain.status import MealStatus, StatusEvent
@@ -38,13 +40,25 @@ def build_person_meal_history_rows(
     return build_meal_history_rows_by_person(revisions).get(person_id, ())
 
 
-def build_meal_history_rows_by_person(
-    revisions: tuple[RevisionRecord, ...],
-) -> dict[UUID, tuple[MealHistoryRow, ...]]:
-    """Project each person's status rows once for a shared revision chain."""
-    rows: dict[UUID, list[MealHistoryRow]] = defaultdict(list)
+@dataclass(frozen=True)
+class MealHistoryEntry:
+    row: MealHistoryRow
+    target: MealHistoryTarget
+
+
+def build_meal_history_rows_by_person(revisions):
+    return {person_id: tuple(entry.row for entry in entries)
+            for person_id, entries in build_meal_history_entries_by_person(revisions).items()}
+
+
+def build_meal_history_entries_by_person(revisions):
+    """Keep stable audit identities separate from user-facing table values."""
+    rows = defaultdict(list)
+    cancelled = cancelled_meal_history_targets(revisions)
     for record in sorted(revisions, key=lambda item: item.metadata.recorded_at):
-        if is_roster_import_history(record):
+        if (is_roster_import_history(record)
+                or "meal_history_cancellation" in record.metadata.decisions
+                or "snapshot_restore_target" in record.metadata.decisions):
             continue
         metadata = record.metadata
         details = (
@@ -57,12 +71,15 @@ def build_meal_history_rows_by_person(
             if change.entity_kind == STATUS_EVENT_KIND and change.after is not None
         ]
         for event in events:
-            rows[event.person_id].append((*meal_status_summary(event), *details))
+            target = MealHistoryTarget(metadata.revision_id, STATUS_EVENT_KIND, event.event_id)
+            if target not in cancelled:
+                rows[event.person_id].append(MealHistoryEntry((*meal_status_summary(event), *details), target))
         added = metadata.decisions.get("roster_row_change")
         if (metadata.source is not RevisionSource.UI
                 or not isinstance(added, Mapping) or added.get("operation") != "add"):
             continue
-        explicit_statuses = {(event.person_id, event.meal) for event in events}
+        explicit_statuses = {(event.person_id, event.meal) for event in events
+                             if MealHistoryTarget(metadata.revision_id, STATUS_EVENT_KIND, event.event_id) not in cancelled}
         for change in record.changes:
             if (change.entity_kind != ENROLLMENT_KIND
                     or change.operation is not ChangeOperation.INSERT
@@ -72,7 +89,11 @@ def build_meal_history_rows_by_person(
             for enrollment in enrollments_from_state(change.entity_id, change.after):
                 if (enrollment.person_id, enrollment.meal) in explicit_statuses:
                     continue
+                target = MealHistoryTarget(metadata.revision_id, ENROLLMENT_KIND, change.entity_id, enrollment.period)
+                if target in cancelled:
+                    continue
                 start = enrollment.period.starts_on
                 period = f"{start.isoformat() if start is not None else '시작일 미지정'} ~ "
-                rows[enrollment.person_id].append((enrollment.meal.value, "시작", period, *details))
+                rows[enrollment.person_id].append(MealHistoryEntry(
+                    (enrollment.meal.value, "시작", period, *details), target))
     return {person_id: tuple(items) for person_id, items in rows.items()}

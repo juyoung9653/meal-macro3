@@ -1,18 +1,23 @@
 """Cached personal meal-status rows for the roster inspector."""
 
-from typing import NamedTuple
 
 from src.services.person_history import build_history_tables
 
 from .ledger_reader import load_revision_chain
-from .meal_history import build_meal_history_rows_by_person
+from .meal_history import build_meal_history_entries_by_person
 from .startup_loading import run_progress_task
 
 
-class MealHistoryRow(NamedTuple):
-    meal: str
-    category: str
-    period: str
+class MealHistoryRow(tuple):
+    """Three display values with an optional immutable cancellation identity."""
+    def __new__(cls, meal, category, period, target=None):
+        instance = super().__new__(cls, (meal, category, period))
+        instance.target = target
+        return instance
+
+    meal = property(lambda self: self[0])
+    category = property(lambda self: self[1])
+    period = property(lambda self: self[2])
 
 
 class InspectorMealHistory:
@@ -45,12 +50,12 @@ class InspectorMealHistory:
         if roster.revision_id != self._revision_id:
             snapshot = self._database.snapshot(roster.revision_id)
             revisions = load_revision_chain(self._database, roster.revision_id)
-            projected = build_meal_history_rows_by_person(revisions)
+            projected = build_meal_history_entries_by_person(revisions)
             headings, legacy_rows = build_history_tables(roster, snapshot, revisions)["식종 변경"]
             person_index = headings.index("사람 UUID")
             legacy_visible_ids = {row[person_index] for row in legacy_rows}
             self._rows = {
-                person_id: tuple(MealHistoryRow(*row[:3]) for row in reversed(rows))
+                person_id: tuple(MealHistoryRow(*entry.row[:3], target=entry.target) for entry in reversed(rows))
                 for person_id, rows in projected.items()
             }
             self._legacy_visible_ids = legacy_visible_ids

@@ -57,8 +57,8 @@ class DocumentSourceDialog(QDialog):
         self.setObjectName("documentSourceDialog")
         self.setWindowTitle("문서에 사용할 변경번호")
         self.setModal(True)
-        self.resize(1000, 560)
-        self.setMinimumSize(900, 500)
+        self.resize(720, 430)
+        self.setMinimumSize(620, 390)
         self.setStyleSheet(application_stylesheet())
         self._build_ui()
         self._render_selection()
@@ -80,11 +80,9 @@ class DocumentSourceDialog(QDialog):
         layout.setContentsMargins(22, 22, 22, 20)
         layout.setSpacing(14)
         layout.addWidget(self._build_header())
-        content = QHBoxLayout()
-        content.setSpacing(16)
-        selected = QVBoxLayout()
-        selected.setSpacing(14)
-        selected.addWidget(self._build_source_ticket())
+        content = QVBoxLayout()
+        content.setSpacing(10)
+        content.addWidget(self._build_source_ticket())
 
         self._selection_note = QLabel()
         self._selection_note.setObjectName("documentSourceNote")
@@ -93,12 +91,16 @@ class DocumentSourceDialog(QDialog):
             QSizePolicy.Policy.Preferred,
             QSizePolicy.Policy.Maximum,
         )
-        selected.addWidget(self._selection_note)
-        selected.addStretch(1)
-        content.addLayout(selected, 1)
+        content.addWidget(self._selection_note)
+        self._history_button = QPushButton("이전 변경번호 선택")
+        self._history_button.setObjectName("linkAction")
+        self._history_button.setVisible(len(self._summaries) > 1)
+        self._history_button.clicked.connect(self._toggle_archive)
+        content.addWidget(self._history_button, 0, Qt.AlignmentFlag.AlignLeft)
         self._archive_frame = self._build_archive()
+        self._archive_frame.setVisible(False)
         content.addWidget(self._archive_frame, 1)
-        layout.addLayout(content, 1)
+        layout.addLayout(content)
 
         self._buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok
@@ -217,6 +219,16 @@ class DocumentSourceDialog(QDialog):
         self._archive_list.setCurrentRow(0)
         self._selected = self._latest
         self._render_selection()
+
+    def _toggle_archive(self) -> None:
+        visible = not self._archive_frame.isVisible()
+        self._archive_frame.setVisible(visible)
+        self._history_button.setText(
+            "변경번호 목록 닫기" if visible else "이전 변경번호 선택"
+        )
+        if visible:
+            self._archive_list.setFocus(Qt.FocusReason.OtherFocusReason)
+        self.adjustSize()
 
     def _render_selection(self) -> None:
         historical = not self.using_latest

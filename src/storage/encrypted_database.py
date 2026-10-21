@@ -152,6 +152,24 @@ class EncryptedDatabase:
                     f"expected={expected_parent}, actual={actual_parent}"
                 )
             restoring = "snapshot_restore_target" in record.metadata.decisions
+            from src.domain.meal_history_cancellation import (
+                CANCELLATION_DECISION, CANCELLATION_KIND, validate_meal_history_cancellation,
+            )
+            cancelling = CANCELLATION_DECISION in record.metadata.decisions
+            if cancelling:
+                if restoring or actual_parent is None:
+                    raise ValueError("식종 변경 취소는 현재 명단에서 한 건씩 처리해야 합니다.")
+                chain = []
+                cursor = actual_parent
+                while cursor is not None:
+                    previous = self.revision(cursor)
+                    chain.append(previous)
+                    cursor = previous.metadata.parent_revision_id
+                validate_meal_history_cancellation(
+                    self._current_entity_snapshot(actual_parent), tuple(reversed(chain)), record,
+                )
+            elif not restoring and any(c.entity_kind == CANCELLATION_KIND for c in record.changes):
+                raise ValueError("식종 변경 취소 기록은 검증된 취소 작업으로만 저장할 수 있습니다.")
             if not restoring:
                 _validate_changes_against_current(connection, record.changes)
             from src.domain.household_shared import (
@@ -178,7 +196,7 @@ class EncryptedDatabase:
                     self._current_entity_snapshot(actual_parent), self.snapshot(target_id), record,
                 )
                 _validate_changes_against_current(connection, record.changes, restoring=True)
-            if actual_parent is not None and not restoring:
+            if actual_parent is not None and not restoring and not cancelling:
                 if shared or exceptions:
                     record = expand_household_shared_revision(self._current_entity_snapshot(actual_parent), record)
                 _validate_changes_against_current(connection, record.changes)
@@ -191,6 +209,7 @@ class EncryptedDatabase:
                 record.metadata.revision_id,
                 record.changes,
                 restoring=restoring,
+                cancelling=cancelling,
             )
             validate_typed_projections(connection)
             if record.import_batch is not None:

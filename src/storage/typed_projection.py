@@ -58,7 +58,7 @@ def apply_typed_projection_changes(
     connection: apsw.Connection,
     revision_id: UUID,
     changes: tuple[AuditChange, ...],
-    *, restoring: bool = False,
+    *, restoring: bool = False, cancelling: bool = False,
 ) -> None:
     """Apply recognized audit entities inside the caller's transaction."""
 
@@ -105,7 +105,11 @@ def apply_typed_projection_changes(
         key=lambda change: (_write_order(change.entity_kind), str(change.entity_id)),
     )
     for change in (*deletes, *writes):
-        if restoring and change.entity_kind == STATUS_EVENT_KIND:
+        if cancelling and change.entity_kind == STATUS_EVENT_KIND:
+            if change.operation is not ChangeOperation.DELETE:
+                raise ProjectionContractError("식종 변경 취소는 선택한 상태 기록 삭제만 허용합니다.")
+            _apply_status_event(connection, revision_id, change, None, restoring=True)
+        elif restoring and change.entity_kind == STATUS_EVENT_KIND:
             _apply_status_event(connection, revision_id, change, change.after, restoring=True)
         else:
             _apply_change(connection, revision_id, change)

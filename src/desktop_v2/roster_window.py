@@ -117,6 +117,28 @@ _STATUS_COLORS = {
 _MEAL_ORDER = (Meal.DINNER, Meal.BREAKFAST, Meal.LUNCH)
 
 
+def _inspector_household_members(
+    roster: RosterSnapshot, person_id: UUID, on: date,
+) -> tuple[Person, ...]:
+    """Show initial household context before its saved start, without backdating data."""
+    first = {}
+    households = {}
+    for membership in roster.memberships:
+        previous = first.get(membership.person_id)
+        if previous is None or (membership.period.starts_on or date.min) < (previous.period.starts_on or date.min):
+            first[membership.person_id] = membership
+        if membership.period.contains(on):
+            households[membership.person_id] = membership.household_id
+    for member_id, membership in first.items():
+        start = membership.period.starts_on
+        if member_id not in households and start is not None and on < start:
+            households[member_id] = membership.household_id
+    household_id = households.get(person_id)
+    if household_id is None:
+        return ()
+    return tuple(person for person in roster.persons if households.get(person.person_id) == household_id)
+
+
 @dataclass(frozen=True, slots=True)
 class _Column:
     key: str
@@ -1343,6 +1365,7 @@ class RosterWindow(QMainWindow):
     database_export_requested = Signal()
     current_sheet_export_requested = Signal(object)
     driver_households_export_requested = Signal(object, object)
+    meal_history_cancel_requested = Signal(object, object)
     revision_history_requested = Signal()
     complaint_history_requested = Signal()
     import_review_requested = Signal()
@@ -2644,6 +2667,9 @@ class RosterWindow(QMainWindow):
         layout.addLayout(history_heading)
         self._meal_history_list = _MealHistoryList()
         self._meal_history_list.setObjectName("mealHistory")
+        self._meal_history_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._meal_history_list.customContextMenuRequested.connect(self._open_meal_history_context_menu)
+        self._meal_history_list.setToolTip("식종 변경을 우클릭하면 선택한 변경 한 건을 취소할 수 있습니다.")
         self._meal_history_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._meal_history_list.setUniformItemSizes(False)
         self._meal_history_list.setSpacing(2)
@@ -3027,25 +3053,10 @@ class RosterWindow(QMainWindow):
         profile = person.profile
         self._inspector_name.setText(profile.name)
         self._household_list.clear()
-        household_ids = {
-            membership.household_id
-            for membership in self._roster.memberships
-            if membership.person_id == person.person_id
-            and membership.period.contains(self._model.service_day)
-        }
-        members: list[Person] = []
-        for household_id in household_ids:
-            members.extend(
-                self._roster.household_members(
-                    household_id,
-                    on=self._model.service_day,
-                )
-            )
-        unique_members = {
-            member.person_id: member
-            for member in members
-        }
-        for member in unique_members.values():
+        members = _inspector_household_members(
+            self._roster, person.person_id, self._model.service_day,
+        )
+        for member in members:
             meals = " · ".join(
                 meal.value
                 for meal in Meal
@@ -3147,7 +3158,8 @@ class RosterWindow(QMainWindow):
                 title, tooltip = row
             item = QListWidgetItem("" if isinstance(row, MealHistoryRow) else title)
             item.setSizeHint(QSize(0, 54 if isinstance(row, MealHistoryRow) else 34))
-            item.setToolTip(tooltip)
+            item.setToolTip(tooltip + ("\n우클릭: 선택한 변경 취소" if getattr(row, "target", None) else ""))
+            item.setData(Qt.ItemDataRole.UserRole, getattr(row, "target", None))
             self._meal_history_list.addItem(item)
             if isinstance(row, MealHistoryRow):
                 entry = QWidget()
@@ -3162,6 +3174,7 @@ class RosterWindow(QMainWindow):
                 period_label.setWordWrap(True)
                 period_label.setStyleSheet("font-size: 12px;")
                 entry_layout.addWidget(period_label)
+                entry.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
                 entry.setToolTip(tooltip)
                 entry.setAccessibleName(f"{title}, {period}")
                 self._meal_history_list.setItemWidget(item, entry)
@@ -3170,6 +3183,17 @@ class RosterWindow(QMainWindow):
             item.setSizeHint(QSize(0, 34))
             self._meal_history_list.addItem(item)
         self._meal_history_list.update_row_heights()
+
+    def _open_meal_history_context_menu(self, position) -> None:
+        item = self._meal_history_list.itemAt(position)
+        target = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+        if target is None:
+            return
+        menu = QMenu(self)
+        action = menu.addAction("선택한 변경 취소…")
+        revision_id = self._roster.revision_id
+        action.triggered.connect(lambda: self.meal_history_cancel_requested.emit(target, revision_id))
+        menu.exec(self._meal_history_list.viewport().mapToGlobal(position))
 
     def _meal_history_rows_for(self, person: Person) -> tuple:
         rows = self._meal_change_history_rows.get(person.person_id)

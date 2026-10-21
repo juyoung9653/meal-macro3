@@ -2,12 +2,13 @@
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
-from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
+from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QDialog,
     QHeaderView,
     QLabel,
+    QMenu,
     QPlainTextEdit,
     QPushButton,
     QTableView,
@@ -20,7 +21,7 @@ from src.domain.roster import Meal
 from src.services.person_history import build_history_tables
 
 from .ledger_reader import load_revision_chain
-from .meal_history import MEAL_HISTORY_HEADINGS, build_person_meal_history_rows
+from .meal_history import MEAL_HISTORY_HEADINGS, build_meal_history_entries_by_person
 from .theme import application_stylesheet, register_application_fonts
 
 
@@ -100,8 +101,13 @@ class HistoryRowsModel(QAbstractTableModel):
 
 
 class PersonHistoryDialog(QDialog):
-    def __init__(self, person, tables, histories, selected_meal, parent=None):
+    meal_history_cancel_requested = Signal(object)
+
+    def __init__(self, person, tables, histories, selected_meal, parent=None, *, entries=(), revision_id=None):
         super().__init__(parent)
+        self._person_id = person.person_id
+        self.expected_revision_id = revision_id
+        self._meal_entries = tuple(reversed(entries))
         register_application_fonts()
         self.setStyleSheet(application_stylesheet())
         self.setWindowTitle(f"{person.profile.name} · 이력보기")
@@ -116,9 +122,12 @@ class PersonHistoryDialog(QDialog):
             headings, rows, detail_rows = _focused_rows(name, *tables[name])
             page = QWidget()
             page_layout = QVBoxLayout(page)
-            page_layout.addWidget(QLabel(f"{len(rows)}건" if rows else "기록된 이력이 없습니다."))
+            count_label = QLabel(f"{len(rows)}건" if rows else "기록된 이력이 없습니다.")
+            page_layout.addWidget(count_label)
             if name == "식종 변경":
-                note = QLabel("가입기간·배송배정 등 다른 변경과 상태 기록 삭제는 더보기 → 이력·민원 → 전체 변경 이력에서 확인할 수 있습니다.")
+                self._meal_count_label = count_label
+            if name == "식종 변경":
+                note = QLabel("기록을 우클릭하면 선택한 변경 한 건을 취소할 수 있습니다. 취소한 기록은 이 목록에서 사라지며 원본과 취소 내용은 더보기 → 이력·민원 → 전체 변경 이력에 보존됩니다.")
                 note.setWordWrap(True)
                 page_layout.addWidget(note)
             view = QTableView()
@@ -142,6 +151,8 @@ class PersonHistoryDialog(QDialog):
             view.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
             if name == "식종 변경":
                 self._configure_meal_history_columns(view, headings)
+                view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+                view.customContextMenuRequested.connect(self._open_meal_history_context_menu)
             elif detail_rows is not None:
                 widths = (130, 235, 235, 110, 145) if name == "정보 변경" else (150, 80, 100, 410, 110)
                 for index, width in enumerate(widths):
@@ -174,6 +185,58 @@ class PersonHistoryDialog(QDialog):
         close = QPushButton("닫기")
         close.clicked.connect(self.accept)
         layout.addWidget(close)
+
+    def _meal_history_menu(self, row):
+        if row < 0 or row >= len(self._meal_entries):
+            return None
+        menu = QMenu(self)
+        target = self._meal_entries[row].target
+        menu.addAction("선택한 변경 취소…").triggered.connect(
+            lambda: self.meal_history_cancel_requested.emit(target))
+        return menu
+
+    def _open_meal_history_context_menu(self, position):
+        view = self.findChild(QTableView, "history_식종 변경")
+        index = view.indexAt(position)
+        menu = self._meal_history_menu(index.row()) if index.isValid() else None
+        if menu is not None:
+            view.selectRow(index.row())
+            menu.exec(view.viewport().mapToGlobal(position))
+
+    def reload_meal_history(self, session):
+        from .startup_loading import run_progress_task
+
+        def load():
+            roster = session.database.current_roster()
+            revisions = load_revision_chain(session.database, roster.revision_id)
+            entries = build_meal_history_entries_by_person(revisions).get(self._person_id, ())
+            histories = {meal: session.database.status_history(self._person_id, meal) for meal in Meal}
+            return roster.revision_id, entries, histories
+        revision_id, entries, histories = run_progress_task(
+            load, title="식종 변경 이력을 새로 불러오는 중입니다",
+            message="취소 후 남은 기록과 상태 적용 기간을 확인합니다.", parent=self,
+        )
+        self.expected_revision_id = revision_id
+        self._meal_entries = tuple(reversed(entries))
+        view = self.findChild(QTableView, "history_식종 변경")
+        model = view.model()
+        model.beginResetModel()
+        model.rows = tuple(entry.row for entry in self._meal_entries)
+        model.endResetModel()
+        self._meal_count_label.setText(f"{len(entries)}건" if entries else "기록된 이력이 없습니다.")
+        details = self.findChild(QPlainTextEdit, "historyDetails_식종 변경")
+        details.clear()
+        if entries:
+            view.selectRow(0)
+        periods = self.tabs.widget(3)
+        selected = periods.currentIndex()
+        while periods.count():
+            page = periods.widget(0)
+            periods.removeTab(0)
+            page.deleteLater()
+        for meal in (Meal.BREAKFAST, Meal.LUNCH, Meal.DINNER):
+            periods.addTab(self._status_period_page(histories[meal], meal), meal.value)
+        periods.setCurrentIndex(selected)
 
     @staticmethod
     def _show_row_details(table, target, index):
@@ -262,18 +325,16 @@ def create_person_history_dialog(session, person, meal, parent=None):
         snapshot = session.database.snapshot(roster.revision_id)
         revisions = load_revision_chain(session.database, roster.revision_id)
         tables = build_history_tables(roster, snapshot, revisions, person_id=current_person.person_id)
-        tables["식종 변경"] = (
-            MEAL_HISTORY_HEADINGS,
-            build_person_meal_history_rows(revisions, current_person.person_id),
-        )
+        entries = build_meal_history_entries_by_person(revisions).get(current_person.person_id, ())
+        tables["식종 변경"] = (MEAL_HISTORY_HEADINGS, tuple(entry.row for entry in entries))
         histories = {
             item: session.database.status_history(current_person.person_id, item) for item in Meal
         }
-        return current_person, tables, histories
+        return current_person, tables, histories, entries, roster.revision_id
 
-    person, tables, histories = run_progress_task(
+    person, tables, histories, entries, revision_id = run_progress_task(
         load, title="개인별 이력을 불러오는 중입니다",
         message="선택한 사람의 변경 이력과 식종 상태를 읽는 중입니다.",
         parent=parent,
     )
-    return PersonHistoryDialog(person, tables, histories, meal, parent)
+    return PersonHistoryDialog(person, tables, histories, meal, parent, entries=entries, revision_id=revision_id)
