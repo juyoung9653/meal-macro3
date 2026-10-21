@@ -124,3 +124,17 @@ def test_same_second_revisions_remain_individually_selectable(app):
     assert dialog.selected_revision_id == FIRST_ID
     assert dialog.selected_summary.reason == first.reason
     dialog.close()
+
+
+def test_intentional_picker_open_shows_archive_and_keeps_previous_choice(app):
+    first, latest = _summaries()
+    dialog = DocumentSourceDialog((latest, first))
+    dialog.set_selected_summary(first)
+    dialog.show_archive()
+    dialog.show()
+    app.processEvents()
+
+    assert dialog._archive_frame.isVisible()
+    assert dialog._archive_list.currentRow() == 1
+    assert dialog.selected_summary == first
+    dialog.reject()

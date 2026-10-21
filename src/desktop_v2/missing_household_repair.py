@@ -26,7 +26,11 @@ def _candidate_label(item):
         identity.append(profile.birth_date.isoformat())
     if profile.school_name:
         identity.append(profile.school_name)
-    identity.append(f"적용 시작일 {item.starts_on.isoformat() if item.starts_on else '제한 없음'}")
+    start_label = item.starts_on.isoformat() if item.starts_on else "제한 없음"
+    if item.original_membership is not None:
+        identity.append(f"기존 가구 시작일 {item.original_membership.period.starts_on.isoformat()} → {start_label}")
+    else:
+        identity.append(f"별도 가구 복구 · 적용 시작일 {start_label}")
     return " · ".join(identity)
 
 
@@ -43,7 +47,7 @@ class MissingHouseholdRepairDialog(QDialog):
         title = QLabel("가구 소속 기록 복구")
         title.setObjectName("workspaceTitle")
         root.addWidget(title)
-        note = QLabel("과거 명단 행 추가 또는 방학 중식 가져오기에서 소속 기록이 빠진 대상자에게 각각 별도 가구를 만듭니다. 식종 가입·상태·인적사항은 변경하지 않습니다.")
+        note = QLabel("과거 행 추가에서 가구 시작일이 식종 가입일보다 늦게 저장됐다면 기존 가구의 시작일을 앞당깁니다. 소속 기록이 누락된 대상자는 별도 가구로 복구합니다. 아래 대상과 날짜를 확인해주세요.")
         note.setWordWrap(True)
         root.addWidget(note)
         scroll = QScrollArea()

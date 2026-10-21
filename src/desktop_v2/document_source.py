@@ -75,6 +75,19 @@ class DocumentSourceDialog(QDialog):
     def using_latest(self) -> bool:
         return self._selected.revision_id == self._latest.revision_id
 
+    def set_selected_summary(self, summary: RevisionSummary) -> None:
+        for index, candidate in enumerate(self._summaries):
+            if candidate.revision_id == summary.revision_id:
+                self._archive_list.setCurrentRow(index)
+                self._selected = candidate
+                self._render_selection()
+                return
+        raise ValueError("선택한 변경번호를 목록에서 찾을 수 없습니다.")
+
+    def show_archive(self) -> None:
+        if len(self._summaries) > 1 and not self._archive_frame.isVisible():
+            self._toggle_archive()
+
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
         layout.setContentsMargins(22, 22, 22, 20)

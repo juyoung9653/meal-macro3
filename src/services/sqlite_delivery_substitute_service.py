@@ -12,6 +12,7 @@ from src.domain.projections import roster_from_historical_snapshot
 from src.domain.revisions import HistoricalSnapshot
 from src.domain.roster import Meal
 from src.services.sqlite_delivery_report_service import prepare_physical_delivery_data
+from src.services.delivery_households import require_delivery_household
 
 
 STANDARD_COLUMNS = (
@@ -63,11 +64,7 @@ def prepare_delivery_substitute_data(
         profile = person.profile
         # An indivisible shipment may cover several service dates. Reject an
         # ambiguous household transition instead of merging unrelated homes.
-        households = {roster.household_for(person.person_id, on=service_on).household_id
-                      if roster.household_for(person.person_id, on=service_on) else None
-                      for service_on in shipment.service_dates}
-        if None in households or len(households) != 1:
-            raise ValueError(f"{profile.name}님의 배송에 유효한 가구가 하나로 정해지지 않습니다. 가구 적용일을 확인해주세요.")
+        household_id = require_delivery_household(roster, person.person_id, shipment.service_dates)
         view = routing.resolve(roster, person.person_id, day)
         driver = view.drivers[meal]
         driver_id = view.driver_ids[meal]
@@ -80,7 +77,7 @@ def prepare_delivery_substitute_data(
                       jurisdiction=view.jurisdiction or "", road_address=view.road_address or "",
                       detail_address=view.detail_address or "", form=form)
         values.update({f"custom:{item.definition_id}": _text(profile.custom_values.get(item.definition_id)) for item in custom})
-        rows.append(SubstituteRow(person.person_id, next(iter(households)), driver_key, driver or "미지정",
+        rows.append(SubstituteRow(person.person_id, household_id, driver_key, driver or "미지정",
                                   values, shipment.entitlement_count, any(value.upper().endswith("BOX") for value in forms)))
     rows.sort(key=lambda row: (row.driver_label, sequence_sort_key(row.values["sequence"]), row.values["name"], str(row.person_id)))
     return PreparedSubstituteData(day, meal, tuple(rows), columns, defaults, {

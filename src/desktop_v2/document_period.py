@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QPushButton,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -84,6 +85,8 @@ class DocumentPeriodSelection:
 class DocumentPeriodDialog(QDialog):
     """Confirm or edit a job-specific period suggested from the roster date."""
 
+    REVISION_SELECTION_REQUESTED = 2
+
     def __init__(
         self,
         request: DocumentSetupRequest,
@@ -116,6 +119,19 @@ class DocumentPeriodDialog(QDialog):
     @property
     def request(self) -> DocumentSetupRequest:
         return self._request
+
+    def set_source_options_available(self, available: bool) -> None:
+        self._change_source_button.setVisible(available)
+
+    def set_source(self, source: RevisionSummary) -> None:
+        if not isinstance(source, RevisionSummary):
+            raise TypeError("문서 원본은 RevisionSummary여야 합니다.")
+        self._request = DocumentSetupRequest(
+            self._request.action, source, self._request.anchor_day,
+            self._request.anchor_meal,
+        )
+        self._source_detail.setText(self._source_detail_text())
+        self._refresh_state()
 
     def selected_period(self) -> DocumentPeriodSelection:
         starts_on, ends_on = self._current_period()
@@ -197,15 +213,25 @@ class DocumentPeriodDialog(QDialog):
         copy.setSpacing(3)
         title = QLabel("명단 화면에서 보고 있던 날짜")
         title.setObjectName("sectionLabel")
-        detail = QLabel(
+        self._source_detail = QLabel(self._source_detail_text())
+        self._source_detail.setObjectName("documentPeriodAnchorDetail")
+        copy.addWidget(title)
+        copy.addWidget(self._source_detail)
+        layout.addLayout(copy, 1)
+        self._change_source_button = QPushButton("이전 변경번호 선택")
+        self._change_source_button.setObjectName("linkAction")
+        self._change_source_button.setVisible(False)
+        self._change_source_button.clicked.connect(
+            lambda: self.done(self.REVISION_SELECTION_REQUESTED)
+        )
+        layout.addWidget(self._change_source_button)
+        return frame
+
+    def _source_detail_text(self) -> str:
+        return (
             f"{self._request.anchor_day:%Y년 %m월 %d일}  ·  "
             f"변경번호 {format_revision_timestamp(self._request.source.recorded_at)}"
         )
-        detail.setObjectName("documentPeriodAnchorDetail")
-        copy.addWidget(title)
-        copy.addWidget(detail)
-        layout.addLayout(copy, 1)
-        return frame
 
     def _build_period_editor(self) -> QFrame:
         frame = QFrame()

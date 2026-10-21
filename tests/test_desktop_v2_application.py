@@ -1342,8 +1342,7 @@ def test_delivery_report_hub_skips_monthly_template_prerequisite(tmp_path: Path)
         selected_summary = summary
 
         def __init__(self, summaries, parent=None):
-            assert summaries == (summary,)
-            assert parent is window
+            raise AssertionError("최신 원본에서는 선택창을 열지 않아야 합니다.")
 
         def exec(self):
             return QDialog.DialogCode.Accepted
@@ -1428,6 +1427,156 @@ def test_delivery_report_hub_skips_monthly_template_prerequisite(tmp_path: Path)
     assert len(emitted) == 1
     assert emitted[0].document.period.action is DocumentAction.DELIVERY_REPORT
     assert emitted[0].document.meals == tuple(Meal)
+
+
+@pytest.mark.parametrize("choice", ("latest", "historical", "picker_cancel", "period_cancel", "form_error"))
+def test_document_period_controls_optional_revision_choice_and_cancellation(
+    tmp_path: Path, monkeypatch, choice: str,
+):
+    earlier = RevisionSummary(
+        1, UUID("84000000-0000-0000-0000-000000000010"), "20260830-001",
+        datetime(2026, 8, 30, 1, tzinfo=UTC), date(2026, 8, 17),
+        RevisionActor("tester", "S-1-5-21-test"), "earlier", RevisionSource.UI,
+    )
+    latest = replace(
+        earlier, sequence=5,
+        revision_id=UUID("84000000-0000-0000-0000-000000000011"),
+        reason="latest",
+    )
+    window = SimpleNamespace(
+        table_model=SimpleNamespace(service_day=date(2026, 8, 17), meal=Meal.LUNCH),
+        document_output_selected=SimpleNamespace(emit=lambda value: emitted.append(value)),
+    )
+    session = SimpleNamespace(database=SimpleNamespace(revision_summaries=lambda: (earlier, latest)))
+    emitted = []
+    events = []
+    errors = []
+    snapshot = object()
+    snapshot_revisions = []
+    def read_snapshot(revision_id):
+        snapshot_revisions.append(revision_id)
+        if choice == "form_error":
+            raise RuntimeError("snapshot unavailable")
+        return snapshot
+    session.database.snapshot = read_snapshot
+    import src.desktop_v2.application as application_module
+    monkeypatch.setattr(
+        application_module, "delivery_forms_from_snapshot",
+        lambda value: (None, "행복도시락") if value is snapshot else (),
+    )
+
+    class Hub:
+        selected_action = DocumentAction.DELIVERY_REPORT
+
+        def __init__(self, parent=None):
+            assert parent is window
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+    class Period:
+        def __init__(self, request, parent=None):
+            assert parent is window
+            assert request.source == latest
+            self.request = request
+            self.opens = 0
+
+        def set_source_options_available(self, available):
+            assert available
+
+        def exec(self):
+            self.opens += 1
+            events.append(f"period:{self.opens}")
+            if self.opens == 1 and choice in ("historical", "picker_cancel"):
+                return 2
+            return (QDialog.DialogCode.Rejected if choice == "period_cancel"
+                    else QDialog.DialogCode.Accepted)
+
+        def set_source(self, summary):
+            self.request = replace(self.request, source=summary)
+
+        def selected_period(self):
+            return DocumentPeriodSelection(
+                self.request.action, self.request.source, self.request.anchor_day,
+                self.request.anchor_meal, date(2026, 8, 17), date(2026, 8, 20),
+            )
+
+    class Source:
+        selected_summary = earlier
+
+        def __init__(self, summaries, parent=None):
+            assert summaries == (earlier, latest)
+            assert parent is window
+
+        def set_selected_summary(self, summary):
+            assert summary == latest
+
+        def show_archive(self):
+            events.append("archive")
+
+        def exec(self):
+            events.append("source")
+            return (QDialog.DialogCode.Rejected if choice == "picker_cancel"
+                    else QDialog.DialogCode.Accepted)
+
+    class MealDialog:
+        def __init__(self, period, parent=None):
+            assert parent is window
+            self.period = period
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+        def set_available_delivery_forms(self, forms):
+            assert forms == (None, "행복도시락")
+            events.append("forms")
+
+        def selection(self):
+            return DocumentMealSelection(self.period, (Meal.LUNCH,))
+
+    class Output:
+        def __init__(self, document, directory, parent=None):
+            assert parent is window
+            self.document = document
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+        def selection(self):
+            return next_available_document_output(
+                self.document, tmp_path, DocumentOutputMode.SAVED_DEFAULT,
+            )
+
+    controller = DesktopStartupController(
+        settings=SimpleNamespace(document_output_directory=tmp_path),
+        document_hub_dialog_type=Hub, document_source_dialog_type=Source,
+        document_period_dialog_type=Period, document_meal_dialog_type=MealDialog,
+        document_output_dialog_type=Output,
+        message_box=SimpleNamespace(critical=lambda *args: errors.append(args)),
+    )
+    monkeypatch.setattr(controller, "_ensure_document_prerequisites", lambda *_args: True)
+    controller._run_document_hub(session, window)
+
+    if choice in ("latest", "period_cancel"):
+        assert events == (["period:1", "forms"] if choice == "latest" else ["period:1"])
+        if choice == "latest":
+            assert len(emitted) == 1
+            assert emitted[0].document.period.source == latest
+            assert snapshot_revisions == [latest.revision_id]
+        else:
+            assert not emitted
+            assert not snapshot_revisions
+    elif choice == "form_error":
+        assert events == ["period:1"]
+        assert snapshot_revisions == [latest.revision_id]
+        assert not emitted
+        assert errors[0][1:] == ("배송 형태를 읽지 못했습니다", "snapshot unavailable")
+    else:
+        assert events == ["period:1", "archive", "source", "period:2", "forms"]
+        assert len(emitted) == 1
+        expected_source = earlier if choice == "historical" else latest
+        assert emitted[0].document.period.source == expected_source
+        assert snapshot_revisions == [expected_source.revision_id]
 
 
 def test_school_calendar_editor_can_route_to_excel_import():

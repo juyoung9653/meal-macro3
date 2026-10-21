@@ -225,3 +225,100 @@ def test_settings_action_routes_and_refreshes_only_completed_result(monkeypatch)
     monkeypatch.setattr(startup, "_replace_roster_if_changed", lambda *args: calls.append(args))
     startup._run_settings_hub(session, window)
     assert calls == [(session, window, roster)]
+
+
+def legacy_late_manual_membership(session, *, ends_on=None):
+    from src.domain.roster import DeliveryAssignment
+    roster = RosterSnapshot(
+        uuid4(), persons=(Person(PERSON, PersonProfile("시작일 복구 대상")),),
+        households=(Household(HOUSEHOLD),),
+        memberships=(HouseholdMembership(PERSON, HOUSEHOLD, InclusiveDateRange(date(2026, 10, 16), ends_on)),),
+        enrollments=(MealEnrollment(PERSON, Meal.DINNER, InclusiveDateRange(date(2026, 10, 13))),),
+        assignments=(DeliveryAssignment(PERSON, None, "검증 기사", "1"),),
+    )
+    append_roster(session, roster, reason="명단 행 추가")
+    return roster
+
+
+def test_late_manual_membership_repair_restores_both_delivery_documents(tmp_path):
+    from src.services.sqlite_delivery_report_service import prepare_delivery_report_data
+    from src.services.sqlite_delivery_substitute_service import prepare_delivery_substitute_data
+    app = QApplication.instance() or QApplication([])
+    day = date(2026, 10, 13)
+    with DatabaseSession.create(tmp_path / "late-start.db", "test-password") as session:
+        original = legacy_late_manual_membership(session)
+        old_snapshot = session.database.snapshot(original.revision_id)
+        def generate(snapshot):
+            return (prepare_delivery_report_data(snapshot, day, day, (Meal.DINNER,)),
+                    prepare_delivery_substitute_data(snapshot, day, Meal.DINNER))
+        for callback in (lambda: prepare_delivery_report_data(old_snapshot, day, day, (Meal.DINNER,)),
+                         lambda: prepare_delivery_substitute_data(old_snapshot, day, Meal.DINNER)):
+            with pytest.raises(ValueError, match="유효한 가구"):
+                callback()
+        context = load_missing_household_context(session.database)
+        assert len(context.candidates) == 1
+        assert context.candidates[0].original_membership == original.memberships[0]
+        assert context.candidates[0].starts_on == day
+        dialog = MissingHouseholdRepairDialog(context)
+        assert "2026-10-16 → 2026-10-13" in dialog.preview_label.text()
+        dialog.close()
+        assert not MissingHouseholdRepairController(session, dialog_type=dialog_type(False)).run().completed
+        assert session.database.latest_revision().metadata.revision_id == original.revision_id
+        messages = Messages()
+        outcome = MissingHouseholdRepairController(session, dialog_type=dialog_type(True),
+            message_box=messages, actor_provider=lambda: ACTOR).run()
+        assert outcome.completed, messages.errors
+        current = session.database.current_roster()
+        assert current.households == original.households
+        assert current.enrollments == original.enrollments
+        assert current.memberships == (replace(original.memberships[0], period=InclusiveDateRange(day)),)
+        report, substitute = generate(session.database.snapshot(current.revision_id))
+        assert len(report.shipments) == 1
+        assert len(substitute.rows) == 1
+        assert not load_missing_household_context(session.database).candidates
+        assert session.database.snapshot(original.revision_id).entities == old_snapshot.entities
+        with pytest.raises(ValueError, match="유효한 가구"):
+            generate(session.database.snapshot(original.revision_id))
+
+
+@pytest.mark.parametrize("change", ["end", "transfer", "gap", "date_edit", "restore"])
+def test_late_membership_repair_preserves_later_intent(tmp_path, change):
+    with DatabaseSession.create(tmp_path / f"{change}.db", "test-password") as session:
+        original = legacy_late_manual_membership(session,
+            ends_on=date(2026, 10, 30) if change == "end" else None)
+        if change != "end":
+            other = uuid4()
+            member = original.memberships[0]
+            households = original.households
+            if change == "transfer":
+                households = (*households, Household(other))
+                members = (replace(member, household_id=other),)
+            elif change == "gap":
+                members = (replace(member, period=InclusiveDateRange(date(2026, 10, 16), date(2026, 10, 20))),
+                           replace(member, period=InclusiveDateRange(date(2026, 10, 25))))
+            else:
+                members = (replace(member, period=InclusiveDateRange(date(2026, 10, 17))),)
+            changed = replace(original, revision_id=uuid4(), memberships=members, households=households)
+            append_roster(session, changed, old=original)
+            if change == "restore":
+                restored = replace(original, revision_id=uuid4())
+                append_roster(session, restored, old=changed)
+        assert not load_missing_household_context(session.database).candidates
+
+
+@pytest.mark.parametrize("memberships,expected", [
+    ((), "기록 없음"),
+    ((HouseholdMembership(PERSON, HOUSEHOLD, InclusiveDateRange(date(2026, 10, 16))),), "2026-10-16"),
+    ((HouseholdMembership(PERSON, HOUSEHOLD, InclusiveDateRange(date(2026, 10, 1), date(2026, 10, 12))),), "종료일 2026-10-12"),
+])
+def test_delivery_household_diagnostic_shows_saved_dates(memberships, expected):
+    from src.services.delivery_households import require_delivery_household
+    roster = RosterSnapshot(uuid4(), persons=(Person(PERSON, PersonProfile("오류 대상")),),
+                            households=(Household(HOUSEHOLD),), memberships=memberships)
+    with pytest.raises(HouseholdServiceDatesError) as caught:
+        require_delivery_household(roster, PERSON, (date(2026, 10, 13),))
+    assert caught.value.person_id == PERSON
+    text = str(caught.value)
+    assert "2026-10-13" in text and expected in text
+    assert "가구 소속 기록 복구" in text
+    assert str(PERSON) not in text and str(HOUSEHOLD) not in text

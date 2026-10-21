@@ -50,6 +50,7 @@ from src.services.delivery_service import (
     DeliveryReportRow,
     DeliveryReportTotals,
 )
+from src.services.delivery_households import require_delivery_household
 from src.services.meal_service_availability import (
     RECURRING_MEAL_SERVICE_POLICY_VERSION,
     default_delivery_weekdays,
@@ -58,7 +59,7 @@ from src.services.meal_service_availability import (
 )
 
 
-DELIVERY_REPORT_CALCULATION_CONTRACT_VERSION = 3
+DELIVERY_REPORT_CALCULATION_CONTRACT_VERSION = 4
 DELIVERY_REPORT_GROUPING_POLICY_VERSION = 2
 
 
@@ -114,6 +115,7 @@ def prepare_delivery_report_data(
     meals: Sequence[Meal],
     *,
     staff_sort: Mapping[Meal | str, Sequence[str]] | None = None,
+    delivery_forms: Sequence[str | None] | None = None,
 ) -> PreparedDeliveryReportData:
     """Build report rows from entitlement service dates and physical shipments.
 
@@ -123,8 +125,23 @@ def prepare_delivery_report_data(
     """
 
     return _prepare_delivery_data(
-        snapshot, period_start, period_end, meals, staff_sort=staff_sort, build_reports=True
+        snapshot, period_start, period_end, meals, staff_sort=staff_sort,
+        build_reports=True, delivery_forms=delivery_forms,
     )
+
+
+def delivery_forms_from_snapshot(snapshot: HistoricalSnapshot) -> tuple[str | None, ...]:
+    """List the default and named forms saved in the selected source revision."""
+    if not isinstance(snapshot, HistoricalSnapshot):
+        raise TypeError("snapshot은 HistoricalSnapshot이어야 합니다.")
+    roster = roster_from_historical_snapshot(snapshot)
+    names = {
+        setting.form
+        for owner in (*roster.persons, *roster.households)
+        for setting in (owner.delivery_settings or ())
+        if setting.form is not None
+    }
+    return (None, *sorted(names, key=lambda value: (value.casefold(), value)))
 
 
 def prepare_physical_delivery_data(
@@ -155,6 +172,7 @@ def _prepare_delivery_data(
     *,
     staff_sort: Mapping[Meal | str, Sequence[str]] | None,
     build_reports: bool,
+    delivery_forms: Sequence[str | None] | None = None,
     missing_lunch_schedule_as_zero: bool = False,
 ) -> PreparedDeliveryReportData:
     if not isinstance(snapshot, HistoricalSnapshot):
@@ -167,6 +185,15 @@ def _prepare_delivery_data(
     normalized_staff_sort = _normalize_staff_sort(staff_sort)
 
     roster = roster_from_historical_snapshot(snapshot)
+    selected_forms: tuple[str | None, ...] | None = None
+    if delivery_forms is not None:
+        if not build_reports:
+            raise ValueError("일일식수 문서에서만 배송 형태를 선택할 수 있습니다.")
+        selected_forms = _canonical_delivery_forms(delivery_forms)
+        available_forms = set(delivery_forms_from_snapshot(snapshot))
+        unknown = set(selected_forms) - available_forms
+        if unknown:
+            raise ValueError("선택한 원본의 배송 설정에 없는 배송 형태가 있습니다.")
     routing = routing_state_from_snapshot(snapshot)
     school_calendar = school_lunch_calendar_from_snapshot(snapshot)
     adjustments = service_adjustment_schedule_from_snapshot(snapshot)
@@ -200,14 +227,23 @@ def _prepare_delivery_data(
     normal_breakfast: list[MealEntitlement] = []
     shipments: list[PhysicalShipment] = []
     exclusions: Counter[str] = Counter()
+    allowed_forms = set(selected_forms) if selected_forms is not None else None
     for person in roster.persons:
         for meal in selected_meals:
+            eligible_service_days = (
+                ordered_service_days if allowed_forms is None else tuple(
+                    day for day in ordered_service_days
+                    if _delivery_form_on(roster, person.person_id, meal, day) in allowed_forms
+                )
+            )
+            if not eligible_service_days:
+                continue
             history = resolve_status_history(
                 person.person_id,
                 meal,
                 tuple(events_by_key[(person.person_id, meal)]),
             )
-            for service_on in ordered_service_days:
+            for service_on in eligible_service_days:
                 if meal not in roster.meals_for(person.person_id, on=service_on):
                     continue
                 provision = adjustments.provision_for(meal, service_on)
@@ -305,6 +341,11 @@ def _prepare_delivery_data(
         for item in shipments
         if comparison_start <= item.delivery_on <= period_end
     )
+    if selected_forms is not None:
+        coalesced_shipments = tuple(
+            item for item in coalesced_shipments
+            if _shipment_form(roster, item) in allowed_forms
+        )
 
     reports: tuple[DeliveryReport, ...] = ()
     if build_reports:
@@ -357,6 +398,7 @@ def _prepare_delivery_data(
             ),
             "source_revision_id": str(snapshot.revision_id),
             "selected_meals": tuple(meal.value for meal in selected_meals),
+            **({"selected_delivery_forms": selected_forms} if build_reports else {}),
             "report_period": {
                 "basis": "physical_delivery_day",
                 "starts_on": period_start.isoformat(),
@@ -558,21 +600,9 @@ def _shipment_presences(
     by_key: defaultdict[tuple[date, Meal], list[_ShipmentPresence]] = defaultdict(list)
     for shipment in shipments:
         person = roster.person(shipment.person_id)
-        household_ids: set[UUID] = set()
-        for service_on in shipment.service_dates:
-            household = roster.household_for(shipment.person_id, on=service_on)
-            if household is None:
-                raise ValueError(
-                    f"{person.profile.name}님의 {service_on:%Y.%m.%d} 식사일에 "
-                    "유효한 가구가 없습니다."
-                )
-            household_ids.add(household.household_id)
-        if len(household_ids) != 1:
-            shown = ", ".join(day.strftime("%Y.%m.%d") for day in shipment.service_dates)
-            raise ValueError(
-                f"{person.profile.name}님의 한 번 배송에 서로 다른 가구가 섞입니다({shown}). "
-                "가구 변경 적용일을 확인해주세요."
-            )
+        household_id = require_delivery_household(
+            roster, shipment.person_id, shipment.service_dates,
+        )
         assignment = roster.resolve_assignment(shipment.person_id, shipment.meal)
         delivery_view = routing.resolve(
             roster, shipment.person_id, shipment.delivery_on
@@ -586,20 +616,11 @@ def _shipment_presences(
         by_key[(shipment.delivery_on, shipment.meal)].append(
             _ShipmentPresence(
                 shipment.person_id,
-                next(iter(household_ids)),
+                household_id,
                 driver,
                 "" if assignment.sequence is None else assignment.sequence.strip(),
                 delivery_view.jurisdiction or "",
-                next(
-                    (
-                        setting.form
-                        for setting in roster.delivery_settings_for(
-                            shipment.person_id, on=shipment.service_dates[0]
-                        )
-                        if setting.meal is shipment.meal
-                    ),
-                    None,
-                ),
+                _shipment_form(roster, shipment),
                 shipment.entitlement_count,
             )
         )
@@ -618,6 +639,43 @@ def _shipment_presences(
             for key, values in by_key.items()
         }
     )
+
+
+def _shipment_form(roster: RosterSnapshot, shipment: PhysicalShipment) -> str | None:
+    return _delivery_form_on(
+        roster, shipment.person_id, shipment.meal, shipment.service_dates[0],
+    )
+
+
+def _delivery_form_on(
+    roster: RosterSnapshot, person_id: UUID, meal: Meal, on: date,
+) -> str | None:
+    return next(
+        (
+            setting.form
+            for setting in roster.delivery_settings_for(
+                person_id, on=on
+            )
+            if setting.meal is meal
+        ),
+        None,
+    )
+
+
+def _canonical_delivery_forms(forms: Sequence[str | None]) -> tuple[str | None, ...]:
+    if isinstance(forms, (str, bytes)):
+        raise TypeError("배송 형태는 목록으로 선택해야 합니다.")
+    selected = tuple(forms)
+    if not selected:
+        raise ValueError("문서에 포함할 배송 형태를 하나 이상 선택해야 합니다.")
+    for form in selected:
+        if form is not None and (
+            not isinstance(form, str) or not form or form != " ".join(form.split())
+        ):
+            raise ValueError("배송 형태 선택 값이 올바르지 않습니다.")
+    if len(set(selected)) != len(selected):
+        raise ValueError("같은 배송 형태를 중복 선택할 수 없습니다.")
+    return tuple(sorted(selected, key=lambda value: (value is not None, value.casefold() if value else "", value or "")))
 
 
 def _aggregate_presences(

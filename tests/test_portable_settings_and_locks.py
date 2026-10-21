@@ -422,7 +422,9 @@ def test_document_default_write_failure_is_shown_and_stops_dispatch(tmp_path, mo
         message_box=SimpleNamespace(critical=lambda *a: messages.append(a)))
     window = SimpleNamespace(table_model=SimpleNamespace(service_day=None, meal=None),
         document_output_selected=SimpleNamespace(emit=lambda value: dispatched.append(value)))
-    session = SimpleNamespace(database=SimpleNamespace(revision_summaries=lambda: []))
+    session = SimpleNamespace(database=SimpleNamespace(
+        revision_summaries=lambda: [SimpleNamespace(sequence=1)],
+    ))
     if flow == "wizard":
         monkeypatch.setattr(controller, "_ensure_document_prerequisites", lambda *a: True)
         monkeypatch.setattr(module, "DocumentSetupRequest", lambda *a: object())

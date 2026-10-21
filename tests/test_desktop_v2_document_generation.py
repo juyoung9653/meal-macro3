@@ -541,7 +541,7 @@ def test_publishes_encrypted_delivery_report_records_run_and_backup(
             report_day,
         )
         selection = next_available_document_output(
-            DocumentMealSelection(period, (Meal.LUNCH,)),
+            DocumentMealSelection(period, (Meal.LUNCH,), delivery_forms=(None,)),
             outputs,
             DocumentOutputMode.SAVED_DEFAULT,
         )
@@ -568,6 +568,7 @@ def test_publishes_encrypted_delivery_report_records_run_and_backup(
         assert run.period_start == report_day
         assert run.calculation_manifest["report_count"] == 1
         assert run.calculation_manifest["target_entitlement_count"] == 1
+        assert run.calculation_manifest["selected_delivery_forms"] == (None,)
         assert run.template_manifest["writer"] == (
             "report_generator.make_report_publication"
         )

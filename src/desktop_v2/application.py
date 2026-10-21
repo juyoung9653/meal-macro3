@@ -39,6 +39,7 @@ from .document_hub import DocumentAction, DocumentHubDialog, DocumentSetupReques
 from .document_meal import DocumentMealDialog
 from .delivery_substitute import DeliverySubstituteDialog
 from src.services.sqlite_delivery_substitute_service import prepare_delivery_substitute_data
+from src.services.sqlite_delivery_report_service import delivery_forms_from_snapshot
 from .document_output import (
     DefaultDocumentDirectoryDialog,
     DocumentOutputDialog,
@@ -734,22 +735,59 @@ class DesktopStartupController:
         except Exception as error:
             self._message_box.critical(window, "문서 원본을 읽지 못했습니다", str(error))
             return
-        source = self._document_source_dialog_type(summaries, parent=window)
-        if (yield DialogRequest(source)) != QDialog.DialogCode.Accepted:
+        if not summaries:
+            self._message_box.information(
+                window, "문서 원본이 없습니다", "문서에 사용할 변경 이력이 없습니다.",
+            )
             return
         setup = DocumentSetupRequest(
             action,
-            source.selected_summary,
+            max(summaries, key=lambda summary: summary.sequence),
             service_day,
             selected_meal,
         )
         period = self._document_period_dialog_type(setup, parent=window)
-        if (yield DialogRequest(period)) != QDialog.DialogCode.Accepted:
-            return
+        source_options_setter = getattr(period, "set_source_options_available", None)
+        if callable(source_options_setter):
+            source_options_setter(len(summaries) > 1)
+        while True:
+            period_result = yield DialogRequest(period)
+            if period_result == DocumentPeriodDialog.REVISION_SELECTION_REQUESTED:
+                source = self._document_source_dialog_type(summaries, parent=window)
+                selection_setter = getattr(source, "set_selected_summary", None)
+                if callable(selection_setter):
+                    selection_setter(period.request.source)
+                archive_opener = getattr(source, "show_archive", None)
+                if callable(archive_opener):
+                    archive_opener()
+                if (yield DialogRequest(source)) == QDialog.DialogCode.Accepted:
+                    period.set_source(source.selected_summary)
+                continue
+            if period_result != QDialog.DialogCode.Accepted:
+                return
+            break
+        selected_period = period.selected_period()
         meal = self._document_meal_dialog_type(
-            period.selected_period(),
+            selected_period,
             parent=window,
         )
+        forms_setter = getattr(meal, "set_available_delivery_forms", None)
+        if action is DocumentAction.DELIVERY_REPORT and callable(forms_setter):
+            try:
+                forms = run_progress_task(
+                    lambda: delivery_forms_from_snapshot(
+                        session.database.snapshot(selected_period.source.revision_id)
+                    ),
+                    title="배송 형태를 불러오는 중입니다",
+                    message="선택한 변경번호의 배송 형태를 확인하는 중입니다.",
+                    parent=window,
+                )
+                forms_setter(forms)
+            except Exception as error:
+                self._message_box.critical(
+                    window, "배송 형태를 읽지 못했습니다", str(error),
+                )
+                return
         if (yield DialogRequest(meal)) != QDialog.DialogCode.Accepted:
             return
         document = meal.selection()

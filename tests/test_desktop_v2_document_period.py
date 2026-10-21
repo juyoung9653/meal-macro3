@@ -182,3 +182,29 @@ def test_substitute_dialog_keeps_exactly_one_editable_day(app):
     selected = dialog.selected_period()
     assert selected.starts_on == selected.ends_on == date(2026, 8, 21)
     dialog.close()
+
+
+def test_period_source_selector_preserves_dates_and_updates_selection(app):
+    dialog = DocumentPeriodDialog(_request(DocumentAction.DELIVERY_REPORT))
+    dialog.set_source_options_available(True)
+    dialog.show()
+    app.processEvents()
+    dialog._ends_on.setDate(QDate(2026, 8, 23))
+
+    assert dialog._change_source_button.isVisible()
+    dialog._change_source_button.click()
+    assert dialog.result() == DocumentPeriodDialog.REVISION_SELECTION_REQUESTED
+    dialog.show()
+    app.processEvents()
+    assert dialog._ends_on.date() == QDate(2026, 8, 23)
+
+    older = replace(
+        _summary(), sequence=2,
+        revision_id=UUID("58000000-0000-0000-0000-000000000002"),
+        recorded_at=datetime(2026, 8, 20, 5, tzinfo=UTC),
+    )
+    dialog.set_source(older)
+    assert dialog.selected_period().source == older
+    assert dialog.selected_period().ends_on == date(2026, 8, 23)
+    assert "20260820-140000" in dialog._source_detail.text()
+    dialog.close()

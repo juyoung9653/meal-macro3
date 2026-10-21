@@ -243,6 +243,7 @@ class DocumentGenerationController:
                     period.starts_on,
                     period.ends_on,
                     selection.document.meals,
+                    delivery_forms=selection.document.delivery_forms,
                 )
                 if not prepared.reports:
                     raise ValueError(

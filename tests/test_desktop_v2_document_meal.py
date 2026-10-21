@@ -155,3 +155,39 @@ def test_substitute_dialog_is_exclusive_without_current_screen_meal(app):
     assert dialog.selected_meals() == (Meal.BREAKFAST,)
     assert dialog._save_button.isEnabled()
     dialog.close()
+
+
+def test_report_dialog_selects_forms_and_blocks_all_unchecked(app):
+    dialog = DocumentMealDialog(_period(DocumentAction.DELIVERY_REPORT))
+    dialog.set_available_delivery_forms((None, "도시락", "식재료 박스"))
+    dialog.show()
+    app.processEvents()
+
+    assert dialog.selection().delivery_forms == (None, "도시락", "식재료 박스")
+    assert all(card.height() >= 80 for card in dialog._cards.values())
+    assert all(button.height() >= 18 for button in dialog._buttons_by_form.values())
+    dialog._buttons_by_form["식재료 박스"].setChecked(False)
+    app.processEvents()
+    assert dialog.selection().delivery_forms == (None, "도시락")
+    assert "도시락" in dialog._summary.text()
+
+    for button in dialog._buttons_by_form.values():
+        button.setChecked(False)
+    app.processEvents()
+    assert not dialog._save_button.isEnabled()
+    assert "배송 형태를 하나 이상" in dialog._error.text()
+    with pytest.raises(ValueError, match="배송 형태를 하나 이상"):
+        dialog.selection()
+    dialog.close()
+
+
+def test_report_form_selection_is_legacy_all_without_configured_choices():
+    selection = DocumentMealSelection(
+        _period(DocumentAction.DELIVERY_REPORT), (Meal.DINNER,),
+    )
+    assert selection.delivery_forms is None
+    with pytest.raises(ValueError, match="일일식수 문서에서만"):
+        DocumentMealSelection(
+            _period(DocumentAction.INVOICE), (Meal.DINNER,),
+            delivery_forms=(None,),
+        )

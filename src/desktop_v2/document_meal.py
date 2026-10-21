@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
     QRadioButton,
+    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
@@ -51,6 +52,7 @@ class DocumentMealSelection:
     period: DocumentPeriodSelection
     meals: tuple[Meal, ...]
     substitute_options: SubstituteOptions | None = None
+    delivery_forms: tuple[str | None, ...] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.period, DocumentPeriodSelection):
@@ -73,6 +75,19 @@ class DocumentMealSelection:
                 raise TypeError("배송대타 설정이 올바르지 않습니다.")
             if self.period.action is not DocumentAction.DELIVERY_SUBSTITUTE:
                 raise ValueError("다른 문서에는 배송대타 설정을 사용할 수 없습니다.")
+        if self.delivery_forms is not None:
+            if self.period.action is not DocumentAction.DELIVERY_REPORT:
+                raise ValueError("일일식수 문서에서만 배송 형태를 선택할 수 있습니다.")
+            forms = tuple(self.delivery_forms)
+            if not forms:
+                raise ValueError("문서에 포함할 배송 형태를 하나 이상 선택해야 합니다.")
+            if len(set(forms)) != len(forms):
+                raise ValueError("같은 배송 형태를 중복 선택할 수 없습니다.")
+            if any(form is not None and (
+                not isinstance(form, str) or not form or form != " ".join(form.split())
+            ) for form in forms):
+                raise ValueError("배송 형태 선택 값이 올바르지 않습니다.")
+            object.__setattr__(self, "delivery_forms", forms)
         object.__setattr__(self, "meals", canonical)
 
 
@@ -91,6 +106,8 @@ class DocumentMealDialog(QDialog):
         self._buttons_by_meal: dict[Meal, QAbstractButton] = {}
         self._cards: dict[Meal, QFrame] = {}
         self._exclusive_group: QButtonGroup | None = None
+        self._available_delivery_forms: tuple[str | None, ...] | None = None
+        self._buttons_by_form: dict[str | None, QCheckBox] = {}
         self._defaults = suggest_document_meals(
             period.action,
             period.anchor_meal,
@@ -100,8 +117,12 @@ class DocumentMealDialog(QDialog):
         self.setObjectName("documentMealDialog")
         self.setWindowTitle(f"{period.action.label} 식종 선택")
         self.setModal(True)
-        self.resize(780, 550)
-        self.setMinimumSize(700, 510)
+        if period.action is DocumentAction.DELIVERY_REPORT:
+            self.resize(780, 700)
+            self.setMinimumSize(700, 680)
+        else:
+            self.resize(780, 550)
+            self.setMinimumSize(700, 510)
         self.setStyleSheet(application_stylesheet())
         self._build_ui()
         self._refresh_state()
@@ -117,8 +138,46 @@ class DocumentMealDialog(QDialog):
             if self._buttons_by_meal[meal].isChecked()
         )
 
+    def set_available_delivery_forms(self, forms: tuple[str | None, ...]) -> None:
+        """Configure report choices from the already selected historical source."""
+        if self._period.action is not DocumentAction.DELIVERY_REPORT:
+            return
+        values = tuple(forms)
+        if not values or None not in values or len(set(values)) != len(values):
+            raise ValueError("배송 형태 목록이 올바르지 않습니다.")
+        if any(value is not None and (
+            not isinstance(value, str) or not value or value != " ".join(value.split())
+        ) for value in values):
+            raise ValueError("배송 형태 목록이 올바르지 않습니다.")
+        self._available_delivery_forms = values
+        for button in self._buttons_by_form.values():
+            self._form_layout.removeWidget(button)
+            button.deleteLater()
+        self._buttons_by_form.clear()
+        for form in values:
+            button = QCheckBox("기본" if form is None else form)
+            button.setObjectName("documentFormCheck")
+            button.setMinimumHeight(22)
+            button.setChecked(True)
+            button.toggled.connect(self._refresh_state)
+            self._buttons_by_form[form] = button
+            self._form_layout.addWidget(button)
+        self._form_panel.show()
+        self._refresh_state()
+
+    def selected_delivery_forms(self) -> tuple[str | None, ...] | None:
+        if self._available_delivery_forms is None:
+            return None
+        return tuple(
+            form for form in self._available_delivery_forms
+            if self._buttons_by_form[form].isChecked()
+        )
+
     def selection(self) -> DocumentMealSelection:
-        return DocumentMealSelection(self._period, self.selected_meals())
+        return DocumentMealSelection(
+            self._period, self.selected_meals(),
+            delivery_forms=self.selected_delivery_forms(),
+        )
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -129,6 +188,8 @@ class DocumentMealDialog(QDialog):
 
         section = QFrame()
         section.setObjectName("editSection")
+        if self._period.action is DocumentAction.DELIVERY_REPORT:
+            section.setMinimumHeight(180)
         section_layout = QVBoxLayout(section)
         section_layout.setContentsMargins(15, 13, 15, 15)
         section_layout.setSpacing(10)
@@ -165,6 +226,30 @@ class DocumentMealDialog(QDialog):
             cards.addWidget(card, 1)
         section_layout.addLayout(cards, 1)
         root.addWidget(section, 1)
+
+        if self._period.action is DocumentAction.DELIVERY_REPORT:
+            self._form_panel = QFrame()
+            self._form_panel.setObjectName("editSection")
+            form_panel_layout = QVBoxLayout(self._form_panel)
+            form_panel_layout.setContentsMargins(15, 10, 15, 10)
+            form_panel_layout.setSpacing(5)
+            title = QLabel("문서에 포함할 배송 형태")
+            title.setObjectName("sectionLabel")
+            form_panel_layout.addWidget(title)
+            detail = QLabel("선택하지 않은 형태는 가구 수와 식수에서 모두 제외합니다.")
+            detail.setObjectName("muted")
+            form_panel_layout.addWidget(detail)
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setMinimumHeight(100)
+            scroll.setMaximumHeight(130)
+            container = QWidget()
+            self._form_layout = QVBoxLayout(container)
+            self._form_layout.setContentsMargins(0, 0, 0, 0)
+            scroll.setWidget(container)
+            form_panel_layout.addWidget(scroll)
+            self._form_panel.hide()
+            root.addWidget(self._form_panel)
 
         self._summary = QLabel()
         self._summary.setObjectName("documentMealSummary")
@@ -285,9 +370,13 @@ class DocumentMealDialog(QDialog):
             card.style().polish(card)
         if not hasattr(self, "_summary"):
             return
-        if not selected:
+        selected_forms = self.selected_delivery_forms()
+        if not selected or selected_forms == ():
             self._summary.clear()
-            self._error.setText("문서에 포함할 식종을 하나 이상 선택해주세요.")
+            self._error.setText(
+                "문서에 포함할 식종을 하나 이상 선택해주세요."
+                if not selected else "문서에 포함할 배송 형태를 하나 이상 선택해주세요."
+            )
             self._error.show()
             self._save_button.setEnabled(False)
             return
@@ -297,6 +386,11 @@ class DocumentMealDialog(QDialog):
             labels += " 전체"
         self._summary.setText(
             f"{self._period.action.label} 포함 식종: {labels}"
+            + (
+                "  ·  배송 형태: "
+                + " · ".join("기본" if form is None else form for form in selected_forms)
+                if selected_forms is not None else ""
+            )
         )
         self._save_button.setEnabled(True)
 

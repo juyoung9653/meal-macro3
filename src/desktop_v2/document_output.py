@@ -321,6 +321,15 @@ class DocumentOutputDialog(QDialog):
         detail.setObjectName("documentOutputContextDetail")
         copy.addWidget(title)
         copy.addWidget(detail)
+        if period.action is DocumentAction.DELIVERY_REPORT and self._document.delivery_forms is not None:
+            forms = " · ".join(
+                "기본" if form is None else form
+                for form in self._document.delivery_forms
+            )
+            form_detail = QLabel(f"포함 배송 형태 {forms}")
+            form_detail.setObjectName("documentOutputContextDetail")
+            form_detail.setWordWrap(True)
+            copy.addWidget(form_detail)
         layout.addLayout(copy, 1)
         return frame
 

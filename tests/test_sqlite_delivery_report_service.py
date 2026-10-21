@@ -180,7 +180,7 @@ def test_breakfast_report_uses_physical_friday_and_keeps_three_entitlements():
         date(2026, 8, 23),
     )
     assert prepared.calculation_manifest["target_entitlement_count"] == 3
-    assert prepared.calculation_manifest["calculation_contract_version"] == 3
+    assert prepared.calculation_manifest["calculation_contract_version"] == 4
     assert prepared.calculation_manifest["recurring_service_policy"]["version"] == 5
     assert prepared.calculation_manifest["household_grouping"]["policy_version"] == 2
     assert prepared.calculation_manifest["report_period"]["basis"] == (
@@ -610,7 +610,7 @@ def test_physical_delivery_preparation_skips_report_only_requirements(people, in
         assert physical.shipments == report.shipments
         assert physical.calculation_manifest == {
             k: v for k, v in report.calculation_manifest.items()
-            if k not in {'household_grouping', 'staff_order', 'report_count'}
+            if k not in {'household_grouping', 'staff_order', 'report_count', 'selected_delivery_forms'}
         }
     else:
         with pytest.raises(ValueError):
