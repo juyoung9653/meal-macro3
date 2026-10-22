@@ -259,10 +259,10 @@ def test_calculates_shared_invoice_and_confirmation_facts_from_source_revision()
         delivery.breakfast_count,
         delivery.lunch_count,
         delivery.dinner_count,
-    ) == (13, 1, 14)
-    assert delivery.billing_amount == 287_000
-    assert delivery.amount(prepared.batch.prices) == 287_000
-    assert sum(item.breakfast_count for item in delivery.weekly) == 13
+    ) == (11, 1, 14)
+    assert delivery.billing_amount == 267_000
+    assert delivery.amount(prepared.batch.prices) == 267_000
+    assert sum(item.breakfast_count for item in delivery.weekly) == 11
     assert sum(item.lunch_count for item in delivery.weekly) == 1
     assert sum(item.dinner_count for item in delivery.weekly) == 14
     assert prepared.global_note == (
@@ -273,8 +273,8 @@ def test_calculates_shared_invoice_and_confirmation_facts_from_source_revision()
         "중식",
         "석식",
     )
-    assert prepared.calculation_manifest["billing"]["total_amount"] == 287_000
-    assert prepared.calculation_manifest["calculation_contract_version"] == 3
+    assert prepared.calculation_manifest["billing"]["total_amount"] == 267_000
+    assert prepared.calculation_manifest["calculation_contract_version"] == 4
     assert prepared.calculation_manifest["recurring_service_policy"]["version"] == 5
 
 
@@ -305,7 +305,7 @@ def test_blocks_enrolled_lunch_when_reviewed_school_period_is_missing():
         )
 
 
-def test_physical_delivery_mapping_does_not_change_breakfast_billing_days():
+def test_same_month_delivery_mappings_keep_billing_equal():
     default = prepare_monthly_document_data(
         _source_snapshot(), date(2026, 8, 1), date(2026, 8, 31), (Meal.BREAKFAST,)
     )
@@ -314,8 +314,8 @@ def test_physical_delivery_mapping_does_not_change_breakfast_billing_days():
             HouseholdDeliverySetting(Meal.BREAKFAST, delivery_weekdays=(0, 1, 2, 3, 4, 3, 4)),
         )), date(2026, 8, 1), date(2026, 8, 31), (Meal.BREAKFAST,)
     )
-    assert default.batch.deliveries[0].breakfast_count == 13
-    assert mapped.batch.deliveries[0].breakfast_count == 13
+    assert default.batch.deliveries[0].breakfast_count == 11
+    assert mapped.batch.deliveries[0].breakfast_count == 11
     assert mapped.batch.deliveries[0].billing_amount == default.batch.deliveries[0].billing_amount
     assert tuple(item.service_on for item in mapped.entitlements) == tuple(item.service_on for item in default.entitlements)
 

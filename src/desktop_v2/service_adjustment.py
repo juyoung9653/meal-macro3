@@ -171,7 +171,8 @@ class ServiceAdjustmentHubDialog(QDialog):
         title.setObjectName("workspaceTitle")
         guide = QLabel(
             "공휴일은 자동으로 후보만 표시됩니다. 선택한 뒤 정상 운영, "
-            "미제공 또는 대체식으로 확정해야 일정과 청구에 반영됩니다."
+            "미제공 또는 대체식으로 확정해야 일정과 청구에 반영됩니다. "
+            "검토하지 않은 공휴일은 평소 요일 설정대로 운영합니다."
         )
         guide.setObjectName("workspaceSubtitle")
         guide.setWordWrap(True)
@@ -613,7 +614,7 @@ class PublicHolidayBatchDialog(QDialog):
         delivery_title.setObjectName("sectionLabel")
         delivery_layout.addWidget(delivery_title)
         delivery_help = QLabel(
-            "공휴일과 주말을 건너뛴 직전 운영일을 제안합니다. "
+            "선택한 휴무일과 주말을 건너뛴 직전 운영일을 제안합니다. "
             "실제 제공일이 다른 칸만 바꾸세요."
         )
         delivery_help.setObjectName("muted")
@@ -742,7 +743,7 @@ class PublicHolidayBatchDialog(QDialog):
                     self._schedule,
                     scheduled_meals or meals or tuple(Meal),
                     candidate.day,
-                    excluded_days=tuple(self._calendar_days),
+                    excluded_days=tuple(item.day for item in self._public_holidays),
                 )
                 for column, meal in enumerate(Meal, start=2):
                     if (candidate.day, meal) not in service_keys:

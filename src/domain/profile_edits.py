@@ -6,7 +6,7 @@ from dataclasses import dataclass, replace
 from datetime import date, datetime
 from uuid import UUID
 
-from .projections import roster_audit_changes
+from .projections import roster_audit_changes_for_people_and_households
 from .revisions import (
     RevisionActor,
     RevisionMetadata,
@@ -144,6 +144,7 @@ def build_person_profile_revision(
     )
     member_ids = {member.person_id for member in members}
     updated_persons = []
+    changed_person_ids: set[UUID] = set()
     for person in current_roster.persons:
         is_subject = person.person_id == person_id
         shares_household_phone = (
@@ -174,29 +175,47 @@ def build_person_profile_revision(
             if receives_delivery_settings
             else person.delivery_settings
         )
-        updated_persons.append(
-            replace(
-                person,
-                profile=profile,
-                delivery_settings=delivery_settings,
+        if profile == person.profile and delivery_settings == person.delivery_settings:
+            updated_persons.append(person)
+        else:
+            updated_persons.append(
+                replace(
+                    person,
+                    profile=profile,
+                    delivery_settings=delivery_settings,
+                )
             )
-        )
+            changed_person_ids.add(person.person_id)
     persons = tuple(updated_persons)
     if household_delivery_settings is not None and household_id is None:
         raise ValueError("배송 설정을 저장할 가구가 연결되지 않았습니다.")
-    households = tuple(
-        replace(household, delivery_settings=household_delivery_settings)
-        if household_delivery_settings is not None and household.household_id == household_id
-        else household
-        for household in current_roster.households
-    )
+    changed_household_ids: set[UUID] = set()
+    updated_households = []
+    for household in current_roster.households:
+        if (
+            household_delivery_settings is not None
+            and household.household_id == household_id
+            and household.delivery_settings != household_delivery_settings
+        ):
+            updated_households.append(
+                replace(household, delivery_settings=household_delivery_settings)
+            )
+            changed_household_ids.add(household.household_id)
+        else:
+            updated_households.append(household)
+    households = tuple(updated_households)
     snapshot = replace(
         current_roster,
         revision_id=revision_id,
         persons=persons,
         households=households,
     )
-    changes = roster_audit_changes(current_roster, snapshot)
+    changes = roster_audit_changes_for_people_and_households(
+        current_roster,
+        snapshot,
+        person_ids=changed_person_ids,
+        household_ids=changed_household_ids,
+    )
     if not changes:
         raise ValueError("변경된 사람 정보가 없습니다.")
 

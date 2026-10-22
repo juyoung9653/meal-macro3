@@ -10,14 +10,17 @@ from enum import StrEnum
 
 from PySide6.QtWidgets import QDialog, QMessageBox, QWidget
 
-from src.domain.delivery_routing import routing_state_from_snapshot
+from src.domain.delivery_routing import (
+    DRIVER_KIND, DRIVER_ORDER_KIND, ROUTING_EVENT_KIND, routing_state_from_snapshot,
+)
 from src.domain.roster import Meal
 from src.domain.status import resolve_status_history
 from src.domain.revisions import format_revision_timestamp
-from src.domain.school_calendar import school_lunch_calendar_from_snapshot
-from src.domain.service_adjustments import service_adjustment_schedule_from_snapshot
+from src.domain.school_calendar import SCHOOL_LUNCH_SCHEDULE_KIND, school_lunch_calendar_from_snapshot
+from src.domain.service_adjustments import SERVICE_ADJUSTMENT_SCHEDULE_KIND, service_adjustment_schedule_from_snapshot
+from src.domain.household_shared import HOUSEHOLD_SHARED_KIND
 from src.storage.database_session import DatabaseSession
-from src.importing.profile_history import import_profiles_from_snapshot
+from src.importing.profile_history import IMPORT_PROFILE_KIND, import_profiles_from_snapshot
 
 from .custom_fields import CustomFieldController
 from .complaints import ComplaintController
@@ -36,7 +39,7 @@ from .document_completion import (
 )
 from .document_generation import DocumentGenerationController
 from .document_hub import DocumentAction, DocumentHubDialog, DocumentSetupRequest
-from .document_meal import DocumentMealDialog
+from .document_meal import DocumentMealDialog, load_daily_report_choices, save_daily_report_choices
 from .delivery_substitute import DeliverySubstituteDialog
 from src.services.sqlite_delivery_substitute_service import prepare_delivery_substitute_data
 from src.services.sqlite_delivery_report_service import delivery_forms_from_snapshot
@@ -60,7 +63,7 @@ from .roster_cell_edit import RosterCellEditController, is_roster_routing_cell
 from .roster_row_edit import RosterRowEditController
 from .provider_settings import ProviderSettingsController
 from .column_input_rules import ColumnInputRuleController
-from src.domain.column_input_rules import load_rules
+from src.domain.column_input_rules import RULES_KIND, load_rules
 from .monthly_statistics import MonthlyStatisticsDialog
 from src.services.monthly_meal_statistics import build_monthly_meal_statistics
 from .monthly_meal_history import MonthlyMealHistoryDialog
@@ -349,6 +352,7 @@ class DesktopStartupController:
             ("batch_driver_assignment_requested", lambda targets: launch(self._run_batch_driver_assignment, session, window, targets)),
             ("sequence_edit_requested", lambda person_id: launch(self._run_sequence_edit, session, window, person_id)),
             ("household_sequence_save_requested", lambda targets, value, dialog: self._save_household_sequence(session, window, targets, value, dialog)),
+            ("household_order_save_requested", lambda values, dialog: self._save_household_order(session, window, values, dialog)),
             ("person_add_requested", lambda selected_meal: launch(self._run_roster_row_add, session, window, selected_meal)),
             ("person_delete_requested", lambda person_id: launch(self._run_roster_row_delete, session, window, person_id)),
             ("relocation_requested", lambda person_id: launch(self._run_relocation, session, window, person_id)),
@@ -550,6 +554,16 @@ class DesktopStartupController:
                 else:
                     rows = window.driver_household_rows()
                 dialog.replace_rows(rows)
+        dialog.show_sequence_result(result)
+
+    def _save_household_order(self, session, window, values, dialog) -> None:
+        result = SequenceEditController(session).save_order(
+            values, expected_revision_id=dialog.source_revision_id, parent=dialog,
+        )
+        if result.status is SequenceSaveStatus.SAVED:
+            if self._replace_roster_if_changed(session, window, result.roster):
+                dialog.source_revision_id = result.roster.revision_id
+                dialog.refresh_rows()
         dialog.show_sequence_result(result)
 
     @dialog_workflow
@@ -812,9 +826,31 @@ class DesktopStartupController:
                     window, "배송 형태를 읽지 못했습니다", str(error),
                 )
                 return
-        if (yield DialogRequest(meal)) != QDialog.DialogCode.Accepted:
-            return
-        document = meal.selection()
+        if action is DocumentAction.DELIVERY_REPORT:
+            preferences_setter = getattr(meal, "set_report_choices", None)
+            if callable(preferences_setter):
+                try:
+                    choices = run_progress_task(lambda: load_daily_report_choices(session),
+                        title="일일식수 선택을 불러오는 중입니다", message="운영 DB에 저장된 식종과 배송 형태를 확인합니다.", parent=window)
+                    preferences_setter(choices)
+                except Exception as error:
+                    self._message_box.critical(window, "일일식수 선택을 읽지 못했습니다", str(error))
+                    return
+        while True:
+            if (yield DialogRequest(meal)) != QDialog.DialogCode.Accepted:
+                return
+            document = meal.selection()
+            choices_getter = getattr(meal, "selected_report_choices", None)
+            if action is DocumentAction.DELIVERY_REPORT and callable(choices_getter):
+                try:
+                    roster, backup = save_daily_report_choices(session, choices_getter(), parent=window)
+                    self._replace_roster_if_changed(session, window, roster)
+                except Exception as error:
+                    self._message_box.critical(window, "일일식수 선택을 저장하지 못했습니다", str(error))
+                    continue
+                if backup is not None and backup.error is not None:
+                    self._message_box.warning(window, "선택은 저장됐지만 자동 백업에 실패했습니다", str(backup.error))
+            break
         if action is DocumentAction.DELIVERY_SUBSTITUTE:
             try:
                 prepared = run_progress_task(
@@ -991,6 +1027,12 @@ class DesktopStartupController:
             return
         if hub.selected_action is SettingsAction.DOCUMENT_TEMPLATE:
             (yield from invoke(self._run_document_template_change, session, window))
+            return
+        if hub.selected_action is SettingsAction.INVOICE_SETTINGS:
+            from .invoice_settings import InvoiceSettingsController
+            roster = (yield from invoke(InvoiceSettingsController(session).run, parent=window))
+            if roster is not None:
+                self._replace_roster_if_changed(session, window, roster)
             return
         if hub.selected_action is SettingsAction.DOCUMENT_COLUMN_MAPPING:
             (yield from invoke(self._run_document_column_mapping, session, window))
@@ -1400,7 +1442,15 @@ class DesktopStartupController:
             roster = session.database.current_roster()
         if roster is None:
             return None
-        snapshot = session.database.snapshot(roster.revision_id)
+        read_kinds = getattr(session.database, "snapshot_for_kinds", None)
+        snapshot = (
+            read_kinds(roster.revision_id, (
+                DRIVER_KIND, DRIVER_ORDER_KIND, ROUTING_EVENT_KIND,
+                SCHOOL_LUNCH_SCHEDULE_KIND, SERVICE_ADJUSTMENT_SCHEDULE_KIND,
+                HOUSEHOLD_SHARED_KIND, IMPORT_PROFILE_KIND, RULES_KIND,
+            ))
+            if callable(read_kinds) else session.database.snapshot(roster.revision_id)
+        )
         profiles = import_profiles_from_snapshot(snapshot)
         return _StartupPreparation(
             roster=roster,
@@ -1416,7 +1466,11 @@ class DesktopStartupController:
 
     @staticmethod
     def _revision_display_code(session: DatabaseSession, roster) -> str:
-        metadata = session.database.revision(roster.revision_id).metadata
+        read_metadata = getattr(session.database, "revision_metadata", None)
+        metadata = (
+            read_metadata(roster.revision_id) if callable(read_metadata)
+            else session.database.revision(roster.revision_id).metadata
+        )
         return format_revision_timestamp(metadata.recorded_at)
 
     def _access_dialog(self, parent: QWidget | None):

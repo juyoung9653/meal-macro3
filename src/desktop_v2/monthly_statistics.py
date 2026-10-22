@@ -119,7 +119,8 @@ class MonthlyStatisticsDialog(QDialog):
             self._set_row(row, (item.day.isoformat(), item.dinner, item.breakfast, item.lunch, item.total))
         self._set_row(len(result.days), ("월 합계", result.dinner_total, result.breakfast_total, result.lunch_total, result.total))
         self.summary.setText(f"월 합계  석식 {result.dinner_total:,} · 조식 {result.breakfast_total:,} · 중식 {result.lunch_total:,} · 전체 {result.total:,}")
-        self.revision_note.setText("조회 당시 최신 운영 데이터 기준 · 새로고침으로 변경 내용을 반영합니다")
+        next_month = "포함" if result.include_next_month else "제외"
+        self.revision_note.setText(f"다음 달 식수 {next_month} · 설정 → 식수·청구서 설정에서 변경\n조회 당시 최신 운영 데이터 기준 · 새로고침으로 변경 내용을 반영합니다")
 
     def _set_row(self, row: int, values) -> None:
         for column, value in enumerate(values):

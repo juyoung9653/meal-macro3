@@ -132,6 +132,36 @@ def test_cancel_pause_reveals_earlier_stop(session):
     assert [row[1] for row in rows(session, person)] == ["중지"]
 
 
+@pytest.mark.parametrize("fail_after_first", [False, True])
+def test_atomic_cancellation_batch_preserves_audit_or_rolls_back_everything(session, fail_after_first):
+    person = initialize(session)
+    first = status(session, person, MealStatus.STOPPED, date(2026, 10, 2))
+    second = status(session, person, MealStatus.STOPPED, date(2026, 10, 3))
+    retained = status(session, person, MealStatus.STOPPED, DAY)
+    before = session.database.snapshot(session.database.latest_revision_id())
+    old_records = tuple(session.database.revision_summaries())
+
+    def records():
+        for index, target in enumerate((first, second)):
+            if fail_after_first and index == 1:
+                raise KeyboardInterrupt("synthetic interruption")
+            yield prepare(session, target)[1]
+
+    if fail_after_first:
+        with pytest.raises(KeyboardInterrupt):
+            session.database.append_revisions(records())
+        assert session.database.snapshot(session.database.latest_revision_id()) == before
+        assert session.database.revision_summaries() == old_records
+    else:
+        session.database.append_revisions(records())
+        assert [event.event_id for event in session.database.status_events()] == [retained.entity_id]
+        assert len(rows(session, person)) == 1
+        assert len(session.database.revision_summaries()) == len(old_records) + 2
+        assert session.database.snapshot(before.revision_id) == before
+    assert session.database._require_connection().get_autocommit()
+    session.database.check_integrity()
+
+
 def test_cancel_one_meal_start_reverts_only_its_enrollment(session):
     person = initialize(session, enrolled=False)
     target = status(session, person, MealStatus.DELIVERY, meals=(Meal.BREAKFAST, Meal.DINNER))

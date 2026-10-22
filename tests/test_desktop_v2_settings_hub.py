@@ -39,6 +39,7 @@ def test_settings_hub_has_db_and_computer_local_jobs(app):
         "생성 Excel 비밀번호",
         "문서 양식",
         "출력 칼럼 연결",
+        "식수·청구서 설정",
         "식종별 배송 기본값",
         "중지 표시 기간",
         "배송순서 입력 방식",
@@ -75,6 +76,7 @@ def test_settings_hub_groups_equal_half_width_cards_at_minimum_size(app):
         ),
         "문서 출력": (
             SettingsAction.DOCUMENT_TEMPLATE,
+            SettingsAction.INVOICE_SETTINGS,
             SettingsAction.DOCUMENT_COLUMN_MAPPING,
             SettingsAction.EXPORT_PASSWORD,
             SettingsAction.DOCUMENT_DIRECTORY,

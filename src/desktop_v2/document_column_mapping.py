@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 
 from src.domain.revisions import RevisionActor
 from src.domain.roster import RosterSnapshot
+from src.domain.invoice_settings import invoice_settings_from_snapshot
 from src.services.document_column_mappings import (
     MappingEditorSpec, build_mapping_revision, load_mapping_overrides, load_mapping_fallbacks,
     mapping_editor_spec,
@@ -220,6 +221,8 @@ class DocumentColumnMappingDialog(QDialog):
                     reason = "가구 묶음 기준"
                 elif target == "제공기관":
                     reason = "공통 제공기관 자동 적용"
+                elif "식종 변경 이력" in spec.target_labels[target]:
+                    reason = "식종 변경 이력 자동 적용 · 식수·청구서 설정에서 위치 변경"
                 else:
                     reason = "자동 계산"
                 automatic = QLabel(f"{reason} · 수정할 수 없음")
@@ -330,7 +333,8 @@ class DocumentColumnMappingController:
             model = getattr(parent, "table_model", None)
             column_labels = None if model is None else {column.key: column.label for column in model.columns}
             specs = {
-                scope: mapping_editor_spec(*scope, roster=roster, column_labels=column_labels)
+                scope: mapping_editor_spec(*scope, roster=roster, column_labels=column_labels,
+                    history_column=invoice_settings_from_snapshot(snapshot).history_column(scope[0]))
                 for scope in _SCOPES
             }
             overrides = {

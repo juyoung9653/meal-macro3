@@ -1,4 +1,4 @@
-"""Aggregate sequence blanks and Enter-only household sequence persistence."""
+"""Main roster sequence blanks and drag-only household persistence."""
 import os
 from dataclasses import replace
 from datetime import date
@@ -9,7 +9,6 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PySide6.QtCore import QSettings, Qt
-from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLineEdit
 
 from src.desktop_v2.column_search import ALL_SEQUENCES_EMPTY, SequenceValuePicker, sequence_pair_token
@@ -94,99 +93,14 @@ def test_aggregate_rejects_mixed_blank_and_nonempty_common_with_meal_driver_only
     assert model.rowCount() == 0
 
 
-def start_editor(dialog, app, row=0, *, mouse=True):
-    item = dialog.table.item(row, 3)
-    dialog.table.scrollToItem(item)
-    app.processEvents()
-    if mouse:
-        point = dialog.table.visualItemRect(item).center()
-        QTest.mouseClick(dialog.table.viewport(), Qt.LeftButton, pos=point)
-        QTest.mouseDClick(dialog.table.viewport(), Qt.LeftButton, pos=point)
-    else:
-        dialog.table.editItem(item)
-    app.processEvents()
-    editor = next((item for item in dialog.table.findChildren(QLineEdit, "householdSequenceEditor")
-                   if item.isVisible()), None)
-    assert editor is not None
-    return editor
-
-
-def test_inline_enter_and_focus_loss_save_exact_pairs_while_escape_cancels(app):
+def test_household_sequence_uses_drag_instead_of_inline_editor(app):
     roster = roster_fixture()
     merged, dinner, breakfast = manifest_rows(roster)
-    other = replace(dinner, household_key=uuid4(), member_ids=(roster.persons[2].person_id,), member_names=("별도",), sequences=("10",))
-    dialog = DriverHouseholdsDialog((merged, other), service_day=date(2026, 10, 13), drivers=())
-    dialog.show()
-    received = []
-    dialog.sequence_save_requested.connect(lambda *args: received.append(args))
-    dialog.table.sortItems(3, Qt.DescendingOrder)
-    dialog._set_column_search("members", "하나")
-    editor = start_editor(dialog, app)
-    assert editor.text() == "" and editor.placeholderText()
-    targets = editor._sequence_targets
-    assert set(targets) == {(roster.persons[0].person_id, Meal.DINNER), (roster.persons[1].person_id, Meal.BREAKFAST)}
-    assert editor._sequence_row == merged
-    editor.setText("001")
-    QTest.keyClick(editor, Qt.Key_Return)
-    app.processEvents()
-    assert received == [(targets, "001")]
-    assert dialog.table.item(0, 3).text() == "001, 2"  # No optimistic display.
-    editor = start_editor(dialog, app)
-    editor.setText("99")
-    QTest.keyClick(editor, Qt.Key_Escape)
-    app.processEvents()
-    assert len(received) == 1 and dialog.table.item(0, 3).text() == "001, 2"
-    editor = start_editor(dialog, app)
-    editor.setText("88")
-    dialog.split_button.setFocus()
-    app.processEvents()
-    assert received[-1] == (targets, "88") and len(received) == 2
-    assert dialog.table.item(0, 3).text() == "001, 2"
-    # Only sequence cells are editable, including real double-clicks.
-    point = dialog.table.visualItemRect(dialog.table.item(0, 1)).center()
-    QTest.mouseDClick(dialog.table.viewport(), Qt.LeftButton, pos=point)
-    app.processEvents()
-    assert not any(editor.isVisible() for editor in dialog.table.findChildren(QLineEdit))
-    dialog._set_column_search("members", "")
-    dialog.split_button.click()
-    dialog._set_column_values("meals", {"조식"})
-    editor = start_editor(dialog, app)
-    assert editor.text() == "2"
-    editor.setText("007")
-    QTest.keyClick(editor, Qt.Key_Return)
-    assert received[-1] == (((roster.persons[1].person_id, Meal.BREAKFAST),), "007")
-    assert len(received) == 3
-    dialog.split_button.setFocus()
-    app.processEvents()
-    assert len(received) == 3
-    editor = start_editor(dialog, app)
-    assert editor.text() == "2"
-    QTest.keyClick(editor, Qt.Key_Backspace)
-    dialog.split_button.setFocus()
-    app.processEvents()
-    assert received[-1] == (((roster.persons[1].person_id, Meal.BREAKFAST),), "")
-    assert len(received) == 4
-    editor = start_editor(dialog, app)
-    dialog.split_button.setFocus()
-    app.processEvents()
-    assert len(received) == 4
-    dialog.close()
-
-
-def test_sort_during_inline_edit_keeps_original_snapshot_and_target(app):
-    roster = roster_fixture()
-    merged, dinner, breakfast = manifest_rows(roster)
-    dialog = DriverHouseholdsDialog((dinner, breakfast), service_day=date(2026, 10, 13), drivers=())
-    dialog.show()
-    received = []
-    dialog.sequence_save_requested.connect(lambda *args: received.append(args))
-    editor = start_editor(dialog, app)
-    target = editor._sequence_targets
-    editor.setText("012")
-    dialog.table.sortItems(3, Qt.DescendingOrder)
-    QTest.keyClick(editor, Qt.Key_Return)
-    assert received == [(target, "012")]
-    assert target == ((roster.persons[0].person_id, Meal.DINNER),)
+    dialog = DriverHouseholdsDialog((merged,), service_day=date(2026, 10, 13), drivers=())
+    assert dialog.table.isColumnHidden(3)
+    assert dialog.table.editTriggers() == dialog.table.EditTrigger.NoEditTriggers
+    assert not dialog.table.findChildren(QLineEdit, "householdSequenceEditor")
+    assert dialog.table.dragEnabled()
     dialog.close()
 
 
@@ -238,59 +152,54 @@ def test_save_value_atomic_noop_invalid_failure_and_backup_warning(tmp_path):
         assert session.database.current_roster().resolve_assignment(*targets[1]).sequence == "003"
 
 
-def test_application_inline_commit_refreshes_preserves_filters_and_failure_display(app, settings, tmp_path, monkeypatch):
+def test_application_drag_refreshes_preserves_filters_and_failure_display(app, settings, tmp_path, monkeypatch):
     import src.desktop_v2.application as application
     from src.desktop_v2.portable_settings import DesktopStorageSettings
     roster = roster_fixture()
-    targets = ((roster.persons[0].person_id, Meal.DINNER), (roster.persons[1].person_id, Meal.BREAKFAST))
-    # Exact merged fixture shares a household only in the UI. The persistence
-    # contract uses explicit targets regardless of household membership.
     merged, dinner, breakfast = manifest_rows(roster)
-    with DatabaseSession.create(tmp_path / "app-inline.sqlite3", "password", "recovery") as session:
+    other = replace(dinner, household_key=uuid4(), member_ids=(roster.persons[2].person_id,),
+                    member_names=("하나 별도",), sequences=("10",))
+    with DatabaseSession.create(tmp_path / "app-drag.sqlite3", "password", "recovery") as session:
         initialize(session, roster)
         window = RosterWindow(roster, column_settings=settings, inactive_settings=settings)
         window._set_day(date(2026, 10, 13))
-        manifest = DriverHouseholdsDialog(
-            (merged,), service_day=date(2026, 10, 13), drivers=(),
-            rows_provider=lambda _include_hidden: (
-                replace(merged, sequences=tuple(sorted({
-                    window.roster.resolve_assignment(*target).sequence or "" for target in targets
-                }))),
-            ),
-        )
-        manifest.show()
+        def rows(_include_hidden):
+            def refresh(row):
+                return replace(row, sequences=tuple(window.roster.resolve_assignment(person, row.meals[0]).sequence or ""
+                               for person in row.member_ids))
+            return (replace(merged, meal_rows=(refresh(dinner), refresh(breakfast)),
+                            sequences=(window.roster.resolve_assignment(dinner.member_ids[0], Meal.DINNER).sequence or "",)),
+                    refresh(other))
+        manifest = DriverHouseholdsDialog(rows(False), service_day=date(2026, 10, 13), drivers=(), rows_provider=rows)
+        manifest.source_revision_id = roster.revision_id
+        manifest.meal_combo.setCurrentIndex(manifest.meal_combo.findData(Meal.DINNER.value))
         manifest._set_column_search("members", "하나")
-        manifest.table.sortItems(3, Qt.DescendingOrder)
         monkeypatch.setattr(application, "SequenceEditController", lambda current: SequenceEditController(
             current, actor_provider=lambda: RevisionActor("tester", "sid")))
         startup = application.DesktopStartupController(settings=DesktopStorageSettings(settings))
-        manifest.sequence_save_requested.connect(lambda pairs, value: startup._save_household_sequence(session, window, pairs, value, manifest))
+        manifest.order_save_requested.connect(lambda values: startup._save_household_order(session, window, values, manifest))
         append = session.append_revision
-        appends = []
         def failing(record):
             raise OSError("잠시 실패")
         session.append_revision = failing
-        editor = start_editor(manifest, app)
-        editor.setText("005")
-        QTest.keyClick(editor, Qt.Key_Return)
-        app.processEvents()
-        assert manifest.table.item(0, 3).text() == "001, 2"
+        manifest.table.move_row(1, 0)
         assert "잠시 실패" in manifest.sequence_status.text()
         assert window.roster.revision_id == roster.revision_id
+        assert manifest.table.item(0, 1).text() == dinner.member_names[0]
+        appends = []
         def warning(record):
             appends.append(record)
             append(record)
             return SimpleNamespace(error=OSError("백업 실패"))
         session.append_revision = warning
-        editor = start_editor(manifest, app)
-        editor.setText("005")
-        QTest.keyClick(editor, Qt.Key_Return)
-        app.processEvents()
-        assert len(appends) == 1 and len(appends[0].changes) == 2
-        assert all(window.roster.resolve_assignment(*target).sequence == "005" for target in targets)
+        manifest.table.move_row(1, 0)
+        assert len(appends) == 1
+        assert window.roster.resolve_assignment(other.member_ids[0], Meal.DINNER).sequence == "1"
+        assert window.roster.resolve_assignment(dinner.member_ids[0], Meal.DINNER).sequence == "2"
+        assert window.roster.resolve_assignment(breakfast.member_ids[0], Meal.BREAKFAST).sequence == "2"
         assert manifest._column_searches["members"] == "하나"
-        assert manifest.table.horizontalHeader().sortIndicatorOrder() == Qt.DescendingOrder
-        assert manifest.table.item(0, 3).text() == "005"
+        assert manifest.meal_combo.currentData() == Meal.DINNER.value
+        assert manifest.source_revision_id == window.roster.revision_id
         assert "저장됐지만" in manifest.sequence_status.text()
         manifest.close()
         window.close()
@@ -329,16 +238,13 @@ def test_real_projection_prefills_only_uniform_values_including_missing(app, tmp
             results.append(result)
             dialog.show_sequence_result(result)
         dialog.sequence_save_requested.connect(save)
-        editor = start_editor(dialog, app)
-        assert editor.text() == ("" if second_sequence is None else "001")
-        assert len(editor._sequence_targets) == 2
-        assert "이 행의 가구원 식종에 같은 순서 적용" in dialog.sequence_status.text()
-        QTest.keyClick(editor, Qt.Key_Return)
+        assert dialog.table.isColumnHidden(3)
+        assert dialog.table.editTriggers() == dialog.table.EditTrigger.NoEditTriggers
+        assert dialog.table.item(0, 3).text() == "001"
         assert results == []
         assert session.database.current_roster().revision_id == roster.revision_id
         assert session.database.current_roster().resolve_assignment(second.person_id, Meal.DINNER).sequence == second_sequence
         dialog.split_button.click()
-        editor = start_editor(dialog, app)
-        assert editor.text() == ("" if second_sequence is None else "001")
-        QTest.keyClick(editor, Qt.Key_Escape)
+        assert dialog.table.rowCount() == 1
+        assert dialog.table.isColumnHidden(3)
         dialog.close()

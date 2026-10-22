@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from uuid import uuid4
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -21,10 +23,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from src.domain.daily_report_choices import DailyReportChoices, build_daily_report_choices_revision, daily_report_choices_from_snapshot
 from src.domain.revisions import format_revision_timestamp
 from src.domain.roster import Meal
 from src.domain.delivery_substitute import SubstituteOptions
 
+from .import_controller import current_windows_actor
+from .startup_loading import save_revision
 from .document_hub import DocumentAction
 from .document_period import DocumentPeriodSelection
 from .theme import application_stylesheet, register_application_fonts
@@ -108,6 +113,7 @@ class DocumentMealDialog(QDialog):
         self._exclusive_group: QButtonGroup | None = None
         self._available_delivery_forms: tuple[str | None, ...] | None = None
         self._buttons_by_form: dict[str | None, QCheckBox] = {}
+        self._excluded_forms = set()
         self._defaults = suggest_document_meals(
             period.action,
             period.anchor_meal,
@@ -138,6 +144,24 @@ class DocumentMealDialog(QDialog):
             if self._buttons_by_meal[meal].isChecked()
         )
 
+    def set_report_choices(self, choices: DailyReportChoices) -> None:
+        if self._period.action is not DocumentAction.DELIVERY_REPORT:
+            return
+        self._excluded_forms = set(choices.excluded_forms)
+        for meal, button in self._buttons_by_meal.items():
+            button.setChecked(meal in choices.meals)
+        for form, button in self._buttons_by_form.items():
+            button.setChecked(form not in self._excluded_forms)
+        self._refresh_state()
+
+    def selected_report_choices(self) -> DailyReportChoices:
+        selected = self.selection()
+        # Keep exclusions absent from a historical source so a temporarily
+        # missing form stays excluded when it reappears.
+        excluded = self._excluded_forms - set(self._buttons_by_form)
+        excluded.update(form for form, button in self._buttons_by_form.items() if not button.isChecked())
+        return DailyReportChoices(selected.meals, tuple(excluded))
+
     def set_available_delivery_forms(self, forms: tuple[str | None, ...]) -> None:
         """Configure report choices from the already selected historical source."""
         if self._period.action is not DocumentAction.DELIVERY_REPORT:
@@ -158,7 +182,7 @@ class DocumentMealDialog(QDialog):
             button = QCheckBox("기본" if form is None else form)
             button.setObjectName("documentFormCheck")
             button.setMinimumHeight(22)
-            button.setChecked(True)
+            button.setChecked(form not in self._excluded_forms)
             button.toggled.connect(self._refresh_state)
             self._buttons_by_form[form] = button
             self._form_layout.addWidget(button)
@@ -413,6 +437,8 @@ _MEAL_COPY = {
 def _meal_instruction(period: DocumentPeriodSelection) -> str:
     if period.action is DocumentAction.DELIVERY_SUBSTITUTE:
         return "배송대타는 담당자 한 명의 배송표를 만들기 때문에 식종 하나만 선택합니다."
+    if period.action is DocumentAction.DELIVERY_REPORT:
+        return "선택한 식종과 제외한 배송 형태는 운영 DB에 저장되어 다른 PC에서도 적용됩니다. 처음에는 모두 선택합니다."
     return "누락을 막기 위해 조식·중식·석식을 모두 선택했습니다. 필요 없는 식종만 해제하세요."
 
 
@@ -426,3 +452,23 @@ def _period_text(period: DocumentPeriodSelection) -> str:
     if period.starts_on == period.ends_on:
         return period.starts_on.strftime("%Y.%m.%d")
     return f"{period.starts_on:%Y.%m.%d} ~ {period.ends_on:%Y.%m.%d}"
+
+
+def load_daily_report_choices(session):
+    roster = session.database.current_roster()
+    if roster is None:
+        raise ValueError("현재 명단이 없습니다.")
+    return daily_report_choices_from_snapshot(session.database.snapshot(roster.revision_id))
+
+
+def save_daily_report_choices(session, choices, *, parent=None):
+    roster = session.database.current_roster()
+    if roster is None:
+        raise ValueError("현재 명단이 없습니다.")
+    snapshot = session.database.snapshot(roster.revision_id)
+    record = build_daily_report_choices_revision(snapshot, choices, actor=current_windows_actor(),
+                                                 recorded_at=datetime.now(UTC), revision_id=uuid4())
+    if record is None:
+        return roster, None
+    backup = save_revision(session, record, parent=parent)
+    return session.database.current_roster(), backup

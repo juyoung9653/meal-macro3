@@ -136,7 +136,7 @@ def test_measurement_error_is_explicit_and_owned_excel_is_closed(monkeypatch, cl
     import win32com.client
     monkeypatch.setitem(sys.modules, "pythoncom", types.SimpleNamespace(CoInitialize=lambda: events.append(("init",)), CoUninitialize=lambda: events.append(("uninit",))))
     import win32com.client
-    monkeypatch.setattr(win32com.client, "DispatchEx", lambda name: app)
+    monkeypatch.setattr(metrics, "_create_excel_application", lambda: app)
     def fail(*args): raise ValueError("synthetic measurement failure")
     monkeypatch.setattr(metrics, "_measure", fail)
     with pytest.raises(metrics.SubstituteExcelError, match="Microsoft Excel") as error:
@@ -150,7 +150,7 @@ def test_measurement_error_is_explicit_and_owned_excel_is_closed(monkeypatch, cl
 def test_missing_excel_does_not_publish_an_approximation(monkeypatch, tmp_path):
     import win32com.client
     def unavailable(*args): raise OSError("Excel unavailable")
-    monkeypatch.setattr(win32com.client, "DispatchEx", unavailable)
+    monkeypatch.setattr(metrics, "_create_excel_application", unavailable)
     from src.generators.substitute_generator import make_substitute_publication
     with pytest.raises(metrics.SubstituteExcelError, match="Microsoft Excel"):
         make_substitute_publication(synthetic((1,)), SubstituteOptions("synthetic", ("name",)),
@@ -200,13 +200,16 @@ def excel():
     pythoncom.CoInitialize()
     application = None
     try:
-        application = win32.DispatchEx("Excel.Application")
+        application = metrics._create_excel_application()
         application.Visible = False
         application.DisplayAlerts = False
         yield application
     finally:
         if application is not None:
             application.Quit()
+        application = None
+        import gc
+        gc.collect()
         pythoncom.CoUninitialize()
 
 
@@ -373,7 +376,9 @@ def test_real_route_shape_common_font_and_print_settings(excel, orientation, ent
         paper_width = 842 if ws.page_setup.orientation == "landscape" else 595
         available = paper_width - sheet.PageSetup.LeftMargin - sheet.PageSetup.RightMargin
         assert sum(sheet.Columns(c).Width for c in range(1, layout.used_cols + 1)) <= available
-        assert ws.cell(layout.used_rows, max(5, max(g.meal_count for g in layout.groups)) + 2).value == 38 * entitlements
+        # Breakfast substitute sheets count recipients even when each receives
+        # a three-meal bundle; daily meal reports retain the entitlement total.
+        assert ws.cell(layout.used_rows, max(5, max(g.meal_count for g in layout.groups)) + 2).value == 38
         from src.excel.substitute_page_layout import page_chunks_from_breaks
         assert all(len(page) <= 18 for page in page_chunks_from_breaks(sheet, layout.groups))
         for page_break in sheet.HPageBreaks:

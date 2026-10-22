@@ -9,6 +9,7 @@ from uuid import UUID
 
 from src.domain.revisions import HistoricalSnapshot
 from src.domain.roster import Meal
+from src.domain.invoice_settings import invoice_settings_from_snapshot
 from src.services.sqlite_delivery_report_service import prepare_physical_delivery_data
 
 MEALS = (Meal.DINNER, Meal.BREAKFAST, Meal.LUNCH)
@@ -35,6 +36,7 @@ class MonthlyMealStatistics:
     dinner_total: int
     breakfast_total: int
     lunch_total: int
+    include_next_month: bool = True
 
     @property
     def total(self) -> int:
@@ -53,12 +55,14 @@ def build_monthly_meal_statistics(snapshot: HistoricalSnapshot, year: int, month
         snapshot, start, end, MEALS, missing_lunch_schedule_as_zero=True,
     )
     counts: dict[date, dict[Meal, int]] = {}
+    policy = invoice_settings_from_snapshot(snapshot)
     for shipment in physical.shipments:
         # The source also includes earlier comparison shipments. Never count those.
         if not start <= shipment.delivery_on <= end:
             continue
         by_meal = counts.setdefault(shipment.delivery_on, {})
-        by_meal[shipment.meal] = by_meal.get(shipment.meal, 0) + shipment.entitlement_count
+        amount = sum(policy.include_next_month or service_on <= end for service_on in shipment.service_dates)
+        by_meal[shipment.meal] = by_meal.get(shipment.meal, 0) + amount
     days = tuple(
         MonthlyMealDay(
             day,
@@ -74,4 +78,5 @@ def build_monthly_meal_statistics(snapshot: HistoricalSnapshot, year: int, month
         sum(item.dinner for item in days),
         sum(item.breakfast for item in days),
         sum(item.lunch for item in days),
+        policy.include_next_month,
     )

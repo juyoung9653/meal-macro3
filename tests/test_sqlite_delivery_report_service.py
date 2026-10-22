@@ -180,22 +180,15 @@ def test_breakfast_report_uses_physical_friday_and_keeps_three_entitlements():
         date(2026, 8, 23),
     )
     assert prepared.calculation_manifest["target_entitlement_count"] == 3
-    assert prepared.calculation_manifest["calculation_contract_version"] == 4
+    assert prepared.calculation_manifest["calculation_contract_version"] == 5
     assert prepared.calculation_manifest["recurring_service_policy"]["version"] == 5
     assert prepared.calculation_manifest["household_grouping"]["policy_version"] == 2
     assert prepared.calculation_manifest["report_period"]["basis"] == (
         "physical_delivery_day"
     )
     breakfast_manifest = prepared.calculation_manifest["breakfast_physical_delivery"]
-    assert breakfast_manifest["policy"] == {
-        "policy_version": 1,
-        "default_closed_friday_mode": ClosedFridayMode.THURSDAY_WEEKEND_ONLY.value,
-        "change_count": 0,
-        "content_sha256": "24536815e0c24815409bb1bc722e7fc826a11e9277e68add506394d36c368038",
-    }
-    assert breakfast_manifest["used_rule_versions"] == (
-        "breakfast-delivery-policy-v1@default",
-    )
+    assert breakfast_manifest["closed_delivery_day"] == "exclude_entire_bundle"
+    assert breakfast_manifest["unreviewed_holidays"] == "normal"
 
 
 def test_empty_breakfast_report_keeps_empty_rule_usage():
@@ -208,11 +201,7 @@ def test_empty_breakfast_report_keeps_empty_rule_usage():
     assert prepared.reports == ()
     assert prepared.shipments == ()
     breakfast_manifest = prepared.calculation_manifest["breakfast_physical_delivery"]
-    assert breakfast_manifest["used_rule_versions"] == ()
-    assert breakfast_manifest["used_closed_friday_modes"] == ()
-    assert breakfast_manifest["policy"]["content_sha256"] == (
-        "24536815e0c24815409bb1bc722e7fc826a11e9277e68add506394d36c368038"
-    )
+    assert breakfast_manifest["policy_version"] == 2
 
 
 def test_explicit_breakfast_weekdays_do_not_bundle_weekend_meals():
@@ -527,21 +516,9 @@ def test_retired_closed_friday_policy_does_not_override_default_delivery(tmp_pat
         (Meal.BREAKFAST,),
     )
 
-    assert prepared.shipments[0].service_dates == (
-        friday + timedelta(days=1), friday + timedelta(days=2),
-    )
-    assert prepared.calculation_manifest["target_entitlement_count"] == 2
-    breakfast_manifest = prepared.calculation_manifest[
-        "breakfast_physical_delivery"
-    ]
-    assert breakfast_manifest["used_closed_friday_modes"] == (
-        ClosedFridayMode.THURSDAY_WEEKEND_ONLY.value,
-    )
-    assert breakfast_manifest["used_rule_versions"] == (
-        "breakfast-delivery-policy-v1@default",
-    )
-    assert breakfast_manifest["policy"]["change_count"] == 0
-    assert breakfast_manifest["unassigned"] == {}
+    assert prepared.shipments == ()
+    assert prepared.calculation_manifest["target_entitlement_count"] == 0
+    assert prepared.calculation_manifest["breakfast_physical_delivery"]["closed_delivery_day"] == "exclude_entire_bundle"
 
 
 def test_selected_lunch_period_remains_strict_about_missing_school_schedule():

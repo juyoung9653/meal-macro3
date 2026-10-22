@@ -192,15 +192,14 @@ def test_include_hidden_toggle_rebuilds_and_preserves_browse_state(app):
     dialog._set_column_search("address", "성남대로")
     dialog.table.sortItems(3, Qt.SortOrder.DescendingOrder)
     dialog.split_button.click()
-    editor = _start_editor(dialog, app)
-    assert editor._sequence_targets == ((visible.person_id, Meal.DINNER),)
+    assert dialog.table.isColumnHidden(3)
+    assert dialog.table.dragEnabled()  # Filtered drags preserve hidden row positions.
 
     dialog.include_hidden_checkbox.click()
     app.processEvents()
 
     assert calls[-1] is True
     assert dialog.include_hidden is True
-    assert not editor.isVisible()
     assert dialog._split_by_meal is True
     assert dialog._column_searches == {"address": "성남대로"}
     assert dialog.table.horizontalHeader().sortIndicatorOrder() == Qt.SortOrder.DescendingOrder
@@ -296,7 +295,7 @@ def test_roster_provider_filters_meal_status_before_grouping_and_export(app):
         assert all(projection.member_ids == (visible.person_id,) for projection in row.meal_rows)
         dialog.template_export_button.click()
         assert [sheet.sheet_name for sheet in exported[-1].sheets] == ["기사-석식", "기사-조식"]
-        assert dialog.current_view_snapshot().rows[0][1:4] == ("보이는 사람", "석식, 조식", "1, 2")
+        assert dialog.current_view_snapshot().rows[0][:2] == ("보이는 사람", "석식, 조식")
 
         dialog.include_hidden_checkbox.click()
         (row,) = dialog._rows

@@ -1,7 +1,9 @@
 """Revision contract validation tests."""
 
+from collections import UserDict, UserList
 from dataclasses import replace
 from datetime import UTC, date, datetime
+from types import MappingProxyType
 from uuid import UUID
 
 import pytest
@@ -15,8 +17,9 @@ from src.domain.revisions import (
     RevisionRecord,
     RevisionSource,
     format_revision_timestamp,
+    freeze_json_object,
+    plain_json,
 )
-
 
 REVISION_ID = UUID("20000000-0000-0000-0000-000000000001")
 ENTITY_ID = UUID("20000000-0000-0000-0000-000000000002")
@@ -53,6 +56,40 @@ def test_revision_json_is_deeply_immutable():
     decisions["nested"]["values"].append(3)
 
     assert metadata.decisions["nested"]["values"] == (1, 2)
+
+
+def test_json_freeze_copies_nested_mapping_proxy_and_custom_collections():
+    proxied_source = {"values": [1, 2]}
+    custom_mapping = UserDict({"nested": proxied_source})
+    custom_sequence = UserList([custom_mapping])
+
+    frozen = freeze_json_object(
+        {
+            "proxy": MappingProxyType(proxied_source),
+            "mapping": custom_mapping,
+            "sequence": custom_sequence,
+        }
+    )
+    proxied_source["values"].append(3)
+    custom_mapping["added"] = True
+    custom_sequence.append("added")
+
+    assert plain_json(frozen) == {
+        "proxy": {"values": [1, 2]},
+        "mapping": {"nested": {"values": [1, 2]}},
+        "sequence": [{"nested": {"values": [1, 2]}}],
+    }
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_json_freeze_still_rejects_non_finite_builtin_floats(value):
+    with pytest.raises(ValueError, match="유한"):
+        freeze_json_object({"nested": [value]})
+
+
+def test_json_freeze_still_rejects_unsupported_nested_values():
+    with pytest.raises(TypeError, match="scalar, list, object"):
+        freeze_json_object({"unsupported": object()})
 
 
 def test_revision_display_code_is_optional_until_database_assignment():

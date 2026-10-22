@@ -25,11 +25,12 @@ def format_digits(value: str, kind: str) -> str:
     if kind == "date":
         digits = digits[:8]
         return "-".join(part for part in (digits[:4], digits[4:6], digits[6:]) if part)
-    digits = digits[:11]
-    if len(digits) <= 3:
+    prefix = 2 if digits.startswith("02") or ("-" in value and len(value.split("-", 1)[0]) == 2) else 3
+    digits = digits[:prefix + 8]
+    if len(digits) <= prefix:
         return digits
-    middle = 4 if len(digits) > 10 else 3
-    return "-".join(part for part in (digits[:3], digits[3:3 + middle], digits[3 + middle:]) if part)
+    middle = 4 if len(digits) > prefix + 7 else 3
+    return "-".join(part for part in (digits[:prefix], digits[prefix:prefix + middle], digits[prefix + middle:]) if part)
 
 
 class RuleLineEdit(QLineEdit):
@@ -87,7 +88,7 @@ class ColumnInputRuleDialog(QDialog):
         layout.addWidget(QLabel(f"{label} 칼럼에 새로 입력하는 값의 형식을 선택합니다."))
         self.format = QComboBox()
         self.format.addItem("제한 없음 (텍스트)", "text")
-        self.format.addItem("전화번호 (000-000-0000 / 000-0000-0000)", "phone")
+        self.format.addItem("전화번호 (앞자리 2~3자리 · 가운데 3~4자리 · 끝 4자리)", "phone")
         self.format.addItem("날짜 (YYYY-MM-DD)", "date")
         for index in range(self.format.count()):
             self.format.model().item(index).setEnabled(self.format.itemData(index) in allowed_formats)

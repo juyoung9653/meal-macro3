@@ -147,7 +147,9 @@ def test_layout_options_group_breaks_and_long_text(orientation, split):
     opts = replace(options(data), columns=("name", "road_address", "sequence"), orientation=orientation, split=split, groups_per_page=1)
     wb = build_substitute_workbook(data, opts)
     ws = wb.active
-    assert ws.page_setup.orientation == ("landscape" if orientation == "auto" else orientation)
+    # These three selected columns produce seven used columns including the
+    # summary. Auto switches to landscape only at eight used columns.
+    assert ws.page_setup.orientation == ("portrait" if orientation == "auto" else orientation)
     assert str(ws.page_setup.paperSize) == ws.PAPERSIZE_A4
     assert ws.print_title_rows == "$1:$2"
     assert ws["B3"].value == long_text.replace("\n", " ")

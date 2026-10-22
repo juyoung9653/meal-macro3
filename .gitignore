@@ -44,3 +44,6 @@ main.exe
 /tests/.person_delivery_ui_tmp*/
 /tests/person_delivery_ui_*.png
 /tests/person_delivery_ui_pytest.log
+
+# Local temporary files
+/tmp/

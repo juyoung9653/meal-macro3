@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import Counter, defaultdict
+from calendar import monthrange
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -27,9 +28,10 @@ from src.domain.delivery_routing import (
 )
 from src.domain.entitlements import (
     MealEntitlement,
-    decide_entitlement,
 )
 from src.domain.delivery_defaults import delivery_defaults_state
+from src.domain.invoice_settings import invoice_settings_from_snapshot
+from src.services.invoice_remarks import invoice_history_notes
 from src.domain.projections import (
     roster_from_historical_snapshot,
     status_events_from_historical_snapshot,
@@ -49,7 +51,6 @@ from src.domain.service_adjustments import (
     service_adjustment_schedule_from_snapshot,
     service_adjustment_schedule_state,
 )
-from src.domain.status import StatusEvent, resolve_status_history
 from src.domain.unit_pricing import (
     UnitPriceSchedule,
     global_unit_price_note,
@@ -57,10 +58,9 @@ from src.domain.unit_pricing import (
 )
 from src.services.meal_service_availability import (
     RECURRING_MEAL_SERVICE_POLICY_VERSION,
-    regular_service_available,
 )
 
-MONTHLY_DOCUMENT_CALCULATION_CONTRACT_VERSION = 3
+MONTHLY_DOCUMENT_CALCULATION_CONTRACT_VERSION = 4
 
 
 class HouseholdServiceDatesError(ValueError):
@@ -102,8 +102,11 @@ def prepare_monthly_document_data(
     period_start: date,
     period_end: date,
     meals: Sequence[Meal],
+    *,
+    revisions=(),
 ) -> PreparedMonthlyDocumentData:
     """Resolve enrollment, school calendar, closures, status, and pricing once."""
+    from src.services.sqlite_delivery_report_service import prepare_physical_delivery_data
 
     if not isinstance(snapshot, HistoricalSnapshot):
         raise TypeError("snapshot은 HistoricalSnapshot이어야 합니다.")
@@ -124,43 +127,18 @@ def prepare_monthly_document_data(
     adjustments = service_adjustment_schedule_from_snapshot(snapshot)
     price_schedule = unit_price_schedule_from_snapshot(snapshot)
     status_events = status_events_from_historical_snapshot(snapshot)
-    events_by_key: defaultdict[tuple[UUID, Meal], list[StatusEvent]] = defaultdict(list)
-    for event in status_events:
-        events_by_key[(event.person_id, event.meal)].append(event)
-
-    entitlements: list[MealEntitlement] = []
-    exclusions: Counter[str] = Counter()
-    service_days = tuple(_days(period_start, period_end))
-    for person in roster.persons:
-        for meal in selected_meals:
-            events = tuple(events_by_key[(person.person_id, meal)])
-            history = resolve_status_history(person.person_id, meal, events)
-            for service_on in service_days:
-                # Unenrolled dates do not need an unrelated school's schedule.
-                if meal not in roster.meals_for(person.person_id, on=service_on):
-                    continue
-                available = regular_service_available(
-                    roster,
-                    person,
-                    meal,
-                    service_on,
-                    school_calendar,
-                )
-                provision = adjustments.provision_for(meal, service_on)
-                decision = decide_entitlement(
-                    roster,
-                    person.person_id,
-                    meal,
-                    service_on,
-                    status_history=history,
-                    service_available=available,
-                    service_provision=provision,
-                )
-                entitlement = decision.entitlement
-                if entitlement is not None:
-                    entitlements.append(entitlement)
-                else:
-                    exclusions.update(item.value for item in decision.exclusions)
+    physical = prepare_physical_delivery_data(snapshot, period_start, period_end, selected_meals)
+    policy = invoice_settings_from_snapshot(snapshot)
+    month_end = date(period_end.year, period_end.month, monthrange(period_end.year, period_end.month)[1])
+    delivery_dates = {
+        (shipment.person_id, shipment.meal, service_on): shipment.delivery_on
+        for shipment in physical.shipments
+        if period_start <= shipment.delivery_on <= period_end
+        for service_on in shipment.service_dates
+        if policy.include_next_month or service_on <= month_end
+    }
+    entitlements = [MealEntitlement(*key) for key in delivery_dates]
+    exclusions = physical.calculation_manifest["exclusions"]
 
     ordered_entitlements = tuple(
         sorted(
@@ -178,11 +156,13 @@ def prepare_monthly_document_data(
         period_end,
         provider,
         routing=routing_state_from_snapshot(snapshot),
+        delivery_dates=delivery_dates,
+        history_notes=invoice_history_notes(snapshot, revisions, period_start, period_end, selected_meals),
     )
     global_note = global_unit_price_note(
         price_schedule,
-        period_start,
-        period_end,
+        min((period_start, *(item.service_on for item in ordered_entitlements))),
+        max((period_end, *(item.service_on for item in ordered_entitlements))),
         selected_meals,
     )
     billing_manifest = billing.calculation_manifest(
@@ -190,6 +170,7 @@ def prepare_monthly_document_data(
         period_start=period_start,
         period_end=period_end,
         meals=selected_meals,
+        delivery_dates=delivery_dates,
     )
     calculation_manifest = freeze_json_object(
         {
@@ -200,6 +181,9 @@ def prepare_monthly_document_data(
                 "routing_basis": "document_period_end",
             },
             "source_revision_id": str(snapshot.revision_id),
+            "period_basis": "physical_delivery_day",
+            "include_next_month": policy.include_next_month,
+            "physical_delivery": physical.calculation_manifest,
             "selected_meals": tuple(meal.value for meal in selected_meals),
             "recurring_service_policy": {
                 "version": RECURRING_MEAL_SERVICE_POLICY_VERSION,
@@ -245,6 +229,8 @@ def _monthly_batch(
     provider: str = "",
     *,
     routing: RoutingState,
+    delivery_dates: Mapping[tuple[UUID, Meal, date], date] | None = None,
+    history_notes: Mapping[UUID, str] | None = None,
 ) -> MonthlyDeliveryBatch:
     by_person: defaultdict[UUID, list[MealEntitlement]] = defaultdict(list)
     for entitlement in entitlements:
@@ -270,7 +256,7 @@ def _monthly_batch(
         deliveries.append(
             MonthlyDelivery(
                 roster=_roster_entry(person, roster, position, provider, delivery_view=delivery_view),
-                note=person.profile.note or "",
+                note=(history_notes or {}).get(person.person_id, ""),
                 delivery_staff=_join_unique(delivery_view.drivers[meal] for meal in active_meals),
                 delivery_sequence=_join_unique(item.sequence for item in assignments),
                 breakfast_count=summary.count_for(Meal.BREAKFAST),
@@ -280,6 +266,7 @@ def _monthly_batch(
                     period_start.year,
                     period_start.month,
                     person_entitlements,
+                    delivery_dates=delivery_dates,
                 ),
                 billing_amount=summary.total_amount,
                 household_key=str(
@@ -366,13 +353,18 @@ def _weekly_deliveries(
     year: int,
     month: int,
     entitlements: tuple[MealEntitlement, ...],
+    *,
+    delivery_dates: Mapping[tuple[UUID, Meal, date], date] | None = None,
 ) -> tuple[WeeklyDelivery, ...]:
     result = []
     for week, starts_on, ends_on in get_week_ranges(year, month):
         counts = Counter(
             item.meal
             for item in entitlements
-            if starts_on <= item.service_on <= ends_on
+            if starts_on <= (
+                item.service_on if delivery_dates is None else
+                delivery_dates[(item.person_id, item.meal, item.service_on)]
+            ) <= ends_on
         )
         result.append(
             WeeklyDelivery(

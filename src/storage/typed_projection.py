@@ -68,7 +68,17 @@ def apply_typed_projection_changes(
     if not typed_changes:
         return
 
-    current = load_typed_entity_states(connection)
+    if all(change.entity_kind == PERSON_KIND for change in typed_changes):
+        # Cell edits touch only person rows. Check their before-images through
+        # the primary key; the full post-write validation below the caller's
+        # apply boundary still checks every projection and roster constraint.
+        current = {}
+        for change in typed_changes:
+            for person_id, state in _load_person_states(connection, change.entity_id):
+                person_from_state(person_id, state)
+                current[EntityRef(PERSON_KIND, person_id)] = state
+    else:
+        current = load_typed_entity_states(connection)
     for change in typed_changes:
         reference = EntityRef(change.entity_kind, change.entity_id)
         actual = current.get(reference)
@@ -77,9 +87,7 @@ def apply_typed_projection_changes(
                 raise ProjectionContractError(
                     f"typed projection entity가 이미 있습니다: {reference}"
                 )
-        elif plain_json(change.before) != (
-            None if actual is None else plain_json(actual)
-        ):
+        elif plain_json(change.before) != actual:
             raise ProjectionContractError(
                 f"typed projection before가 현재 상태와 다릅니다: {reference}"
             )
@@ -194,10 +202,17 @@ def load_status_events(
 def load_typed_entity_states(
     connection: apsw.Connection,
 ) -> dict[EntityRef, Mapping[str, JsonValue]]:
+    return _load_typed_state_and_roster(connection)[0]
+
+
+def _load_typed_state_and_roster(
+    connection: apsw.Connection,
+) -> tuple[dict[EntityRef, Mapping[str, JsonValue]], RosterSnapshot | None]:
     latest = connection.execute(
         "SELECT revision_id FROM revision ORDER BY sequence DESC LIMIT 1"
     ).fetchone()
     states: dict[EntityRef, Mapping[str, JsonValue]] = {}
+    roster = None
     if latest is not None:
         roster = load_current_roster(connection, UUID(str(latest[0])))
         states.update(
@@ -207,41 +222,44 @@ def load_typed_entity_states(
         )
     for event in load_status_events(connection):
         states[EntityRef(STATUS_EVENT_KIND, event.event_id)] = status_event_state(event)
-    return states
+    return states, roster
 
 
-def validate_typed_projections(connection: apsw.Connection) -> None:
-    """Compare every typed current row with a replay of the audit ledger."""
+def validate_typed_projections(connection: apsw.Connection) -> RosterSnapshot | None:
+    """Compare every typed current row with the latest audit state of each entity."""
 
     expected: dict[EntityRef, Mapping[str, JsonValue]] = {}
     for row in connection.execute(
         """
-        SELECT change.entity_kind, change.entity_id, change.operation,
-               change.after_json
-        FROM audit_change AS change
-        JOIN revision ON revision.revision_id = change.revision_id
-        WHERE change.entity_kind IN (?, ?, ?, ?, ?, ?, ?)
-        ORDER BY revision.sequence, change.ordinal
+        SELECT entity_kind, entity_id, after_json FROM (
+            SELECT change.entity_kind, change.entity_id, change.operation,
+                   change.after_json,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY change.entity_kind, change.entity_id
+                       ORDER BY revision.sequence DESC, change.ordinal DESC
+                   ) AS state_rank
+            FROM audit_change AS change
+            JOIN revision ON revision.revision_id = change.revision_id
+            WHERE change.entity_kind IN (?, ?, ?, ?, ?, ?, ?)
+        ) WHERE state_rank = 1 AND operation != 'delete'
         """,
         tuple(sorted(TYPED_ENTITY_KINDS)),
     ):
         reference = EntityRef(str(row[0]), UUID(str(row[1])))
-        operation = ChangeOperation(str(row[2]))
-        if operation is ChangeOperation.DELETE:
-            expected.pop(reference, None)
-        else:
-            expected[reference] = json.loads(str(row[3]))
+        expected[reference] = json.loads(str(row[2]))
 
     try:
-        actual = load_typed_entity_states(connection)
+        actual, roster = _load_typed_state_and_roster(connection)
     except (TypeError, ValueError) as error:
         raise ProjectionContractError(
             f"typed projection을 domain 객체로 복원할 수 없습니다: {error}"
         ) from error
-    if _plain_states(actual) != _plain_states(expected):
+    # Both serializers return plain dict/list/scalar canonical states.
+    if actual != expected:
         raise ProjectionContractError(
             "typed projection이 revision ledger의 최신 상태와 다릅니다."
         )
+    return roster
 
 
 def _apply_change(
@@ -559,16 +577,25 @@ def _apply_status_event(
 
 
 def _load_persons(connection: apsw.Connection) -> Iterable[Person]:
-    for row in connection.execute(
-        """
+    for person_id, state in _load_person_states(connection):
+        yield person_from_state(person_id, state)
+
+
+def _load_person_states(
+    connection: apsw.Connection, person_id: UUID | None = None,
+) -> Iterable[tuple[UUID, Mapping[str, JsonValue]]]:
+    sql = """
         SELECT person_id, name, birth_date, school_type, school_name, grade,
                class_name, household_head_name, relationship_to_child,
                jurisdiction, provider, road_address, detail_address, telephone,
                mobile_phone, note, custom_values_json, delivery_settings_json
         FROM person_projection
-        ORDER BY person_id
         """
-    ):
+    parameters = () if person_id is None else (str(person_id),)
+    if person_id is not None:
+        sql += " WHERE person_id = ?"
+    sql += " ORDER BY person_id"
+    for row in connection.execute(sql, parameters):
         state = {
             "name": row[1],
             "birth_date": row[2],
@@ -588,7 +615,7 @@ def _load_persons(connection: apsw.Connection) -> Iterable[Person]:
             "custom_values": json.loads(str(row[16])),
             **({"delivery_settings": json.loads(str(row[17]))} if row[17] is not None else {}),
         }
-        yield person_from_state(UUID(str(row[0])), state)
+        yield UUID(str(row[0])), state
 
 
 def _load_custom_fields(
@@ -747,12 +774,6 @@ def _require_one_changed(
         raise ProjectionContractError(
             f"typed projection 대상이 하나가 아닙니다: {entity_kind}/{entity_id}"
         )
-
-
-def _plain_states(
-    states: Mapping[EntityRef, Mapping[str, JsonValue]],
-) -> dict[EntityRef, object]:
-    return {reference: plain_json(state) for reference, state in states.items()}
 
 
 def _date_text(value: date | None) -> str | None:

@@ -322,7 +322,7 @@ def test_generate_invoice_creates_valid_workbook_from_annual_book(
         ws = wb["청구서"]
         assert ws.max_row >= 5
         # 실제 템플릿 M/N/O = 중식/석식/조식
-        assert ws["A4"].value == "003"
+        assert ws["A4"].value == 1  # 청구서 연번은 배송순서가 아닌 출력 행 순번이다.
         assert ws["O4"].value == 6
         assert ws["N5"].value == 3
         assert "9500" in str(ws["Q4"].value)
@@ -574,7 +574,7 @@ def test_real_annual_xlsx_to_invoice_and_confirm_end_to_end(
     invoice_wb = openpyxl.load_workbook(invoice_path, data_only=False)
     try:
         invoice_ws = invoice_wb["청구서"]
-        assert invoice_ws["A4"].value == "003"
+        assert invoice_ws["A4"].value == 1
         assert invoice_ws["O4"].value == 2
         assert "DB검토" not in invoice_wb.sheetnames
     finally:

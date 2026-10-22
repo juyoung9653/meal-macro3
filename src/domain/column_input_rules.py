@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+import re
 from datetime import date, datetime
 from uuid import UUID
 
@@ -57,11 +58,8 @@ def validate_input(key: str, value: str, rule: InputRule) -> None:
     if rule.max_length is not None and len(value) > rule.max_length:
         raise ValueError(f"최대 {rule.max_length}글자까지 입력할 수 있습니다.")
     if rule.format == "phone":
-        if not (len(value) in (12, 13) and value.count("-") == 2 and
-                ((len(value) == 12 and value[3] == "-" and value[7] == "-") or
-                 (len(value) == 13 and value[3] == "-" and value[8] == "-")) and
-                all(part.isascii() and part.isdigit() for part in value.split("-"))):
-            raise ValueError("전화번호는 000-000-0000 또는 000-0000-0000 형식으로 입력해주세요.")
+        if re.fullmatch(r"[0-9]{2,3}-[0-9]{3,4}-[0-9]{4}", value) is None:
+            raise ValueError("전화번호는 앞자리 2~3자리, 가운데 3~4자리, 끝 4자리로 입력해주세요. 예: 02-123-4567, 010-1234-5678")
     elif rule.format == "date":
         try:
             if len(value) != 10 or value[4] != "-" or value[7] != "-" or not all(part.isascii() and part.isdigit() for part in value.split("-")):

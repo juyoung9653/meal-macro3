@@ -48,7 +48,7 @@ def test_more_menu_has_one_level_of_task_submenus(window):
         "이력·민원": ("_revision_history_action", "_complaint_history_action", "_monthly_meal_history_action"),
         "통계": ("_monthly_statistics_action",),
         "내보내기": ("_current_sheet_export_action", "_database_export_action"),
-        "기사 관리": ("_drivers_action", "_driver_replacement_action"),
+        "기사 관리": ("_driver_households_action", "_drivers_action", "_driver_replacement_action"),
         "운영": ("_school_calendar_action", "_service_adjustment_action", "_unit_price_action"),
         "화면·설정": ("_special_only_action", "_columns_action", "_settings_action"),
     }
@@ -80,7 +80,7 @@ def test_monthly_statistics_action_emits_once(window):
 def test_header_only_exposes_frequent_actions(window):
     header = window._more_button.parentWidget()
     visible = {button.text() for button in header.findChildren(QPushButton) if button.isVisible()}
-    assert visible == {"문서 만들기", "기사별 가구", "행 추가", "더보기"}
+    assert visible == {"문서 만들기", "행 추가", "더보기"}
     assert window._more_button.menu() is None
     assert window._more_panel.isHidden()
     assert window._column_search_header.buttons["name"].isVisible()
@@ -266,13 +266,14 @@ def test_driver_view_uses_all_delivery_meals_and_current_date_despite_roster_fil
             super().__init__(kwargs.get("parent"))
             opened.append((rows, kwargs))
             self.sequence_save_requested = SignalStub()
+            self.order_save_requested = SignalStub()
 
     class SignalStub:
         def connect(self, callback):
             pass
 
     monkeypatch.setattr(driver_households, "DriverHouseholdsDialog", Dialog)
-    window._driver_households_button.click()
+    window._driver_households_action.trigger()
     rows, settings = opened[-1]
     assert settings["service_day"] == service_day
     assert settings.get("selected_driver_id") is None
@@ -284,7 +285,7 @@ def test_driver_view_uses_all_delivery_meals_and_current_date_despite_roster_fil
     assert len(next(row for row in rows if row.driver_id == driver_a.driver_id).member_ids) == 2
 
     window._set_day(service_day + timedelta(days=1))
-    window._driver_households_button.click()
+    window._driver_households_action.trigger()
     rows, settings = opened[-1]
     assert settings["service_day"] == service_day + timedelta(days=1)
     assert next(row for row in rows if row.driver_id == driver_a.driver_id).meals == (Meal.BREAKFAST,)
@@ -304,7 +305,7 @@ def test_driver_households_button_opens_real_dialog_and_can_close(window):
             seen.append((dialog.isVisible(), dialog.table.rowCount()))
             dialog.findChild(QDialogButtonBox).button(QDialogButtonBox.StandardButton.Close).click()
 
-    window._driver_households_button.click()
+    window._driver_households_action.trigger()
     QApplication.instance().processEvents()
     dialog = window.findChild(DriverHouseholdsDialog)
     assert dialog.isVisible()

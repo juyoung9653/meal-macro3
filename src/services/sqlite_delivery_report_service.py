@@ -11,12 +11,7 @@ from uuid import UUID
 
 from src.core.diff_format import fmt_cell
 from src.domain.entitlements import (
-    BreakfastDeliveryRule,
-    ClosedFridayMode,
-    MealEntitlement,
-    PhysicalDeliveryCalendar,
     PhysicalShipment,
-    plan_breakfast_shipments,
     decide_entitlement,
 )
 from src.domain.delivery_defaults import delivery_defaults_state
@@ -54,13 +49,12 @@ from src.services.delivery_service import (
 from src.services.delivery_households import require_delivery_household
 from src.services.meal_service_availability import (
     RECURRING_MEAL_SERVICE_POLICY_VERSION,
-    default_delivery_weekdays,
     physical_delivery_on,
     regular_service_available,
 )
 
 
-DELIVERY_REPORT_CALCULATION_CONTRACT_VERSION = 4
+DELIVERY_REPORT_CALCULATION_CONTRACT_VERSION = 5
 DELIVERY_REPORT_GROUPING_POLICY_VERSION = 2
 
 
@@ -200,13 +194,13 @@ def _prepare_delivery_data(
         if unknown:
             raise ValueError("선택한 원본의 배송 설정에 없는 배송 형태가 있습니다.")
     routing = routing_state_from_snapshot(snapshot)
+    if staff_sort is None:
+        normalized_staff_sort = _normalize_staff_sort({
+            meal: tuple(driver.name for driver in routing.drivers)
+            for meal in selected_meals
+        })
     school_calendar = school_lunch_calendar_from_snapshot(snapshot)
     adjustments = service_adjustment_schedule_from_snapshot(snapshot)
-    # Retired policy records remain in the ledger, but reports use this fixed rule.
-    breakfast_rule = BreakfastDeliveryRule(
-        "breakfast-delivery-policy-v1@default",
-        ClosedFridayMode.THURSDAY_WEEKEND_ONLY,
-    )
     status_events = status_events_from_historical_snapshot(snapshot)
     events_by_key: defaultdict[tuple[UUID, Meal], list[StatusEvent]] = defaultdict(list)
     for event in status_events:
@@ -230,12 +224,6 @@ def _prepare_delivery_data(
         )
     )
     ordered_service_days = tuple(sorted(service_days))
-    physical_calendar = _breakfast_calendar(
-        adjustments,
-        ordered_service_days,
-    )
-
-    normal_breakfast: list[MealEntitlement] = []
     shipments: list[PhysicalShipment] = []
     exclusions: Counter[str] = Counter()
     allowed_forms = set(selected_forms) if selected_forms is not None else None
@@ -268,6 +256,12 @@ def _prepare_delivery_data(
                 )
                 if provision.treatment is ServiceTreatment.NORMAL:
                     candidate_delivery = physical_delivery_on(roster, person, meal, service_on)
+                    delivery_provision = adjustments.provision_for(meal, candidate_delivery)
+                    if delivery_provision.treatment is not ServiceTreatment.NORMAL:
+                        candidate_delivery = delivery_provision.delivery_on
+                if candidate_delivery is None:
+                    exclusions["delivery_day_closed"] += 1
+                    continue
                 try:
                     available = regular_service_available(
                         roster,
@@ -304,51 +298,8 @@ def _prepare_delivery_data(
                     if period_start <= service_on <= normal_evaluation_end:
                         exclusions.update(item.value for item in decision.exclusions)
                     continue
-                if provision.treatment is ServiceTreatment.REPLACEMENT:
-                    assert provision.delivery_on is not None
-                    shipments.append(
-                        PhysicalShipment(
-                            person.person_id,
-                            meal,
-                            provision.delivery_on,
-                            (service_on,),
-                        )
-                    )
-                elif meal is Meal.BREAKFAST and (
-                    physical_delivery_on(roster, person, meal, service_on)
-                    == service_on - timedelta(days=(service_on.weekday() - default_delivery_weekdays(meal)[service_on.weekday()]) % 7)
-                ):
-                    normal_breakfast.append(entitlement)
-                else:
-                    delivery_on = physical_delivery_on(roster, person, meal, service_on)
-                    if adjustments.provision_for(meal, delivery_on).treatment is not ServiceTreatment.NORMAL:
-                        exclusions["delivery_day_closed"] += 1
-                        continue
-                    shipments.append(
-                        PhysicalShipment(
-                            person.person_id,
-                            meal,
-                            delivery_on,
-                            (service_on,),
-                        )
-                    )
+                shipments.append(PhysicalShipment(person.person_id, meal, candidate_delivery, (service_on,)))
 
-    breakfast_plans = (
-        (plan_breakfast_shipments(normal_breakfast, physical_calendar, breakfast_rule),)
-        if normal_breakfast
-        else ()
-    )
-    shipments.extend(
-        shipment
-        for plan in breakfast_plans
-        for shipment in plan.shipments
-    )
-    unassigned = Counter(
-        item.reason.value
-        for plan in breakfast_plans
-        for item in plan.unassigned
-        if period_start <= item.entitlement.service_on <= normal_evaluation_end
-    )
     coalesced_shipments = _coalesce_shipments(
         item
         for item in shipments
@@ -452,30 +403,10 @@ def _prepare_delivery_data(
                 "household_delivery_weekday": "latest_configured_weekday_on_or_before_service_day",
             },
             "breakfast_physical_delivery": {
-                "policy": {
-                    "policy_version": 1,
-                    "default_closed_friday_mode": breakfast_rule.closed_friday_mode.value,
-                    "change_count": 0,
-                    "content_sha256": _state_sha256(
-                        {
-                            "policy_version": 1,
-                            "default_closed_friday_mode": breakfast_rule.closed_friday_mode.value,
-                            "changes": (),
-                        }
-                    ),
-                },
-                "used_rule_versions": tuple(
-                    plan.rule_version for plan in breakfast_plans
-                ),
-                "used_closed_friday_modes": tuple(
-                    sorted(
-                        {
-                            breakfast_rule.closed_friday_mode.value
-                            for item in normal_breakfast
-                        }
-                    )
-                ),
-                "unassigned": dict(sorted(unassigned.items())),
+                "policy_version": 2,
+                "basis": "configured_delivery_weekdays_and_explicit_adjustments",
+                "unreviewed_holidays": "normal",
+                "closed_delivery_day": "exclude_entire_bundle",
             },
             "school_lunch_calendar": school_calendar.manifest(),
             "service_adjustments": {
@@ -543,29 +474,8 @@ def _replacement_service_days(
                     and provision.delivery_on is not None
                     and comparison_start <= provision.delivery_on <= period_end
                 ):
-                    result.add(service_on)
+                    result.update(service_on + timedelta(days=offset) for offset in range(7))
     return result
-
-
-def _breakfast_calendar(
-    schedule: ServiceAdjustmentSchedule,
-    service_days: Sequence[date],
-) -> PhysicalDeliveryCalendar:
-    probe_days: set[date] = set()
-    for service_on in service_days:
-        probe_days.add(service_on)
-        friday = service_on - timedelta(days=service_on.weekday() - 4)
-        probe_days.add(friday)
-        probe_days.add(friday - timedelta(days=1))
-    closed: set[date] = set()
-    opened: set[date] = set()
-    for day in probe_days:
-        provision = schedule.provision_for(Meal.BREAKFAST, day)
-        if provision.treatment is not ServiceTreatment.NORMAL:
-            closed.add(day)
-        elif provision.change_id is not None:
-            opened.add(day)
-    return PhysicalDeliveryCalendar(frozenset(closed), frozenset(opened))
 
 
 def _candidate_delivery(

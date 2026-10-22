@@ -60,11 +60,11 @@ def test_export_freezes_filtered_split_sorted_visual_table(app):
         dialog.export_button.click()
         assert len(captured) == 1
         snapshot = captured[0]
-        assert snapshot.sheet_name == "기사별 가구"
-        assert snapshot.headers == ("배송순서", "배송기사", "가구원", "식종", "주소")
+        assert snapshot.sheet_name == "배송순서관리"
+        assert snapshot.headers == ("가구원", "식종", "주소")
         assert snapshot.rows == (
-            ("001", "기사A", "둘째", "조식", "성남시"),
-            ("010", "기사A", "=가구", "석식", "성남시"),
+            ("둘째", "조식", "성남시"),
+            ("=가구", "석식", "성남시"),
         )
         assert dialog.export_button.objectName() == "quietAction"
     finally:
@@ -77,7 +77,7 @@ def test_export_allows_header_only_result(app):
     )
     try:
         snapshot = dialog.current_view_snapshot()
-        assert snapshot.headers == ("배송기사", "가구원", "식종", "배송순서", "주소", "연락처")
+        assert snapshot.headers == ("가구원", "식종", "주소", "연락처")
         assert snapshot.rows == ()
     finally:
         dialog.close()
@@ -98,10 +98,10 @@ def test_export_uses_include_hidden_result(app):
         rows_provider=rows_provider,
     )
     try:
-        assert tuple(row[1] for row in dialog.current_view_snapshot().rows) == ("표시",)
+        assert tuple(row[0] for row in dialog.current_view_snapshot().rows) == ("표시",)
         dialog.include_hidden_checkbox.click()
         assert requests == [True]
-        assert tuple(row[1] for row in dialog.current_view_snapshot().rows) == ("표시", "숨김")
+        assert tuple(row[0] for row in dialog.current_view_snapshot().rows) == ("표시", "숨김")
     finally:
         dialog.close()
 
@@ -123,7 +123,7 @@ def test_roster_relays_snapshot_with_active_driver_dialog(app):
         QTimer.singleShot(0, export_and_close)
         window._show_driver_households()
         assert len(captured) == 1
-        assert captured[0][0].sheet_name == "기사별 가구"
+        assert captured[0][0].sheet_name == "배송순서관리"
         assert captured[0][1].objectName() == "driverHouseholdsDialog"
     finally:
         window.close()

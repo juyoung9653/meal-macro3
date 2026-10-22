@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from itertools import groupby
+from collections.abc import Iterable
 from datetime import UTC, date, datetime, timedelta, timezone
 from pathlib import Path
 from uuid import UUID
@@ -23,7 +24,6 @@ from src.domain.revisions import (
     RevisionRecord,
     RevisionSummary,
     RevisionSource,
-    freeze_json_object,
     plain_json,
 )
 from src.domain.roster import Meal, RosterSnapshot
@@ -139,7 +139,8 @@ class EncryptedDatabase:
         if record.metadata.display_code is not None:
             raise ValueError("표시용 변경번호는 DB가 저장 시 자동으로 부여합니다.")
         connection = self._require_connection()
-        connection.execute("BEGIN IMMEDIATE")
+        nested = not connection.get_autocommit()
+        connection.execute("SAVEPOINT append_revision" if nested else "BEGIN IMMEDIATE")
         try:
             row = connection.execute(
                 "SELECT revision_id FROM revision ORDER BY sequence DESC LIMIT 1"
@@ -194,9 +195,8 @@ class EncryptedDatabase:
                     self._current_entity_snapshot(actual_parent), self.snapshot(target_id), record,
                 )
                 _validate_changes_against_current(connection, record.changes, restoring=True)
-            if actual_parent is not None and not restoring and not cancelling:
-                if shared or exceptions:
-                    record = expand_household_shared_revision(self._current_entity_snapshot(actual_parent), record)
+            if actual_parent is not None and not restoring and not cancelling and (shared or exceptions):
+                record = expand_household_shared_revision(self._current_entity_snapshot(actual_parent), record)
                 _validate_changes_against_current(connection, record.changes)
             _insert_revision(connection, record.metadata)
             _insert_revision_display_code(connection, record.metadata)
@@ -209,7 +209,7 @@ class EncryptedDatabase:
                 restoring=restoring,
                 cancelling=cancelling,
             )
-            validate_typed_projections(connection)
+            validated_roster = validate_typed_projections(connection)
             if record.import_batch is not None:
                 _insert_import_batch(connection, record.import_batch)
             connection.execute(
@@ -226,17 +226,51 @@ class EncryptedDatabase:
                 ),
             )
             committed_roster = (
-                load_current_roster(connection, record.metadata.revision_id)
+                validated_roster
                 if shared or shared_setting_changed or restoring else None
             )
-            connection.execute("COMMIT")
+            connection.execute("RELEASE SAVEPOINT append_revision" if nested else "COMMIT")
             return committed_roster
-        except Exception:
+        except BaseException:
+            if nested:
+                connection.execute("ROLLBACK TO SAVEPOINT append_revision")
+                connection.execute("RELEASE SAVEPOINT append_revision")
+            else:
+                connection.execute("ROLLBACK")
+            raise
+
+    def append_revisions(self, records: Iterable[RevisionRecord]) -> tuple[RosterSnapshot | None, ...]:
+        """Validate and save a batch atomically using the usual per-record rules."""
+        connection = self._require_connection()
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            results = tuple(self.append_revision(record) for record in records)
+            self.check_integrity()
+            connection.execute("COMMIT")
+            return results
+        except BaseException:
             connection.execute("ROLLBACK")
             raise
 
     def _current_entity_snapshot(self, revision_id: UUID) -> HistoricalSnapshot:
-        """Read only latest states, avoiding JSON replay of every old revision."""
+        """Read latest states inside the caller's write transaction."""
+        return self._entity_snapshot(revision_id)
+
+    def _entity_snapshot(
+        self, revision_id: UUID, *, sequence: int | None = None,
+        kinds: tuple[str, ...] | None = None,
+    ) -> HistoricalSnapshot:
+        clauses = []
+        parameters: list[object] = []
+        if sequence is not None:
+            clauses.append("revision.sequence <= ?")
+            parameters.append(sequence)
+        if kinds is not None:
+            if not kinds:
+                return HistoricalSnapshot(revision_id, {})
+            clauses.append("change.entity_kind IN (" + ",".join("?" for _ in kinds) + ")")
+            parameters.extend(kinds)
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
         rows = self._require_connection().execute(
             """SELECT entity_kind, entity_id, after_json FROM (
                 SELECT change.entity_kind, change.entity_id, change.after_json,
@@ -251,28 +285,33 @@ class EncryptedDatabase:
                        ) AS first_ordinal,
                        ROW_NUMBER() OVER (
                            PARTITION BY change.entity_kind, change.entity_id
-                           ORDER BY revision.sequence DESC
+                           ORDER BY revision.sequence DESC, change.ordinal DESC
                        ) AS state_rank
                 FROM audit_change AS change
                 JOIN revision ON revision.revision_id = change.revision_id
+            """ + where + """
             ) WHERE state_rank = 1 AND operation != 'delete'
-              ORDER BY first_sequence, first_ordinal"""
+              ORDER BY first_sequence, first_ordinal""",
+            parameters,
         )
+        # HistoricalSnapshot freezes nested values once and retains source order.
         return HistoricalSnapshot(revision_id, {
             EntityRef(str(row[0]), UUID(str(row[1]))): json.loads(str(row[2]))
             for row in rows
         })
 
-    def latest_revision(self) -> RevisionRecord | None:
-        connection = self._require_connection()
-        row = connection.execute(
+    def latest_revision_id(self) -> UUID | None:
+        row = self._require_connection().execute(
             "SELECT revision_id FROM revision ORDER BY sequence DESC LIMIT 1"
         ).fetchone()
-        if row is None:
-            return None
-        return self.revision(UUID(str(row[0])))
+        return None if row is None else UUID(str(row[0]))
 
-    def revision(self, revision_id: UUID) -> RevisionRecord:
+    def latest_revision(self) -> RevisionRecord | None:
+        revision_id = self.latest_revision_id()
+        return None if revision_id is None else self.revision(revision_id)
+
+    def revision_metadata(self, revision_id: UUID) -> RevisionMetadata:
+        """Load metadata with seal/count checks, without materializing audit JSON."""
         if not isinstance(revision_id, UUID):
             raise TypeError("revision ID는 UUID여야 합니다.")
         connection = self._require_connection()
@@ -293,14 +332,21 @@ class EncryptedDatabase:
             raise KeyError(f"없는 revision ID입니다: {revision_id}")
         seal = connection.execute(
             """
-            SELECT change_count, has_import_batch
+            SELECT change_count, has_import_batch,
+                   (SELECT count(*) FROM audit_change WHERE revision_id = ?),
+                   (SELECT count(*) FROM import_batch WHERE revision_id = ?)
             FROM revision_seal
             WHERE revision_id = ?
             """,
-            (str(revision_id),),
+            (str(revision_id), str(revision_id), str(revision_id)),
         ).fetchone()
         if seal is None:
             raise DatabaseIntegrityError(f"봉인되지 않은 revision입니다: {revision_id}")
+
+        if int(seal[0]) != int(seal[2]) or int(seal[1]) != int(seal[3]):
+            raise DatabaseIntegrityError(f"revision 봉인 정보가 다릅니다: {revision_id}")
+        if seal[3] and str(row[6]) != RevisionSource.IMPORT.value:
+            raise DatabaseIntegrityError("import batch의 revision source가 import가 아닙니다.")
 
         metadata = RevisionMetadata(
             revision_id=revision_id,
@@ -314,6 +360,11 @@ class EncryptedDatabase:
             rule_versions=json.loads(str(row[8])),
             display_code=str(row[9]),
         )
+        return metadata
+
+    def revision(self, revision_id: UUID) -> RevisionRecord:
+        metadata = self.revision_metadata(revision_id)
+        connection = self._require_connection()
         changes = tuple(
             AuditChange(
                 entity_kind=str(change[0]),
@@ -356,48 +407,34 @@ class EncryptedDatabase:
                 effective_on=date.fromisoformat(str(batch_row[7])),
                 decisions=json.loads(str(batch_row[8])),
             )
-        if int(seal[0]) != len(changes) or bool(seal[1]) != (import_batch is not None):
-            raise DatabaseIntegrityError(f"revision 봉인 정보가 다릅니다: {revision_id}")
         return RevisionRecord(metadata, changes, import_batch)
 
     def snapshot(self, revision_id: UUID) -> HistoricalSnapshot:
-        if not isinstance(revision_id, UUID):
-            raise TypeError("revision ID는 UUID여야 합니다.")
-        self.revision(revision_id)
-        connection = self._require_connection()
-        target = connection.execute(
+        """Read the immutable entity state at an explicit revision."""
+        return self._snapshot_for_kinds(revision_id, None)
+
+    def snapshot_for_kinds(
+        self, revision_id: UUID, kinds: Iterable[str],
+    ) -> HistoricalSnapshot:
+        """Return only requested entity kinds, preserving original source order."""
+        if isinstance(kinds, str):
+            raise TypeError("kinds는 문자열 모음이어야 합니다.")
+        selected = tuple(dict.fromkeys(kinds))
+        if any(not isinstance(kind, str) or not kind for kind in selected):
+            raise TypeError("entity kind는 비어 있지 않은 문자열이어야 합니다.")
+        return self._snapshot_for_kinds(revision_id, selected)
+
+    def _snapshot_for_kinds(
+        self, revision_id: UUID, kinds: tuple[str, ...] | None,
+    ) -> HistoricalSnapshot:
+        self.revision_metadata(revision_id)
+        target = self._require_connection().execute(
             "SELECT sequence FROM revision WHERE revision_id = ?",
             (str(revision_id),),
         ).fetchone()
         if target is None:
             raise KeyError(f"없는 revision ID입니다: {revision_id}")
-
-        entities: dict[EntityRef, object] = {}
-        first_seen: dict[EntityRef, int] = {}
-        for row in connection.execute(
-            """
-            SELECT change.entity_kind, change.entity_id,
-                   change.operation, change.after_json
-            FROM audit_change AS change
-            JOIN revision ON revision.revision_id = change.revision_id
-            WHERE revision.sequence <= ?
-            ORDER BY revision.sequence, change.ordinal
-            """,
-            (int(target[0]),),
-        ):
-            reference = EntityRef(str(row[0]), UUID(str(row[1])))
-            first_seen.setdefault(reference, len(first_seen))
-            operation = ChangeOperation(str(row[2]))
-            if operation is ChangeOperation.DELETE:
-                entities.pop(reference, None)
-            else:
-                entities[reference] = freeze_json_object(json.loads(str(row[3])))
-        # Status precedence uses original source order when timestamps tie.
-        # A restore may resurrect deleted IDs in a different audit-change order.
-        return HistoricalSnapshot(revision_id, {
-            reference: entities[reference]
-            for reference in sorted(entities, key=first_seen.__getitem__)
-        })
+        return self._entity_snapshot(revision_id, sequence=int(target[0]), kinds=kinds)
 
     def roster_snapshot(self, revision_id: UUID) -> RosterSnapshot:
         """Rehydrate the roster at an explicit immutable revision."""

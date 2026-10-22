@@ -89,8 +89,8 @@ def test_reopen_restores_split_search_exact_values_and_explicit_empty(app, tmp_p
 
     restored = _dialog(path)
     try:
-        assert restored._split_by_meal is True
-        assert restored.split_button.text() == "분리 해제"
+        assert restored._split_by_meal is False
+        assert restored.split_button.text() == "식종별 분리"
         assert restored._column_searches == {"members": "아침"}
         assert restored._column_values == {
             "meals": frozenset({"조식"}),
@@ -144,11 +144,11 @@ def test_clear_all_persists_and_preserves_split_sort_hidden_and_fixed_scope(app,
 
     restored = _dialog(path)
     try:
-        assert restored._split_by_meal is True
+        assert restored._split_by_meal is False
         assert restored._column_searches == {}
         assert restored._column_values == {}
         assert not restored.include_hidden_checkbox.isChecked()
-        assert restored.table.rowCount() == 3
+        assert restored.table.rowCount() == 1
     finally:
         restored.close()
 
@@ -159,6 +159,7 @@ def test_malformed_unknown_state_is_ignored_without_losing_valid_fields(app, tmp
     settings = _settings(path)
     settings.setValue(key, json.dumps({
         "split_by_meal": "yes",
+        "address_columns_version": 2,
         "columns": {"members": 7, "unknown": "x", "address": "  판교  "},
         "values": {"contacts": "bad", "unknown": [], "meals": ["조식", 3]},
         "include_hidden": True,
@@ -181,7 +182,7 @@ def test_malformed_unknown_state_is_ignored_without_losing_valid_fields(app, tmp
     try:
         assert broken._column_searches == {}
         assert broken._column_values == {}
-        assert broken.table.rowCount() == 2
+        assert broken.table.rowCount() == 1
     finally:
         broken.close()
 
@@ -201,7 +202,7 @@ def test_standalone_dialog_does_not_persist_filters(app):
     try:
         assert reopened._split_by_meal is False
         assert reopened._column_values == {}
-        assert reopened.table.rowCount() == 2
+        assert reopened.table.rowCount() == 1
     finally:
         reopened.close()
 

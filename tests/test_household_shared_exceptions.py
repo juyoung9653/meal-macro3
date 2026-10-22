@@ -376,6 +376,9 @@ def test_exception_save_keeps_ui_responsive_and_errors_on_gui_thread(app, tmp_pa
     from PySide6.QtCore import QTimer
     from src.desktop_v2.startup_loading import StartupLoadingDialog
 
+    # Exercise the visible-dialog/thread contract; delay policy has separate tests.
+    monkeypatch.setattr("src.desktop_v2.startup_loading.PROGRESS_DELAY_MS", 0)
+
     r = roster()
     pair = (r.persons[0].person_id, "mobile")
     path = tmp_path / "responsive.sqlite3"

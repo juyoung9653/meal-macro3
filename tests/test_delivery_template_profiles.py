@@ -66,17 +66,18 @@ def test_legacy_override_belongs_only_to_school_and_reset_masks_it(tmp_path, act
 
 def test_settings_cards_open_correct_profile_without_switching_selection(app, preferences):
     calls = []
-    class Editor:
+    class Editor(QDialog):
         def __init__(self, action, database_id, parent, *, profile):
+            super().__init__(parent)
             calls.append((action, database_id, profile))
-        def exec(self):
-            return QDialog.DialogCode.Rejected
     dialog = DocumentTemplateDialog(None, delivery_dialog_type=Editor)
     dialog.set_preferences_scope("db")
     assert "문서 양식" in dialog.windowTitle()
     for (profile, action), button in dialog._delivery_buttons.items():
         button.click()
         assert calls[-1] == (action, "db", profile)
+        dialog.findChildren(Editor)[-1].reject()
+        app.processEvents()
     with pytest.raises(ValueError):
         _ = dialog.selected_profile
     assert all("미설정" in label.text() for (profile, _), label in dialog._delivery_status.items() if profile is Profile.HAPPY_LUNCHBOX)

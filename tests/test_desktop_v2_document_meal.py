@@ -191,3 +191,59 @@ def test_report_form_selection_is_legacy_all_without_configured_choices():
             _period(DocumentAction.INVOICE), (Meal.DINNER,),
             delivery_forms=(None,),
         )
+
+
+def test_report_choices_persist_in_database_and_cancel_keeps_previous(app, tmp_path):
+    from src.desktop_v2.document_meal import load_daily_report_choices, save_daily_report_choices
+    from src.storage.database_session import DatabaseSession
+    from tests.test_delivery_routing import initialize
+    from tests.test_sequence_workflow import roster_fixture
+    path = tmp_path / "choices.sqlite3"
+    def open_dialog(session, forms=(None, "도시락", "식재료 박스")):
+        dialog = DocumentMealDialog(_period(DocumentAction.DELIVERY_REPORT))
+        dialog.set_available_delivery_forms(forms)
+        dialog.set_report_choices(load_daily_report_choices(session))
+        return dialog
+
+    with DatabaseSession.create(path, "password") as session:
+        initialize(session, roster_fixture())
+        original = session.database.current_roster().revision_id
+        first = open_dialog(session)
+        first._clear_all()
+        first._buttons_by_meal[Meal.DINNER].setChecked(True)
+        first._buttons_by_form[None].setChecked(False)
+        first._buttons_by_form["식재료 박스"].setChecked(False)
+        first._accept_if_valid()
+        roster, backup = save_daily_report_choices(session, first.selected_report_choices())
+        assert roster.revision_id != original
+        current = roster.revision_id
+        assert save_daily_report_choices(session, first.selected_report_choices())[1] is None
+        assert session.database.current_roster().revision_id == current
+
+    # A new session restores choices entirely from the DB, with no PC settings.
+    with DatabaseSession.open(path, "password") as session:
+        reopened = open_dialog(session)
+        assert reopened.selected_meals() == (Meal.DINNER,)
+        assert reopened.selected_delivery_forms() == ("도시락",)
+        reopened._select_all()
+        reopened._buttons_by_form[None].setChecked(True)
+        reopened.reject()
+        assert load_daily_report_choices(session).meals == (Meal.DINNER,)
+        historical = open_dialog(session, (None, "도시락", "새 형태"))
+        assert historical.selected_meals() == (Meal.DINNER,)
+        assert historical.selected_delivery_forms() == ("도시락", "새 형태")
+        save_daily_report_choices(session, historical.selected_report_choices())
+        historical.close()
+        restored = open_dialog(session, (None, "도시락", "식재료 박스", "새 형태"))
+        assert restored.selected_delivery_forms() == ("도시락", "새 형태")
+        restored.reject()
+        unavailable = open_dialog(session, (None,))
+        assert unavailable.selected_delivery_forms() == ()
+        assert not unavailable._save_button.isEnabled()
+        unavailable.reject()
+    with DatabaseSession.create(tmp_path / "other.sqlite3", "password") as other:
+        initialize(other, roster_fixture())
+        dialog = open_dialog(other)
+        assert dialog.selected_meals() == tuple(Meal)
+        assert dialog.selected_delivery_forms() == (None, "도시락", "식재료 박스")
+        dialog.close()

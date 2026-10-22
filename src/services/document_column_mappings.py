@@ -20,6 +20,7 @@ from src.domain.roster import (
     CustomFieldType, RosterSnapshot, additional_mobile_phone_field_ordinal,
     additional_telephone_field_ordinal,
 )
+from src.domain.invoice_settings import InvoiceSettings, invoice_settings_from_snapshot
 from src.templates.config import auto_detect_semantic_columns, get_template_sheet_name, read_template_columns
 
 _STANDARD_SOURCES = (
@@ -86,6 +87,7 @@ def mapping_editor_spec(
     profile: str, document_kind: str, *, settings: SettingsManager | None = None,
     roster: RosterSnapshot | None = None,
     column_labels: Mapping[str, str] | None = None,
+    history_column: str | None = None,
 ) -> MappingEditorSpec:
     if profile not in ("급식", "행복도시락") or document_kind not in ("invoice", "confirmation"):
         raise ValueError("지원하지 않는 문서 양식 또는 문서 종류입니다.")
@@ -107,11 +109,16 @@ def mapping_editor_spec(
         locked = tuple(
             sorted(calculated | (set(_INVOICE_AUTOMATIC_TARGETS) & set(columns)))
         )
+        history_column = InvoiceSettings().history_column(profile) if history_column is None else history_column
+        if history_column in columns:
+            locked = (*locked, history_column)
     else:
         defaults = confirmation_default_mapping()
         targets = tuple(_CONFIRM_DEFAULTS)
         locked = _CONFIRM_LOCKED
     source_options = list(_STANDARD_SOURCES)
+    if document_kind == "invoice":
+        source_options.remove("비고")
     labels = {key: key for key in source_options}
     labels["학교명"] = "학교"
     labels[FULL_ADDRESS_FIELD] = "전체 주소 (도로명주소 + 상세주소)"
@@ -153,6 +160,8 @@ def mapping_editor_spec(
                 reason = "가구 묶음 기준"
             elif key == "제공기관":
                 reason = "공통 설정 자동 적용"
+            elif key == history_column:
+                reason = "식종 변경 이력 자동 적용"
             else:
                 reason = "자동 계산"
             target_labels[key] = f"{key} ({reason})"
@@ -196,7 +205,8 @@ def build_mapping_revision(
     roster: RosterSnapshot | None = None,
     desired_fallbacks: Mapping[str, str] | None = None,
 ) -> PreparedMappingRevision | None:
-    spec = mapping_editor_spec(profile, document_kind, settings=settings, roster=roster)
+    spec = mapping_editor_spec(profile, document_kind, settings=settings, roster=roster,
+                               history_column=invoice_settings_from_snapshot(snapshot).history_column(profile))
     editable = {key: spec.defaults[key] for key in spec.targets if key not in spec.locked_targets}
     return _build_mapping_revision(
         current_revision_id, snapshot, profile, document_kind, desired_mapping,

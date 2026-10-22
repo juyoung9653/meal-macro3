@@ -82,7 +82,7 @@ def test_selected_forms_count_only_included_people_and_households():
     assert selected.reports[0].rows[0].memo == "기본 1가구·1식\n도시락 1가구·1식"
     assert selected.calculation_manifest["selected_delivery_forms"] == (None, "도시락")
     assert selected.calculation_manifest["target_entitlement_count"] == 2
-    assert selected.calculation_manifest["calculation_contract_version"] == 4
+    assert selected.calculation_manifest["calculation_contract_version"] == 5
     assert all_forms.calculation_manifest["selected_delivery_forms"] is None
 
 

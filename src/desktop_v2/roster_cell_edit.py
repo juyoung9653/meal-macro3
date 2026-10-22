@@ -29,7 +29,7 @@ from src.domain.household_shared import (
     profile_with_shared_routing,
 )
 from src.domain.profile_edits import build_person_profile_revision
-from src.domain.column_input_rules import load_rules, rule_for, validate_input
+from src.domain.column_input_rules import RULES_KIND, load_rules, rule_for, validate_input
 from src.domain.revisions import RevisionActor
 from src.domain.roster import (
     CustomFieldDefinition,
@@ -341,7 +341,14 @@ class RosterCellEditController:
             if updated_profile == editing_person.profile and not forced_routing_fields:
                 return RosterCellEditOutcome(RosterCellEditStatus.CANCELLED)
             snapshot_reader = getattr(self._session.database, "snapshot", None)
-            rules = load_rules(snapshot_reader(roster.revision_id) if snapshot_reader else None)
+            read_kinds = getattr(self._session.database, "snapshot_for_kinds", None)
+            rules_snapshot = snapshot
+            if rules_snapshot is None:
+                rules_snapshot = (
+                    read_kinds(roster.revision_id, (RULES_KIND,)) if callable(read_kinds)
+                    else snapshot_reader(roster.revision_id) if snapshot_reader else None
+                )
+            rules = load_rules(rules_snapshot)
             value = roster_cell_text(replace(editing_person, profile=updated_profile), column_key,
                                      next((item for item in roster.custom_fields if f"custom:{item.definition_id}" == column_key), None))
             validate_input(column_key, value, rule_for(rules, column_key))

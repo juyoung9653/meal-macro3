@@ -90,7 +90,7 @@ def build_driver_household_rows(
 
         resolved = routing_state.resolve(roster, person.person_id, on)
         household_key = household_by_person.get(person.person_id, person.person_id)
-        address = _address(resolved.road_address, resolved.detail_address)
+        address = _address(resolved.road_address, None)
         for meal in selected_meals:
             driver_id = resolved.driver_ids[meal]
             driver_name = resolved.drivers[meal]
@@ -101,7 +101,8 @@ def build_driver_household_rows(
                 identity = ("legacy", driver_name)
             else:
                 identity = ("unassigned", None)
-            key = (household_key, identity, address)
+            # Hide the detail in presentation without changing household grouping.
+            key = (household_key, identity, _address(resolved.road_address, resolved.detail_address))
             parts = groups.setdefault(
                 key,
                 _RowParts(household_key, driver_id, driver_name, address),

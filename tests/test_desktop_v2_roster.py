@@ -779,7 +779,8 @@ def test_minimum_width_header_keeps_actions_and_filters_on_separate_rows(app):
         < window._documents_button.parentWidget().width()
     )
     assert window._column_search_header.buttons["name"].isVisible()
-    assert window._special_only_filter.geometry().right() < window._driver_households_button.geometry().left()
+    assert not hasattr(window, "_driver_households_button")
+    assert window._driver_households_action.text() == "배송순서관리"
     window.close()
 
 

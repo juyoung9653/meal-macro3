@@ -22,9 +22,9 @@ PERSON = UUID("fc300000-0000-0000-0000-000000000003")
 
 
 def test_phone_date_length_and_untouched_legacy_values():
-    for value in ("031-123-4567", "010-1234-5678"):
+    for value in ("02-123-4567", "02-1234-5678", "031-123-4567", "010-1234-5678"):
         validate_input("mobile", value, InputRule("phone"))
-    for value in ("031-1234", "02-1234-5678", "01012345678", "010-1234-567x"):
+    for value in ("031-1234", "2-1234-5678", "01012345678", "010-1234-567x", "xx-xxx-xxxx"):
         with pytest.raises(ValueError, match="전화번호"):
             validate_input("mobile", value, InputRule("phone"))
     validate_input("birth_date", "2024-02-29", InputRule("date"))
@@ -214,6 +214,14 @@ def test_digit_editor_keeps_cursor_and_handles_paste(app):
     phone.selectAll()
     phone.insert("010-9999-8888")
     assert phone.text() == "010-9999-8888"
+    phone.selectAll()
+    QTest.keyClicks(phone, "021234567")
+    assert phone.text() == "02-123-4567"
+    QTest.keyClicks(phone, "8")
+    assert phone.text() == "02-1234-5678"
+    phone.selectAll()
+    phone.insert("02-987-6543")
+    assert phone.text() == "02-987-6543"
     phone.close()
     day = RuleLineEdit(InputRule("date"))
     day.show()

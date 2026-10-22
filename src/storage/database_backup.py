@@ -155,25 +155,27 @@ class DatabaseBackupService:
         temporary_archive = self._directory / f".{backup_name}.{uuid4().hex}.tmp"
 
         snapshot = database.snapshot_bytes()
-        latest = database.latest_revision()
-        latest_revision_id = (
-            None if latest is None else latest.metadata.revision_id
-        )
+        latest_revision_id = database.latest_revision_id()
         compressed = backup_snapshot.compress_full(snapshot)
         parent = None
+        previous_snapshot = None
+        verified_chain = ()
+        # Reuse discovery during preparation; recheck dependencies before publication.
+        records = self.list_backups() if not force_full else ()
         if not force_full:
-            records = self.list_backups(database_id=credentials.database_id)
-            predecessor = records[0] if records else None
+            predecessor = next((item for item in records
+                                if item.database_id == credentials.database_id), None)
             if (predecessor is not None and predecessor.format_version == 2
                     and predecessor.schema_version == database.schema_version
                     and predecessor.created_at <= timestamp
                     and predecessor.full_created_at is not None
                     and timestamp - predecessor.full_created_at < FULL_BACKUP_INTERVAL):
                 try:
-                    previous_snapshot = _reconstruct_snapshot(predecessor, database_key)
+                    previous_snapshot = _reconstruct_snapshot(predecessor, database_key, records=records)
                     delta = backup_snapshot.compress_delta(previous_snapshot, snapshot)
                     if len(delta) < len(compressed):
                         compressed, parent = delta, predecessor
+                        verified_chain = _snapshot_chain(predecessor, records=records)
                 except (BackupFormatError, BackupIntegrityError, OSError):
                     logger.warning("이전 백업을 검증할 수 없어 전체 백업을 생성합니다: %s", predecessor.path)
         backup_id = uuid4()
@@ -206,7 +208,18 @@ class DatabaseBackupService:
                 archive.writestr(_MANIFEST_MEMBER, _json_bytes(manifest))
             _flush_file(temporary_archive)
             staged_record = inspect_backup(temporary_archive)
-            if _reconstruct_snapshot(staged_record, database_key) != snapshot:
+            # Dependencies can be deleted/replaced externally while we write the
+            # staged archive. Rehash their on-disk payloads before reusing the
+            # authenticated parent bytes; identical backup copies are equivalent.
+            current_chain = _snapshot_chain(staged_record)[:-1]
+            if len(current_chain) != len(verified_chain) or any(
+                replace(current, path=verified.path,
+                        credentials_sha256=verified.credentials_sha256) != verified
+                for current, verified in zip(current_chain, verified_chain)
+            ):
+                raise BackupIntegrityError("백업 생성 중 이전 백업 내용이 달라졌습니다.")
+            if _decode_snapshot(staged_record, database_key,
+                                previous_snapshot if parent is not None else None) != snapshot:
                 raise BackupIntegrityError("새 백업의 snapshot 검증에 실패했습니다.")
             if final_path.exists():
                 raise BackupAlreadyExistsError(f"백업 파일이 이미 있습니다: {final_path}")
@@ -214,7 +227,7 @@ class DatabaseBackupService:
         finally:
             temporary_archive.unlink(missing_ok=True)
 
-        record = inspect_backup(final_path)
+        record = replace(staged_record, path=final_path)
         if prune:
             try:
                 self.prune_backups(record.database_id, protected_path=record.path)
@@ -499,25 +512,36 @@ def _snapshot_chain(record: BackupRecord, *, records: tuple[BackupRecord, ...] |
     return tuple(reversed(chain))
 
 
-def _reconstruct_snapshot(record: BackupRecord, database_key: bytes) -> bytes:
+def _decode_snapshot(
+    item: BackupRecord, database_key: bytes, parent: bytes | None,
+) -> bytes:
+    """Authenticate one on-disk archive against its inspected record."""
+    try:
+        with zipfile.ZipFile(item.path, "r") as archive:
+            manifest = json.loads(_read_small_member(archive, _MANIFEST_MEMBER, _MAX_MANIFEST_BYTES))
+            payload = archive.read(_DATABASE_MEMBER)
+        if hashlib.sha256(payload).hexdigest() != item.database_sha256:
+            raise BackupIntegrityError("백업 payload가 변경되었습니다.")
+        snapshot = backup_snapshot.decrypt(payload, database_key, manifest, parent)
+        if (len(snapshot) != item.snapshot_size
+                or hashlib.sha256(snapshot).hexdigest() != item.snapshot_sha256
+                or snapshot[:16] != b"SQLite format 3\x00"
+                or int.from_bytes(snapshot[60:64], "big") != item.schema_version):
+            raise BackupIntegrityError("복원 snapshot 크기, SHA-256 또는 schema가 다릅니다.")
+        return snapshot
+    except (BackupFormatError, BackupIntegrityError, OSError):
+        raise
+    except Exception as error:
+        raise BackupIntegrityError("백업 인증 또는 증분 데이터 검증에 실패했습니다.") from error
+
+
+def _reconstruct_snapshot(
+    record: BackupRecord, database_key: bytes, *,
+    records: tuple[BackupRecord, ...] | None = None,
+) -> bytes:
     snapshot = None
-    for item in _snapshot_chain(record):
-        try:
-            with zipfile.ZipFile(item.path, "r") as archive:
-                manifest = json.loads(_read_small_member(archive, _MANIFEST_MEMBER, _MAX_MANIFEST_BYTES))
-                payload = archive.read(_DATABASE_MEMBER)
-            if hashlib.sha256(payload).hexdigest() != item.database_sha256:
-                raise BackupIntegrityError("백업 payload가 변경되었습니다.")
-            snapshot = backup_snapshot.decrypt(payload, database_key, manifest, snapshot)
-            if (len(snapshot) != item.snapshot_size
-                    or hashlib.sha256(snapshot).hexdigest() != item.snapshot_sha256
-                    or snapshot[:16] != b"SQLite format 3\x00"
-                    or int.from_bytes(snapshot[60:64], "big") != item.schema_version):
-                raise BackupIntegrityError("복원 snapshot 크기, SHA-256 또는 schema가 다릅니다.")
-        except (BackupFormatError, BackupIntegrityError, OSError):
-            raise
-        except Exception as error:
-            raise BackupIntegrityError("백업 인증 또는 증분 데이터 검증에 실패했습니다.") from error
+    for item in _snapshot_chain(record, records=records):
+        snapshot = _decode_snapshot(item, database_key, snapshot)
     if snapshot is None:
         raise BackupIntegrityError("복원할 snapshot이 없습니다.")
     return snapshot
@@ -531,8 +555,8 @@ def _rewrap_snapshot_backup(path: Path, record: BackupRecord, database_key: byte
         validation_file = staging / "validation.sqlite3"
         EncryptedDatabase.restore_snapshot(snapshot, validation_file, database_key)
         with EncryptedDatabase.open(validation_file, database_key) as database:
-            latest = database.latest_revision()
-            if ((None if latest is None else latest.metadata.revision_id) != record.latest_revision_id
+            latest_id = database.latest_revision_id()
+            if (latest_id != record.latest_revision_id
                     or database.schema_version < record.schema_version):
                 raise BackupIntegrityError("백업 DB 이력이 기록과 다릅니다.")
         with zipfile.ZipFile(path, "r") as archive:
@@ -580,9 +604,9 @@ def _rewrap_backup(
         shutil.copyfile(database_file, validation_file)
         with EncryptedDatabase.open(validation_file, database_key) as database:
             database.check_integrity()
-            latest = database.latest_revision()
+            latest_id = database.latest_revision_id()
             if (database.schema_version < record.schema_version or
-                (None if latest is None else latest.metadata.revision_id) != record.latest_revision_id):
+                latest_id != record.latest_revision_id):
                 raise BackupIntegrityError("백업 DB 이력이 기록과 다릅니다.")
         if _sha256_file(database_file) != record.database_sha256:
             raise BackupIntegrityError("검증 중 백업 DB 내용이 달라졌습니다.")
@@ -708,8 +732,8 @@ def _restore_backup(
                     raise BackupIntegrityError("복원 중 백업 DB 내용이 달라졌습니다.")
                 with EncryptedDatabase.open(staged_database, key) as restored:
                     restored.check_integrity()
-                    latest = restored.latest_revision()
-                    if ((None if latest is None else latest.metadata.revision_id) != record.latest_revision_id
+                    latest_id = restored.latest_revision_id()
+                    if (latest_id != record.latest_revision_id
                             or restored.schema_version < record.schema_version):
                         raise BackupIntegrityError("복원 DB 이력이 기록과 다릅니다.")
                 if destination.exists() or destination_credentials.exists():

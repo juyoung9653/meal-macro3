@@ -326,6 +326,8 @@ class RosterTableModel(QAbstractTableModel):
     def set_routing_state(self, state: RoutingState) -> None:
         if not isinstance(state, RoutingState):
             raise TypeError("state는 RoutingState여야 합니다.")
+        if state == self._routing_state:
+            return
         self.beginResetModel()
         self._routing_state = state
         self._rebuild_context_projection()
@@ -335,6 +337,8 @@ class RosterTableModel(QAbstractTableModel):
     def set_school_calendar(self, calendar: SchoolLunchCalendar) -> None:
         if not isinstance(calendar, SchoolLunchCalendar):
             raise TypeError("calendar는 SchoolLunchCalendar여야 합니다.")
+        if calendar == self._school_calendar:
+            return
         self.beginResetModel()
         self._school_calendar = calendar
         self._rebuild_context_projection()
@@ -507,9 +511,54 @@ class RosterTableModel(QAbstractTableModel):
     ) -> None:
         if not isinstance(roster, RosterSnapshot):
             raise TypeError("roster는 RosterSnapshot이어야 합니다.")
+        next_histories = dict(histories or {})
+        previous = self._roster
+        # A profile-only edit cannot change another person's meal/routing context.
+        # Keep the full reset for structural changes and changed status histories.
+        if (
+            (imported_profile_fields is None
+             or frozenset(imported_profile_fields) == self._imported_profile_fields)
+            and next_histories == self._histories
+            and roster.custom_fields == previous.custom_fields
+            and roster.households == previous.households
+            and roster.memberships == previous.memberships
+            and roster.enrollments == previous.enrollments
+            and roster.assignments == previous.assignments
+            and roster.delivery_defaults == previous.delivery_defaults
+            and tuple(p.person_id for p in roster.persons)
+                == tuple(p.person_id for p in previous.persons)
+            and all(
+                column.key in self._imported_profile_fields
+                or any(getattr(p.profile, column.key) is not None for p in roster.persons)
+                   == any(getattr(p.profile, column.key) is not None for p in previous.persons)
+                for column in _OPTIONAL_PROFILE_COLUMNS
+            )
+        ):
+            changed = {
+                after.person_id for before, after in zip(previous.persons, roster.persons)
+                if before != after
+            }
+            old_people = self._people
+            self._roster = roster
+            self._histories = next_histories
+            self._rebuild_context_projection(changed)
+            self._refresh_people()
+            new_people = self._people
+            if tuple(p.person_id for p in old_people) != tuple(p.person_id for p in new_people):
+                self._people = old_people
+                self.beginResetModel()
+                self._people = new_people
+                self.endResetModel()
+            elif self.columnCount():
+                for row, person in enumerate(new_people):
+                    if person.person_id in changed:
+                        self.dataChanged.emit(
+                            self.index(row, 0), self.index(row, self.columnCount() - 1),
+                        )
+            return
         self.beginResetModel()
         self._roster = roster
-        self._histories = dict(histories or {})
+        self._histories = next_histories
         if imported_profile_fields is not None:
             self._imported_profile_fields = frozenset(imported_profile_fields)
         self._columns = self._build_columns()
@@ -988,10 +1037,12 @@ class RosterTableModel(QAbstractTableModel):
             and not (unmapped_nonempty & allowed_special)
         )
 
-    def _rebuild_context_projection(self) -> None:
+    def _rebuild_context_projection(self, person_ids: set[UUID] | None = None) -> None:
         """Resolve day-and-meal lookups once, outside the table paint path."""
 
-        contexts: dict[UUID, _PersonContext] = {}
+        contexts: dict[UUID, _PersonContext] = {} if person_ids is None else dict(self._contexts)
+        if person_ids is not None and not person_ids:
+            return
         explicit_meals = {}
         common_sequences = {}
         people_with_sequence = {item.person_id for item in self._roster.assignments if item.sequence}
@@ -1002,6 +1053,8 @@ class RosterTableModel(QAbstractTableModel):
                 common_sequences[assignment.person_id] = assignment.sequence
         for person in self._roster.persons:
             person_id = person.person_id
+            if person_ids is not None and person_id not in person_ids:
+                continue
             meals = self._roster.meals_for(person_id, on=self._day)
             meal_statuses = {
                 meal: self._resolve_status(person_id, meal, meals)
@@ -1359,6 +1412,7 @@ class RosterWindow(QMainWindow):
     batch_driver_assignment_requested = Signal(object)
     sequence_edit_requested = Signal(object)
     household_sequence_save_requested = Signal(object, str, object)
+    household_order_save_requested = Signal(object, object)
     driver_replacement_requested = Signal()
     relocation_requested = Signal(object)
     complaint_requested = Signal(object, object)
@@ -1582,11 +1636,13 @@ class RosterWindow(QMainWindow):
         self._meal_change_history_rows.clear()
         self._revision_display_code = revision_display_code
         self._column_layout.save()
+        previous_columns = self._model.columns
         self._model.replace_roster(roster, self._histories, imported_profile_fields=imported_profile_fields)
         self._refresh_archive()
         self._revision_label.setText(self._revision_label_text())
-        self._column_layout.replace_columns(self._model.columns)
-        self._column_search_header.replace_columns(self._model.columns)
+        if previous_columns != self._model.columns:
+            self._column_layout.replace_columns(self._model.columns)
+            self._column_search_header.replace_columns(self._model.columns)
         self._after_model_reset()
 
     def set_imported_profile_fields(self, fields: frozenset[str]) -> None:
@@ -1632,6 +1688,8 @@ class RosterWindow(QMainWindow):
     def set_routing_state(self, state: RoutingState) -> None:
         if not isinstance(state, RoutingState):
             raise TypeError("state는 RoutingState여야 합니다.")
+        if state == self._routing_state:
+            return
         selected_cell = self.selected_person_cell()
         self._routing_state = state
         self._model.set_routing_state(state)
@@ -1642,6 +1700,8 @@ class RosterWindow(QMainWindow):
     def set_school_calendar(self, calendar: SchoolLunchCalendar) -> None:
         if not isinstance(calendar, SchoolLunchCalendar):
             raise TypeError("calendar는 SchoolLunchCalendar여야 합니다.")
+        if calendar == self._school_calendar:
+            return
         self._school_calendar = calendar
         self._model.set_school_calendar(calendar)
         self._refresh_archive()
@@ -1652,6 +1712,8 @@ class RosterWindow(QMainWindow):
     ) -> None:
         if not isinstance(schedule, ServiceAdjustmentSchedule):
             raise TypeError("schedule은 ServiceAdjustmentSchedule이어야 합니다.")
+        if schedule == self._service_adjustment_schedule:
+            return
         self._service_adjustment_schedule = schedule
         self._after_model_reset()
 
@@ -1848,13 +1910,6 @@ class RosterWindow(QMainWindow):
         self._special_only_filter.toggled.connect(self._on_special_only_changed)
         self._special_only_filter.toggled.connect(self._special_only_action.setChecked)
         self._special_only_action.toggled.connect(self._special_only_filter.setChecked)
-        self._driver_households_button = QPushButton("기사별 가구")
-        self._driver_households_button.setObjectName("quietAction")
-        self._driver_households_button.setToolTip(
-            "선택일에 배송 상태인 모든 식종의 담당 가구를 기사별로 봅니다"
-        )
-        self._driver_households_button.clicked.connect(lambda: launch(self._show_driver_households))
-        filters.addWidget(self._driver_households_button)
         self._add_person_button = QPushButton("행 추가")
         self._add_person_button.setObjectName("quietAction")
         self._add_person_button.setToolTip("현재 식종에 가입한 대상자를 명단에 추가합니다")
@@ -2062,8 +2117,10 @@ class RosterWindow(QMainWindow):
                  "전체 명단·민원·정보 및 식종 변경 이력을 Excel로 저장합니다"),
             )),
             ("기사 관리", (
+                ("_driver_households_action", "배송순서관리", lambda: launch(self._show_driver_households),
+                 "기사 한 명을 선택하고 행을 드래그해 배송순서를 저장합니다"),
                 ("_drivers_action", "기사 관리", self.drivers_requested.emit,
-                 "배송기사를 등록하고 연락처를 관리합니다"),
+                 "배송기사 등록·연락처와 일일식수에 표시할 기사 순서를 관리합니다"),
                 ("_driver_replacement_action", "기사 일괄 교체", self.driver_replacement_requested.emit,
                  "기존 기사의 배정을 선택한 날짜부터 새 기사에게 일괄 변경합니다"),
             )),
@@ -2141,6 +2198,10 @@ class RosterWindow(QMainWindow):
         )
         dialog.sequence_save_requested.connect(
             lambda targets, value: self.household_sequence_save_requested.emit(targets, value, dialog)
+        )
+        dialog.source_revision_id = self._roster.revision_id
+        dialog.order_save_requested.connect(
+            lambda values: self.household_order_save_requested.emit(values, dialog)
         )
         export_signal = getattr(dialog, "export_requested", None)
         if export_signal is not None and hasattr(export_signal, "connect"):

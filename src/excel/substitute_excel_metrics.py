@@ -8,6 +8,8 @@ cannot be reproduced exactly with a character-count approximation.
 from __future__ import annotations
 
 from copy import copy
+from concurrent.futures import ThreadPoolExecutor
+import gc
 from math import ceil, floor
 from traceback import clear_frames
 from xml.etree import ElementTree
@@ -187,11 +189,39 @@ def apply_excel_metrics(workbook, columns: list[str], layout: SheetLayout, optio
         import win32com.client
     except ImportError as exc:
         raise SubstituteExcelError("배송대타 서식을 맞추려면 Windows용 Microsoft Excel과 pywin32가 필요합니다.") from exc
+    # Import pythoncom on the caller before starting the worker: its first
+    # import initializes that thread's apartment. An owned worker then balances
+    # exactly its own initialization and cannot tear down Qt's/caller's COM
+    # apartment when several documents are generated in succession.
+    # Only Python workbook data crosses threads; every Excel proxy stays here.
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="substitute-excel") as worker:
+        worker.submit(_apply_excel_metrics_in_apartment, workbook, columns, layout,
+                      options, preserve_styles=preserve_styles).result()
+
+
+def _create_excel_application():
+    import pythoncom
+    from win32com.client.dynamic import DumbDispatch
+
+    # CoCreateInstanceEx creates our own server, never attaches to an open
+    # user workbook. Avoid caching the application's ITypeInfo/ITypeComp:
+    # Excel disconnects those remote interfaces on Quit, before pywin32 can
+    # release them, producing RPC_E_DISCONNECTED during apartment teardown.
+    dispatch = pythoncom.CoCreateInstanceEx(
+        "Excel.Application", None, pythoncom.CLSCTX_LOCAL_SERVER, None,
+        (pythoncom.IID_IDispatch,),
+    )[0]
+    return DumbDispatch(dispatch, "Excel.Application")
+
+
+def _apply_excel_metrics_in_apartment(workbook, columns, layout, options, *, preserve_styles=False):
+    import pythoncom
+
     excel = excel_workbook = excel_sheet = None
     failure = None
     pythoncom.CoInitialize()
     try:
-        excel = win32com.client.DispatchEx("Excel.Application")
+        excel = _create_excel_application()
         excel.Visible = False
         excel.DisplayAlerts = False
         excel.ScreenUpdating = False
@@ -214,6 +244,7 @@ def apply_excel_metrics(workbook, columns: list[str], layout: SheetLayout, optio
             if excel_workbook is not None:
                 excel_workbook.Close(SaveChanges=False)
         except Exception as exc:
+            clear_frames(exc.__traceback__)
             if failure is None:
                 failure = exc
         finally:
@@ -222,10 +253,16 @@ def apply_excel_metrics(workbook, columns: list[str], layout: SheetLayout, optio
                 if excel is not None:
                     excel.Quit()
             except Exception as exc:
+                clear_frames(exc.__traceback__)
                 if failure is None:
                     failure = exc
             finally:
                 excel = None
+                # Dynamic dispatch wrappers can retain each other through
+                # cached bound methods. Release those cycles while their COM
+                # apartment is still alive, before CoUninitialize disconnects
+                # the server and pumps its pending messages.
+                gc.collect()
                 pythoncom.CoUninitialize()
     if failure is not None:
         raise SubstituteExcelError("배송대타 Excel 서식 처리에 실패했습니다. Microsoft Excel 설치와 기본 프린터 설정을 확인해주세요.") from failure

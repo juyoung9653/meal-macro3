@@ -7,11 +7,16 @@ domain objects and the full JSON states stored in the revision ledger.
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from datetime import date, datetime
 from uuid import UUID, uuid5
 
-from .delivery_defaults import DELIVERY_DEFAULTS_ID, DELIVERY_DEFAULTS_KIND, delivery_defaults_from_state, delivery_defaults_state
+from .delivery_defaults import (
+    DELIVERY_DEFAULTS_ID,
+    DELIVERY_DEFAULTS_KIND,
+    delivery_defaults_from_state,
+    delivery_defaults_state,
+)
 from .revisions import (
     AuditChange,
     ChangeOperation,
@@ -35,7 +40,6 @@ from .roster import (
     RosterSnapshot,
 )
 from .status import MealStatus, StatusEvent
-
 
 PERSON_KIND = "roster.person"
 HOUSEHOLD_KIND = "roster.household"
@@ -82,6 +86,41 @@ def roster_audit_changes(
 
     before_states = {} if before is None else _roster_states(before)
     after_states = _roster_states(after)
+    return _audit_changes(before_states, after_states)
+
+
+def roster_audit_changes_for_people_and_households(
+    before: RosterSnapshot,
+    after: RosterSnapshot,
+    *,
+    person_ids: Iterable[UUID] = (),
+    household_ids: Iterable[UUID] = (),
+) -> tuple[AuditChange, ...]:
+    """Project known person/household edits without serializing the full roster."""
+
+    if not isinstance(before, RosterSnapshot):
+        raise TypeError("before는 RosterSnapshot이어야 합니다.")
+    if not isinstance(after, RosterSnapshot):
+        raise TypeError("after는 RosterSnapshot이어야 합니다.")
+    selected_person_ids = _uuid_set(person_ids, "person IDs")
+    selected_household_ids = _uuid_set(household_ids, "household IDs")
+    before_states = _people_and_household_states(
+        before,
+        selected_person_ids,
+        selected_household_ids,
+    )
+    after_states = _people_and_household_states(
+        after,
+        selected_person_ids,
+        selected_household_ids,
+    )
+    return _audit_changes(before_states, after_states)
+
+
+def _audit_changes(
+    before_states: Mapping[EntityRef, Mapping[str, JsonValue]],
+    after_states: Mapping[EntityRef, Mapping[str, JsonValue]],
+) -> tuple[AuditChange, ...]:
     references = sorted(
         before_states.keys() | after_states.keys(),
         key=lambda reference: (
@@ -113,7 +152,7 @@ def roster_audit_changes(
                     after=None,
                 )
             )
-        elif plain_json(old) != plain_json(new):
+        elif old != new:
             changes.append(
                 AuditChange(
                     reference.entity_kind,
@@ -552,6 +591,33 @@ def _roster_states(
                 assignments_by_key.get((person_id, meal)),
             )
     return states
+
+
+def _people_and_household_states(
+    snapshot: RosterSnapshot,
+    person_ids: frozenset[UUID],
+    household_ids: frozenset[UUID],
+) -> dict[EntityRef, Mapping[str, JsonValue]]:
+    states: dict[EntityRef, Mapping[str, JsonValue]] = {}
+    for household in snapshot.households:
+        if household.household_id in household_ids:
+            states[EntityRef(HOUSEHOLD_KIND, household.household_id)] = (
+                _household_state(household)
+            )
+    for person in snapshot.persons:
+        if person.person_id in person_ids:
+            states[EntityRef(PERSON_KIND, person.person_id)] = _person_state(person)
+    return states
+
+
+def _uuid_set(values: Iterable[UUID], label: str) -> frozenset[UUID]:
+    try:
+        result = frozenset(values)
+    except TypeError as error:
+        raise TypeError(f"{label}는 UUID iterable이어야 합니다.") from error
+    if any(not isinstance(value, UUID) for value in result):
+        raise TypeError(f"{label}에는 UUID만 허용됩니다.")
+    return result
 
 
 def _household_state(household: Household) -> Mapping[str, JsonValue]:

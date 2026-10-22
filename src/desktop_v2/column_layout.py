@@ -325,7 +325,10 @@ class RosterColumnLayout(QObject):
         return {**layout, "order": order}
 
     def _write_layout(self, layout: dict[str, Any]) -> None:
-        self._settings.setValue(self._settings_key, json.dumps(layout, ensure_ascii=False))
+        payload = json.dumps(layout, ensure_ascii=False)
+        if self._settings.value(self._settings_key) == payload:
+            return
+        self._settings.setValue(self._settings_key, payload)
         self._settings.sync()
 
     def _header_matches_columns(self) -> bool:

@@ -40,7 +40,7 @@ def test_fixed_uuid_scope_and_no_top_filter_controls(app):
     dialog = DriverHouseholdsDialog(rows, service_day=date(2026, 9, 22), drivers=(first, second), selected_driver_id=second.driver_id)
     assert dialog.table.rowCount() == 1
     assert dialog._selected_driver_id == second.driver_id
-    assert not dialog.findChildren(QComboBox)
+    assert dialog.findChildren(QComboBox) == [dialog.driver_combo, dialog.meal_combo]
     assert not dialog.findChildren(QLineEdit)
     assert dialog.table.item(0, 3).data(Qt.UserRole).driver_id == second.driver_id
     dialog._set_column_values("driver", {"이전 기사"})
@@ -57,11 +57,12 @@ def test_name_search_empty_state_and_pre_grouped_rows_are_not_reprojected(app):
         _row(household, None, "", address="다른 주소", contact="010-9999"),
     )
     dialog = DriverHouseholdsDialog(rows, service_day=date(2026, 9, 22), drivers=(driver,))
-    assert dialog.table.rowCount() == 2
-    assert "가구 1건 · 표시 2행" == dialog.count.text()
+    assert dialog.table.rowCount() == 1
+    assert "가구 1건 · 표시 1행" == dialog.count.text()
     assert "석식, 중식" in {
         dialog.table.item(index, 2).text() for index in range(dialog.table.rowCount())
     }
+    dialog.driver_combo.setCurrentIndex(1)
     dialog._set_column_search("contacts", "9999")
     assert dialog.table.rowCount() == 1
     dialog._set_column_search("members", "없는 가구")
@@ -104,7 +105,7 @@ def test_meal_split_uses_exact_rows_and_restores_merged_view_with_filters_and_so
         ("첫째, 둘째", "조식", "001, 002", "010-1, 010-2"),
         ("둘째", "중식", "004", "010-2"),
     }
-    assert dialog.table.item(0, 3).text() == "004"
+    assert dialog.table.item(0, 3).text() == "001, 002"
     assert dialog.table.selectedItems()
     dialog._set_column_search("members", "둘째")
     assert dialog.table.rowCount() == 2
@@ -149,7 +150,9 @@ def test_split_reconciles_exact_values_and_empty_state(app):
 def test_legacy_name_selection_is_not_mistaken_for_unassigned(app):
     driver = Driver(uuid4(), "기사")
     dialog = DriverHouseholdsDialog((_row(uuid4(), None, ""),), service_day=date(2026, 9, 22), drivers=(driver,), selected_driver_id="기사")
-    assert dialog._selected_driver_id is None
+    assert dialog._selected_driver_id == driver.driver_id
+    assert dialog.table.rowCount() == 0
+    dialog.driver_combo.setCurrentIndex(1)
     assert dialog.table.rowCount() == 1
     dialog.close()
 
@@ -178,28 +181,22 @@ def searchable_dialog(app):
     dialog.close()
 
 
-def test_header_click_sorts_numeric_sequences_and_filter_refresh_keeps_rows_intact(searchable_dialog, app):
+def test_header_click_keeps_delivery_order_and_filter_refresh_keeps_rows_intact(searchable_dialog, app):
     dialog = searchable_dialog
     header = dialog._column_search_header
-    assert [dialog.table.item(i, 3).text() for i in range(4)] == ["10", "2", "1", ""]
-    dialog.table.sortItems(3, Qt.SortOrder.AscendingOrder)
-    assert [dialog.table.item(i, 3).text() for i in range(4)] == ["1", "2", "10", ""]
-    dialog._set_column_search("members", "가구")
-    assert [dialog.table.item(i, 5).text() for i in range(3)] == ["010-1", "010-2", "010-10"]
-    point = QPoint(header.sectionViewportPosition(3) + header.sectionSize(3) // 2,
-                   header.height() // 2)
+    assert [dialog.table.item(i, 3).text() for i in range(2)] == ["2", "10"]
+    point = QPoint(header.sectionViewportPosition(1) + 30, header.height() // 2)
     QTest.mouseClick(header.viewport(), Qt.MouseButton.LeftButton, pos=point)
     app.processEvents()
-    assert header.sortIndicatorOrder() == Qt.SortOrder.DescendingOrder
-    assert [dialog.table.item(i, 3).text() for i in range(3)] == ["10", "2", "1"]
-    dialog._set_column_search("contacts", "010-")
-    assert [dialog.table.item(i, 1).text() for i in range(3)] == ["가구다", "가구나", "가구가"]
-    assert all(dialog.table.item(i, 5).toolTip() == dialog.table.item(i, 5).text() for i in range(3))
+    assert [dialog.table.item(i, 3).text() for i in range(2)] == ["2", "10"]
+    dialog._set_column_search("members", "가구")
+    assert [dialog.table.item(i, 5).text() for i in range(2)] == ["010-2", "010-10"]
+    assert dialog.table.dragEnabled()
 
 
 @pytest.mark.parametrize("key,query,count", (
-    ("driver", "기사a", 2), ("members", "가구나", 1), ("meals", "조식", 1),
-    ("sequence", "  2  ", 1), ("address", "판교", 2), ("contacts", "010-2", 1),
+    ("members", "가구나", 1), ("meals", "조식", 1),
+    ("address", "판교", 1), ("contacts", "010-2", 1),
 ))
 def test_each_column_search_filters_its_own_displayed_values(searchable_dialog, key, query, count):
     dialog = searchable_dialog
@@ -210,7 +207,7 @@ def test_each_column_search_filters_its_own_displayed_values(searchable_dialog, 
     assert dialog.table.rowCount() == count
     dialog._column_search_header.open_value_filter(key)
     dialog._column_search_header._menu.findChild(ColumnValuePicker).reset.click()
-    assert dialog.table.rowCount() == 4
+    assert dialog.table.rowCount() == 2
 
 
 def test_column_searches_combine_with_driver_header_filter(searchable_dialog):
@@ -223,7 +220,7 @@ def test_column_searches_combine_with_driver_header_filter(searchable_dialog):
     assert dialog.table.rowCount() == 1
     assert dialog.table.item(0, 1).text() == "가구다"
     assert dialog.count.text() == "가구 1건 · 표시 1행"
-    dialog._set_column_values("driver", {"기사B"})
+    dialog.driver_combo.setCurrentIndex(1)
     assert dialog.table.rowCount() == 0
     assert "해당" in dialog.empty.text()
     dialog._set_column_search("meals", "")
@@ -236,6 +233,7 @@ def test_column_value_picker_filters_blanks_and_can_reset(searchable_dialog, app
 
     dialog = searchable_dialog
     header = dialog._column_search_header
+    dialog.driver_combo.setCurrentIndex(2)
     header.open_value_filter("address")
     app.processEvents()
     picker = header._menu.findChild(ColumnValuePicker)
@@ -244,12 +242,14 @@ def test_column_value_picker_filters_blanks_and_can_reset(searchable_dialog, app
     picker.apply.click()
     assert dialog.table.rowCount() == 1
     assert dialog.table.item(0, 1).text() == "미등록"
-    assert set(dialog.column_filter_values("address")) == {"", "정자", "판교"}
+    assert set(dialog.column_filter_values("address")) == {""}
     dialog._set_column_search("members", "가구")
     assert dialog.table.rowCount() == 0
     header.open_value_filter("address")
     header._menu.findChild(ColumnValuePicker).reset.click()
-    assert dialog.table.rowCount() == 3
+    assert dialog.table.rowCount() == 0
+    dialog._clear_all_filters()
+    assert dialog.table.rowCount() == 1
 
 
 def test_column_buttons_stay_aligned_after_resizing_and_horizontal_scroll(searchable_dialog, app):
@@ -262,6 +262,9 @@ def test_column_buttons_stay_aligned_after_resizing_and_horizontal_scroll(search
     app.processEvents()
     for column, key in enumerate(("driver", "members", "meals", "sequence", "address", "contacts")):
         button = header.buttons[key]
+        if dialog.table.isColumnHidden(column):
+            assert not button.isVisible()
+            continue
         assert button.geometry().left() == header.sectionViewportPosition(column) + header.sectionSize(column) - header.BUTTON_WIDTH - 2
         assert button.width() == header.BUTTON_WIDTH
 

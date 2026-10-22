@@ -37,7 +37,7 @@ def _exercise_filters():
     app = QApplication.instance() or QApplication([])
     rows = tuple(
         DriverHouseholdRow(
-            uuid4(), None, f"Driver {i % 2}", (uuid4(),),
+            uuid4(), None, "Driver 0", (uuid4(),),
             (f"Household {i}", "Second\nThird\nFourth" if i % 2 == 0 else "Second"),
             (Meal.DINNER if i % 2 else Meal.BREAKFAST,),
             f"Address {i % 2}", (f"010-{i % 2}",), (f"00{i % 2 + 1}",),
@@ -69,7 +69,7 @@ def _exercise_filters():
         QTest.mouseClick(button, Qt.MouseButton.LeftButton)
         app.processEvents()
 
-    for key, column in (("sequence", 3), ("driver", 0), ("members", 1), ("meals", 2), ("address", 4), ("contacts", 5)):
+    for key, column in (("members", 1), ("meals", 2), ("address", 4), ("contacts", 5)):
         values = dialog.column_filter_values(key)
         for value in values[:2]:
             picker = picker_for(key)

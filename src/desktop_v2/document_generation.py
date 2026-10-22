@@ -32,6 +32,8 @@ from src.generators.invoice_generator import make_invoice_publication
 from src.generators.report_generator import make_report_publication
 from src.generators.substitute_generator import make_substitute_publication, SUBSTITUTE_RENDER_CONTRACT_VERSION
 from src.services.sqlite_delivery_substitute_service import prepare_delivery_substitute_data
+from src.domain.invoice_settings import invoice_settings_from_snapshot
+from .ledger_reader import load_revision_chain
 from src.services.sqlite_delivery_report_service import (
     prepare_delivery_report_data,
 )
@@ -258,6 +260,7 @@ class DocumentGenerationController:
                     period.starts_on,
                     period.ends_on,
                     selection.document.meals,
+                    revisions=load_revision_chain(self._session.database, source_snapshot.revision_id),
                 )
                 if not prepared.batch.deliveries:
                     raise ValueError(
@@ -308,6 +311,11 @@ class DocumentGenerationController:
                     load_mapping_overrides(current_snapshot, profile_key, "invoice"),
                 )
                 column_fallbacks = effective_fallbacks(column_mapping, load_mapping_fallbacks(current_snapshot, profile_key, "invoice"), document_kind="invoice")
+                history_column = invoice_settings_from_snapshot(current_snapshot).history_column(profile_key)
+                column_mapping = {target: ("" if source == "비고" or target == history_column else source)
+                                  for target, source in column_mapping.items()}
+                column_fallbacks = {target: source for target, source in column_fallbacks.items()
+                                    if source != "비고" and target != history_column}
                 _validate_custom_mapping_sources(column_mapping, current_roster)
                 _validate_custom_mapping_sources(column_fallbacks, current_roster)
                 _count, publication = self._invoice_writer(
@@ -317,6 +325,7 @@ class DocumentGenerationController:
                     str(template_path),
                     meal_type=profile_key,
                     global_note=prepared.global_note,
+                    history_note_column=history_column,
                     output_password=password_setting.password,
                     overwrite=False,
                     **({"column_fallbacks": column_fallbacks} if column_fallbacks else {}),
@@ -384,6 +393,7 @@ class DocumentGenerationController:
                 "writer": writer_name,
                 "column_mapping": dict(sorted(column_mapping.items())),
                 "column_fallbacks": dict(sorted(column_fallbacks.items())),
+                **({"history_note_column": history_column} if action is DocumentAction.INVOICE else {}),
                 "content_sha256": publication.content_sha256,
                 "export_password": (
                     password_setting.public_manifest()

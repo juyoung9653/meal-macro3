@@ -269,7 +269,7 @@ class HistoricalSnapshot:
 
 
 def freeze_json_object(value: Mapping[str, JsonValue]) -> Mapping[str, JsonValue]:
-    if not isinstance(value, Mapping):
+    if type(value) is not dict and not isinstance(value, Mapping):
         raise TypeError("JSON object는 mapping이어야 합니다.")
     return MappingProxyType(
         {
@@ -280,6 +280,20 @@ def freeze_json_object(value: Mapping[str, JsonValue]) -> Mapping[str, JsonValue
 
 
 def plain_json(value: JsonValue) -> JsonScalar | list | dict:
+    value_type = type(value)
+    if value_type is dict:
+        return {key: plain_json(item) for key, item in value.items()}
+    if value_type is tuple:
+        return [plain_json(item) for item in value]
+    if (
+        value is None
+        or value_type is str
+        or value_type is int
+        or value_type is float
+        or value_type is bool
+        or value_type is list
+    ):
+        return value
     if isinstance(value, Mapping):
         return {key: plain_json(item) for key, item in value.items()}
     if isinstance(value, tuple):
@@ -288,6 +302,17 @@ def plain_json(value: JsonValue) -> JsonScalar | list | dict:
 
 
 def _freeze_json(value: object) -> JsonValue:
+    value_type = type(value)
+    if value is None or value_type is str or value_type is int or value_type is bool:
+        return value
+    if value_type is float:
+        if not isfinite(value):
+            raise ValueError("JSON 숫자는 유한해야 합니다.")
+        return value
+    if value_type is dict:
+        return freeze_json_object(value)
+    if value_type is list or value_type is tuple:
+        return tuple(_freeze_json(item) for item in value)
     if isinstance(value, Mapping):
         return freeze_json_object(value)
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):

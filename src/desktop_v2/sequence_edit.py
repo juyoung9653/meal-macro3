@@ -185,6 +185,31 @@ class SequenceEditController:
         self._message_box = message_box
         self._actor_provider = actor_provider
 
+    def save_order(self, values, *, expected_revision_id, parent=None) -> SequenceSaveResult:
+        """Commit a complete drag operation atomically against its displayed source."""
+        try:
+            roster = self._session.database.current_roster()
+            if roster is None or roster.revision_id != expected_revision_id:
+                raise ValueError("다른 창에서 내용이 변경되었습니다. 배송순서관리를 다시 열어주세요.")
+            if not values or all(
+                value == (roster.resolve_assignment(*key).sequence or "")
+                for key, value in values.items()
+            ):
+                return SequenceSaveResult(SequenceSaveStatus.UNCHANGED, roster, "변경된 배송순서가 없습니다.")
+            prepared = build_scoped_sequence_revision(
+                roster, values, actor=self._actor_provider(),
+                recorded_at=datetime.now(UTC), revision_id=uuid4(),
+            )
+            backup = save_revision(self._session, prepared.record, parent=parent)
+        except Exception as error:
+            return SequenceSaveResult(SequenceSaveStatus.FAILED, message=f"배송순서를 저장하지 못했습니다: {error}")
+        return SequenceSaveResult(
+            SequenceSaveStatus.SAVED, committed_roster_after_save(self._session, prepared.snapshot),
+            f"배송순서는 저장됐지만 자동 백업에 실패했습니다: {backup.error}"
+            if backup.error is not None else "배송순서를 저장했습니다.",
+            backup.error is not None,
+        )
+
     @dialog_workflow
     def run(self, person_id, parent=None):
         try:

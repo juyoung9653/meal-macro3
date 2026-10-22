@@ -109,6 +109,7 @@ def _fill_invoice_sheet(
     meal_type: str = "급식",
     global_note: str | None = None,
     column_fallbacks: Mapping[str, str] | None = None,
+    history_note_column: str | None = None,
 ) -> int:
     """단일 시트에 people 데이터를 채운다. 작성 건수 반환."""
     template_columns = read_template_columns(template_path, sheet_name=sheet_name)
@@ -120,9 +121,16 @@ def _fill_invoice_sheet(
     price_col = col_mapping.get("__calc_price", "청구금액")
     sequence_col_idx = col_idx_map.get("연번")
 
-    # 메모 컬럼은 명단에서 정상 매핑된 값을 쓰되 좌측/줄바꿈 서식을 적용한다.
-    _memo_col_name = "평일중식중지=>초1-2,고3" if meal_type == "급식" else "비고"
+    # 지정한 이력 칼럼은 명단 연결값 대신 이력을 쓰고 줄바꿈을 적용한다.
+    _memo_col_name = ("평일중식중지=>초1-2,고3" if meal_type == "급식" else "비고") if history_note_column is None else history_note_column
     _memo_col_idx = col_idx_map.get(_memo_col_name)
+    if history_note_column and history_note_column not in col_idx_map:
+        raise ValueError(f"{sheet_name} 템플릿에 이력 칼럼 '{history_note_column}'이 없습니다. 식수·청구서 설정에서 다시 선택해주세요.")
+    if history_note_column and history_note_column in {
+        "연번", "제공기관", bf_col, dn_col, lh_col, price_col,
+        col_mapping.get("__calc_total", "계"),
+    }:
+        raise ValueError("식수·청구금액 등 자동 계산 칼럼은 이력 칼럼으로 선택할 수 없습니다.")
 
     ws = wb[sheet_name]
     row_idx = get_template_data_start_row()
@@ -143,6 +151,8 @@ def _fill_invoice_sheet(
         lunch_cnt = person.lunch_count
 
         row_data = _map_person_to_row(person, col_mapping, template_columns, column_fallbacks)
+        if history_note_column:
+            row_data[history_note_column] = person.note
         if sequence_col_idx is not None:
             row_data["연번"] = ordinal
         mapped_targets = set(row_data) - {bf_col, dn_col, lh_col, price_col, col_mapping.get("__calc_total", "계")}
@@ -357,6 +367,7 @@ def make_invoice_publication(
     output_password: str | None = None,
     overwrite: bool = True,
     column_fallbacks: Mapping[str, str] | None = None,
+    history_note_column: str | None = None,
 ) -> tuple[int, WorkbookPublicationResult]:
     """월별 배송 배치 → 청구서템플릿 다중 시트 채워서 output_path 에 저장.
 
@@ -400,6 +411,7 @@ def make_invoice_publication(
                 meal_type=meal_type,
                 global_note=global_note,
                 column_fallbacks=column_fallbacks,
+                history_note_column=history_note_column,
             )
         if rename_prefix:
             _rename_sheets(wb, rename_prefix)

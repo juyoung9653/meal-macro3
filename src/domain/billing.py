@@ -157,21 +157,25 @@ class EntitlementBilling:
         period_start: date,
         period_end: date,
         meals: Sequence[Meal] = tuple(Meal),
+        delivery_dates: Mapping[tuple[UUID, Meal, date], date] | None = None,
     ) -> Mapping[str, JsonValue]:
         if not isinstance(schedule, UnitPriceSchedule):
             raise TypeError("schedule은 UnitPriceSchedule이어야 합니다.")
+        service_dates = tuple(day for summary in self.summaries for line in summary.lines for day in line.service_dates)
         note = global_unit_price_note(
             schedule,
-            period_start,
-            period_end,
+            min((period_start, *service_dates)),
+            max((period_end, *service_dates)),
             meals,
         )
         for summary in self.summaries:
             for line in summary.lines:
-                if any(
-                    not period_start <= service_on <= period_end
+                period_dates = tuple(
+                    service_on if delivery_dates is None else
+                    delivery_dates[(line.person_id, line.meal, service_on)]
                     for service_on in line.service_dates
-                ):
+                )
+                if any(not period_start <= day <= period_end for day in period_dates):
                     raise ValueError(
                         "청구 결과에 calculation manifest 대상 기간 밖의 "
                         "서비스일이 있습니다."
@@ -190,6 +194,7 @@ class EntitlementBilling:
                 "default_unit_price": schedule.default_unit_price,
                 "period_start": period_start.isoformat(),
                 "period_end": period_end.isoformat(),
+                "period_basis": "service_date" if delivery_dates is None else "physical_delivery_day",
                 "global_unit_price_note": note,
                 "total_count": self.total_count,
                 "total_amount": self.total_amount,

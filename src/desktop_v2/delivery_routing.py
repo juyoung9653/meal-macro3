@@ -127,7 +127,9 @@ class DriverOrderTable(QTableWidget):
         destination = self.rowAt(point.y())
         if destination < 0:
             destination = self.rowCount()
-        elif point.y() > self.visualItemRect(self.item(destination, 0)).center().y():
+        elif point.y() > self.visualItemRect(self.item(destination, next(
+            (column for column in range(self.columnCount()) if not self.isColumnHidden(column)), 0,
+        ))).center().y():
             destination += 1
         source = self.currentRow() if self._drag_source_row is None else self._drag_source_row
         self.move_row(source, destination)
@@ -173,7 +175,7 @@ class DriverRegistryDialog(QDialog):
                 "기사를 등록하면 식종별 배송담당과 기사 필터에서 선택할 수 있습니다."
             )
         )
-        guidance = QLabel("기사 행을 드래그해 순서를 바꾼 뒤 ‘순서 저장’을 누르세요.")
+        guidance = QLabel("기사 행을 드래그해 순서를 바꾼 뒤 ‘순서 저장’을 누르세요. 일일식수 문서에도 이 기사 순서를 적용합니다.")
         guidance.setWordWrap(True)
         layout.addWidget(guidance)
         self.table = DriverOrderTable(len(state.drivers))
