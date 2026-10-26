@@ -1700,7 +1700,9 @@ def test_roster_histories_share_one_read_without_mixing_people_or_meals():
 
     session = SimpleNamespace(database=SimpleNamespace(status_events=status_events))
     roster = SimpleNamespace(persons=(SimpleNamespace(person_id=first), SimpleNamespace(person_id=second)))
-    histories = DesktopStartupController._histories(session, roster)
+    histories = DesktopStartupController._histories(
+        session, roster, SimpleNamespace(entity=lambda *args: None),
+    )
 
     assert len(reads) == 1
     assert set(histories) == {(person, meal) for person in (first, second) for meal in Meal}
@@ -1727,6 +1729,7 @@ def test_roster_history_read_error_is_not_replaced_with_default_delivery():
         DesktopStartupController._histories(
             SimpleNamespace(database=SimpleNamespace(status_events=status_events)),
             SimpleNamespace(persons=(SimpleNamespace(person_id=UUID(int=701)),)),
+            SimpleNamespace(entity=lambda *args: None),
         )
 
 

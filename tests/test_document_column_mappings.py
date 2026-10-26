@@ -53,11 +53,11 @@ def test_confirmation_explicit_empty_mapping_clears_person_field():
     assert _mapped_source_column({"이름": "학교명"}, "성명", "이름") == "학교명"
 
 
-def test_confirmation_locked_grouping_fields_have_accurate_reason():
+def test_confirmation_address_and_jurisdiction_are_editable():
     spec = mapping_editor_spec("급식", "confirmation")
-    assert set(spec.locked_targets) == {"도로명주소", "상세주소", "관할동"}
-    for target in spec.locked_targets:
-        assert spec.target_labels[target] == f"{target} (가구 묶음 기준)"
+    assert spec.locked_targets == ()
+    assert {"도로명주소", "관할동"} <= set(spec.targets)
+    assert "상세주소" not in spec.targets
 
 
 def test_semantic_total_prefers_normalized_exact_header_over_relationship_substring():
@@ -113,3 +113,28 @@ def test_effective_invoice_mapping_ignores_stale_automatic_column_overrides():
     assert "계 (급식수)" not in mapping
     assert mapping["제공기관"] == "제공기관"
     assert "연번" not in mapping
+
+
+@pytest.mark.parametrize("profile", ["급식", "행복도시락"])
+def test_confirmation_address_mapping_and_fallbacks_survive_revision(profile):
+    from src.services.document_column_mappings import (
+        build_mapping_revision as prepare, confirmation_default_mapping,
+        effective_fallbacks, load_mapping_fallbacks,
+    )
+    original_id = UUID("6e000000-0000-0000-0000-000000000021")
+    changed_id = UUID("6e000000-0000-0000-0000-000000000022")
+    desired = {"도로명주소": "비고", "관할동": "학교명"}
+    fallbacks = {"도로명주소": "도로명주소", "관할동": "관할동"}
+    change = prepare(
+        original_id, HistoricalSnapshot(original_id, {}), profile, "confirmation", desired,
+        desired_fallbacks=fallbacks, actor=RevisionActor("tester", "S-1-5-21-test"),
+        recorded_at=datetime(2026, 6, 1, tzinfo=UTC), revision_id=changed_id,
+    )
+    saved = HistoricalSnapshot(changed_id, {
+        EntityRef(MAPPING_ENTITY_KIND, mapping_entity_id(profile, "confirmation")): change.record.changes[0].after,
+    })
+    assert load_mapping_overrides(saved, profile, "confirmation") == desired
+    assert effective_fallbacks(
+        confirmation_default_mapping(), load_mapping_fallbacks(saved, profile, "confirmation"),
+        document_kind="confirmation",
+    ) == fallbacks

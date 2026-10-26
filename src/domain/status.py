@@ -154,19 +154,25 @@ def resolve_status_history(
     person_id: UUID,
     meal: Meal,
     events: tuple[StatusEvent, ...],
+    *,
+    same_month_pause: bool = True,
 ) -> StatusHistory:
     """Overlay raw events and calculate non-overlapping effective intervals.
 
     Later-recorded events win only over the dates they cover. Tuple order breaks
     ties when two events have the same recorded timestamp, matching ledger order.
     An open-ended raw ``중지`` that is permanently superseded by an open-ended
-    ``배송`` is displayed as a finite ``일시중지`` while both raw events remain.
+    ``배송`` is displayed as a finite ``일시중지`` only when conversion is
+    enabled and the authored stop and resumption start in the same year/month.
+    Both raw events remain unchanged.
     """
 
     if not isinstance(person_id, UUID):
         raise TypeError("사람 ID는 UUID여야 합니다.")
     if not isinstance(meal, Meal):
         raise TypeError("meal은 Meal이어야 합니다.")
+    if type(same_month_pause) is not bool:
+        raise TypeError("일시중지 자동변환 여부는 참/거짓이어야 합니다.")
     events = tuple(events)
     for event in events:
         if not isinstance(event, StatusEvent):
@@ -221,7 +227,7 @@ def resolve_status_history(
             )
         )
 
-    interpreted = _interpret_temporary_stops(painted)
+    interpreted = _interpret_temporary_stops(painted) if same_month_pause else painted
     intervals = _coalesce_painted_intervals(interpreted)
     return StatusHistory(person_id, meal, events, intervals)
 
@@ -240,6 +246,11 @@ def _interpret_temporary_stops(
             and next_interval.status is MealStatus.DELIVERY
             and next_interval.ends_exclusive_ordinal is None
             and next_interval.winning_event.period.ends_on is None
+            and interval.ends_exclusive_ordinal == next_interval.starts_ordinal
+            and _same_month(
+                interval.winning_event.period.starts_on,
+                next_interval.winning_event.period.starts_on,
+            )
         )
         if not is_temporary_stop:
             interpreted.append(interval)
@@ -257,6 +268,13 @@ def _interpret_temporary_stops(
             )
         )
     return interpreted
+
+
+def _same_month(first: date | None, second: date | None) -> bool:
+    return (
+        first is not None and second is not None
+        and (first.year, first.month) == (second.year, second.month)
+    )
 
 
 def _coalesce_painted_intervals(

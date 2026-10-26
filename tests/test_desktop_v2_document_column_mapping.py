@@ -226,3 +226,30 @@ def test_dialog_screenshots_default_and_small(app):
     assert dialog._save_button.isVisible()
     assert dialog._scroll.verticalScrollBar().maximum() > 0
     dialog.close()
+
+
+@pytest.mark.parametrize("profile", ["급식", "행복도시락"])
+def test_confirmation_address_and_dong_mapping_edit_reset_and_cancel(app, profile):
+    specs = {scope: mapping_editor_spec(*scope) for scope in SCOPES}
+    dialog = DocumentColumnMappingDialog(specs, {scope: {} for scope in SCOPES})
+    dialog._profile_combo.setCurrentIndex(dialog._profile_combo.findData(profile))
+    dialog._document_combo.setCurrentIndex(dialog._document_combo.findData("confirmation"))
+    try:
+        assert "상세주소" not in dialog._combos
+        for target in ("도로명주소", "관할동"):
+            primary = dialog._combos[target]
+            secondary = dialog._fallback_combos[target]
+            primary.setCurrentIndex(primary.findData("비고"))
+            secondary.setCurrentIndex(secondary.findData(target))
+        assert dialog.desired_mapping()["도로명주소"] == "비고"
+        assert dialog.desired_mapping()["관할동"] == "비고"
+        assert dialog.desired_fallbacks()["도로명주소"] == "도로명주소"
+        assert dialog.desired_fallbacks()["관할동"] == "관할동"
+        dialog._reset_button.click()
+        assert dialog.desired_mapping()["도로명주소"] == "도로명주소"
+        assert dialog.desired_mapping()["관할동"] == "관할동"
+        assert not dialog.desired_fallbacks()
+        dialog._cancel_button.click()
+        assert dialog.result() == QDialog.DialogCode.Rejected
+    finally:
+        dialog.close()

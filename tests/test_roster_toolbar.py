@@ -22,14 +22,10 @@ def window():
 
 @pytest.mark.parametrize("action_name,signal_name", (
     ("_import_action", "import_review_requested"),
-    ("_database_export_action", "database_export_requested"),
     ("_revision_history_action", "revision_history_requested"),
     ("_complaint_history_action", "complaint_history_requested"),
-    ("_monthly_meal_history_action", "monthly_meal_history_requested"),
+    ("_monthly_overview_action", "monthly_overview_requested"),
     ("_drivers_action", "drivers_requested"),
-    ("_driver_replacement_action", "driver_replacement_requested"),
-    ("_school_calendar_action", "school_calendar_requested"),
-    ("_service_adjustment_action", "service_adjustment_requested"),
     ("_unit_price_action", "unit_price_requested"),
     ("_settings_action", "settings_requested"),
 ))
@@ -44,13 +40,10 @@ def test_more_menu_actions_keep_their_original_workflows(window, action_name, si
 
 def test_more_menu_has_one_level_of_task_submenus(window):
     expected = {
-        "명단 관리": ("_import_action", "_archive_action"),
-        "이력·민원": ("_revision_history_action", "_complaint_history_action", "_monthly_meal_history_action"),
-        "통계": ("_monthly_statistics_action",),
-        "내보내기": ("_current_sheet_export_action", "_database_export_action"),
-        "기사 관리": ("_driver_households_action", "_drivers_action", "_driver_replacement_action"),
-        "운영": ("_school_calendar_action", "_service_adjustment_action", "_unit_price_action"),
-        "화면·설정": ("_special_only_action", "_columns_action", "_settings_action"),
+        "명단·파일": ("_import_action", "_export_action", "_archive_action"),
+        "기사·배송": ("_drivers_action", "_driver_households_action"),
+        "조회·기록": ("_monthly_overview_action", "_revision_history_action", "_complaint_history_action"),
+        "운영·설정": ("_operating_schedule_action", "_unit_price_action", "_columns_action", "_settings_action"),
     }
     assert [action.text() for action in window._more_menu.actions()] == list(expected)
     for group in window._more_menu.actions():
@@ -182,22 +175,15 @@ def test_more_filter_actions_sync_with_roster_state(window):
 
 
 def test_column_settings_remains_reachable_from_more_menu(window, monkeypatch):
-    menus = []
-    from PySide6.QtCore import QTimer
-
-    original = window._column_layout.create_menu
-
-    def create_menu(parent, **kwargs):
-        menu = original(parent, **kwargs)
-        menus.append(menu)
-        QTimer.singleShot(0, menu.close)
-        return menu
-
-    monkeypatch.setattr(window._column_layout, "create_menu", create_menu)
+    from src.desktop_v2.workspace_tools import ColumnManagerDialog
     window._columns_action.trigger()
-    assert len(menus) == 1
-    assert "기본 열 구성으로 되돌리기" in {action.text() for action in menus[0].actions()}
-    assert "사용자 항목 추가·삭제" in {action.text() for action in menus[0].actions()}
+    QApplication.instance().processEvents()
+    dialogs = window.findChildren(ColumnManagerDialog)
+    assert len(dialogs) == 1 and dialogs[0].isVisible()
+    assert dialogs[0].columns.count() == len(window.table_model.columns)
+    texts = {button.text() for button in dialogs[0].findChildren(QPushButton)}
+    assert {"기본 배치 복원", "사용자 항목 추가·삭제"} <= texts
+    dialogs[0].accept()
 
 
 def test_header_context_keeps_unhide_and_input_rule_but_moves_three_actions_to_more(window, monkeypatch):

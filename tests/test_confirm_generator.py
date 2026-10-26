@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
 
@@ -133,7 +134,7 @@ def test_typed_same_household_requires_one_consistent_address(tmp_path: Path):
         ),
     )
 
-    with pytest.raises(ValueError, match="같은 DB 가구.*주소"):
+    with pytest.raises(ValueError, match="같은 가구의 출력값") as error:
         make_confirm_publication(
             batch,
             {},
@@ -141,6 +142,12 @@ def test_typed_same_household_requires_one_consistent_address(tmp_path: Path):
             "사용되지않는.xlsx",
             meal_type="급식",
         )
+
+    message = str(error.value)
+    for value in ("첫째", "둘째", "성남대로 1", "성남대로 2", "다른 항목: 도로명주소"):
+        assert value in message
+    assert "household-1" not in message
+    assert "명단 2행" not in message
 
 
 @pytest.fixture
@@ -270,7 +277,8 @@ def test_same_road_with_different_detail_addresses_are_separate_households(
             for cell in row
             if isinstance(cell.value, str)
         }
-        assert {"성남대로 1 101호", "성남대로 1 102호"} <= values
+        assert "성남대로 1" in values
+        assert not {"성남대로 1 101호", "성남대로 1 102호"} & values
     finally:
         workbook.close()
 
@@ -490,3 +498,77 @@ def test_happy_lunch_delivery_phone_placeholder_is_explicitly_blank(tmp_path: Pa
         assert ws["K3"].value == "기사A"
     finally:
         wb.close()
+
+
+@pytest.mark.parametrize("profile", ["급식", "행복도시락"])
+@pytest.mark.parametrize("primary", ["선택 주소", "  ", None, 0])
+def test_confirmation_maps_address_and_dong_with_fallbacks(tmp_path, profile, primary):
+    template = f"assets/{profile}/{profile}_확인서템플릿.xlsx"
+    people = []
+    for index, name in enumerate(("첫째", "둘째")):
+        person = _typed_delivery(name, "same-household", f"원본 주소 {index}")
+        values = dict(person.roster.extra, **{
+            "상세주소": f"{index + 1}01호", "custom:address": primary,
+            "custom:backup_address": "대체 주소", "custom:dong": " ",
+            "custom:backup_dong": "선택동",
+        })
+        people.append(replace(person, roster=replace(person.roster, extra=values)))
+    output = tmp_path / "mapped.xlsx"
+    created, _ = make_confirm_publication(
+        MonthlyDeliveryBatch(2026, 6, MealPrices(10000, 10000, 10000), False, tuple(people)),
+        {"도로명주소": "custom:address", "관할동": "custom:dong"}, output, template,
+        meal_type=profile,
+        column_fallbacks={"도로명주소": "custom:backup_address", "관할동": "custom:backup_dong"},
+    )
+    assert created[0]["count_2"] == 1
+    placeholders = scan_placeholders(template, ["2명"])["2명"]
+    wb = openpyxl.load_workbook(output)
+    try:
+        assert wb.sheetnames == ["선택동"]
+        sheet = wb["선택동"]
+        expected = "대체 주소" if primary is None or primary == "  " else str(primary)
+        assert sheet.cell(*placeholders["addr"][0]).value == expected
+        if profile == "급식":
+            assert sheet.cell(*placeholders["dong"][0]).value == "선택동"
+    finally:
+        wb.close()
+
+
+def test_confirmation_empty_output_mapping_keeps_db_household(tmp_path, confirm_template):
+    people = tuple(_typed_delivery(name, "same-household", "원본 주소") for name in ("첫째", "둘째"))
+    output = tmp_path / "blank.xlsx"
+    created, _ = make_confirm_publication(
+        MonthlyDeliveryBatch(2026, 6, MealPrices(10000, 10000, 10000), False, people),
+        {"도로명주소": "", "관할동": ""}, output, confirm_template,
+    )
+    assert created[0]["count_2"] == 1
+    wb = openpyxl.load_workbook(output)
+    try:
+        assert wb.sheetnames == ["기타"]
+        placeholders = scan_placeholders(confirm_template, ["2명"])["2명"]
+        for field in ("addr", "dong"):
+            assert wb["기타"].cell(*placeholders[field][0]).value is None
+    finally:
+        wb.close()
+
+
+def test_confirmation_conflict_shows_actual_identity_and_mapped_values(tmp_path):
+    people = []
+    for index, name in enumerate(("첫째", "둘째")):
+        person = _typed_delivery(name, "internal-household-id", "원본 주소")
+        values = dict(person.roster.extra, **{
+            "생년월일": f"2015-01-0{index + 1}", "학교명": "가상초",
+            "custom:dong": f"선택{index}동", "custom:name": "출력용 별칭",
+        })
+        people.append(replace(person, roster=replace(person.roster, extra=values)))
+    with pytest.raises(ValueError) as error:
+        make_confirm_publication(
+            MonthlyDeliveryBatch(2026, 6, MealPrices(10000, 10000, 10000), False, tuple(people)),
+            {"성명": "custom:name", "관할동": "custom:dong"}, tmp_path / "bad.xlsx", "unused.xlsx",
+        )
+    message = str(error.value)
+    for value in ("첫째", "둘째", "2015-01-01", "2015-01-02", "가상초", "선택0동", "선택1동", "다른 항목: 관할동"):
+        assert value in message
+    assert "internal-household-id" not in message
+    assert "출력용 별칭" not in message
+    assert not list(tmp_path.iterdir())

@@ -10,6 +10,7 @@ from types import MappingProxyType
 from uuid import UUID
 
 from src.core.diff_format import fmt_cell
+from src.domain.pause_conversion import pause_conversion_from_snapshot
 from src.domain.entitlements import (
     PhysicalShipment,
     decide_entitlement,
@@ -202,6 +203,7 @@ def _prepare_delivery_data(
     school_calendar = school_lunch_calendar_from_snapshot(snapshot)
     adjustments = service_adjustment_schedule_from_snapshot(snapshot)
     status_events = status_events_from_historical_snapshot(snapshot)
+    conversion = pause_conversion_from_snapshot(snapshot)
     events_by_key: defaultdict[tuple[UUID, Meal], list[StatusEvent]] = defaultdict(list)
     for event in status_events:
         events_by_key[(event.person_id, event.meal)].append(event)
@@ -242,6 +244,7 @@ def _prepare_delivery_data(
                 person.person_id,
                 meal,
                 tuple(events_by_key[(person.person_id, meal)]),
+                same_month_pause=conversion.same_month,
             )
             histories[(person.person_id, meal)] = history
             for service_on in eligible_service_days:

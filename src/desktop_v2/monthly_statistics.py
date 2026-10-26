@@ -16,18 +16,22 @@ from .theme import application_stylesheet, register_application_fonts
 
 
 class MonthlyStatisticsDialog(QDialog):
-    def __init__(self, selected_day: date, load: Callable[[int, int], MonthlyMealStatistics], parent: QWidget | None = None):
+    def __init__(self, selected_day: date, load: Callable[[int, int], MonthlyMealStatistics], parent: QWidget | None = None, *, embedded=False):
         super().__init__(parent)
         register_application_fonts()
         self.setStyleSheet(application_stylesheet())
         self.setWindowTitle("월별 식수")
         self.resize(640, 700)
         self.setMinimumSize(500, 500)
+        if embedded:
+            self.setWindowFlags(Qt.WindowType.Widget)
+            self.setMinimumSize(0, 0)
         self._load = load
         root = QVBoxLayout(self)
         title = QLabel("월별 식수")
         title.setObjectName("workspaceTitle")
         root.addWidget(title)
+        title.setVisible(not embedded)
         scope = QLabel("실제 배송일 기준 · 전체 명단")
         scope.setObjectName("workspaceSubtitle")
         root.addWidget(scope)
@@ -57,7 +61,10 @@ class MonthlyStatisticsDialog(QDialog):
         refresh.clicked.connect(self.refresh)
         period.addWidget(refresh)
         period.addStretch(1)
-        root.addLayout(period)
+        period_host = QWidget()
+        period_host.setLayout(period)
+        root.addWidget(period_host)
+        period_host.setVisible(not embedded)
         self.year.valueChanged.connect(self.refresh)
         self.month.currentIndexChanged.connect(self.refresh)
         self.error = QLabel()
@@ -86,8 +93,10 @@ class MonthlyStatisticsDialog(QDialog):
         close.setObjectName("quietAction")
         close.clicked.connect(self.accept)
         actions.addWidget(close)
+        close.setVisible(not embedded)
         root.addLayout(actions)
-        self.refresh()
+        if not embedded:
+            self.refresh()
 
     def _shift_month(self, offset: int) -> None:
         absolute = self.year.value() * 12 + self.month.currentData() - 1 + offset

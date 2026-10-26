@@ -12,6 +12,7 @@ from src.domain.delivery_routing import DRIVER_KIND, DRIVER_ORDER_KIND, ROUTING_
 from src.domain.document_column_mappings import MAPPING_ENTITY_KIND
 from src.domain.document_templates import DOCUMENT_TEMPLATE_SETTING_KIND
 from src.domain.invoice_settings import INVOICE_SETTINGS_KIND
+from src.domain.pause_conversion import PAUSE_CONVERSION_KIND
 from src.domain.daily_report_choices import CHOICES_KIND
 from src.domain.export_security import EXPORT_PASSWORD_SETTING_KIND
 from src.domain.meal_history_cancellation import CANCELLATION_KIND, CANCELLATION_DECISION
@@ -60,6 +61,7 @@ _KIND_LABELS = {
     MAPPING_ENTITY_KIND: "출력 칼럼 연결",
     DOCUMENT_TEMPLATE_SETTING_KIND: "문서 양식",
     INVOICE_SETTINGS_KIND: "식수·청구서 설정",
+    PAUSE_CONVERSION_KIND: "일시중지 자동변환",
     CHOICES_KIND: "일일식수 식종·배송 형태 선택",
     UNIT_PRICE_SCHEDULE_KIND: "급식 단가",
     SERVICE_ADJUSTMENT_SCHEDULE_KIND: "휴무·대체식",
@@ -75,6 +77,7 @@ _OPERATION_LABELS = {
 }
 
 _FIELD_LABELS = {
+    "same_month": "같은 달 안에서 자동변환",
     "excluded_forms": "일일식수 제외 배송 형태",
     "include_next_month": "다음 달 식수 포함",
     "school_history_column": "급식 청구서 이력 칼럼",

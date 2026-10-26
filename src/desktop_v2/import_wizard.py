@@ -440,7 +440,8 @@ class RosterImportWizard(QDialog):
                 "왼쪽은 운영 데이터에 저장할 항목이고, 오른쪽은 선택한 Excel 열입니다. * 항목만 필수입니다.",
             )
         )
-        self.lunch_mode_note = QLabel("방학 중식 명단: 유효한 모든 행을 중식 배송 대상으로 처리합니다. 식종 열은 필요하지 않습니다.")
+        self.lunch_mode_note = QLabel("방학 중식 명단: 이름·핸드폰으로 기존 명단과 연결합니다. 학교·학년은 높은 값을 우선하고, 다른 변경 값은 비교·수정 후 반영합니다. 식종 열은 필요하지 않습니다.")
+        self.lunch_mode_note.setWordWrap(True)
         self.lunch_mode_note.setObjectName("sectionLabel")
         self.lunch_mode_note.setWordWrap(True)
         layout.addWidget(self.lunch_mode_note)
@@ -1734,6 +1735,7 @@ class RosterImportWizard(QDialog):
                     table_name=selected_table,
                     password=password,
                     cell_overrides=self._cell_overrides,
+                    identity_by_mobile=self.purpose_combo.currentData() == ImportPurpose.VACATION_LUNCH,
                 ),
             )
         except Exception as error:

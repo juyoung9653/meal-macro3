@@ -28,6 +28,7 @@ from src.domain.status import MealStatus, resolve_status_history
 from src.importing.application import (
     IdentityResolution,
     ReconciliationDecision,
+    apply_reconciliation,
 )
 from src.importing.revision import (
     ImportPurpose,
@@ -36,6 +37,7 @@ from src.importing.revision import (
 from src.importing.reconciliation import (
     ReconciliationDisposition,
     stage_reconciliation,
+    stage_lunch_reconciliation,
 )
 from src.importing.households import (
     StoredHouseholdMatchingRule,
@@ -53,6 +55,8 @@ from src.storage.database_session import (
 
 from .import_review import ImportReviewDialog, import_decision_rows
 from .import_wizard import RosterImportWizard
+from .lunch_value_review import LunchValueReviewDialog
+from src.importing.lunch_values import lunch_value_rows
 
 
 class GuidedImportStatus(StrEnum):
@@ -82,6 +86,7 @@ class GuidedRosterImportController:
         actor_provider: Callable[[], RevisionActor] = None,
         wizard_type=RosterImportWizard,
         review_type=ImportReviewDialog,
+        value_review_type=LunchValueReviewDialog,
         message_box=QMessageBox,
     ) -> None:
         if not isinstance(session, DatabaseSession):
@@ -90,6 +95,7 @@ class GuidedRosterImportController:
         self._actor_provider = actor_provider or current_windows_actor
         self._wizard_type = wizard_type
         self._review_type = review_type
+        self._value_review_type = value_review_type
         self._message_box = message_box
 
     @dialog_workflow
@@ -119,7 +125,7 @@ class GuidedRosterImportController:
                 return GuidedImportOutcome(GuidedImportStatus.CANCELLED)
             latest = self._session.database.latest_revision()
             assert latest is not None
-            if latest.metadata.effective_on > selection.effective_on:
+            if latest.metadata.effective_on is not None and latest.metadata.effective_on > selection.effective_on:
                 self._message_box.warning(parent, "적용일 확인 필요", "현재 명단에 적용일 이후의 변경이 있습니다. 방학 중식 적용일을 다시 선택해주세요.")
                 return GuidedImportOutcome(GuidedImportStatus.CANCELLED)
             historical = self._session.database.snapshot(latest.metadata.revision_id)
@@ -135,7 +141,8 @@ class GuidedRosterImportController:
                     tuple(event for event in lunch_events if event.person_id == person.person_id),
                 ).status_on(selection.effective_on) is MealStatus.DELIVERY
             )
-        plan = stage_reconciliation(
+        reconcile = stage_lunch_reconciliation if purpose is ImportPurpose.VACATION_LUNCH else stage_reconciliation
+        plan = reconcile(
             current_roster,
             selection.preview.observations,
             effective_on=selection.effective_on,
@@ -158,24 +165,35 @@ class GuidedRosterImportController:
             if (yield DialogRequest(review, self._session)) != QDialog.DialogCode.Accepted:
                 return GuidedImportOutcome(GuidedImportStatus.CANCELLED)
         try:
+            decisions = (
+                {
+                    staged.observation.observation_id: ReconciliationDecision(
+                        staged.observation.observation_id, IdentityResolution.CREATE_NEW, uuid4(),
+                    )
+                    for staged in plan.by_disposition(ReconciliationDisposition.NEW)
+                } if review is None else review.decisions()
+            )
+            revision_id = uuid4()
+            value_choices = None
+            if purpose is ImportPurpose.VACATION_LUNCH:
+                candidate = apply_reconciliation(
+                    current_roster, plan, new_revision_id=revision_id,
+                    decisions=decisions, custom_fields=selection.preview.custom_fields,
+                )
+                rows = lunch_value_rows(current_roster, candidate, plan)
+                if any(not row.automatic for row in rows):
+                    value_review = self._value_review_type(current_roster, candidate, plan, parent)
+                    if (yield DialogRequest(value_review, self._session)) != QDialog.DialogCode.Accepted:
+                        return GuidedImportOutcome(GuidedImportStatus.CANCELLED)
+                    value_choices = value_review.choices()
             prepared = build_import_revision(
                 current_roster,
                 selection.preview,
                 plan,
-                decisions=(
-                    {
-                        staged.observation.observation_id: ReconciliationDecision(
-                            staged.observation.observation_id,
-                            IdentityResolution.CREATE_NEW,
-                            uuid4(),
-                        )
-                        for staged in plan.by_disposition(ReconciliationDisposition.NEW)
-                    }
-                    if review is None else review.decisions()
-                ),
+                decisions=decisions,
                 actor=self._actor_provider(),
                 recorded_at=datetime.now(UTC),
-                revision_id=uuid4(),
+                revision_id=revision_id,
                 batch_id=uuid4(),
                 existing_profile=selection.existing_profile,
                 household_plan=household_plan,
@@ -187,6 +205,7 @@ class GuidedRosterImportController:
                 existing_household_rule=(None if purpose is ImportPurpose.VACATION_LUNCH else selection.existing_household_rule),
                 purpose=purpose,
                 lunch_status_events=lunch_events,
+                lunch_value_choices=value_choices,
             )
             backup_result = save_revision(self._session, prepared.record, parent=parent)
         except Exception as error:

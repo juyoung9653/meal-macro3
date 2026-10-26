@@ -62,7 +62,7 @@ class DocumentColumnMappingDialog(QDialog):
         self._indicators: dict[str, QLabel] = {}
         self._switching = False
         register_application_fonts()
-        self.setWindowTitle("출력 칼럼 연결")
+        self.setWindowTitle("청구서·확인서 항목 설정")
         self.setObjectName("documentColumnMappingDialog")
         self.setModal(True)
         self.resize(900, 650)
@@ -116,7 +116,7 @@ class DocumentColumnMappingDialog(QDialog):
         header_layout.setContentsMargins(18, 14, 18, 15)
         eyebrow = QLabel("문서 출력 · 공통 설정")
         eyebrow.setObjectName("editEyebrow")
-        title = QLabel("출력 칼럼 연결")
+        title = QLabel("청구서·확인서 항목 설정")
         title.setObjectName("workspaceTitle")
         explanation = QLabel(
             "각 대상자의 1순위 값이 비어 있으면 2순위 값을 사용합니다. 둘 다 비어 있으면 빈칸으로 출력합니다. 저장 후 새로 만드는 문서에 적용됩니다."
@@ -146,7 +146,7 @@ class DocumentColumnMappingDialog(QDialog):
         root.addLayout(selectors)
 
         headings = QHBoxLayout()
-        for index, text in enumerate(("템플릿 칼럼", "1순위", "2순위 · 1순위가 비면")):
+        for index, text in enumerate(("출력 칼럼", "1순위", "2순위 · 1순위가 비면")):
             label = QLabel(text)
             label.setObjectName("editEyebrow")
             headings.addWidget(label, 1 if index == 0 else 2)
@@ -158,6 +158,7 @@ class DocumentColumnMappingDialog(QDialog):
         root.addWidget(self._scroll, 1)
 
         note = QLabel("식수·청구금액·연번 등 계산 칼럼은 자동으로 채워지며 수정할 수 없습니다.")
+        self._scope_note = note
         note.setObjectName("settingsHubNote")
         note.setWordWrap(True)
         root.addWidget(note)
@@ -206,6 +207,12 @@ class DocumentColumnMappingDialog(QDialog):
         self._combos = {}
         self._fallback_combos = {}
         self._indicators = {}
+        self.setMinimumHeight(450)
+        self._reset_button.setText("이 문서 초기화")
+        self._scope_note.setText(
+            "주소는 연결한 값만 출력합니다. 상세주소는 자동으로 합치지 않으며 DB 가구 묶음은 유지합니다."
+            if self.document_kind == "confirmation" else
+            "식수·청구금액·연번 등 계산 칼럼은 자동으로 채워지며 수정할 수 없습니다.")
         container = QWidget()
         grid = QGridLayout(container)
         grid.setContentsMargins(2, 2, 4, 2)
@@ -234,7 +241,7 @@ class DocumentColumnMappingDialog(QDialog):
             field.setMinimumWidth(140)
             field.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
             field.setMinimumContentsLength(8)
-            field.setAccessibleName(f"{target} 1순위")
+            field.setAccessibleName(f"{spec.target_labels[target]} 1순위")
             field.addItem("비움", "")
             selectable = spec.source_options if spec.selectable_source_options is None else spec.selectable_source_options
             for source in selectable:
@@ -250,7 +257,7 @@ class DocumentColumnMappingDialog(QDialog):
             secondary.setMinimumWidth(140)
             secondary.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
             secondary.setMinimumContentsLength(8)
-            secondary.setAccessibleName(f"{target} 2순위")
+            secondary.setAccessibleName(f"{spec.target_labels[target]} 2순위")
             secondary.addItem("사용 안 함", "")
             for source in selectable:
                 if source:
@@ -259,11 +266,13 @@ class DocumentColumnMappingDialog(QDialog):
             secondary.currentIndexChanged.connect(self._refresh_indicators)
             self._fallback_combos[target] = secondary
             grid.addWidget(secondary, row, 2, alignment=Qt.AlignmentFlag.AlignTop)
-            right = QVBoxLayout()
+            right_widget = QWidget()
+            right = QVBoxLayout(right_widget)
+            right.setContentsMargins(0, 0, 0, 0)
             right.setSpacing(2)
             right.addWidget(field, 1)
             right.addWidget(indicator)
-            grid.addLayout(right, row, 1)
+            grid.addWidget(right_widget, row, 1)
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(1, 2)
         grid.setColumnStretch(2, 2)
@@ -274,9 +283,11 @@ class DocumentColumnMappingDialog(QDialog):
     def _refresh_indicators(self, _index: int = 0) -> None:
         defaults = self._specs[self._scope].defaults
         for target, combo in self._combos.items():
-            self._indicators[target].setText(
-                "별도 연결" if combo.currentData() != defaults.get(target, "") or self._fallback_combos[target].currentData() else "기본 연결"
-            )
+            state = "별도 연결" if combo.currentData() != defaults.get(target, "") or self._fallback_combos[target].currentData() else "기본 연결"
+            self._indicators[target].setText(state)
+            combo.setToolTip(f"{combo.currentText()} · {state}")
+            secondary = self._fallback_combos[target]
+            secondary.setToolTip(secondary.currentText())
 
     def _reset_scope(self) -> None:
         defaults = self._specs[self._scope].defaults

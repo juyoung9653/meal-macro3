@@ -20,6 +20,7 @@ class ReconciliationDisposition(StrEnum):
 
 
 class ReviewReason(StrEnum):
+    MISSING_MOBILE_PHONE = "missing_mobile_phone"
     MISSING_BIRTH_DATE = "missing_birth_date"
     DUPLICATE_SOURCE_IDENTITY = "duplicate_source_identity"
     DUPLICATE_ROSTER_IDENTITY = "duplicate_roster_identity"
@@ -194,6 +195,65 @@ def stage_reconciliation(
         effective_on,
         staged,
     )
+
+
+def stage_lunch_reconciliation(
+    roster: RosterSnapshot | None,
+    observations: tuple[PersonObservation, ...],
+    *,
+    effective_on: date,
+) -> ReconciliationPlan:
+    """Vacation lunch identities use name and the primary mobile number only."""
+    if roster is not None and not isinstance(roster, RosterSnapshot):
+        raise TypeError("roster는 RosterSnapshot 또는 None이어야 합니다.")
+    _validate_date(effective_on, "적용일")
+    observations = tuple(observations)
+    if any(not isinstance(item, PersonObservation) for item in observations):
+        raise TypeError("observations에는 PersonObservation만 허용됩니다.")
+    if len({item.observation_id for item in observations}) != len(observations):
+        raise ValueError("observation ID가 중복되었습니다.")
+    by_identity = defaultdict(list)
+    by_name = defaultdict(list)
+    source_counts = defaultdict(int)
+    for person in (() if roster is None else roster.persons):
+        name = _name_key(person.profile.name)
+        by_name[name].append(person)
+        phone = normalize_phone(person.profile.mobile_phone)
+        if phone:
+            by_identity[name, phone].append(person)
+    for observation in observations:
+        source_counts[_name_key(observation.name), normalize_phone(
+            observation.profile_values.get(ProfileField.MOBILE_PHONE)
+        )] += 1
+    staged = []
+    for observation in observations:
+        name = _name_key(observation.name)
+        phone = normalize_phone(observation.profile_values.get(ProfileField.MOBILE_PHONE))
+        exact = by_identity.get((name, phone), ()) if phone else ()
+        reasons = []
+        if not phone:
+            reasons.append(ReviewReason.MISSING_MOBILE_PHONE)
+        if source_counts[name, phone] > 1:
+            reasons.append(ReviewReason.DUPLICATE_SOURCE_IDENTITY)
+        if len(exact) > 1:
+            reasons.append(ReviewReason.DUPLICATE_ROSTER_IDENTITY)
+        if len(exact) == 1 and not reasons:
+            person = exact[0]
+            staged.append(StagedPerson(
+                observation, ReconciliationDisposition.MATCHED, person.person_id,
+                (), (), _profile_differences(person, observation), (), (), (),
+            ))
+            continue
+        candidates = exact or by_name.get(name, ())
+        if candidates and not exact:
+            reasons.append(ReviewReason.NAME_COLLISION)
+        staged.append(StagedPerson(
+            observation,
+            ReconciliationDisposition.REVIEW if reasons else ReconciliationDisposition.NEW,
+            None, tuple(sorted((p.person_id for p in candidates), key=str)),
+            tuple(reasons), (), tuple(observation.meals), (), (),
+        ))
+    return ReconciliationPlan(None if roster is None else roster.revision_id, effective_on, tuple(staged))
 
 
 def _stage_person(

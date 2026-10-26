@@ -142,6 +142,18 @@ class RosterColumnLayout(QObject):
         self.save()
         return self._read_layout() or self._default_layout()
 
+    def visible_keys_for_layout(self, settings_key: str, *, hide_new_custom_columns=False) -> set[str]:
+        """Inspect another sheet without switching tabs or changing its layout."""
+        layout, _ = self._read_layout_at(settings_key)
+        layout = layout or self._default_layout()
+        hidden = set(layout["hidden"]) - self._mandatory_keys
+        if "detail_address" not in layout["order"] and "address" in hidden:
+            hidden.add("detail_address")
+        if hide_new_custom_columns:
+            hidden.update(key for key in self._keys()
+                          if key.startswith("custom:") and key not in layout["order"])
+        return set(self._keys()) - hidden
+
     def set_hide_new_custom_columns(self, hidden: bool) -> None:
         self._hide_new_custom_columns = hidden
 

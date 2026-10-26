@@ -1441,6 +1441,7 @@ class RosterWindow(QMainWindow):
     column_input_rule_requested = Signal(str)
     monthly_statistics_requested = Signal()
     monthly_meal_history_requested = Signal()
+    monthly_overview_requested = Signal()
 
     def __init__(
         self,
@@ -1910,6 +1911,7 @@ class RosterWindow(QMainWindow):
         self._special_only_filter.toggled.connect(self._on_special_only_changed)
         self._special_only_filter.toggled.connect(self._special_only_action.setChecked)
         self._special_only_action.toggled.connect(self._special_only_filter.setChecked)
+        filters.addWidget(self._special_only_filter)
         self._add_person_button = QPushButton("행 추가")
         self._add_person_button.setObjectName("quietAction")
         self._add_person_button.setToolTip("현재 식종에 가입한 대상자를 명단에 추가합니다")
@@ -2141,22 +2143,65 @@ class RosterWindow(QMainWindow):
                  "생성 Excel 비밀번호와 문서 저장 폴더를 관리합니다"),
             )),
         )
-        for label, entries in groups:
-            submenu = menu.addMenu(label)
-            self._more_submenus.append(submenu)
-            self._more_group_actions.append(submenu.menuAction())
+        # Keep existing action callbacks while exposing only consolidated jobs.
+        for _label, entries in groups:
             for attribute, text, callback, tooltip in entries:
-                action = submenu.addAction(text)
+                action = QAction(text, self)
                 action.setToolTip(tooltip)
                 if attribute == "_special_only_action":
                     action.setCheckable(True)
                 action.triggered.connect(callback)
                 setattr(self, attribute, action)
-            if label == "명단 관리":
-                self._archive_action = submenu.addAction("장기 미배송 보관함")
-                self._archive_action.setCheckable(True)
-                self._archive_action.toggled.connect(lambda _checked: self._refresh_archive())
+        self._export_action = QAction("Excel 내보내기", self)
+        self._export_action.triggered.connect(lambda: launch(self._show_export_choices))
+        self._monthly_overview_action = QAction("월별 조회", self)
+        self._monthly_overview_action.triggered.connect(self.monthly_overview_requested.emit)
+        self._operating_schedule_action = QAction("운영 일정", self)
+        self._operating_schedule_action.triggered.connect(lambda: launch(self._show_operating_schedule))
+        self._columns_action.setText("칼럼 관리")
+        self._columns_action.triggered.disconnect()
+        self._columns_action.triggered.connect(lambda: launch(self._show_column_manager))
+        self._archive_action = QAction("장기 미배송 보관함", self)
+        self._archive_action.setCheckable(True)
+        self._archive_action.toggled.connect(lambda _checked: self._refresh_archive())
+        compact_groups = (
+            ("명단·파일", (self._import_action, self._export_action, self._archive_action)),
+            ("기사·배송", (self._drivers_action, self._driver_households_action)),
+            ("조회·기록", (self._monthly_overview_action, self._revision_history_action, self._complaint_history_action)),
+            ("운영·설정", (self._operating_schedule_action, self._unit_price_action, self._columns_action, self._settings_action)),
+        )
+        for label, actions in compact_groups:
+            submenu = menu.addMenu(label)
+            self._more_submenus.append(submenu)
+            self._more_group_actions.append(submenu.menuAction())
+            for action in actions:
+                submenu.addAction(action)
         return menu
+
+    @dialog_workflow
+    def _show_export_choices(self):
+        from .workspace_tools import ExportChoiceDialog
+        dialog = ExportChoiceDialog(self)
+        if (yield DialogRequest(dialog)) == QDialog.DialogCode.Accepted:
+            if dialog.choice == "sheet":
+                self._request_current_sheet_export()
+            elif dialog.choice == "database":
+                self.database_export_requested.emit()
+
+    @dialog_workflow
+    def _show_operating_schedule(self):
+        from .workspace_tools import OperatingScheduleDialog
+        dialog = OperatingScheduleDialog(self)
+        if (yield DialogRequest(dialog)) == QDialog.DialogCode.Accepted:
+            if dialog.choice == "school":
+                self.school_calendar_requested.emit()
+            elif dialog.choice == "service":
+                self.service_adjustment_requested.emit()
+
+    @dialog_workflow
+    def _show_column_manager(self):
+        from .workspace_tools import ColumnManagerDialog
+        yield DialogRequest(ColumnManagerDialog(self))
 
     def driver_household_rows(self, *, include_hidden: bool = False, service_day: date | None = None):
         from src.services.driver_households import build_driver_household_rows
@@ -2481,6 +2526,16 @@ class RosterWindow(QMainWindow):
 
     def _sheet_layout_key(self, sheet_id: str) -> str:
         return f"{self._sheet_settings_key}/layout/{sheet_id}"
+
+    def columns_visible_in_any_sheet(self) -> set[str]:
+        self._column_layout.save()
+        visible = set()
+        for sheet_id, _ in self._sheets:
+            visible.update(self._column_layout.visible_keys_for_layout(
+                self._sheet_layout_key(sheet_id),
+                hide_new_custom_columns=sheet_id != self._default_sheet_id(),
+            ))
+        return visible
 
     def _sheet_index(self, sheet_id: str) -> int:
         return next(index for index, item in enumerate(self._sheets) if item[0] == sheet_id)

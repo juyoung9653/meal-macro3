@@ -276,13 +276,13 @@ def test_options_dialog_defaults_reorder_cancel_and_empty_columns(app, session):
     assert dialog.options().columns == data.default_columns
     assert dialog.options().orientation == "portrait"
     assert [dialog.orientation.itemData(i) for i in range(dialog.orientation.count())] == ["portrait", "landscape"]
-    dialog.columns.setCurrentRow(0)
+    dialog.columns.setCurrentItem(dialog.columns.topLevelItem(0))
     dialog._move(1)
     assert dialog.options().columns[1] == "sequence"
     dialog.orientation.setCurrentIndex(1)
     assert dialog.selection().substitute_options.orientation == "landscape"
-    for index in range(dialog.columns.count()):
-        dialog.columns.item(index).setCheckState(Qt.CheckState.Unchecked)
+    for index in range(dialog.columns.topLevelItemCount()):
+        dialog.columns.topLevelItem(index).setCheckState(0, Qt.CheckState.Unchecked)
     assert not dialog.accept_button.isEnabled()
     assert "칼럼" in dialog.error.text()
     dialog.reject()
@@ -333,15 +333,22 @@ def test_long_name_preserves_one_row_per_person_without_merging_names():
 
 
 @pytest.mark.parametrize("mode", ["accept", "cancel", "no_data"])
-def test_actual_document_menu_prepares_in_worker_and_preserves_options(app, session, tmp_path, mode):
+def test_actual_document_menu_prepares_in_worker_and_preserves_options(app, session, tmp_path, mode, monkeypatch):
     from types import SimpleNamespace
     from src.desktop_v2.application import DesktopStartupController
     gui = get_ident()
     observed = []
     emitted = []
+    visibility_calls = []
+    from src.desktop_v2 import substitute_preferences
+    from PySide6.QtCore import QSettings
+    local = QSettings(str(tmp_path / "visibility.ini"), QSettings.Format.IniFormat)
+    original_preferences = substitute_preferences.preferences
+    monkeypatch.setattr(substitute_preferences, "preferences", lambda scope: original_preferences(scope, local))
     actual_day = date(2026, 8, 29) if mode == "no_data" else DAY
     window = SimpleNamespace(table_model=SimpleNamespace(service_day=actual_day, meal=Meal.BREAKFAST),
-                             document_output_selected=SimpleNamespace(emit=emitted.append))
+                             document_output_selected=SimpleNamespace(emit=emitted.append),
+                             columns_visible_in_any_sheet=lambda: {"name", "address"})
     class Hub:
         selected_action = DocumentAction.DELIVERY_SUBSTITUTE
         def __init__(self, **kwargs): pass
@@ -364,6 +371,8 @@ def test_actual_document_menu_prepares_in_worker_and_preserves_options(app, sess
             assert get_ident() == gui
             observed.append("options")
             self.document, self.data = document, data
+        def set_visible_columns(self, keys):
+            visibility_calls.append(keys)
         def exec(self): return QDialog.DialogCode.Rejected if mode == "cancel" else QDialog.DialogCode.Accepted
         def selection(self): return replace(self.document, substitute_options=replace(options(self.data), orientation="landscape"))
     class Output:
@@ -382,6 +391,7 @@ def test_actual_document_menu_prepares_in_worker_and_preserves_options(app, sess
         export_password_controller_type=Password, message_box=messages)
     controller._run_document_hub(session, window)
     assert not messages.errors
+    assert visibility_calls == ([] if mode == "no_data" else [{"name", "road_address"}])
     assert session.database.document_runs() == ()
     if mode == "accept":
         assert len(emitted) == 1
@@ -404,7 +414,7 @@ def test_options_preferences_are_database_scoped_accept_only_and_tolerate_remove
         dialog.set_preferences_scope(scope, settings=settings)
         return dialog
     first = make()
-    first.columns.setCurrentRow(0)
+    first.columns.setCurrentItem(first.columns.topLevelItem(0))
     first._move(1)
     first.orientation.setCurrentIndex(1)
     first.split.setCurrentIndex(1)

@@ -32,6 +32,7 @@ from src.generators.invoice_generator import make_invoice_publication
 from src.generators.report_generator import make_report_publication
 from src.generators.substitute_generator import make_substitute_publication, SUBSTITUTE_RENDER_CONTRACT_VERSION
 from src.services.sqlite_delivery_substitute_service import prepare_delivery_substitute_data
+from src.domain.delivery_substitute import SubstituteColumn
 from src.domain.invoice_settings import invoice_settings_from_snapshot
 from .ledger_reader import load_revision_chain
 from src.services.sqlite_delivery_report_service import (
@@ -240,7 +241,13 @@ class DocumentGenerationController:
             if action is DocumentAction.DELIVERY_SUBSTITUTE:
                 if selection.document.substitute_options is None:
                     raise ValueError("배송대타 담당자와 출력 설정을 선택해주세요.")
-                prepared = prepare_delivery_substitute_data(source_snapshot, period.starts_on, selection.document.meals[0])
+                options = selection.document.substitute_options
+                prepared = prepare_delivery_substitute_data(
+                    source_snapshot, period.starts_on, selection.document.meals[0],
+                    mapping_snapshot=current_snapshot,
+                    columns=tuple(SubstituteColumn(key, label) for key, label in options.column_labels.items()) or None,
+                    fallbacks=None if options.fallbacks is None else dict(options.fallbacks),
+                )
                 prepared.selected_rows(selection.document.substitute_options)
             elif action is DocumentAction.DELIVERY_REPORT:
                 prepared = prepare_delivery_report_data(
@@ -357,9 +364,11 @@ class DocumentGenerationController:
                 kind = DocumentKind.CONFIRMATION
                 writer_name = "confirm_generator.make_confirm_publication"
             elif action is DocumentAction.DELIVERY_SUBSTITUTE:
-                column_mapping = {}
-                column_fallbacks = {}
-                mapping_setting = None
+                applied = prepared.calculation_manifest["column_mapping"]
+                column_mapping = applied["mapping"]
+                column_fallbacks = applied["fallbacks"]
+                mapping_setting = (mapping_setting_from_snapshot(current_snapshot, applied["profile"], "substitute")
+                                   if selection.document.substitute_options.fallbacks is None else None)
                 publication = self._substitute_writer(
                     prepared, selection.document.substitute_options, refreshed.output_path,
                     output_password=password_setting.password, overwrite=False,
@@ -414,6 +423,7 @@ class DocumentGenerationController:
                 template_manifest[
                     "template_setting"
                 ] = template_setting.public_manifest()
+            if template_setting is not None or action is DocumentAction.DELIVERY_SUBSTITUTE:
                 template_manifest["column_mapping_setting"] = (
                     mapping_setting.public_manifest() if mapping_setting is not None else None
                 )

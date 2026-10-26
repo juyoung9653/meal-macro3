@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from types import MappingProxyType
 from uuid import UUID
@@ -17,6 +17,22 @@ class SubstituteColumn:
     label: str
 
 
+STANDARD_COLUMNS = (
+    SubstituteColumn("sequence", "배송순서"),
+    SubstituteColumn("jurisdiction", "관할동"),
+    SubstituteColumn("name", "성명"),
+    SubstituteColumn("detail_address", "상세주소"),
+    SubstituteColumn("road_address", "도로명주소"),
+    SubstituteColumn("mobile_phone", "핸드폰"),
+    SubstituteColumn("note", "비고"),
+    SubstituteColumn("telephone", "전화번호"),
+    SubstituteColumn("school_name", "학교명"),
+    SubstituteColumn("grade", "학년"),
+    SubstituteColumn("birth_date", "생년월일"),
+    SubstituteColumn("form", "배송 형태"),
+)
+
+
 @dataclass(frozen=True, slots=True)
 class SubstituteOptions:
     driver_key: str
@@ -24,6 +40,8 @@ class SubstituteOptions:
     orientation: str = "portrait"
     split: str = "groups"
     groups_per_page: int = 18
+    fallbacks: Mapping[str, str] | None = None
+    column_labels: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self):
         if not isinstance(self.driver_key, str) or not self.driver_key:
@@ -40,11 +58,24 @@ class SubstituteOptions:
         if type(self.groups_per_page) is not int or not 1 <= self.groups_per_page <= 100:
             raise ValueError("페이지당 가구 수는 1~100이어야 합니다.")
         object.__setattr__(self, "columns", columns)
+        for mapping in (self.fallbacks, self.column_labels):
+            if mapping is not None and (
+                not isinstance(mapping, Mapping)
+                or any(not isinstance(key, str) or not isinstance(value, str) for key, value in mapping.items())
+            ):
+                raise ValueError("배송대타 칼럼 설정이 올바르지 않습니다.")
+        if self.fallbacks is not None:
+            if any(key == value for key, value in self.fallbacks.items()):
+                raise ValueError("대체 칼럼은 다른 칼럼을 선택해주세요.")
+            object.__setattr__(self, "fallbacks", MappingProxyType(dict(self.fallbacks)))
+        object.__setattr__(self, "column_labels", MappingProxyType(dict(self.column_labels)))
 
     def manifest(self):
         return {"driver_key": self.driver_key, "columns": self.columns,
                 "orientation": self.orientation, "split": self.split,
-                "groups_per_page": self.groups_per_page}
+                "groups_per_page": self.groups_per_page,
+                **({"fallbacks": dict(self.fallbacks), "column_labels": dict(self.column_labels)}
+                   if self.fallbacks is not None else {})}
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +87,8 @@ class SubstituteRow:
     values: Mapping[str, str]
     entitlement_count: int
     box: bool = False
+    grouping_phone: str | None = None
+    grouping_jurisdiction: str | None = None
 
     def __post_init__(self):
         if self.entitlement_count < 1:

@@ -296,6 +296,14 @@ def _roster_entry(
     *,
     delivery_view: PersonDeliveryView | None = None,
 ) -> RosterEntry:
+    return RosterEntry(position, roster_mapping_values(person, roster, provider, delivery_view=delivery_view))
+
+
+def roster_mapping_values(
+    person: Person, roster: RosterSnapshot, provider: str = "", *,
+    delivery_view: PersonDeliveryView | None = None,
+) -> dict[str, object]:
+    """Raw mapping sources shared by invoices, confirmations and substitute sheets."""
     profile = person.profile
     birth_date = profile.birth_date
     extra: dict[str, object] = {
@@ -346,7 +354,7 @@ def _roster_entry(
         })
     # A legacy custom field must not override the database-wide provider.
     extra["제공기관"] = provider
-    return RosterEntry(position, extra)
+    return extra
 
 
 def _weekly_deliveries(

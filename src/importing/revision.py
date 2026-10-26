@@ -67,6 +67,7 @@ def build_import_revision(
     existing_household_rule: StoredHouseholdMatchingRule | None = None,
     purpose: ImportPurpose = ImportPurpose.DATABASE,
     lunch_status_events: tuple[StatusEvent, ...] = (),
+    lunch_value_choices: Mapping | None = None,
 ) -> PreparedImportRevision:
     """Apply reviewed identities, households, and rules in the same commit."""
 
@@ -124,7 +125,7 @@ def build_import_revision(
         assert current_roster is not None
         result, lunch_events = _apply_vacation_lunch(
             current_roster, result, preview, plan, revision_id,
-            recorded_at, tuple(lunch_status_events),
+            recorded_at, tuple(lunch_status_events), lunch_value_choices,
         )
     if current_roster is None and not result.snapshot.persons:
         raise ValueError("최초 명단에서는 한 명 이상을 추가해야 합니다.")
@@ -270,6 +271,7 @@ def _apply_vacation_lunch(
     revision_id: UUID,
     recorded_at: datetime,
     historical_events: tuple[StatusEvent, ...],
+    value_choices: Mapping | None = None,
 ) -> tuple[ReconciliationResult, tuple[StatusEvent, ...]]:
     if result.ignored_observation_ids:
         raise ValueError("방학 중식 명단에서는 행 제외를 허용하지 않습니다.")
@@ -299,10 +301,9 @@ def _apply_vacation_lunch(
         )).status_on(plan.effective_on) is MealStatus.DELIVERY
     }
     stopped_ids = delivering_ids - present_ids
-    persons = tuple(sorted((
-        *current.persons,
-        *(person for person in result.snapshot.persons if person.person_id not in existing_ids),
-    ), key=lambda person: str(person.person_id)))
+    from .lunch_values import apply_lunch_values
+    persons, reviewed_assignments = apply_lunch_values(current, result, plan, value_choices)
+    persons = tuple(sorted(persons, key=lambda person: str(person.person_id)))
     enrollments = list(current.enrollments)
     for person_id in sorted(present_ids, key=str):
         matching = [item for item in enrollments if item.person_id == person_id and item.meal is Meal.LUNCH]
@@ -325,9 +326,10 @@ def _apply_vacation_lunch(
     new_household_ids = {person_id: uuid4() for person_id in new_person_ids}
     needed_custom_ids = {
         definition_id
-        for person in persons if person.person_id in new_person_ids
+        for person in persons
         for definition_id in person.profile.custom_values
     }
+    needed_custom_ids.update(definition.definition_id for definition in preview.custom_fields)
     existing_custom_ids = {definition.definition_id for definition in current.custom_fields}
     custom_fields = (
         *current.custom_fields,
@@ -340,7 +342,7 @@ def _apply_vacation_lunch(
         (*current.memberships, *(HouseholdMembership(person_id, household_id, InclusiveDateRange(plan.effective_on))
                                  for person_id, household_id in new_household_ids.items())),
         tuple(sorted(enrollments, key=lambda item: (str(item.person_id), item.meal.value, item.period.starts_on or date.min))),
-        (*current.assignments, *(
+        (*reviewed_assignments, *(
             DeliveryAssignment(person_id, Meal.LUNCH, assignment.driver, assignment.sequence)
             for person_id in sorted(present_ids - existing_ids, key=str)
             for assignment in (result.snapshot.resolve_assignment(person_id, Meal.LUNCH),)

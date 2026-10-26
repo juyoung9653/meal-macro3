@@ -1,4 +1,4 @@
-"""Vacation lunch imports update lunch status without rewriting existing profiles."""
+"""Vacation lunch imports preserve other meals and require reviewed value changes."""
 
 from datetime import UTC, date, datetime
 from uuid import UUID
@@ -62,7 +62,7 @@ def _preview(*names: str) -> WorkbookImportPreview:
     observations = tuple(
         PersonObservation(
             UUID(int=200 + index), SourceReference("synthetic.xlsx", "명단", (index + 2,)),
-            {ProfileField.NAME: name, ProfileField.BIRTH_DATE: date(2015, 1, {"유지": 1, "제외": 2, "재개": 3, "신규": 4}[name]), ProfileField.SCHOOL_NAME: "새 학교"},
+            {ProfileField.NAME: name, ProfileField.BIRTH_DATE: date(2015, 1, {"유지": 1, "제외": 2, "재개": 3, "신규": 4}[name]), ProfileField.SCHOOL_NAME: "기존 학교", ProfileField.MOBILE_PHONE: "01000000001"},
             (Meal.LUNCH,),
         )
         for index, name in enumerate(names)
@@ -75,7 +75,7 @@ def _preview(*names: str) -> WorkbookImportPreview:
 
 def _roster() -> RosterSnapshot:
     persons = tuple(
-        Person(person_id, PersonProfile(name, birth_date=date(2015, 1, index + 1), school_name="기존 학교"))
+        Person(person_id, PersonProfile(name, birth_date=date(2015, 1, index + 1), school_name="기존 학교", mobile_phone="01000000001"))
         for index, (person_id, name) in enumerate(((KEEP, "유지"), (OMIT, "제외"), (RESTORE, "재개")))
     )
     return RosterSnapshot(
@@ -261,8 +261,8 @@ def test_consecutive_lunch_imports_persist_stop_and_restart_history(tmp_path):
         events = status_events_from_historical_snapshot(historical, person_id=OMIT, meal=Meal.LUNCH)
         history = resolve_status_history(OMIT, Meal.LUNCH, events)
         assert history.status_on(date(2026, 7, 31)) is MealStatus.DELIVERY
-        assert history.status_on(date(2026, 8, 1)) is MealStatus.PAUSED
-        assert history.status_on(date(2026, 8, 31)) is MealStatus.PAUSED
+        assert history.status_on(date(2026, 8, 1)) is MealStatus.STOPPED
+        assert history.status_on(date(2026, 8, 31)) is MealStatus.STOPPED
         assert history.status_on(date(2026, 9, 1)) is MealStatus.DELIVERY
         assert len(events) == 2
 

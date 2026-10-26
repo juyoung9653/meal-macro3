@@ -2,18 +2,18 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from hashlib import sha256
 import json
 
-from PySide6.QtCore import Qt, QSettings
+from PySide6.QtCore import Qt, QSize
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout,
-    QLabel, QListWidget, QListWidgetItem, QPushButton, QSpinBox, QVBoxLayout, QWidget,
+    QLabel, QTreeWidget, QTreeWidgetItem, QHeaderView, QPushButton, QSpinBox, QVBoxLayout, QWidget,
 )
 
 from src.domain.delivery_substitute import PreparedSubstituteData, SubstituteOptions
 from .document_meal import DocumentMealSelection
 from .theme import application_stylesheet, register_application_fonts
+from .substitute_preferences import preferences
 
 
 class DeliverySubstituteDialog(QDialog):
@@ -25,6 +25,9 @@ class DeliverySubstituteDialog(QDialog):
         self._document, self._data = document, data
         self._preferences = None
         self._preferences_key = None
+        self._visible_keys = {column.key for column in data.columns}
+        self._fallback_combos = {}
+        self._saved_preferences = {}
         self.setWindowTitle("배송대타 · 담당과 출력 설정")
         self.setMinimumSize(620, 560)
         self.resize(740, 640)
@@ -66,19 +69,18 @@ class DeliverySubstituteDialog(QDialog):
         paper.addWidget(self.group_limit)
         form.addRow("용지 · 페이지", paper)
         layout.addLayout(form)
-        label = QLabel("출력 칼럼 · 선택한 칼럼을 목록 순서대로 출력")
+        label = QLabel("배송대타에 넣을 항목 · 체크한 칼럼을 목록 순서대로 출력")
         layout.addWidget(label)
         columns_layout = QHBoxLayout()
-        self.columns = QListWidget()
+        self.columns = QTreeWidget()
         self.columns.setObjectName("substituteColumns")
-        by_key = {column.key: column for column in data.columns}
+        self.columns.setRootIsDecorated(False)
+        self.columns.setColumnCount(2)
+        self.columns.setHeaderLabels(["출력할 칼럼", "값이 비어 있으면"])
+        self.columns.header().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.columns.setTextElideMode(Qt.TextElideMode.ElideNone)
         order = (*data.default_columns, *(column.key for column in data.columns if column.key not in data.default_columns))
-        for key in order:
-            item = QListWidgetItem(by_key[key].label)
-            item.setData(Qt.ItemDataRole.UserRole, key)
-            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            item.setCheckState(Qt.CheckState.Checked if key in data.default_columns else Qt.CheckState.Unchecked)
-            self.columns.addItem(item)
+        self._rebuild_columns(order, set(data.default_columns), {})
         columns_layout.addWidget(self.columns, 1)
         moves = QVBoxLayout()
         for label, direction in (("위로 ↑", -1), ("아래로 ↓", 1)):
@@ -89,7 +91,12 @@ class DeliverySubstituteDialog(QDialog):
         moves.addStretch()
         columns_layout.addLayout(moves)
         layout.addLayout(columns_layout, 1)
-        hint = QLabel("가구는 페이지 중간에서 나누지 않습니다. 긴 내용은 자동으로 줄바꿈합니다.\n관할동·연락처를 출력하지 않아도 가구 집계와 BOX 표시는 유지됩니다.")
+        self.visibility_note = QLabel()
+        self.visibility_note.setWordWrap(True)
+        layout.addWidget(self.visibility_note)
+        hint = QLabel("칼럼 이름을 문서 제목으로 사용하고, 값이 없을 때만 오른쪽 칼럼에서 가져옵니다.\n"
+                      "출력 선택·순서·대체 칼럼은 이 PC의 운영 파일별로 기억합니다.\n"
+                      "가구 집계와 BOX 표시는 원래 명단을 기준으로 유지됩니다.")
         hint.setWordWrap(True)
         layout.addWidget(hint)
         self.error = QLabel()
@@ -115,8 +122,7 @@ class DeliverySubstituteDialog(QDialog):
         Only field keys and print choices are stored; drivers and source values
         are deliberately absent. Injected dialogs need not implement this hook.
         """
-        self._preferences = settings if settings is not None else QSettings("분당구", "급식 배송 운영 SQLite v2")
-        self._preferences_key = "documents/substitute_v1/" + sha256(database_id.encode("utf-8")).hexdigest()
+        self._preferences, self._preferences_key = preferences(database_id, settings)
         raw = self._preferences.value(self._preferences_key)
         if not isinstance(raw, str):
             return
@@ -124,28 +130,23 @@ class DeliverySubstituteDialog(QDialog):
             saved = json.loads(raw)
             if not isinstance(saved, dict):
                 return
+            self._saved_preferences = saved
             order, selected = saved.get("order"), saved.get("columns")
             if not isinstance(order, list) or not isinstance(selected, list):
                 return
             if any(not isinstance(key, str) for key in (*order, *selected)):
                 return
-            items = {self.columns.item(index).data(Qt.ItemDataRole.UserRole): self.columns.item(index)
-                     for index in range(self.columns.count())}
-            order = list(dict.fromkeys(key for key in order if key in items))
-            order.extend(key for key in items if key not in order)
-            checked = set(selected) & items.keys()
+            keys = self._column_keys()
+            order = list(dict.fromkeys(key for key in order if key in keys))
+            order.extend(key for key in keys if key not in order)
+            checked = set(selected) & set(keys)
             if not checked:
                 checked = set(self._data.default_columns)
-            self.columns.blockSignals(True)
-            try:
-                retained = {self.columns.item(index).data(Qt.ItemDataRole.UserRole): self.columns.takeItem(index)
-                            for index in reversed(range(self.columns.count()))}
-                for key in order:
-                    item = retained[key]
-                    item.setCheckState(Qt.CheckState.Checked if key in checked else Qt.CheckState.Unchecked)
-                    self.columns.addItem(item)
-            finally:
-                self.columns.blockSignals(False)
+            by_meal = saved.get("fallbacks_by_meal", {})
+            fallbacks = by_meal.get(self._data.meal.value, {}) if isinstance(by_meal, dict) else {}
+            if not isinstance(fallbacks, dict) or any(not isinstance(key, str) or not isinstance(value, str) for key, value in fallbacks.items()):
+                fallbacks = {}
+            self._rebuild_columns(order, checked, fallbacks)
             for combo, key in ((self.orientation, "orientation"), (self.split, "split")):
                 index = combo.findData(saved.get(key))
                 if index >= 0:
@@ -164,34 +165,106 @@ class DeliverySubstituteDialog(QDialog):
             self._refresh()
             return
         if self._preferences is not None:
-            saved = options.manifest()
+            saved = {**self._saved_preferences, **options.manifest()}
             saved.pop("driver_key")
-            saved["order"] = [self.columns.item(index).data(Qt.ItemDataRole.UserRole)
-                              for index in range(self.columns.count())]
+            saved.pop("column_labels", None)
+            saved.pop("fallbacks", None)
+            saved["columns"] = self._selected_keys(include_hidden=True)
+            saved["order"] = self._column_keys()
+            by_meal = saved.get("fallbacks_by_meal", {})
+            saved["fallbacks_by_meal"] = {**(by_meal if isinstance(by_meal, dict) else {}),
+                                        self._data.meal.value: self._fallback_values()}
             self._preferences.setValue(self._preferences_key, json.dumps(saved, ensure_ascii=False))
         super().accept()
 
     def _move(self, direction):
-        current = self.columns.currentRow()
-        target = current + direction
-        if current >= 0 and 0 <= target < self.columns.count():
-            item = self.columns.takeItem(current)
-            self.columns.insertItem(target, item)
-            self.columns.setCurrentRow(target)
+        item = self.columns.currentItem()
+        if item is None:
+            return
+        key = item.data(0, Qt.ItemDataRole.UserRole)
+        order = self._column_keys()
+        visible = [key for key in order if key in self._visible_keys]
+        if key not in visible:
+            return
+        index = visible.index(key)
+        target = index + direction
+        if 0 <= target < len(visible):
+            first, second = order.index(key), order.index(visible[target])
+            order[first], order[second] = order[second], order[first]
+            self._rebuild_columns(order, set(self._selected_keys(include_hidden=True)), self._fallback_values())
+            self.columns.setCurrentItem(self.columns.topLevelItem(second))
+
+    def _column_keys(self):
+        return [self.columns.topLevelItem(index).data(0, Qt.ItemDataRole.UserRole)
+                for index in range(self.columns.topLevelItemCount())]
+
+    def _selected_keys(self, *, include_hidden=False):
+        return [item.data(0, Qt.ItemDataRole.UserRole)
+                for index in range(self.columns.topLevelItemCount())
+                if (item := self.columns.topLevelItem(index)).checkState(0) == Qt.CheckState.Checked
+                and (include_hidden or not item.isHidden())]
+
+    def _fallback_values(self):
+        return {key: combo.currentData() for key, combo in self._fallback_combos.items() if combo.currentData()}
+
+    def _rebuild_columns(self, order, checked, fallbacks):
+        self.columns.blockSignals(True)
+        self.columns.clear()
+        self._fallback_combos = {}
+        by_key = {column.key: column for column in self._data.columns}
+        for key in order:
+            item = QTreeWidgetItem([by_key[key].label, ""])
+            item.setSizeHint(0, QSize(0, 36))
+            item.setData(0, Qt.ItemDataRole.UserRole, key)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(0, Qt.CheckState.Checked if key in checked else Qt.CheckState.Unchecked)
+            self.columns.addTopLevelItem(item)
+            item.setHidden(key not in self._visible_keys)
+            combo = QComboBox()
+            combo.setAccessibleName(f"{by_key[key].label} 값이 비어 있으면")
+            combo.addItem("사용 안 함", "")
+            for candidate in self._data.columns:
+                if candidate.key != key and candidate.key in self._visible_keys:
+                    combo.addItem(candidate.label, candidate.key)
+            selected = fallbacks.get(key, "")
+            if selected and combo.findData(selected) < 0:
+                combo.addItem("저장된 대체 칼럼 (현재 목록에 없음)", selected)
+            combo.setCurrentIndex(combo.findData(selected))
+            combo.currentIndexChanged.connect(self._refresh)
+            self.columns.setItemWidget(item, 1, combo)
+            self._fallback_combos[key] = combo
+        self.columns.blockSignals(False)
+
+    def set_visible_columns(self, keys):
+        self._visible_keys = set(keys)
+        self._rebuild_columns(self._column_keys(), set(self._selected_keys(include_hidden=True)), self._fallback_values())
+        hidden_count = len(self._data.columns) - len(self._visible_keys & set(self._column_keys()))
+        self.visibility_note.setText(
+            f"모든 시트에서 숨긴 칼럼 {hidden_count}개 제외 · 설정 → 배송대타 칼럼 표시에서 변경"
+            if hidden_count else ""
+        )
+        self._refresh()
 
     def options(self) -> SubstituteOptions:
         return SubstituteOptions(self.driver.currentData() or "",
-            tuple(self.columns.item(index).data(Qt.ItemDataRole.UserRole)
-                  for index in range(self.columns.count())
-                  if self.columns.item(index).checkState() == Qt.CheckState.Checked),
-            self.orientation.currentData(), self.split.currentData(), self.group_limit.value())
+            tuple(self._selected_keys()),
+            self.orientation.currentData(), self.split.currentData(), self.group_limit.value(),
+            fallbacks={key: value for key, value in self._fallback_values().items() if key in self._selected_keys()},
+            column_labels={column.key: column.label for column in self._data.columns})
 
     def selection(self) -> DocumentMealSelection:
         options = self.options()
         self._data.selected_rows(options)
+        known = {column.key for column in self._data.columns}
+        if any(value not in known for value in options.fallbacks.values()):
+            raise ValueError("저장된 대체 칼럼이 현재 원본에 없습니다. 다시 선택해주세요.")
         return replace(self._document, substitute_options=options)
 
     def _refresh(self, *_args):
+        for index in range(self.columns.topLevelItemCount()):
+            item = self.columns.topLevelItem(index)
+            self._fallback_combos[item.data(0, Qt.ItemDataRole.UserRole)].setEnabled(
+                item.checkState(0) == Qt.CheckState.Checked)
         self.group_limit.setEnabled(self.split.currentData() != "none")
         try:
             self.selection()

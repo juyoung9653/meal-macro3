@@ -600,10 +600,16 @@ class EncryptedDatabase:
     def status_history(self, person_id: UUID, meal: Meal) -> StatusHistory:
         """Resolve preserved raw events into effective status intervals."""
 
+        from src.domain.pause_conversion import PAUSE_CONVERSION_KIND, pause_conversion_from_snapshot
+        latest = self.latest_revision_id()
+        snapshot = None if latest is None else self.snapshot_for_kinds(
+            latest, (PAUSE_CONVERSION_KIND,),
+        )
         return resolve_status_history(
             person_id,
             meal,
             self.status_events(person_id=person_id, meal=meal),
+            same_month_pause=pause_conversion_from_snapshot(snapshot).same_month,
         )
 
     def check_integrity(self) -> None:

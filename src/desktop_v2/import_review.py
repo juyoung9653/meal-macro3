@@ -208,7 +208,9 @@ class ImportReviewDialog(QDialog):
         title.setObjectName("workspaceTitle")
         subtitle = QLabel(
             f"적용일 {self._plan.effective_on.isoformat()} · "
-            + "나머지 명단은 자동 처리합니다. 선택을 마치면 바로 가져옵니다."
+            + ("이름·핸드폰 연결을 확인하세요. 다른 값이 있으면 다음 화면에서 수정합니다."
+               if self._purpose is ImportPurpose.VACATION_LUNCH
+               else "나머지 명단은 자동 처리합니다. 선택을 마치면 바로 가져옵니다.")
         )
         subtitle.setObjectName("workspaceSubtitle")
         title_column.addWidget(title)
@@ -226,7 +228,7 @@ class ImportReviewDialog(QDialog):
                 "분류",
                 "원본 위치",
                 "성명",
-                "생년월일",
+                "핸드폰" if self._purpose is ImportPurpose.VACATION_LUNCH else "생년월일",
                 "인적사항 변경",
                 "식종 변경",
                 "같은 사람 후보",
@@ -261,7 +263,7 @@ class ImportReviewDialog(QDialog):
             | QDialogButtonBox.StandardButton.Ok
         )
         self._buttons.button(QDialogButtonBox.StandardButton.Ok).setText(
-            "선택한 내용으로 가져오기"
+            "다음: 변경 값 확인" if self._purpose is ImportPurpose.VACATION_LUNCH else "선택한 내용으로 가져오기"
         )
         self._buttons.button(QDialogButtonBox.StandardButton.Ok).setObjectName(
             "primaryAction"
@@ -280,7 +282,7 @@ class ImportReviewDialog(QDialog):
             if item.field in _FIELD_LABELS
         ) or "없음"
         if self._purpose is ImportPurpose.VACATION_LUNCH:
-            profile_changes = "기존 정보 유지" if staged.disposition is ReconciliationDisposition.MATCHED else "신규 등록"
+            profile_changes = "연결 후 변경 값 확인"
         meal_changes = " ".join(
             (
                 *(f"+{meal.value}" for meal in staged.meals_added),
@@ -304,7 +306,9 @@ class ImportReviewDialog(QDialog):
             _DISPOSITION_LABELS[staged.disposition],
             f"{observation.source.sheet_name} {source_rows}행",
             observation.name,
-            observation.birth_date.isoformat() if observation.birth_date else "미입력",
+            (observation.profile_values.get(ProfileField.MOBILE_PHONE) or "미입력")
+            if self._purpose is ImportPurpose.VACATION_LUNCH
+            else observation.birth_date.isoformat() if observation.birth_date else "미입력",
             profile_changes,
             meal_changes,
             identity_candidates,
@@ -486,6 +490,8 @@ class ImportReviewDialog(QDialog):
         if self._roster is None:
             raise ValueError("최초 가져오기에는 기존 사람 후보가 있을 수 없습니다.")
         person = self._roster.person(person_id)
+        if self._purpose is ImportPurpose.VACATION_LUNCH:
+            return f"{person.profile.name} · {person.profile.mobile_phone or '핸드폰 없음'} · {person.profile.school_name or '학교 없음'}"
         birth = (
             "생년 미등록"
             if person.profile.birth_date is None

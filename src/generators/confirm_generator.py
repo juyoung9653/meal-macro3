@@ -13,7 +13,6 @@ from ..core.invoice_data import (
     MonthlyDeliveryBatch,
     WeeklyDelivery,
 )
-from ..core.models import combine_address
 from .mapping_values import resolve_mapping_value
 from ..core.settings import get_settings
 from ..excel.excel_utils import adjust_formula, build_merged_anchor_map, copy_cell
@@ -98,8 +97,14 @@ def _household_delivery_staff(members: Sequence[MonthlyDelivery]) -> str:
 
 
 def _person_identifier(person: MonthlyDelivery, name_col: str) -> str:
-    name = _blank_text(person.roster.extra.get(name_col, "")).strip() or "(빈 값)"
-    return f"성명={name}, {person.roster.location_text}"
+    source = person.roster.extra
+    name = _normalized_text(source.get("성명") or source.get(name_col)) or "(빈 값)"
+    if person.household_key is None:
+        return f"성명={name}, {person.roster.location_text}"
+    return (
+        f"성명={name}, 생년월일={_normalized_text(source.get('생년월일')) or '(빈 값)'}, "
+        f"학교={_normalized_text(source.get('학교명')) or '(빈 값)'}"
+    )
 
 
 def _validated_household_groups(
@@ -108,22 +113,24 @@ def _validated_household_groups(
     detail_address_col: str,
     dong_col: str,
     name_col: str,
+    road_fallback: str = "",
+    dong_fallback: str = "",
 ) -> dict[str, dict[str, list[MonthlyDelivery]]]:
     """Use stable DB household keys, using addresses for annual-workbook recipients."""
     groups: dict[str, dict[str, list[MonthlyDelivery]]] = {}
     blank_addresses: list[str] = []
-    stable_facts: dict[str, tuple[str, str, str]] = {}
+    stable_facts: dict[str, tuple[tuple[str, str], MonthlyDelivery]] = {}
 
     for person in roster_data:
         source = person.roster.extra
-        road_address = _normalized_text(source.get(road_address_col, ""))
+        road_address = _normalized_text(resolve_mapping_value(source, road_address_col, road_fallback))
         detail_address = (
             ""
             if detail_address_col == road_address_col
             else _normalized_text(source.get(detail_address_col, ""))
         )
-        dong = _normalized_text(source.get(dong_col, ""))
-        if not road_address:
+        dong = _normalized_text(resolve_mapping_value(source, dong_col, dong_fallback))
+        if not road_address and person.household_key is None:
             blank_addresses.append(
                 f"관할동={dong or '(빈 값)'}, "
                 f"대상자={_person_identifier(person, name_col)}"
@@ -134,12 +141,22 @@ def _validated_household_groups(
             group_key = f"address:{road_address}\u0000{detail_address}"
         else:
             group_key = f"household:{person.household_key}"
-            facts = (dong, road_address, detail_address)
-            previous = stable_facts.setdefault(person.household_key, facts)
+            facts = (dong, road_address)
+            previous, first = stable_facts.setdefault(person.household_key, (facts, person))
             if previous != facts:
+                differences = [
+                    label for label, before, after in zip(("관할동", "도로명주소"), previous, facts)
+                    if before != after
+                ]
+                details = "\n".join(
+                    f"- {_person_identifier(member, name_col)}: "
+                    f"관할동={values[0] or '(빈 값)'}, 도로명주소={values[1] or '(빈 값)'}"
+                    for member, values in ((first, previous), (person, facts))
+                )
                 raise ValueError(
-                    "확인서 생성 불가: 같은 DB 가구의 관할동 또는 주소가 서로 "
-                    f"다릅니다. 가구 key={person.household_key}"
+                    "확인서 생성 불가: 같은 가구의 출력값이 다릅니다.\n"
+                    f"다른 항목: {', '.join(differences)}\n{details}\n"
+                    "설정 → 출력 칼럼 연결의 확인서 연결과 해당 대상자의 값을 확인해주세요."
                 )
         groups.setdefault(dong, {}).setdefault(group_key, []).append(person)
 
@@ -158,14 +175,7 @@ def _validated_household_groups(
                 _person_identifier(member, name_col) for member in members
             )
             source = members[0].roster.extra
-            address = combine_address(
-                _normalized_text(source.get(road_address_col, "")),
-                (
-                    ""
-                    if detail_address_col == road_address_col
-                    else _normalized_text(source.get(detail_address_col, ""))
-                ),
-            )
+            address = _normalized_text(resolve_mapping_value(source, road_address_col, road_fallback))
             oversized_households.append(
                 f"관할동={dong or '(빈 값)'}, 주소={address}, "
                 f"인원수={len(members)}명, 대상자=[{identifiers}]"
@@ -212,13 +222,18 @@ def make_confirm_publication(
     head_fallback = _mapped_source_column(fallbacks, "세대주 성명", "세대주\n성명", "세대주성명") if any(key in fallbacks for key in ("세대주 성명", "세대주\n성명", "세대주성명")) else ""
     phone_fallback = _mapped_source_column(fallbacks, "핸드폰", "전화번호") if any(key in fallbacks for key in ("핸드폰", "전화번호")) else ""
 
-    # 1. 도로명·상세주소를 정규화하고 관할동+전체주소 가구를 검증한다.
+    road_fallback = fallbacks.get("도로명주소", "")
+    dong_fallback = _mapped_source_column(fallbacks, "관할동", "동") if any(key in fallbacks for key in ("관할동", "동")) else ""
+
+    # DB 가구는 저장된 소속을 유지하고 연결한 출력값의 일관성을 검증한다.
     dong_households = _validated_household_groups(
         batch.deliveries,
         road_address_col,
         detail_address_col,
         dong_col,
         name_col,
+        road_fallback,
+        dong_fallback,
     )
 
     if not title_prefix:
@@ -292,14 +307,7 @@ def make_confirm_publication(
 
         for members in hh_groups.values():
             first_source = members[0].roster.extra
-            address = combine_address(
-                _normalized_text(first_source.get(road_address_col, "")),
-                (
-                    ""
-                    if detail_address_col == road_address_col
-                    else _normalized_text(first_source.get(detail_address_col, ""))
-                ),
-            )
+            address = _normalized_text(resolve_mapping_value(first_source, road_address_col, road_fallback))
             n = len(members)
             tpl_key = f"{n}명"
             src = wb[tpl_key]

@@ -34,6 +34,7 @@ from .projections import (
     status_event_audit_change,
 )
 from .status import MealStatus, StatusEvent, resolve_status_history
+from .pause_conversion import pause_conversion_from_snapshot
 from .meal_status_changes import _cover_delivery_period
 from .delivery_routing import (
     ROUTING_EVENT_KIND,
@@ -261,7 +262,8 @@ class _ReadContext:
         key = (person_id, meal)
         if key not in self.histories:
             self.histories[key] = resolve_status_history(
-                person_id, meal, tuple(self.events_by_person_meal.get(key, ()))
+                person_id, meal, tuple(self.events_by_person_meal.get(key, ())),
+                same_month_pause=pause_conversion_from_snapshot(self.snapshot).same_month,
             )
         return self.histories[key]
 

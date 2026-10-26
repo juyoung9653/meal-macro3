@@ -38,10 +38,12 @@ def test_settings_hub_has_db_and_computer_local_jobs(app):
         "공통 제공기관",
         "생성 Excel 비밀번호",
         "문서 양식",
-        "출력 칼럼 연결",
+        "청구서·확인서 항목 설정",
         "식수·청구서 설정",
         "식종별 배송 기본값",
         "중지 표시 기간",
+        "일시중지 자동변환",
+        "배송대타 칼럼 표시",
         "배송순서 입력 방식",
         "초기 명단 적용일",
         "가구 소속 기록 복구",
@@ -49,6 +51,8 @@ def test_settings_hub_has_db_and_computer_local_jobs(app):
         "운영 데이터 위치",
         "자동 백업 폴더",
         "운영 파일 비밀번호 변경",
+        "구주소 업데이트",
+        "주소 API 키",
     ]
     assert not any("조식 배송 규칙" in action.label for action in SettingsAction)
     assert "공통 설정" in SettingsAction.DOCUMENT_DIRECTORY.scope_label
@@ -70,14 +74,17 @@ def test_settings_hub_groups_equal_half_width_cards_at_minimum_size(app):
             SettingsAction.PROVIDER,
             SettingsAction.DELIVERY_DEFAULTS,
             SettingsAction.STOPPED_HIGHLIGHT,
+            SettingsAction.PAUSE_CONVERSION,
             SettingsAction.SEQUENCE_MODE,
             SettingsAction.INITIAL_ROSTER_DATE,
             SettingsAction.MISSING_HOUSEHOLD_REPAIR,
+            SettingsAction.OLD_ADDRESS,
         ),
         "문서 출력": (
             SettingsAction.DOCUMENT_TEMPLATE,
             SettingsAction.INVOICE_SETTINGS,
             SettingsAction.DOCUMENT_COLUMN_MAPPING,
+            SettingsAction.SUBSTITUTE_COLUMNS,
             SettingsAction.EXPORT_PASSWORD,
             SettingsAction.DOCUMENT_DIRECTORY,
         ),
@@ -85,6 +92,7 @@ def test_settings_hub_groups_equal_half_width_cards_at_minimum_size(app):
             SettingsAction.DATABASE_LOCATION,
             SettingsAction.BACKUP_DIRECTORY,
             SettingsAction.DATABASE_PASSWORD,
+            SettingsAction.JUSO_KEY,
         ),
     }
     widths = {card.width() for card in dialog._cards.values()}

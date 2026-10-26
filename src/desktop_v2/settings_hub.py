@@ -33,6 +33,8 @@ class SettingsAction(StrEnum):
     INVOICE_SETTINGS = "invoice_settings"
     DELIVERY_DEFAULTS = "delivery_defaults"
     STOPPED_HIGHLIGHT = "stopped_highlight"
+    PAUSE_CONVERSION = "pause_conversion"
+    SUBSTITUTE_COLUMNS = "substitute_columns"
     SEQUENCE_MODE = "sequence_mode"
     INITIAL_ROSTER_DATE = "initial_roster_date"
     MISSING_HOUSEHOLD_REPAIR = "missing_household_repair"
@@ -40,6 +42,8 @@ class SettingsAction(StrEnum):
     DATABASE_LOCATION = "database_location"
     BACKUP_DIRECTORY = "backup_directory"
     DATABASE_PASSWORD = "database_password"
+    OLD_ADDRESS = "old_address"
+    JUSO_KEY = "juso_key"
 
     @property
     def label(self) -> str:
@@ -55,6 +59,18 @@ class SettingsAction(StrEnum):
 
 
 _SETTINGS_COPY = {
+    SettingsAction.SUBSTITUTE_COLUMNS: (
+        "배송대타 칼럼 표시", "모든 시트에서 숨긴 칼럼을 배송대타 목록에서 제외할지 정합니다.", "이 PC의 운영 파일별 설정",
+    ),
+    SettingsAction.PAUSE_CONVERSION: (
+        "일시중지 자동변환", "같은 달에 배송을 재개하면 중지 기간을 일시중지로 표시할지 정합니다.", "변경 이력에 기록",
+    ),
+    SettingsAction.OLD_ADDRESS: (
+        "구주소 업데이트", "신주소·구주소 칼럼과 대상 범위를 선택해 수동으로 변환합니다.", "변경 이력에 기록",
+    ),
+    SettingsAction.JUSO_KEY: (
+        "주소 API 키", "주소 검색 승인키를 저장·확인·삭제합니다.", "이 PC의 Windows 사용자별 저장",
+    ),
     SettingsAction.INVOICE_SETTINGS: (
         "식수·청구서 설정", "다음 달 식수 포함 여부와 템플릿에서 식종 이력을 넣을 칼럼을 정합니다.", "변경 이력에 기록",
     ),
@@ -94,8 +110,8 @@ _SETTINGS_COPY = {
         "변경 이력에 기록",
     ),
     SettingsAction.DOCUMENT_COLUMN_MAPPING: (
-        "출력 칼럼 연결",
-        "명단 항목을 청구서·확인서의 어느 칼럼에 넣을지 양식별로 수정합니다.",
+        "청구서·확인서 항목 설정",
+        "청구서·확인서 양식에 넣을 값과 비어 있을 때 대신 넣을 값을 지정합니다.",
         "변경 이력에 기록",
     ),
     SettingsAction.DOCUMENT_DIRECTORY: (
@@ -126,6 +142,10 @@ _SETTINGS_COPY = {
 }
 
 _SETTINGS_STAMPS = {
+    SettingsAction.SUBSTITUTE_COLUMNS: "칼럼",
+    SettingsAction.PAUSE_CONVERSION: "변환",
+    SettingsAction.OLD_ADDRESS: "주소",
+    SettingsAction.JUSO_KEY: "키",
     SettingsAction.INVOICE_SETTINGS: "식수",
     SettingsAction.MISSING_HOUSEHOLD_REPAIR: "가구",
     SettingsAction.INITIAL_ROSTER_DATE: "시작",
@@ -149,9 +169,11 @@ _SETTINGS_GROUPS = (
             SettingsAction.PROVIDER,
             SettingsAction.DELIVERY_DEFAULTS,
             SettingsAction.STOPPED_HIGHLIGHT,
+            SettingsAction.PAUSE_CONVERSION,
             SettingsAction.SEQUENCE_MODE,
             SettingsAction.INITIAL_ROSTER_DATE,
             SettingsAction.MISSING_HOUSEHOLD_REPAIR,
+            SettingsAction.OLD_ADDRESS,
         ),
     ),
     (
@@ -160,6 +182,7 @@ _SETTINGS_GROUPS = (
             SettingsAction.DOCUMENT_TEMPLATE,
             SettingsAction.INVOICE_SETTINGS,
             SettingsAction.DOCUMENT_COLUMN_MAPPING,
+            SettingsAction.SUBSTITUTE_COLUMNS,
             SettingsAction.EXPORT_PASSWORD,
             SettingsAction.DOCUMENT_DIRECTORY,
         ),
@@ -170,6 +193,7 @@ _SETTINGS_GROUPS = (
             SettingsAction.DATABASE_LOCATION,
             SettingsAction.BACKUP_DIRECTORY,
             SettingsAction.DATABASE_PASSWORD,
+            SettingsAction.JUSO_KEY,
         ),
     ),
 )

@@ -18,7 +18,7 @@ from src.excel.publication import WorkbookPublicationResult, publish_workbook
 from src.excel.substitute_excel_metrics import apply_excel_metrics
 from src.excel.substitute_page_layout import SheetGroup, SheetLayout
 
-SUBSTITUTE_RENDER_CONTRACT_VERSION = 6
+SUBSTITUTE_RENDER_CONTRACT_VERSION = 7
 _LABELS = {"name": "이름", "road_address": "신주소", "note": "비고2"}
 _FILLS = {2: "E6B8B7", 3: "B8CCE4", 4: "D8E4BC", 5: "CCC0DA"}
 _THIN = Side(style="thin", color="000000")
@@ -65,23 +65,32 @@ def _preprocess(value: str, *, address=False, note=False) -> str:
     return "\n".join(lines)
 
 
+def _grouping_value(row, key: str, attribute: str) -> str:
+    value = getattr(row, attribute)
+    return row.values.get(key, "") if value is None else value
+
+
 def _build_sheet(data: PreparedSubstituteData, options: SubstituteOptions):
     """Build values/styles independently of the Excel measurement boundary."""
     rows = data.selected_rows(options)
     groups = []
     start = 0
     for index in range(1, len(rows) + 1):
-        previous_phone = _phone(rows[index - 1].values.get("mobile_phone", ""))
-        if index < len(rows) and previous_phone and previous_phone == _phone(rows[index].values.get("mobile_phone", "")):
+        previous_phone = _phone(_grouping_value(rows[index - 1], "mobile_phone", "grouping_phone"))
+        if index < len(rows) and previous_phone and previous_phone == _phone(_grouping_value(rows[index], "mobile_phone", "grouping_phone")):
             continue
         members = rows[start:index]
         meal_count = (len(members) if data.meal is Meal.BREAKFAST else
                       sum(member.entitlement_count for member in members))
         groups.append(SheetGroup(start, index - 1, start + 3, index + 2,
-                                 members[0].values.get("jurisdiction", ""),
+                                 _grouping_value(members[0], "jurisdiction", "grouping_jurisdiction"),
                                  meal_count))
         start = index
     labels = {column.key: _LABELS.get(column.key, column.label) for column in data.columns}
+    if options.fallbacks is not None:
+        labels = {column.key: column.label for column in data.columns}
+    elif data.calculation_manifest.get("column_mapping", {}).get("setting") is not None:
+        labels.update(road_address="주소", note="비고")
     columns = [labels[key] for key in options.columns]
     sizes = tuple(range(1, max(5, max(group.meal_count for group in groups)) + 1))
     used_cols = max(len(columns) + 1, len(sizes) + 2)
@@ -99,7 +108,7 @@ def _build_sheet(data: PreparedSubstituteData, options: SubstituteOptions):
             key = options.columns[col - 1] if col <= len(columns) else None
             value = item.values.get(key, "") if key else ""
             if key:
-                value = _preprocess(value, address=key == "road_address", note=labels[key] == "비고2")
+                value = _preprocess(value, address=key == "road_address", note=key == "note" or labels[key] == "비고2")
             _put(ws, row_number, col, value)
     summaries = {}
     for group in groups:

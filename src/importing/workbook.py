@@ -457,6 +457,7 @@ def parse_workbook(
     sample_limit: int = 8,
     cell_overrides: Mapping[tuple[int, str], object] | None = None,
     table_name: str | None = None,
+    identity_by_mobile: bool = False,
 ) -> WorkbookImportPreview:
     """Parse mapped cells with optional in-memory corrections."""
 
@@ -552,6 +553,7 @@ def parse_workbook(
         column_indexes,
         issues,
         automatic_source_resolutions,
+        identity_by_mobile=identity_by_mobile,
     )
     if not observations and not issues:
         issues.append(ImportIssue(None, None, "가져올 데이터 행이 없습니다."))
@@ -1421,6 +1423,8 @@ def _merge_observations(
     indexes: Mapping[str, int],
     issues: list[ImportIssue],
     automatic_source_resolutions: list[AutomaticSourceResolution],
+    *,
+    identity_by_mobile: bool = False,
 ) -> tuple[PersonObservation, ...]:
     groups: dict[tuple[object, ...], list[_RawObservation]] = {}
     for row in rows:
@@ -1431,6 +1435,9 @@ def _merge_observations(
             if isinstance(birth, date)
             else ("row", row.row_number)
         )
+        if identity_by_mobile:
+            phone = normalize_phone(row.profile_values.get(ProfileField.MOBILE_PHONE))
+            key = (_comparison_key(name), phone) if phone else ("row", row.row_number)
         groups.setdefault(key, []).append(row)
 
     observations: list[PersonObservation] = []
@@ -1456,6 +1463,18 @@ def _merge_observations(
             for field in _SCHOOL_FIELDS
         )
         preferred_school_row = _preferred_school_row(grouped_rows)
+        school_auto = True
+        if identity_by_mobile and school_values_differ:
+            from .lunch_values import preferred_school
+            from src.domain.roster import PersonProfile
+            school_profiles = [PersonProfile(name="학교 비교", **{
+                field.value: row.profile_values.get(field)
+                for field in (ProfileField.SCHOOL_TYPE, ProfileField.SCHOOL_NAME, ProfileField.GRADE)
+            }) for row in grouped_rows]
+            school_auto = all(
+                preferred_school(school_profiles[0], other) is not None
+                for other in school_profiles[1:]
+            )
         fields = tuple(
             dict.fromkeys(
                 field
@@ -1473,7 +1492,7 @@ def _merge_observations(
                     or None
                 )
                 continue
-            if field in _SCHOOL_FIELDS and school_values_differ:
+            if field in _SCHOOL_FIELDS and school_values_differ and school_auto:
                 merged_values[field] = preferred_school_row.profile_values.get(field)
                 continue
             if field in {

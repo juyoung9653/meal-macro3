@@ -30,13 +30,16 @@ _COLUMNS = tuple(_Column(key, label) for key, label in (
 
 
 class MonthlyMealHistoryDialog(QDialog):
-    def __init__(self, selected_day: date, load: Callable[[int, int], MonthlyMealHistory], parent: QWidget | None = None):
+    def __init__(self, selected_day: date, load: Callable[[int, int], MonthlyMealHistory], parent: QWidget | None = None, *, embedded=False):
         super().__init__(parent)
         register_application_fonts()
         self.setStyleSheet(application_stylesheet())
         self.setWindowTitle("월별 식종 변경 이력")
         self.resize(900, 680)
         self.setMinimumSize(760, 480)
+        if embedded:
+            self.setWindowFlags(Qt.WindowType.Widget)
+            self.setMinimumSize(0, 0)
         self._load = load
         self._column_searches: dict[str, str] = {}
         self._column_values: dict[str, frozenset[str]] = {}
@@ -45,6 +48,7 @@ class MonthlyMealHistoryDialog(QDialog):
         title = QLabel("월별 식종 변경 이력")
         title.setObjectName("workspaceTitle")
         root.addWidget(title)
+        title.setVisible(not embedded)
         scope = QLabel("전체 명단 · 선택한 달의 배송·일시중지·중지 변경 기록")
         scope.setObjectName("workspaceSubtitle")
         root.addWidget(scope)
@@ -82,7 +86,13 @@ class MonthlyMealHistoryDialog(QDialog):
         self.clear_filters_button.clicked.connect(self._clear_all_filters)
         period.addWidget(self.clear_filters_button)
         period.addStretch(1)
-        root.addLayout(period)
+        period_host = QWidget()
+        period_host.setLayout(period)
+        root.addWidget(period_host)
+        if embedded:
+            period.removeWidget(self.clear_filters_button)
+            root.addWidget(self.clear_filters_button)
+            period_host.hide()
         self.year.valueChanged.connect(self.refresh)
         self.month.currentIndexChanged.connect(self.refresh)
         self.error = QLabel()
@@ -128,8 +138,10 @@ class MonthlyMealHistoryDialog(QDialog):
         close.setObjectName("quietAction")
         close.clicked.connect(self.accept)
         actions.addWidget(close)
+        close.setVisible(not embedded)
         root.addLayout(actions)
-        self.refresh()
+        if not embedded:
+            self.refresh()
 
     def _shift_month(self, offset: int) -> None:
         absolute = self.year.value() * 12 + self.month.currentData() - 1 + offset

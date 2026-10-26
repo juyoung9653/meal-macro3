@@ -230,3 +230,27 @@ def test_status_defaults_to_delivery_outside_explicit_intervals():
 
     assert history.intervals == ()
     assert history.status_on(date(2026, 8, 17)) is MealStatus.DELIVERY
+
+
+@pytest.mark.parametrize(("start", "resume", "enabled", "expected"), [
+    (date(2026, 10, 5), date(2026, 10, 20), True, MealStatus.PAUSED),
+    (date(2026, 10, 5), date(2026, 10, 20), False, MealStatus.STOPPED),
+    (date(2026, 10, 31), date(2026, 11, 1), True, MealStatus.STOPPED),
+    (date(2026, 12, 31), date(2027, 1, 1), True, MealStatus.STOPPED),
+    (date(2026, 10, 5), date(2027, 10, 20), True, MealStatus.STOPPED),
+])
+def test_pause_conversion_requires_same_year_and_month(start, resume, enabled, expected):
+    stopped = _event(STOP_EVENT_ID, MealStatus.STOPPED, InclusiveDateRange(start, None), "중지")
+    resumed = _event(DELIVERY_EVENT_ID, MealStatus.DELIVERY, InclusiveDateRange(resume, None), "배송")
+    history = resolve_status_history(PERSON_ID, Meal.DINNER, (stopped, resumed), same_month_pause=enabled)
+    assert history.status_on(start) is expected
+    assert history.intervals[0].period.ends_on.toordinal() == resume.toordinal() - 1
+    assert history.status_on(resume) is MealStatus.DELIVERY
+    assert history.events == (stopped, resumed)
+
+
+def test_disabling_conversion_keeps_explicit_cross_month_pause():
+    pause = _event(STOP_EVENT_ID, MealStatus.PAUSED,
+                   InclusiveDateRange(date(2026, 10, 31), date(2026, 11, 2)), "일시중지")
+    history = resolve_status_history(PERSON_ID, Meal.DINNER, (pause,), same_month_pause=False)
+    assert history.status_on(date(2026, 11, 1)) is MealStatus.PAUSED

@@ -15,6 +15,7 @@ from src.domain.delivery_routing import (
 )
 from src.domain.roster import Meal
 from src.domain.status import resolve_status_history
+from src.domain.pause_conversion import PAUSE_CONVERSION_KIND, pause_conversion_from_snapshot
 from src.domain.revisions import format_revision_timestamp
 from src.domain.school_calendar import SCHOOL_LUNCH_SCHEDULE_KIND, school_lunch_calendar_from_snapshot
 from src.domain.service_adjustments import SERVICE_ADJUSTMENT_SCHEDULE_KIND, service_adjustment_schedule_from_snapshot
@@ -359,6 +360,7 @@ class DesktopStartupController:
             ("cell_edit_requested", lambda person_id, column_key, text: launch(self._run_roster_cell_edit, session, window, person_id, column_key, text)),
             ("column_input_rule_requested", lambda column_key: launch(self._run_column_input_rule, session, window, column_key)),
             ("monthly_statistics_requested", lambda: launch(self._run_monthly_statistics, session, window)),
+            ("monthly_overview_requested", lambda: launch(self._run_monthly_overview, session, window)),
             ("monthly_meal_history_requested", lambda: launch(self._run_monthly_meal_history, session, window)),
             ("household_shared_column_requested", lambda column_key: launch(self._run_household_shared_column, session, window, column_key)),
             ("household_shared_exception_requested", lambda person_id, column_key, enabled: launch(self._run_household_shared_exception, session, window, person_id, column_key, enabled)),
@@ -509,6 +511,7 @@ class DesktopStartupController:
         options = {}
         if isinstance(controller, DeliveryRoutingController):
             options["on_saved"] = lambda outcome: self._apply_routing_outcome(session, window, outcome)
+            options["service_day"] = window.table_model.service_day
         outcome = yield from invoke(controller.run_drivers, parent=window, **options)
         self._apply_routing_outcome(session, window, outcome)
 
@@ -649,6 +652,24 @@ class DesktopStartupController:
         outcome = yield from invoke(controller.run, parent=window, **options)
         if outcome.roster is not None:
             self._replace_roster_if_changed(session, window, outcome.roster)
+
+    @dialog_workflow
+    def _run_monthly_overview(self, session, window):
+        from .workspace_tools import MonthlyOverviewDialog
+
+        def load(year, month, history=False):
+            def read():
+                current = session.database.current_roster()
+                if current is None:
+                    raise ValueError("현재 명단이 없습니다.")
+                snapshot = session.database.snapshot(current.revision_id)
+                if history:
+                    return build_monthly_meal_history(snapshot, load_revision_chain(session.database, current.revision_id), year, month)
+                return build_monthly_meal_statistics(snapshot, year, month)
+            return run_progress_task(read, message="선택한 달의 운영 자료를 조회하는 중입니다.", parent=window)
+
+        yield DialogRequest(MonthlyOverviewDialog(window.table_model.service_day, load,
+                            lambda year, month: load(year, month, True), parent=window))
 
     @dialog_workflow
     def _run_monthly_statistics(self, session, window):
@@ -853,11 +874,22 @@ class DesktopStartupController:
             break
         if action is DocumentAction.DELIVERY_SUBSTITUTE:
             try:
-                prepared = run_progress_task(
-                    lambda: prepare_delivery_substitute_data(
-                        session.database.snapshot(document.period.source.revision_id),
+                from .substitute_preferences import preferences, exclude_hidden_columns
+                from src.services.sqlite_delivery_substitute_service import substitute_columns_from_roster, ROSTER_COLUMN_KEYS
+                model = getattr(window, "table_model", None)
+                roster_columns = getattr(model, "columns", None)
+                def prepare_substitute():
+                    source = session.database.snapshot(document.period.source.revision_id)
+                    columns = (substitute_columns_from_roster(roster_columns, source_snapshot=source)
+                               if roster_columns is not None else None)
+                    return prepare_delivery_substitute_data(
+                        source,
                         document.period.starts_on, document.meals[0],
-                    ),
+                        mapping_snapshot=session.database.snapshot(session.database.current_roster().revision_id),
+                        columns=columns, fallbacks={},
+                    )
+                prepared = run_progress_task(
+                    prepare_substitute,
                     title="배송대타 대상을 불러오는 중입니다",
                     message="선택한 날짜의 실제 배송 대상과 담당자를 확인하고 있습니다.", parent=window,
                 )
@@ -868,6 +900,11 @@ class DesktopStartupController:
                 scope_setter = getattr(substitute, "set_preferences_scope", None)
                 if callable(scope_setter):
                     scope_setter(str(session.credentials.database_id))
+                visibility_setter = getattr(substitute, "set_visible_columns", None)
+                visible_getter = getattr(window, "columns_visible_in_any_sheet", None)
+                store, key = preferences(str(session.credentials.database_id))
+                if callable(visibility_setter) and callable(visible_getter) and exclude_hidden_columns(store, key):
+                    visibility_setter({ROSTER_COLUMN_KEYS.get(key, key) for key in visible_getter()})
                 if (yield DialogRequest(substitute)) != QDialog.DialogCode.Accepted:
                     return
                 document = substitute.selection()
@@ -933,6 +970,17 @@ class DesktopStartupController:
     def _run_settings_hub(self, session: DatabaseSession, window) -> None:
         hub = self._settings_hub_dialog_type(parent=window)
         if (yield DialogRequest(hub)) != QDialog.DialogCode.Accepted:
+            return
+        if hub.selected_action is SettingsAction.JUSO_KEY:
+            from .old_address import JusoKeyDialog
+            yield DialogRequest(JusoKeyDialog(parent=window))
+            return
+        if hub.selected_action is SettingsAction.OLD_ADDRESS:
+            from .old_address import OldAddressController
+            controller = OldAddressController(session)
+            controller.on_saved = lambda roster: self._replace_roster_if_changed(session, window, roster)
+            yield from invoke(controller.run, window.table_model.columns,
+                              window.table_model.service_day, parent=window)
             return
         if hub.selected_action is SettingsAction.DATABASE_LOCATION:
             dialog = self._database_location_dialog_type(session, self._settings, parent=window)
@@ -1001,6 +1049,16 @@ class DesktopStartupController:
             return
         if hub.selected_action is SettingsAction.STOPPED_HIGHLIGHT:
             yield from invoke(window.open_stopped_highlight_settings)
+            return
+        if hub.selected_action is SettingsAction.SUBSTITUTE_COLUMNS:
+            from .substitute_preferences import SubstituteColumnVisibilityDialog
+            yield DialogRequest(SubstituteColumnVisibilityDialog(str(session.credentials.database_id), parent=window))
+            return
+        if hub.selected_action is SettingsAction.PAUSE_CONVERSION:
+            from .pause_conversion import PauseConversionController
+            roster = (yield from invoke(PauseConversionController(session).run, parent=window))
+            if roster is not None:
+                self._replace_roster_if_changed(session, window, roster)
             return
         if hub.selected_action is SettingsAction.MISSING_HOUSEHOLD_REPAIR:
             outcome = (yield from invoke(self._missing_household_repair_controller_type(session).run, parent=window))
@@ -1421,9 +1479,12 @@ class DesktopStartupController:
             setter(service_adjustment_schedule_from_snapshot(snapshot))
 
     @staticmethod
-    def _histories(session: DatabaseSession, roster):
+    def _histories(session: DatabaseSession, roster, snapshot=None):
         if not roster.persons:
             return {}
+        if snapshot is None:
+            snapshot = session.database.snapshot(roster.revision_id)
+        conversion = pause_conversion_from_snapshot(snapshot)
         events_by_key = defaultdict(list)
         for event in session.database.status_events():
             events_by_key[(event.person_id, event.meal)].append(event)
@@ -1432,6 +1493,7 @@ class DesktopStartupController:
                 person.person_id,
                 meal,
                 tuple(events_by_key[(person.person_id, meal)]),
+                same_month_pause=conversion.same_month,
             )
             for person in roster.persons
             for meal in Meal
@@ -1447,14 +1509,14 @@ class DesktopStartupController:
             read_kinds(roster.revision_id, (
                 DRIVER_KIND, DRIVER_ORDER_KIND, ROUTING_EVENT_KIND,
                 SCHOOL_LUNCH_SCHEDULE_KIND, SERVICE_ADJUSTMENT_SCHEDULE_KIND,
-                HOUSEHOLD_SHARED_KIND, IMPORT_PROFILE_KIND, RULES_KIND,
+                HOUSEHOLD_SHARED_KIND, IMPORT_PROFILE_KIND, RULES_KIND, PAUSE_CONVERSION_KIND,
             ))
             if callable(read_kinds) else session.database.snapshot(roster.revision_id)
         )
         profiles = import_profiles_from_snapshot(snapshot)
         return _StartupPreparation(
             roster=roster,
-            histories=self._histories(session, roster),
+            histories=self._histories(session, roster, snapshot),
             revision_display_code=self._revision_display_code(session, roster),
             imported_profile_fields=frozenset(
                 field.value

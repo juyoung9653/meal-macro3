@@ -21,6 +21,7 @@ from src.domain.roster import (
     additional_telephone_field_ordinal,
 )
 from src.domain.invoice_settings import InvoiceSettings, invoice_settings_from_snapshot
+from src.domain.delivery_substitute import STANDARD_COLUMNS
 from src.templates.config import auto_detect_semantic_columns, get_template_sheet_name, read_template_columns
 
 _STANDARD_SOURCES = (
@@ -37,11 +38,20 @@ _SOURCE_COLUMN_KEYS = {
     "아동과의 관계": "relationship_to_child",
 }
 _CONFIRM_DEFAULTS = {
-    "도로명주소": "도로명주소", "상세주소": "상세주소", "성명": "성명",
+    "도로명주소": "도로명주소", "성명": "성명",
     "세대주 성명": "세대주 성명", "핸드폰": "핸드폰", "관할동": "관할동",
 }
-_CONFIRM_LOCKED = ("도로명주소", "상세주소", "관할동")
+_CONFIRM_LOCKED: tuple[str, ...] = ()
 _INVOICE_AUTOMATIC_TARGETS = ("연번", "제공기관")
+SUBSTITUTE_MEALS = ("석식", "조식", "중식")
+
+
+def substitute_default_mapping(roster: RosterSnapshot | None) -> dict[str, str]:
+    sources = {column.key: column.label for column in STANDARD_COLUMNS}
+    custom = () if roster is None else sorted(
+        roster.custom_fields, key=lambda field: (field.display_order, str(field.definition_id)))
+    sources.update({f"custom:{field.definition_id}": f"custom:{field.definition_id}" for field in custom})
+    return {f"{meal}:{target}": source for meal in SUBSTITUTE_MEALS for target, source in sources.items()}
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,7 +99,7 @@ def mapping_editor_spec(
     column_labels: Mapping[str, str] | None = None,
     history_column: str | None = None,
 ) -> MappingEditorSpec:
-    if profile not in ("급식", "행복도시락") or document_kind not in ("invoice", "confirmation"):
+    if profile not in ("급식", "행복도시락") or document_kind not in ("invoice", "confirmation", "substitute"):
         raise ValueError("지원하지 않는 문서 양식 또는 문서 종류입니다.")
     settings = settings or get_settings()
     if document_kind == "invoice":
@@ -112,11 +122,17 @@ def mapping_editor_spec(
         history_column = InvoiceSettings().history_column(profile) if history_column is None else history_column
         if history_column in columns:
             locked = (*locked, history_column)
+    elif document_kind == "substitute":
+        defaults = substitute_default_mapping(roster)
+        targets = tuple(defaults)
+        locked = ()
     else:
         defaults = confirmation_default_mapping()
         targets = tuple(_CONFIRM_DEFAULTS)
         locked = _CONFIRM_LOCKED
     source_options = list(_STANDARD_SOURCES)
+    if document_kind == "substitute":
+        source_options.extend(("배송순서", "배송 형태"))
     if document_kind == "invoice":
         source_options.remove("비고")
     labels = {key: key for key in source_options}
@@ -146,14 +162,21 @@ def mapping_editor_spec(
     selectable_sources = tuple(
         source for source in source_options
         if not source or (
-            (source in _SOURCE_COLUMN_KEYS or source.startswith("custom:"))
+            (source in _SOURCE_COLUMN_KEYS or source.startswith("custom:")
+             or (document_kind == "substitute" and source in ("배송순서", "배송 형태")))
             and (
                 column_labels is None
+                or (document_kind == "substitute" and source in ("배송순서", "배송 형태"))
                 or _SOURCE_COLUMN_KEYS.get(source, source) in column_labels
             )
         )
     )
     target_labels = {key: key for key in targets}
+    if document_kind == "substitute":
+        output_labels = {column.key: column.label for column in STANDARD_COLUMNS}
+        if roster is not None:
+            output_labels.update({f"custom:{field.definition_id}": field.name for field in roster.custom_fields})
+        target_labels = {key: output_labels[key.split(":", 1)[1]] for key in targets}
     for key in locked:
         if key in target_labels:
             if document_kind == "confirmation":

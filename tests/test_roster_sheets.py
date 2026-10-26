@@ -35,6 +35,19 @@ def _visible(window, key):
     return not window._table.isColumnHidden(_column(window, key))
 
 
+def test_union_of_sheet_visibility_does_not_switch_tabs(app, tmp_path):
+    window = RosterWindow(_roster(), column_settings=_settings(tmp_path / "union.ini"))
+    window._column_layout.set_visible_keys({"name", "address"})
+    window._add_sheet("연락처", {"name", "mobile"})
+    active = window._sheet_tabs.currentIndex()
+    assert window.columns_visible_in_any_sheet() == {"name", "address", "mobile"}
+    assert window._sheet_tabs.currentIndex() == active
+    assert not _visible(window, "address")
+    window._delete_sheet(0)
+    assert window.columns_visible_in_any_sheet() == {"name", "mobile"}
+    window.close()
+
+
 def test_add_sheet_button_tracks_tabs_after_rename_delete_and_resize(app, tmp_path):
     window = RosterWindow(_roster(), column_settings=_settings(tmp_path / "sheets.ini"))
     add_button = window.findChild(QToolButton, "addRosterSheet")

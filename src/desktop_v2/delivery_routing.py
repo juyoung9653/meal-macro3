@@ -159,6 +159,11 @@ class DriverOrderRequest:
     ordered_driver_ids: tuple[UUID, ...]
 
 
+@dataclass(frozen=True)
+class DriverReplacementLaunch:
+    source_driver: UUID | None
+
+
 class DriverRegistryDialog(QDialog):
     """Only name and phone are user-facing driver attributes."""
 
@@ -212,17 +217,30 @@ class DriverRegistryDialog(QDialog):
         self.add_button = QPushButton("새 기사 등록")
         self.edit_button = QPushButton("선택 기사 수정")
         self.edit_button.setEnabled(False)
+        self.replacement_button = QPushButton("배정 일괄 교체")
+        self.replacement_button.setObjectName("quietAction")
+        self.replacement_button.clicked.connect(self._replace_assignments)
         self.add_button.clicked.connect(lambda: self._save(False))
         self.edit_button.clicked.connect(lambda: self._save(True))
         close = QPushButton("닫기")
         close.clicked.connect(self.reject)
         buttons.addWidget(self.add_button)
         buttons.addWidget(self.edit_button)
+        buttons.addWidget(self.replacement_button)
         buttons.addStretch(1)
         buttons.addWidget(close)
         layout.addLayout(buttons)
         self.error = QLabel()
         layout.addWidget(self.error)
+
+    def _replace_assignments(self):
+        if self._order_pending():
+            self.error.setText("변경한 기사 순서를 먼저 저장한 뒤 일괄 교체를 열어주세요.")
+            return
+        row = self.table.currentRow()
+        self._request = DriverReplacementLaunch(
+            self.table.item(row, 0).data(Qt.ItemDataRole.UserRole) if row >= 0 else None)
+        self.accept()
 
     def _select(self):
         row = self.table.currentRow()
@@ -760,7 +778,7 @@ class DeliveryRoutingController:
         return DeliveryRoutingOutcome(roster, state)
 
     @dialog_workflow
-    def run_drivers(self, parent=None, *, on_saved=None):
+    def run_drivers(self, parent=None, *, on_saved=None, service_day=None):
         outcome = DeliveryRoutingOutcome()
         dialog = None
         while True:
@@ -771,6 +789,15 @@ class DeliveryRoutingController:
                 if (yield DialogRequest(dialog, self._session)) != QDialog.DialogCode.Accepted:
                     return DeliveryRoutingOutcome(*self._load()) if outcome.roster is not None else outcome
                 request = dialog.request()
+                if isinstance(request, DriverReplacementLaunch):
+                    replacement = yield from invoke(self.run_replacement, service_day or date.today(),
+                                                    parent=parent, source_driver=request.source_driver)
+                    if replacement.roster is not None:
+                        outcome = replacement
+                        if on_saved is not None:
+                            on_saved(outcome)
+                    dialog = None
+                    continue
                 metadata = dict(actor=self._actor_provider(), recorded_at=datetime.now(UTC), revision_id=uuid4())
                 if isinstance(request, DriverOrderRequest):
                     record = build_driver_order_revision(roster, state, ordered_driver_ids=request.ordered_driver_ids, **metadata)
@@ -813,10 +840,12 @@ class DeliveryRoutingController:
                 return outcome
 
     @dialog_workflow
-    def run_replacement(self, day, parent=None):
+    def run_replacement(self, day, parent=None, *, source_driver=None):
         try:
             roster, state = self._load()
             dialog = self._replacement_dialog_type(roster, state, day, parent)
+            if source_driver is not None and isinstance(dialog, DriverReplacementDialog):
+                dialog.source.setCurrentIndex(max(0, dialog.source.findData(source_driver)))
             if (yield DialogRequest(dialog, self._session)) != QDialog.DialogCode.Accepted:
                 return DeliveryRoutingOutcome()
             request = dialog.request()

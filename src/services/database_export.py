@@ -18,6 +18,7 @@ from src.domain.roster import (
     RosterSnapshot,
 )
 from src.domain.status import resolve_status_history
+from src.domain.pause_conversion import pause_conversion_from_snapshot
 from src.domain.projections import status_events_from_historical_snapshot
 from src.domain.delivery_routing import (
     DRIVER_KIND,
@@ -157,7 +158,10 @@ def _status(snapshot, person_id, meal, day, profile, calendar):
                 return "-"
         except SchoolLunchScheduleMissingError:
             return "-"
-    status = resolve_status_history(person_id, meal, status_events_from_historical_snapshot(snapshot, person_id=person_id, meal=meal)).status_on(day).value
+    status = resolve_status_history(
+        person_id, meal, status_events_from_historical_snapshot(snapshot, person_id=person_id, meal=meal),
+        same_month_pause=pause_conversion_from_snapshot(snapshot).same_month,
+    ).status_on(day).value
     return "미배송" if status == "중지" else status
 
 

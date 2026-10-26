@@ -16,7 +16,7 @@ MAPPING_POLICY_VERSION = 2
 MAPPING_ENTITY_KIND = "document_column_mapping_setting"
 _NAMESPACE = UUID("5df58302-12ce-4a34-a07d-98c24765904e")
 PROFILES = ("급식", "행복도시락")
-DOCUMENT_KINDS = ("invoice", "confirmation")
+DOCUMENT_KINDS = ("invoice", "confirmation", "substitute")
 
 
 def mapping_entity_id(profile: str, document_kind: str) -> UUID:

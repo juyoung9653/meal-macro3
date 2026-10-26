@@ -203,6 +203,7 @@ def _validate_shared_status(current, before, after, after_entities, person_id, m
         HOUSEHOLD_SHARED_ID, HOUSEHOLD_SHARED_KIND,
         shared_columns_from_state, shared_exceptions_from_state,
     )
+    from .pause_conversion import pause_conversion_from_snapshot
     setting = current.entity(HOUSEHOLD_SHARED_KIND, HOUSEHOLD_SHARED_ID)
     key = "status:" + meal.name.lower()
     exceptions = shared_exceptions_from_state(setting)
@@ -210,6 +211,7 @@ def _validate_shared_status(current, before, after, after_entities, person_id, m
         return
     grouped = []
     days = {date.min}
+    conversion = pause_conversion_from_snapshot(current)
     for states in (current.entities, after_entities):
         events = {}
         for ref, state in states.items():
@@ -219,7 +221,10 @@ def _validate_shared_status(current, before, after, after_entities, person_id, m
             if event.meal is meal:
                 events.setdefault(event.person_id, []).append(event)
                 _add_boundaries(days, event.period)
-        grouped.append({pid: resolve_status_history(pid, meal, tuple(items)) for pid, items in events.items()})
+        grouped.append({
+            pid: resolve_status_history(pid, meal, tuple(items), same_month_pause=conversion.same_month)
+            for pid, items in events.items()
+        })
     for roster in (before, after):
         for membership in roster.memberships:
             _add_boundaries(days, membership.period)

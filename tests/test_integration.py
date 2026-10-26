@@ -595,7 +595,7 @@ def test_real_annual_xlsx_to_invoice_and_confirm_end_to_end(
     confirm_wb = openpyxl.load_workbook(confirm_path, data_only=False)
     try:
         confirm_ws = confirm_wb["정자동"]
-        assert confirm_ws["F3"].value == "성남대로 1 101호"
+        assert confirm_ws["F3"].value == "성남대로 1"
         assert confirm_ws["C6"].value == "홍보호"
         assert confirm_ws["K3"].value == "기사A"
         assert confirm_ws["G6"].value == 1
