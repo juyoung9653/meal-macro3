@@ -67,8 +67,8 @@ def test_manual_add_history_is_visible_after_save_and_reopen(tmp_path):
     with EncryptedDatabase.open(path, b"k" * 32) as database:
         assert InspectorMealHistory(database).rows_for(database.current_roster(), person.person_id) == rows
     personal = build_person_meal_history_rows((added.record,), person.person_id)
-    assert {row[:3] for row in personal} == {tuple(row) for row in rows}
-    assert all(row[3] == ACTOR.username for row in personal)
+    assert {(row[0], row[1], row[3]) for row in personal} == {tuple(row) for row in rows}
+    assert all(row[5] == ACTOR.username for row in personal)
 
 
 @pytest.mark.parametrize("source,decisions", [

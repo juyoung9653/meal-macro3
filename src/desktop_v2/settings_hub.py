@@ -44,6 +44,7 @@ class SettingsAction(StrEnum):
     DATABASE_PASSWORD = "database_password"
     OLD_ADDRESS = "old_address"
     JUSO_KEY = "juso_key"
+    USER_VIEW_LAYOUT = "user_view_layout"
 
     @property
     def label(self) -> str:
@@ -59,6 +60,11 @@ class SettingsAction(StrEnum):
 
 
 _SETTINGS_COPY = {
+    SettingsAction.USER_VIEW_LAYOUT: (
+        "다른 사용자 화면 설정 가져오기",
+        "같은 DB를 사용하는 다른 사용자의 시트 배치와 칼럼 설정을 가져옵니다.",
+        "이 PC의 화면 설정에 적용",
+    ),
     SettingsAction.SUBSTITUTE_COLUMNS: (
         "배송대타 칼럼 표시", "모든 시트에서 숨긴 칼럼을 배송대타 목록에서 제외할지 정합니다.", "이 PC의 운영 파일별 설정",
     ),
@@ -142,6 +148,7 @@ _SETTINGS_COPY = {
 }
 
 _SETTINGS_STAMPS = {
+    SettingsAction.USER_VIEW_LAYOUT: "화면",
     SettingsAction.SUBSTITUTE_COLUMNS: "칼럼",
     SettingsAction.PAUSE_CONVERSION: "변환",
     SettingsAction.OLD_ADDRESS: "주소",
@@ -169,6 +176,7 @@ _SETTINGS_GROUPS = (
             SettingsAction.PROVIDER,
             SettingsAction.DELIVERY_DEFAULTS,
             SettingsAction.STOPPED_HIGHLIGHT,
+            SettingsAction.USER_VIEW_LAYOUT,
             SettingsAction.PAUSE_CONVERSION,
             SettingsAction.SEQUENCE_MODE,
             SettingsAction.INITIAL_ROSTER_DATE,

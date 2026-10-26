@@ -115,9 +115,11 @@ class RosterColumnLayout(QObject):
     def switch_layout(
         self, settings_key: str, *, migrate_legacy: bool = False,
         hide_new_custom_columns: bool = False,
+        save_current: bool = True,
     ) -> None:
         """Save the current sheet before applying another sheet to the same table."""
-        self.save()
+        if save_current:
+            self.save()
         self._settings_key = settings_key
         self._migrate_legacy = migrate_legacy
         self._hide_new_custom_columns = hide_new_custom_columns

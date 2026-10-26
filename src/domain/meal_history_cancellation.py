@@ -4,7 +4,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, timedelta
-from uuid import UUID
+from uuid import UUID, uuid5
 
 from .projections import (
     ENROLLMENT_KIND, STATUS_EVENT_KIND, enrollment_entity_id, enrollments_from_state,
@@ -64,6 +64,11 @@ def cancelled_meal_history_targets(revisions):
 
 def build_meal_history_cancellation(current: HistoricalSnapshot, revisions, target, *,
                                     actor, recorded_at, revision_id):
+    return _build_cancellation(current, revisions, target, actor=actor,
+                               recorded_at=recorded_at, revision_id=revision_id, check_shared=True)
+
+
+def _build_cancellation(current, revisions, target, *, actor, recorded_at, revision_id, check_shared):
     if not revisions or revisions[-1].metadata.revision_id != current.revision_id:
         raise ValueError("최신 변경 이력을 다시 불러온 뒤 취소해주세요.")
     cancelled = cancelled_meal_history_targets(revisions)
@@ -156,24 +161,83 @@ def build_meal_history_cancellation(current: HistoricalSnapshot, revisions, targ
         RevisionSource.UI, decisions={CANCELLATION_DECISION: marker},
     ), tuple(changes))
     result = roster_from_entity_states(revision_id, entities)
-    _validate_shared_status(current, roster, result, entities, person_id, meal)
+    if check_shared:
+        _validate_shared_status(current, roster, result, entities, person_id, meal)
+        _validate_no_shared_expansion(current, record)
+    return result, record
+
+
+def _validate_no_shared_expansion(current, record):
     # Run existing shared-household rules, but never accept an expansion of this one-item action.
     from .household_shared import expand_household_shared_revision
     expanded = expand_household_shared_revision(current, record)
     key = lambda item: EntityRef(item.entity_kind, item.entity_id)
     if {key(c): c for c in expanded.changes} != {key(c): c for c in record.changes}:
         raise ValueError("가구 공용 설정으로 다른 가구원의 가입도 함께 변경되어 이 한 건만 취소할 수 없습니다. 공용 예외 또는 공용 설정을 먼저 확인해주세요.")
+
+
+def build_meal_history_cancellations(current, revisions, targets, *, actor, recorded_at, revision_id):
+    """Undo the selected actions newest-first in memory, then save one atomic revision."""
+    targets = tuple(dict.fromkeys(targets))
+    if not targets:
+        raise ValueError("취소할 식종 변경 이력을 선택해주세요.")
+    if len(targets) == 1:
+        return build_meal_history_cancellation(current, revisions, targets[0], actor=actor,
+                                              recorded_at=recorded_at, revision_id=revision_id)
+    positions = {record.metadata.revision_id: index for index, record in enumerate(revisions)}
+    targets = tuple(sorted(targets, key=lambda target: (
+        positions.get(target.revision_id, -1), target.entity_kind == STATUS_EVENT_KIND,
+        str(target.entity_id), str(target.period),
+    ), reverse=True))
+    snapshot, chain = current, tuple(revisions)
+    entities = dict(current.entities)
+    touched, affected = {}, set()
+    for index, target in enumerate(targets):
+        _, step = _build_cancellation(
+            snapshot, chain, target, actor=actor, recorded_at=recorded_at,
+            revision_id=uuid5(revision_id, f"meal-cancellation:{index}"), check_shared=False,
+        )
+        for change in step.changes:
+            ref = EntityRef(change.entity_kind, change.entity_id)
+            touched[ref] = None
+            if change.entity_kind in (STATUS_EVENT_KIND, ENROLLMENT_KIND):
+                affected.add((UUID(change.before["person_id"]), Meal(change.before["meal"])))
+            if change.after is None:
+                entities.pop(ref, None)
+            else:
+                entities[ref] = change.after
+        snapshot = HistoricalSnapshot(step.metadata.revision_id, entities)
+        chain = (*chain, step)
+    changes = []
+    for ref in touched:
+        before, after = current.entities.get(ref), entities.get(ref)
+        if before != after:
+            operation = (ChangeOperation.INSERT if before is None else
+                         ChangeOperation.DELETE if after is None else ChangeOperation.UPDATE)
+            changes.append(AuditChange(ref.entity_kind, ref.entity_id, operation, before, after))
+    record = RevisionRecord(RevisionMetadata(
+        revision_id, current.revision_id, recorded_at, None, actor,
+        f"식종 변경 취소 · {len(targets)}건", RevisionSource.UI,
+        decisions={CANCELLATION_DECISION: {"targets": [target.state() for target in targets]}},
+    ), tuple(changes))
+    before = roster_from_entity_states(current.revision_id, current.entities)
+    result = roster_from_entity_states(revision_id, entities)
+    for person_id, meal in affected:
+        _validate_shared_status(current, before, result, entities, person_id, meal)
+    _validate_no_shared_expansion(current, record)
     return result, record
 
 
 def validate_meal_history_cancellation(current, revisions, record):
-    target = MealHistoryTarget.from_state(record.metadata.decisions[CANCELLATION_DECISION])
-    _, expected = build_meal_history_cancellation(
-        current, revisions, target, actor=record.metadata.actor,
+    decision = record.metadata.decisions[CANCELLATION_DECISION]
+    targets = tuple(MealHistoryTarget.from_state(state) for state in decision["targets"]) if "targets" in decision else (
+        MealHistoryTarget.from_state(decision),)
+    _, expected = build_meal_history_cancellations(
+        current, revisions, targets, actor=record.metadata.actor,
         recorded_at=record.metadata.recorded_at, revision_id=record.metadata.revision_id,
     )
     if record != expected:
-        raise ValueError("선택한 식종 변경 한 건의 취소 내용과 저장 내용이 다릅니다.")
+        raise ValueError("선택한 식종 변경의 취소 내용과 저장 내용이 다릅니다.")
 
 
 def _intersection(first, second):

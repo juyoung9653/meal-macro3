@@ -49,6 +49,7 @@ from src.desktop_v2.school_calendar_edit import (
     SchoolCalendarEditStatus,
 )
 from src.desktop_v2.settings_hub import SettingsAction
+from src.domain.meal_status_changes import build_meal_status_revision
 from src.domain.roster import (
     InclusiveDateRange,
     Meal,
@@ -338,7 +339,7 @@ class _AcceptedMealStatusDialog:
 
     def selected_periods(self):
         return {
-            Meal.BREAKFAST: InclusiveDateRange(date(2026, 8, 21), None),
+            Meal.BREAKFAST: InclusiveDateRange(date(2026, 8, 28), None),
             Meal.LUNCH: self.selected_period(),
         }
 
@@ -735,6 +736,23 @@ def test_multi_meal_delivery_auto_enrolls_and_backup_restores_events(
         message_box=_Messages,
     ).run()
     assert initial.completed and initial.roster is not None
+    # Resume an existing meal while enrolling a new one; repeated delivery is invalid.
+    stopped_event_id = UUID("84000000-0000-0000-0000-000000000009")
+    stopped = build_meal_status_revision(
+        initial.roster,
+        PERSON_ID,
+        (Meal.BREAKFAST,),
+        MealStatus.STOPPED,
+        InclusiveDateRange(date(2026, 8, 21), None),
+        actor=RevisionActor("tester", "S-1-5-21-test"),
+        recorded_at=datetime(2026, 8, 26, 13, 0, tzinfo=UTC),
+        revision_id=UUID("84000000-0000-0000-0000-00000000000a"),
+        event_ids={Meal.BREAKFAST: stopped_event_id},
+    )
+    assert session.append_revision(stopped.record).succeeded
+    assert session.database.status_history(
+        PERSON_ID, Meal.BREAKFAST,
+    ).status_on(date(2026, 8, 28)) is MealStatus.STOPPED
     event_ids = iter((BREAKFAST_STATUS_EVENT_ID, LUNCH_STATUS_EVENT_ID))
 
     changed = MealStatusChangeController(
@@ -752,7 +770,7 @@ def test_multi_meal_delivery_auto_enrolls_and_backup_restores_events(
         date(2026, 8, 18),
     )
 
-    assert changed.completed and changed.roster is not None
+    assert changed.completed and changed.roster is not None, _Messages.critical_calls
     assert changed.roster.meals_for(PERSON_ID, on=date(2026, 8, 18)) == (
         Meal.BREAKFAST,
         Meal.LUNCH,
@@ -762,17 +780,20 @@ def test_multi_meal_delivery_auto_enrolls_and_backup_restores_events(
     assert decision["meals"] == (Meal.BREAKFAST.value, Meal.LUNCH.value)
     assert decision["status"] == MealStatus.DELIVERY.value
     assert decision["auto_enrolled_meals"] == (Meal.LUNCH.value,)
-    assert session.database.status_history(
-        PERSON_ID,
-        Meal.BREAKFAST,
-    ).events[0].event_id == BREAKFAST_STATUS_EVENT_ID
+    breakfast_history = session.database.status_history(PERSON_ID, Meal.BREAKFAST)
+    assert {event.event_id for event in breakfast_history.events} == {
+        stopped_event_id, BREAKFAST_STATUS_EVENT_ID,
+    }
+    # Once delivery resumes, the bounded stopped interval is projected as paused.
+    assert breakfast_history.status_on(date(2026, 8, 27)) is MealStatus.PAUSED
+    assert breakfast_history.status_on(date(2026, 8, 28)) is MealStatus.DELIVERY
     assert session.database.status_history(
         PERSON_ID,
         Meal.LUNCH,
     ).events[0].event_id == LUNCH_STATUS_EVENT_ID
     assert changed.backup_result is not None and changed.backup_result.succeeded
     backup_path = changed.backup_result.record.path
-    assert len(tuple((tmp_path / "backups").glob("*.mealbackup"))) == 3
+    assert len(tuple((tmp_path / "backups").glob("*.mealbackup"))) == 4
     assert _Messages.critical_calls == []
     assert _Messages.warning_calls == []
     session.close()
@@ -791,6 +812,12 @@ def test_multi_meal_delivery_auto_enrolls_and_backup_restores_events(
             PERSON_ID,
             Meal.LUNCH,
         ).events[0].event_id == LUNCH_STATUS_EVENT_ID
+        restored_breakfast_history = restored.database.status_history(
+            PERSON_ID, Meal.BREAKFAST,
+        )
+        assert restored_breakfast_history.events == breakfast_history.events
+        assert restored_breakfast_history.status_on(date(2026, 8, 27)) is MealStatus.PAUSED
+        assert restored_breakfast_history.status_on(date(2026, 8, 28)) is MealStatus.DELIVERY
         restored_revision = restored.database.latest_revision()
         assert restored_revision.metadata.revision_id == MEAL_STATUS_REVISION_ID
         assert restored_revision.metadata.decisions["meal_status_change"][

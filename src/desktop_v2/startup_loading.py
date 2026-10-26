@@ -7,7 +7,7 @@ from typing import Any, TypeVar
 
 from PySide6.QtCore import QEventLoop, Qt, QThread, QTimer, Slot
 from shiboken6 import isValid
-from PySide6.QtWidgets import QApplication, QDialog, QFrame, QLabel, QProgressBar, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QDialog, QFrame, QLabel, QLineEdit, QProgressBar, QVBoxLayout, QWidget
 
 from .theme import application_stylesheet, register_application_fonts
 
@@ -99,15 +99,51 @@ def run_worker_with_delayed_progress(worker: QThread, dialog: QDialog) -> None:
     app = QApplication.instance()
     windows = [window for window in app.topLevelWidgets()
                if window is not dialog and window.isVisible() and window.isEnabled()]
+    source_window = app.activeWindow()
+    if source_window not in windows:
+        parent = dialog.parentWidget()
+        source_window = parent.window() if parent is not None else None
+    if source_window not in windows:
+        source_window = None
+    source_focus = source_window.focusWidget() if source_window is not None else None
+    source_text_selection = (
+        (source_focus.text(), source_focus.cursorPosition(), source_focus.selectionStart(),
+         source_focus.selectionLength()) if isinstance(source_focus, QLineEdit) else None
+    )
+    shown = False
     loop = QEventLoop()
     timer = QTimer()
     timer.setSingleShot(True)
     timer.setTimerType(Qt.TimerType.PreciseTimer)
 
     def show_if_running():
+        nonlocal shown
         if worker.isRunning():
+            shown = True
             dialog.setEnabled(True)
             dialog.show()
+
+    def restore_source_window():
+        if source_window is None or not isValid(source_window):
+            return
+        if not source_window.isVisible() or not source_window.isEnabled():
+            return
+        # A subsequent confirmation/completion window must keep its own focus.
+        if any(isinstance(window, QDialog) and window is not dialog
+               and window is not source_window and window not in windows and window.isVisible()
+               for window in app.topLevelWidgets()):
+            return
+        source_window.raise_()
+        source_window.activateWindow()
+        if source_focus is not None and isValid(source_focus) and source_focus.isVisible() and source_focus.isEnabled():
+            source_focus.setFocus(Qt.FocusReason.OtherFocusReason)
+            if source_text_selection is not None:
+                text, cursor, start, length = source_text_selection
+                if source_focus.text() == text:
+                    if start >= 0:
+                        source_focus.setSelection(start, length)
+                    else:
+                        source_focus.setCursorPosition(cursor)
 
     timer.timeout.connect(show_if_running)
     worker.finished.connect(loop.quit, Qt.ConnectionType.QueuedConnection)
@@ -125,6 +161,9 @@ def run_worker_with_delayed_progress(worker: QThread, dialog: QDialog) -> None:
         for window in windows:
             if isValid(window):
                 window.setEnabled(True)
+        if shown:
+            restore_source_window()
+            QTimer.singleShot(0, restore_source_window)
         dialog.deleteLater()
         worker.finished.disconnect(loop.quit)
 

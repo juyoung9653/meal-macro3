@@ -199,6 +199,7 @@ def _filter_entries():
     return tuple(MonthlyMealHistoryEntry(
         uuid4(), name, None, None, meal, status,
         InclusiveDateRange(date(2026, 10, day), date(2026, 11, 3)), actor, code,
+        intake_channel="메일" if day == 2 else "-", note="추가 안내" if day == 2 else "",
     ) for name, meal, status, day, actor, code in (
         ("김하늘", Meal.DINNER, MealStatus.PAUSED, 1, "직원A", "20261001-001"),
         ("이수민", Meal.BREAKFAST, MealStatus.DELIVERY, 2, "직원B", "20261002-002"),
@@ -214,6 +215,7 @@ def _visible_names(dialog):
 @pytest.mark.parametrize("key,query", (
     ("name", "이수민"), ("meal", "조식"), ("status", "배송"),
     ("period", "2026-10-02"), ("actor", "직원b"), ("revision", "002"),
+    ("intake_channel", "메일"), ("note", "추가 안내"),
 ))
 def test_header_filter_popup_search_apply_cancel_and_reset(app, key, query):
     from src.desktop_v2.column_search import ColumnValuePicker
@@ -226,7 +228,7 @@ def test_header_filter_popup_search_apply_cancel_and_reset(app, key, query):
     dialog.show()
     app.processEvents()
     header = dialog._column_search_header
-    assert len(header.buttons) == 6
+    assert len(header.buttons) == 8
     header.buttons[key].click()
     picker = header._menu.findChild(ColumnValuePicker)
     picker.search.setText(query)
@@ -313,11 +315,13 @@ def test_dialog_month_change_empty_and_error_clear_rows(app):
 
     dialog = MonthlyMealHistoryDialog(date(2026, 12, 1), load)
     assert dialog.table.rowCount() == 1
-    assert dialog.table.columnCount() == 6
-    assert tuple(dialog.table.horizontalHeaderItem(index).text() for index in range(6)) == (
-        "성명", "식종", "구분", "적용 기간", "변경자", "변경번호",
+    assert dialog.table.columnCount() == 8
+    assert tuple(dialog.table.horizontalHeaderItem(index).text() for index in range(8)) == (
+        "성명", "식종", "구분", "접수 경로", "적용 기간", "비고", "변경자", "변경번호",
     )
-    assert dialog.table.item(0, 3).text() == "2026-12-31 ~ 2027-01-01"
+    assert dialog.table.item(0, 3).text() == "-"
+    assert dialog.table.item(0, 4).text() == "2026-12-31 ~ 2027-01-01"
+    assert dialog.table.item(0, 5).text() == ""
     assert dialog.table.editTriggers() == QAbstractItemView.EditTrigger.NoEditTriggers
     dialog._shift_month(1)
     assert calls == [(2026, 12), (2027, 1)] and dialog.table.rowCount() == 1

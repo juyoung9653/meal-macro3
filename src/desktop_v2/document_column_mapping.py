@@ -146,10 +146,12 @@ class DocumentColumnMappingDialog(QDialog):
         root.addLayout(selectors)
 
         headings = QHBoxLayout()
-        for index, text in enumerate(("출력 칼럼", "1순위", "2순위 · 1순위가 비면")):
+        for index, text in enumerate(("출력 칼럼", "1순위", "2순위 · 1순위가 비면", "연결 상태")):
             label = QLabel(text)
             label.setObjectName("editEyebrow")
-            headings.addWidget(label, 1 if index == 0 else 2)
+            if index == 3:
+                label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            headings.addWidget(label, 2 if index in (1, 2) else 1)
         root.addLayout(headings)
 
         self._scroll = QScrollArea()
@@ -216,7 +218,7 @@ class DocumentColumnMappingDialog(QDialog):
         container = QWidget()
         grid = QGridLayout(container)
         grid.setContentsMargins(2, 2, 4, 2)
-        grid.setHorizontalSpacing(18)
+        grid.setHorizontalSpacing(12)
         grid.setVerticalSpacing(8)
         values = self._initial_mapping(self._scope)
         for row, target in enumerate(spec.targets):
@@ -235,7 +237,7 @@ class DocumentColumnMappingDialog(QDialog):
                 automatic = QLabel(f"{reason} · 수정할 수 없음")
                 automatic.setObjectName("settingsHubNote")
                 automatic.setWordWrap(True)
-                grid.addWidget(automatic, row, 1, 1, 2)
+                grid.addWidget(automatic, row, 1, 1, 3)
                 continue
             field = QComboBox()
             field.setMinimumWidth(140)
@@ -265,17 +267,14 @@ class DocumentColumnMappingDialog(QDialog):
             secondary.setCurrentIndex(secondary.findData(self._initial_fallbacks(self._scope).get(target, "")))
             secondary.currentIndexChanged.connect(self._refresh_indicators)
             self._fallback_combos[target] = secondary
-            grid.addWidget(secondary, row, 2, alignment=Qt.AlignmentFlag.AlignTop)
-            right_widget = QWidget()
-            right = QVBoxLayout(right_widget)
-            right.setContentsMargins(0, 0, 0, 0)
-            right.setSpacing(2)
-            right.addWidget(field, 1)
-            right.addWidget(indicator)
-            grid.addWidget(right_widget, row, 1)
+            grid.addWidget(field, row, 1)
+            grid.addWidget(secondary, row, 2)
+            grid.addWidget(indicator, row, 3,
+                alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(1, 2)
         grid.setColumnStretch(2, 2)
+        grid.setColumnStretch(3, 1)
         grid.setRowStretch(len(spec.targets), 1)
         self._scroll.setWidget(container)
         self._refresh_indicators()

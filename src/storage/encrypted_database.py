@@ -159,12 +159,15 @@ class EncryptedDatabase:
             from src.domain.meal_history_cancellation import (
                 CANCELLATION_DECISION, CANCELLATION_KIND, validate_meal_history_cancellation,
             )
-            cancelling = CANCELLATION_DECISION in record.metadata.decisions
+            from src.services.meal_history_cleanup import CLEANUP_DECISION, validate_meal_history_cleanup
+            deduplicating = CLEANUP_DECISION in record.metadata.decisions
+            cancelling = CANCELLATION_DECISION in record.metadata.decisions or deduplicating
             if cancelling:
                 if restoring or actual_parent is None:
-                    raise ValueError("식종 변경 취소는 현재 명단에서 한 건씩 처리해야 합니다.")
+                    raise ValueError("식종 변경 취소는 현재 명단에서 처리해야 합니다.")
                 chain = self.branch_revision_chain(actual_parent)
-                validate_meal_history_cancellation(
+                validator = validate_meal_history_cleanup if deduplicating else validate_meal_history_cancellation
+                validator(
                     self._current_entity_snapshot(actual_parent), chain, record,
                 )
             elif not restoring and any(c.entity_kind == CANCELLATION_KIND for c in record.changes):
@@ -582,6 +585,39 @@ class EncryptedDatabase:
         if row is None:
             return None
         return load_current_roster(connection, UUID(str(row[0])))
+
+    def save_user_view_layout(self, actor: RevisionActor, computer_name: str, layout) -> bool:
+        """Store a user's latest appearance separately from operational revisions."""
+        from src.domain.view_layout import validate_view_layout
+        if not isinstance(actor, RevisionActor) or not isinstance(computer_name, str):
+            raise TypeError("화면 설정의 사용자 정보가 올바르지 않습니다.")
+        payload = json.dumps(validate_view_layout(layout), ensure_ascii=False, sort_keys=True)
+        connection = self._require_connection()
+        # Do not let a settings save become part of an unrelated revision transaction.
+        if not connection.get_autocommit():
+            raise RuntimeError("다른 저장이 끝난 뒤 화면 설정을 다시 저장해주세요.")
+        row = connection.execute(
+            "SELECT actor_username, computer_name, layout_json FROM user_view_layout WHERE actor_sid = ?",
+            (actor.sid,),
+        ).fetchone()
+        if row == (actor.username, computer_name, payload):
+            return False
+        connection.execute("""
+            INSERT INTO user_view_layout(actor_sid, actor_username, computer_name, updated_at, layout_json)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(actor_sid) DO UPDATE SET actor_username = excluded.actor_username,
+                computer_name = excluded.computer_name, updated_at = excluded.updated_at,
+                layout_json = excluded.layout_json
+        """, (actor.sid, actor.username, computer_name, datetime.now(UTC).isoformat(), payload))
+        return True
+
+    def user_view_layouts(self):
+        """List only profiles held by this database, with independent JSON values."""
+        return tuple({"sid": sid, "username": username, "computer_name": computer,
+                      "updated_at": updated, "layout": json.loads(payload)}
+                     for sid, username, computer, updated, payload in self._require_connection().execute(
+                         "SELECT actor_sid, actor_username, computer_name, updated_at, layout_json "
+                         "FROM user_view_layout ORDER BY actor_username, computer_name, actor_sid"))
 
     def status_events(
         self,

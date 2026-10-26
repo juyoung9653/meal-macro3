@@ -97,8 +97,18 @@ def test_column_manager_visibility_reset_and_shared_entry(window):
     assert not window._table.isColumnHidden(index)
     called = []
     window.household_shared_column_requested.connect(called.append)
-    dialog.columns.setCurrentRow(index)
+    assert dialog.columns.currentItem() is None
+    assert dialog.shared_button.text() == "칼럼 가구 공용 설정"
+    assert dialog.shared_button.isEnabled()
     dialog.shared_button.click()
+    assert called == []
+    action = next(action for action in dialog._shared_menu.actions() if action.data() == "address")
+    assert action.isChecked() == ("address" in window.table_model._household_shared_columns)
+    dialog._shared_menu.close()
+    assert called == []
+    dialog.shared_button.click()
+    action = next(action for action in dialog._shared_menu.actions() if action.data() == "address")
+    action.trigger()
     assert called == ["address"]
 
 

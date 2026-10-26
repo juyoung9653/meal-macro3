@@ -194,7 +194,21 @@ class OldAddressController:
                     raise RevisionConflictError("명단이 변경되었습니다.")
                 key = self._store.get_api_key()
                 if not key:
-                    raise ValueError("설정 → 주소 API 키에서 승인키를 먼저 저장해주세요.")
+                    warning = QMessageBox(parent)
+                    warning.setIcon(QMessageBox.Icon.Warning)
+                    warning.setWindowTitle("주소 API 키가 필요합니다")
+                    warning.setText("저장하지 않았습니다.\n주소 API 승인키를 먼저 저장해주세요.")
+                    input_button = warning.addButton("API키 입력", QMessageBox.ButtonRole.ActionRole)
+                    confirm_button = warning.addButton("확인", QMessageBox.ButtonRole.RejectRole)
+                    warning.setDefaultButton(input_button)
+                    warning.setEscapeButton(confirm_button)
+                    yield DialogRequest(warning)
+                    if warning.clickedButton() is input_button:
+                        key_dialog = JusoKeyDialog(parent=parent, store=self._store,
+                            client_type=self._client_type, message_box=self._message_box)
+                        key_dialog.key_edit.setFocus()
+                        yield DialogRequest(key_dialog)
+                    continue
                 source, target = dialog.source_combo.currentData(), dialog.target_combo.currentData()
                 only_empty = dialog.empty_only.isChecked()
                 client = self._client_type(key)

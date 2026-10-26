@@ -17,7 +17,7 @@ from src.domain.projections import (
 from src.domain.revisions import ChangeOperation, HistoricalSnapshot, RevisionRecord, RevisionSource, format_revision_timestamp
 from src.domain.roster import InclusiveDateRange, Meal
 from src.domain.status import MealStatus
-from src.services.person_history import is_roster_import_history
+from src.services.person_history import is_roster_import_history, meal_change_details
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,6 +31,9 @@ class MonthlyMealHistoryEntry:
     period: InclusiveDateRange
     actor: str
     revision_code: str
+    intake_channel: str = "-"
+    note: str = ""
+    source_period: InclusiveDateRange | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +46,7 @@ class MonthlyMealHistory:
 
 def build_monthly_meal_history(
     snapshot: HistoricalSnapshot, revisions: tuple[RevisionRecord, ...], year: int, month: int,
+    *, include_all_periods: bool = False,
 ) -> MonthlyMealHistory:
     """Keep raw action labels, but trim superseded and unenrolled dates.
 
@@ -110,7 +114,7 @@ def build_monthly_meal_history(
     for person_id, meal, status, period, metadata, event_id in candidates.values():
         # An ongoing action belongs to its original start month, even if later
         # overrides split its effective period into newly starting segments.
-        if period.ends_on is None and (
+        if not include_all_periods and period.ends_on is None and (
             period.starts_on is None or not selected.contains(period.starts_on)
         ):
             continue
@@ -125,13 +129,15 @@ def build_monthly_meal_history(
         for span in spans:
             for enrollment_period in enrollments[person_id, meal]:
                 applicable = _intersection(span, enrollment_period)
-                if applicable is None or not applicable.overlaps(selected):
+                if applicable is None or (not include_all_periods and not applicable.overlaps(selected)):
                     continue
                 profile = person.profile
                 rows.append(MonthlyMealHistoryEntry(
                     person_id, profile.name, profile.birth_date, profile.school_name,
                     meal, status, applicable, metadata.actor.username,
                     metadata.display_code or format_revision_timestamp(metadata.recorded_at),
+                    *meal_change_details(metadata.decisions),
+                    source_period=period,
                 ))
     meal_order = {Meal.DINNER: 0, Meal.BREAKFAST: 1, Meal.LUNCH: 2}
     rows.sort(key=lambda row: (

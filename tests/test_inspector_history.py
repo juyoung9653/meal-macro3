@@ -62,7 +62,7 @@ def test_inspector_history_matches_person_dialog_status_rows_and_refreshes_revis
     rows = history.rows_for(roster, first.person_id)
     assert len(rows) == 7  # One row per status event; all remain available to scroll.
     expected = build_person_meal_history_rows(tuple(records.values()), first.person_id)
-    assert tuple(tuple(row) for row in rows) == tuple(row[:3] for row in reversed(expected))
+    assert tuple(tuple(row) for row in rows) == tuple((row[0], row[1], row[3]) for row in reversed(expected))
     assert rows[0].meal == "석식"
     assert rows[0].category == "일시중지"
     assert rows[0].period == "2026-09-22 ~ 2026-09-30"

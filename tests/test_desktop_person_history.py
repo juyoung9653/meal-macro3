@@ -149,8 +149,8 @@ def test_meal_history_projects_exact_columns_status_period_and_metadata(status, 
     record = _status_revision(status, date(2026, 10, 1), ends_on)
     original_after = record.changes[0].after
     rows = build_person_meal_history_rows((record,), _roster().persons[0].person_id)
-    assert MEAL_HISTORY_HEADINGS == ("식종", "구분", "기간", "변경자", "변경번호")
-    assert rows == (("중식", category, expected, "합성 담당자", "20261014-001"),)
+    assert MEAL_HISTORY_HEADINGS == ("식종", "구분", "접수 경로", "기간", "비고", "변경자", "변경번호")
+    assert rows == (("중식", category, "-", expected, "", "합성 담당자", "20261014-001"),)
     assert record.changes[0].after == original_after
     assert original_after["ends_on"] == (ends_on.isoformat() if ends_on else None)
 
@@ -159,9 +159,9 @@ def test_meal_history_missing_start_is_explicit_without_applied_date():
     record = _status_revision(MealStatus.STOPPED, None, date(2026, 10, 31))
     record = replace(record, metadata=replace(record.metadata, effective_on=None, display_code=None))
     row = build_person_meal_history_rows((record,), _roster().persons[0].person_id)[0]
-    assert row[2] == "시작일 미지정 ~ "
-    assert row[3] == "합성 담당자"
-    assert row[4] == "20261014-100000"
+    assert row[3] == "시작일 미지정 ~ "
+    assert row[5] == "합성 담당자"
+    assert row[6] == "20261014-100000"
 
 
 def test_meal_history_excludes_nonstatus_deletion_import_and_other_person():
@@ -199,8 +199,8 @@ def test_meal_history_keeps_affirmative_updates_and_uses_oldest_first_order():
     ),))
     rows = build_person_meal_history_rows((updated, original), _roster().persons[0].person_id)
     assert tuple(row[1] for row in rows) == ("시작", "중지")
-    assert rows[1][2] == "2026-10-12 ~ "
-    assert tuple(row[4] for row in rows) == ("20261014-001", "20261014-002")
+    assert rows[1][3] == "2026-10-12 ~ "
+    assert tuple(row[6] for row in rows) == ("20261014-001", "20261014-002")
 
 
 def test_same_typed_status_record_preserves_shared_export_format():
@@ -219,7 +219,7 @@ def test_same_typed_status_record_preserves_shared_export_format():
         "사유: 상태 표시 문자열을 날짜로 해석하면 안 됩니다."
     )
     ui_rows = build_person_meal_history_rows((record,), person_id)
-    assert ui_rows[0][1:3] == ("일시중지", "2026-10-01 ~ 2026-10-05")
+    assert ui_rows[0][1:4] == ("일시중지", "-", "2026-10-01 ~ 2026-10-05")
     assert source["status"] == "일시중지"
     assert source["starts_on"] == "2026-10-01" and source["ends_on"] == "2026-10-05"
 
@@ -246,7 +246,7 @@ def test_person_history_provider_uses_ui_projection_without_changing_shared_tabl
     view = dialog.findChild(QTableView, "history_식종 변경")
     assert view.model().headings == MEAL_HISTORY_HEADINGS
     assert view.model().rowCount() == 1
-    assert view.model().data(view.model().index(0, 2)) == "2026-10-01 ~ 2026-10-05"
+    assert view.model().data(view.model().index(0, 3)) == "2026-10-01 ~ 2026-10-05"
     assert shared["식종 변경"][0] == ("이전 값", "변경 값")
     assert dialog.findChild(QTableView, "history_정보 변경").model().rows == (("학교명",),)
     assert dialog.findChild(QTableView, "history_민원").model().rows == (("합성 민원",),)

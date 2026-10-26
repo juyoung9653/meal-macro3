@@ -13,6 +13,7 @@ from .projections import roster_audit_changes, status_event_audit_change
 from .revisions import AuditChange, ChangeOperation, RevisionActor, RevisionMetadata, RevisionRecord, RevisionSource
 from .roster import DeliveryAssignment, Household, HouseholdMembership, InclusiveDateRange, Meal, MealEnrollment, Person, RosterSnapshot
 from .status import MealStatus, StatusEvent
+from .intake import IntakeChannel
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +42,7 @@ def build_roster_row_revision(
     initial_statuses: dict[Meal, tuple[MealStatus, date | None]] | None = None,
     status_event_ids: dict[Meal, UUID] | None = None,
     delete_person_id: UUID | None = None,
+    intake_channel: IntakeChannel | None = None,
 ) -> PreparedRosterRowRevision:
     """Apply exactly one person insertion or deletion to the current roster."""
     if not isinstance(current_roster, RosterSnapshot):
@@ -55,6 +57,8 @@ def build_roster_row_revision(
         raise ValueError("새 revision ID가 필요합니다.")
     if (add_person is None) == (delete_person_id is None):
         raise ValueError("추가 또는 삭제 중 하나만 지정해야 합니다.")
+    if intake_channel is not None and not isinstance(intake_channel, IntakeChannel):
+        raise TypeError("접수 경로는 IntakeChannel이어야 합니다.")
 
     if add_person is not None:
         if not isinstance(add_person, Person):
@@ -172,6 +176,9 @@ def build_roster_row_revision(
         for meal, (status, ends_on) in statuses.items():
             event = StatusEvent((status_event_ids or {})[meal], revision_id, add_person.person_id, meal, status, InclusiveDateRange(starts_by_meal[meal], ends_on), recorded_at)
             changes.append(status_event_audit_change(event))
+    decision = {"operation": operation, "person_id": str(person_id)}
+    if add_person is not None and intake_channel is not None:
+        decision["intake_channel"] = intake_channel.value
     metadata = RevisionMetadata(
         revision_id=revision_id,
         parent_revision_id=current_roster.revision_id,
@@ -180,7 +187,7 @@ def build_roster_row_revision(
         actor=actor,
         reason="명단 행 추가" if operation == "add" else "명단 행 삭제",
         source=RevisionSource.UI,
-        decisions={"roster_row_change": {"operation": operation, "person_id": str(person_id)}},
+        decisions={"roster_row_change": decision},
         rule_versions={"roster_row_change_policy_version": 2},
     )
     return PreparedRosterRowRevision(snapshot, RevisionRecord(metadata, tuple(changes)))

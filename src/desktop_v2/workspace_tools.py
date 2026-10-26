@@ -1,6 +1,6 @@
 """Compact entry points for related roster work."""
 from PySide6.QtCore import QSignalBlocker, Qt
-from PySide6.QtWidgets import (QComboBox, QDialog, QHBoxLayout, QLabel, QListWidget,
+from PySide6.QtWidgets import (QComboBox, QDialog, QHBoxLayout, QLabel, QListWidget, QMenu,
     QListWidgetItem, QPushButton, QSpinBox, QTabWidget, QVBoxLayout, QWidget)
 
 from .theme import application_stylesheet, register_application_fonts
@@ -152,9 +152,8 @@ class ColumnManagerDialog(QDialog):
         actions.addWidget(_button("사용자 항목 추가·삭제", self._custom_fields))
         actions.addStretch()
         root.addLayout(actions)
-        self.shared_button = _button("선택 칼럼 가구 공용 설정", self._shared)
-        self.shared_button.setEnabled(False)
-        self.columns.currentItemChanged.connect(self._selection_changed)
+        self.shared_button = _button("칼럼 가구 공용 설정", self._shared)
+        self._shared_menu = QMenu(self)
         root.addWidget(self.shared_button)
         root.addWidget(_button("닫기", self.accept))
         window.table_model.modelReset.connect(self._reload)
@@ -174,15 +173,6 @@ class ColumnManagerDialog(QDialog):
                     item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
                 item.setCheckState(Qt.CheckState.Unchecked if table.isColumnHidden(logical) else Qt.CheckState.Checked)
                 self.columns.addItem(item)
-        if hasattr(self, "shared_button"):
-            self._selection_changed(None)
-
-    def _selection_changed(self, item, previous=None):
-        key = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
-        allowed = key in available_shared_column_keys(self._window.roster)
-        self.shared_button.setEnabled(allowed)
-        shared = key in self._window.table_model._household_shared_columns
-        self.shared_button.setText("선택 칼럼 가구 공용 해제" if shared else "선택 칼럼 가구 공용 설정")
 
     def _toggle(self, item):
         self._window._column_layout._set_hidden(item.data(Qt.ItemDataRole.UserRole), item.checkState() != Qt.CheckState.Checked)
@@ -196,8 +186,22 @@ class ColumnManagerDialog(QDialog):
         self._window.custom_fields_requested.emit()
 
     def _shared(self):
-        item = self.columns.currentItem()
-        if item is not None:
+        self._shared_menu.clear()
+        allowed = available_shared_column_keys(self._window.roster)
+        shared = self._window.table_model._household_shared_columns
+        for index in range(self.columns.count()):
+            item = self.columns.item(index)
             key = item.data(Qt.ItemDataRole.UserRole)
-            self.accept()
-            self._window.household_shared_column_requested.emit(key)
+            if key not in allowed:
+                continue
+            action = self._shared_menu.addAction(item.text())
+            action.setData(key)
+            action.setCheckable(True)
+            action.setChecked(key in shared)
+            action.setToolTip("체크하면 가구 공용으로 사용하고, 해제하면 현재 값을 유지하며 공용 사용을 끝냅니다.")
+            action.triggered.connect(lambda checked=False, key=key: self._select_shared(key))
+        self._shared_menu.popup(self.shared_button.mapToGlobal(self.shared_button.rect().bottomLeft()))
+
+    def _select_shared(self, key):
+        self.accept()
+        self._window.household_shared_column_requested.emit(key)

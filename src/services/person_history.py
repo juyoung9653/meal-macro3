@@ -326,8 +326,19 @@ def _person_name(roster: RosterSnapshot, person_id: UUID | None, before: Mapping
     return ""
 
 
-def _intake_channel(decisions: Mapping) -> str:
+def meal_change_details(decisions: Mapping) -> tuple[str, str]:
+    """Read optional user-entered details without treating generated reasons as notes."""
+    note = ""
     for key in ("meal_status_change", "batch_meal_status_change"):
+        choice = decisions.get(key)
+        if isinstance(choice, Mapping) and isinstance(choice.get("note"), str):
+            note = choice["note"].strip()
+            break
+    return _intake_channel(decisions).strip() or "-", note
+
+
+def _intake_channel(decisions: Mapping) -> str:
+    for key in ("meal_status_change", "batch_meal_status_change", "roster_row_change"):
         choice = decisions.get(key)
         if isinstance(choice, Mapping):
             value = choice.get("intake_channel")

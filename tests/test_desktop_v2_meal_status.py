@@ -237,7 +237,7 @@ def test_selected_meals_keep_independent_valid_periods(app: QApplication):
         _histories(),
         ANCHOR_DAY,
         Meal.DINNER,
-        MealStatus.DELIVERY,
+        MealStatus.STOPPED,
     )
     try:
         dialog._meal_checks[Meal.BREAKFAST].setChecked(True)
@@ -300,7 +300,7 @@ def test_period_editor_uses_configured_delivery_mapping_not_service_weekdays(app
     ))
     dialog = MealStatusChangeDialog(
         roster.person(PERSON_ID), roster, _histories(), ANCHOR_DAY,
-        Meal.BREAKFAST, MealStatus.DELIVERY,
+        Meal.BREAKFAST, MealStatus.STOPPED,
     )
     try:
         editor = dialog._starts_on_by_meal[Meal.BREAKFAST]
@@ -330,8 +330,11 @@ def test_intake_channel_is_optional_and_returns_selected_channel(app: QApplicati
         MealStatus.DELIVERY,
     )
     try:
-        assert dialog._intake_channel.currentText() == "미선택"
+        assert dialog._intake_channel.currentText() == "-"
         assert dialog.selected_intake_channel() is None
+        assert dialog.selected_note() == ""
+        dialog._note.setPlainText("  합성 비고\n추가 안내  ")
+        assert dialog.selected_note() == "합성 비고\n추가 안내"
         dialog._intake_channel.setCurrentText("기타")
         assert dialog.selected_intake_channel() is IntakeChannel.OTHER
     finally:

@@ -11,10 +11,10 @@ from src.domain.meal_history_cancellation import MealHistoryTarget, cancelled_me
 from src.domain.projections import ENROLLMENT_KIND, STATUS_EVENT_KIND, enrollments_from_state, status_event_from_state
 from src.domain.revisions import ChangeOperation, RevisionRecord, RevisionSource, format_revision_timestamp
 from src.domain.status import MealStatus, StatusEvent
-from src.services.person_history import is_roster_import_history
+from src.services.person_history import is_roster_import_history, meal_change_details
 
-MEAL_HISTORY_HEADINGS = ("식종", "구분", "기간", "변경자", "변경번호")
-MealHistoryRow = tuple[str, str, str, str, str]
+MEAL_HISTORY_HEADINGS = ("식종", "구분", "접수 경로", "기간", "비고", "변경자", "변경번호")
+MealHistoryRow = tuple[str, str, str, str, str, str, str]
 
 
 def meal_status_summary(event: StatusEvent) -> tuple[str, str, str]:
@@ -61,6 +61,7 @@ def build_meal_history_entries_by_person(revisions):
                 or "snapshot_restore_target" in record.metadata.decisions):
             continue
         metadata = record.metadata
+        intake, note = meal_change_details(metadata.decisions)
         details = (
             metadata.actor.username,
             metadata.display_code or format_revision_timestamp(metadata.recorded_at),
@@ -73,7 +74,8 @@ def build_meal_history_entries_by_person(revisions):
         for event in events:
             target = MealHistoryTarget(metadata.revision_id, STATUS_EVENT_KIND, event.event_id)
             if target not in cancelled:
-                rows[event.person_id].append(MealHistoryEntry((*meal_status_summary(event), *details), target))
+                meal, category, period = meal_status_summary(event)
+                rows[event.person_id].append(MealHistoryEntry((meal, category, intake, period, note, *details), target))
         added = metadata.decisions.get("roster_row_change")
         if (metadata.source is not RevisionSource.UI
                 or not isinstance(added, Mapping) or added.get("operation") != "add"):
@@ -95,5 +97,5 @@ def build_meal_history_entries_by_person(revisions):
                 start = enrollment.period.starts_on
                 period = f"{start.isoformat() if start is not None else '시작일 미지정'} ~ "
                 rows[enrollment.person_id].append(MealHistoryEntry(
-                    (enrollment.meal.value, "시작", period, *details), target))
+                    (enrollment.meal.value, "시작", intake, period, note, *details), target))
     return {person_id: tuple(items) for person_id, items in rows.items()}

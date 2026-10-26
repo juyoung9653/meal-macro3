@@ -127,7 +127,7 @@ class PersonHistoryDialog(QDialog):
             if name == "식종 변경":
                 self._meal_count_label = count_label
             if name == "식종 변경":
-                note = QLabel("기록을 우클릭하면 선택한 변경 한 건을 취소할 수 있습니다. 취소한 기록은 이 목록에서 사라지며 원본과 취소 내용은 더보기 → 이력·민원 → 전체 변경 이력에 보존됩니다.")
+                note = QLabel("Ctrl·Shift로 여러 기록을 선택한 뒤 우클릭하면 한 번에 취소할 수 있습니다. 취소한 기록은 이 목록에서 사라지며 원본과 취소 내용은 더보기 → 조회·기록 → 전체 변경 이력에 보존됩니다.")
                 note.setWordWrap(True)
                 page_layout.addWidget(note)
             view = QTableView()
@@ -150,6 +150,7 @@ class PersonHistoryDialog(QDialog):
             view.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
             view.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
             if name == "식종 변경":
+                view.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
                 self._configure_meal_history_columns(view, headings)
                 view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
                 view.customContextMenuRequested.connect(self._open_meal_history_context_menu)
@@ -189,10 +190,15 @@ class PersonHistoryDialog(QDialog):
     def _meal_history_menu(self, row):
         if row < 0 or row >= len(self._meal_entries):
             return None
+        view = self.findChild(QTableView, "history_식종 변경")
+        if not view.selectionModel().isRowSelected(row, QModelIndex()):
+            view.selectRow(row)
+        selected = sorted(index.row() for index in view.selectionModel().selectedRows())
+        targets = tuple(self._meal_entries[index].target for index in selected)
         menu = QMenu(self)
-        target = self._meal_entries[row].target
-        menu.addAction("선택한 변경 취소…").triggered.connect(
-            lambda: self.meal_history_cancel_requested.emit(target))
+        label = f"선택한 변경 {len(targets)}건 취소" if len(targets) > 1 else "선택한 변경 취소"
+        menu.addAction(label).triggered.connect(
+            lambda: self.meal_history_cancel_requested.emit(targets[0] if len(targets) == 1 else targets))
         return menu
 
     def _open_meal_history_context_menu(self, position):
@@ -200,7 +206,6 @@ class PersonHistoryDialog(QDialog):
         index = view.indexAt(position)
         menu = self._meal_history_menu(index.row()) if index.isValid() else None
         if menu is not None:
-            view.selectRow(index.row())
             menu.exec(view.viewport().mapToGlobal(position))
 
     def reload_meal_history(self, session):
@@ -305,7 +310,9 @@ class PersonHistoryDialog(QDialog):
         widths = {
             "식종": 70,
             "구분": 90,
+            "접수 경로": 95,
             "기간": 235,
+            "비고": 220,
             "변경번호": 145,
             "변경자": 110,
         }

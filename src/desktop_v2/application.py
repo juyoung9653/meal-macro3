@@ -464,6 +464,10 @@ class DesktopStartupController:
                     selection,
                 )
             )
+        if callable(getattr(window, "export_view_layout", None)):
+            from .user_view_layout import UserViewLayoutController
+            window._user_view_layout_controller = UserViewLayoutController(session, window)
+            window._user_view_layout_controller.publish()
         return DesktopStartupOutcome(StartupStatus.READY, session, window)
 
     @dialog_workflow
@@ -656,6 +660,7 @@ class DesktopStartupController:
     @dialog_workflow
     def _run_monthly_overview(self, session, window):
         from .workspace_tools import MonthlyOverviewDialog
+        dialog = None
 
         def load(year, month, history=False):
             def read():
@@ -666,10 +671,11 @@ class DesktopStartupController:
                 if history:
                     return build_monthly_meal_history(snapshot, load_revision_chain(session.database, current.revision_id), year, month)
                 return build_monthly_meal_statistics(snapshot, year, month)
-            return run_progress_task(read, message="선택한 달의 운영 자료를 조회하는 중입니다.", parent=window)
+            return run_progress_task(read, message="선택한 달의 운영 자료를 조회하는 중입니다.", parent=dialog or window)
 
-        yield DialogRequest(MonthlyOverviewDialog(window.table_model.service_day, load,
-                            lambda year, month: load(year, month, True), parent=window))
+        dialog = MonthlyOverviewDialog(window.table_model.service_day, load,
+                            lambda year, month: load(year, month, True), parent=window)
+        yield DialogRequest(dialog)
 
     @dialog_workflow
     def _run_monthly_statistics(self, session, window):
@@ -690,6 +696,7 @@ class DesktopStartupController:
 
     @dialog_workflow
     def _run_monthly_meal_history(self, session, window):
+        dialog = None
         def load(year, month):
             def read():
                 current = session.database.current_roster()
@@ -702,7 +709,7 @@ class DesktopStartupController:
             return run_progress_task(
                 read, title="월별 식종 변경 이력을 읽는 중입니다",
                 message="선택한 달의 적용 기간과 변경 이력을 확인하는 중입니다.",
-                parent=window if isinstance(window, QWidget) else None,
+                parent=dialog or (window if isinstance(window, QWidget) else None),
             )
 
         dialog = MonthlyMealHistoryDialog(window.table_model.service_day, load, parent=window)
@@ -970,6 +977,9 @@ class DesktopStartupController:
     def _run_settings_hub(self, session: DatabaseSession, window) -> None:
         hub = self._settings_hub_dialog_type(parent=window)
         if (yield DialogRequest(hub)) != QDialog.DialogCode.Accepted:
+            return
+        if hub.selected_action is SettingsAction.USER_VIEW_LAYOUT:
+            yield from invoke(window._user_view_layout_controller.run)
             return
         if hub.selected_action is SettingsAction.JUSO_KEY:
             from .old_address import JusoKeyDialog

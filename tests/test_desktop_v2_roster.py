@@ -1044,7 +1044,7 @@ def test_row_selection_populates_household_inspector(app):
     assert window._meal_history_list.count() == 1
     entry = window._meal_history_list.itemWidget(window._meal_history_list.item(0))
     assert [label.text() for label in entry.findChildren(QLabel)] == [
-        "중식 · 일시중지", "기간 2026-08-17 ~ 2026-08-17",
+        "중식 · 일시중지", "접수 경로 -\n기간 2026-08-17 ~ 2026-08-17",
     ]
     assert (
         window._table.selectionBehavior()
@@ -1113,7 +1113,7 @@ def test_inspector_uses_meal_history_provider_in_a_scrollable_list(app):
     window.close()
 
 
-def test_inspector_status_card_shows_only_meal_category_period(app):
+def test_inspector_status_card_shows_channel_period_and_note(app):
     from src.desktop_v2.inspector_history import MealHistoryRow
 
     window = RosterWindow(_roster(), _histories(), school_calendar=_calendar())
@@ -1125,6 +1125,7 @@ def test_inspector_status_card_shows_only_meal_category_period(app):
         "중식",
         "일시중지",
         "시작일 미지정 ~ 종료일 미지정",
+        intake_channel="전화", note="보호자 요청\n<추가 확인>",
     )
     window.set_meal_change_history_provider(lambda person: (row,) * 6)
     app.processEvents()
@@ -1134,9 +1135,10 @@ def test_inspector_status_card_shows_only_meal_category_period(app):
     assert len(labels) == 2
     assert all(label.wordWrap() for label in labels)
     assert [label.text() for label in labels] == [
-        "중식 · 일시중지", "기간 시작일 미지정 ~ 종료일 미지정",
+        "중식 · 일시중지", "접수 경로 전화\n기간 시작일 미지정 ~ 종료일 미지정\n비고 보호자 요청\n<추가 확인>",
     ]
-    assert item.toolTip() == "중식 · 일시중지\n기간 시작일 미지정 ~ 종료일 미지정"
+    assert item.toolTip() == "중식 · 일시중지\n접수 경로 전화\n기간 시작일 미지정 ~ 종료일 미지정\n비고 보호자 요청\n<추가 확인>"
+    assert labels[1].textFormat() == Qt.TextFormat.PlainText
     assert item.sizeHint().height() >= sum(label.heightForWidth(window._meal_history_list.viewport().width() - 16) for label in labels)
     assert window._meal_history_list.verticalScrollBar().maximum() > 0
     window.close()

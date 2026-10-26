@@ -929,4 +929,18 @@ MIGRATIONS = (
     ),
 )
 
+MIGRATIONS = (*MIGRATIONS, Migration(
+    version=10,
+    name="user_view_layouts",
+    statements=("""
+        CREATE TABLE user_view_layout (
+            actor_sid TEXT PRIMARY KEY NOT NULL CHECK(length(trim(actor_sid)) > 0),
+            actor_username TEXT NOT NULL CHECK(length(trim(actor_username)) > 0),
+            computer_name TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            layout_json TEXT NOT NULL CHECK(json_valid(layout_json) AND json_type(layout_json) = 'object')
+        ) STRICT
+    """,),
+))
+
 CURRENT_SCHEMA_VERSION = MIGRATIONS[-1].version

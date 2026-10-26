@@ -178,6 +178,7 @@ def _downgrade_to_schema_two_for_migration_test(path: Path) -> None:
         connection.execute("ALTER TABLE person_projection DROP COLUMN delivery_settings_json")
         connection.execute("DROP TRIGGER schema_migration_no_delete")
         connection.execute("DELETE FROM schema_migration WHERE version >= 3")
+        connection.execute("DROP TABLE user_view_layout")
         connection.execute(
             """
             CREATE TRIGGER schema_migration_no_delete
@@ -360,6 +361,7 @@ def test_open_migrates_schema_five_and_preserves_default_household(tmp_path: Pat
         connection.execute("ALTER TABLE person_projection DROP COLUMN delivery_settings_json")
         connection.execute("DROP TRIGGER schema_migration_no_delete")
         connection.execute("DELETE FROM schema_migration WHERE version >= 6")
+        connection.execute("DROP TABLE user_view_layout")
         connection.execute("""CREATE TRIGGER schema_migration_no_delete
             BEFORE DELETE ON schema_migration BEGIN
             SELECT RAISE(ABORT, 'schema migration rows are immutable'); END""")

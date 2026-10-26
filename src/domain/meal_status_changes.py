@@ -12,9 +12,32 @@ from .intake import IntakeChannel
 from .projections import roster_audit_changes, status_event_audit_change
 from .revisions import RevisionActor, RevisionMetadata, RevisionRecord, RevisionSource
 from .roster import InclusiveDateRange, Meal, MealEnrollment, RosterSnapshot, canonical_meals
-from .status import MealStatus, StatusEvent
+from .status import MealStatus, StatusEvent, StatusHistory
 
 MEAL_STATUS_CHANGE_POLICY_VERSION = 2
+
+
+def validate_meal_status_transition(
+    roster: RosterSnapshot,
+    histories: Mapping[tuple[UUID, Meal], StatusHistory],
+    targets: tuple[tuple[UUID, Meal], ...],
+    status: MealStatus,
+    periods: Mapping[Meal, InclusiveDateRange],
+) -> None:
+    """Reject repeated delivery/stops at each target's chosen effective start."""
+    if status not in (MealStatus.DELIVERY, MealStatus.STOPPED):
+        return
+    duplicates = []
+    for person_id, meal in targets:
+        starts_on = periods[meal].starts_on
+        if starts_on is None or meal not in roster.meals_for(person_id, on=starts_on):
+            continue
+        history = histories.get((person_id, meal))
+        current = history.status_on(starts_on) if history is not None else MealStatus.DELIVERY
+        if current is status:
+            duplicates.append(f"{roster.person(person_id).profile.name} · {meal.value} ({starts_on:%Y-%m-%d})")
+    if duplicates:
+        raise ValueError("\n".join(duplicates) + f"\n시작일에 이미 {status.value} 상태이므로 같은 상태를 다시 저장할 수 없습니다.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,6 +62,7 @@ def build_meal_status_revision(
     periods_by_meal: Mapping[Meal, InclusiveDateRange] | None = None,
     reason: str = "배송 상태 변경",
     intake_channel: IntakeChannel | None = None,
+    note: str = "",
 ) -> PreparedMealStatusRevision:
     """Apply one status/period to many meals, auto-enrolling delivery gaps."""
 
@@ -52,6 +76,8 @@ def build_meal_status_revision(
         raise TypeError("status는 MealStatus여야 합니다.")
     if intake_channel is not None and not isinstance(intake_channel, IntakeChannel):
         raise TypeError("접수 경로는 IntakeChannel이어야 합니다.")
+    if not isinstance(note, str):
+        raise TypeError("비고는 문자열이어야 합니다.")
     periods = _resolve_periods(
         current_roster, selected_meals, status, period, periods_by_meal
     )
@@ -149,6 +175,8 @@ def build_meal_status_revision(
     }
     if intake_channel is not None:
         decisions["meal_status_change"]["intake_channel"] = intake_channel.value
+    if note.strip():
+        decisions["meal_status_change"]["note"] = note.strip()
     metadata = RevisionMetadata(
         revision_id=revision_id,
         parent_revision_id=current_roster.revision_id,
@@ -190,6 +218,7 @@ def build_batch_meal_status_revision(
     event_ids: Mapping[tuple[UUID, Meal], UUID],
     periods_by_meal: Mapping[Meal, InclusiveDateRange] | None = None,
     intake_channel: IntakeChannel | None = None,
+    note: str = "",
 ) -> PreparedBatchMealStatusRevision:
     """Validate every target and prepare one atomic revision for the whole batch."""
     if not isinstance(current_roster, RosterSnapshot):
@@ -208,6 +237,8 @@ def build_batch_meal_status_revision(
         raise TypeError("status는 MealStatus여야 합니다.")
     if intake_channel is not None and not isinstance(intake_channel, IntakeChannel):
         raise TypeError("접수 경로는 IntakeChannel이어야 합니다.")
+    if not isinstance(note, str):
+        raise TypeError("비고는 문자열이어야 합니다.")
     if not isinstance(actor, RevisionActor):
         raise TypeError("actor는 RevisionActor여야 합니다.")
     if not isinstance(recorded_at, datetime):
@@ -307,6 +338,8 @@ def build_batch_meal_status_revision(
     }
     if intake_channel is not None:
         decisions["batch_meal_status_change"]["intake_channel"] = intake_channel.value
+    if note.strip():
+        decisions["batch_meal_status_change"]["note"] = note.strip()
     metadata = RevisionMetadata(
         revision_id=revision_id,
         parent_revision_id=current_roster.revision_id,

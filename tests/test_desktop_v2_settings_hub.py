@@ -53,6 +53,7 @@ def test_settings_hub_has_db_and_computer_local_jobs(app):
         "운영 파일 비밀번호 변경",
         "구주소 업데이트",
         "주소 API 키",
+        "다른 사용자 화면 설정 가져오기",
     ]
     assert not any("조식 배송 규칙" in action.label for action in SettingsAction)
     assert "공통 설정" in SettingsAction.DOCUMENT_DIRECTORY.scope_label
@@ -74,6 +75,7 @@ def test_settings_hub_groups_equal_half_width_cards_at_minimum_size(app):
             SettingsAction.PROVIDER,
             SettingsAction.DELIVERY_DEFAULTS,
             SettingsAction.STOPPED_HIGHLIGHT,
+            SettingsAction.USER_VIEW_LAYOUT,
             SettingsAction.PAUSE_CONVERSION,
             SettingsAction.SEQUENCE_MODE,
             SettingsAction.INITIAL_ROSTER_DATE,
@@ -194,6 +196,35 @@ def test_settings_folder_job_saves_path_without_running_password_controller(
     controller._run_settings_hub(SimpleNamespace(), window)
 
     assert settings.saved == chosen
+
+
+@pytest.mark.parametrize("accepted", [False, True])
+def test_user_view_layout_action_runs_import_instead_of_directory_settings(accepted):
+    imports = []
+    window = SimpleNamespace(
+        _user_view_layout_controller=SimpleNamespace(run=lambda: imports.append(True)),
+    )
+
+    class Hub:
+        selected_action = SettingsAction.USER_VIEW_LAYOUT
+
+        def __init__(self, parent=None):
+            assert parent is window
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted if accepted else QDialog.DialogCode.Rejected
+
+    controller = DesktopStartupController(
+        settings=SimpleNamespace(document_output_directory=None),
+        settings_hub_dialog_type=Hub,
+        document_directory_dialog_type=lambda *_args, **_kwargs: pytest.fail(
+            "화면 설정 가져오기에서 문서 저장 폴더 설정을 열면 안 됩니다"
+        ),
+    )
+
+    controller._run_settings_hub(SimpleNamespace(), window)
+
+    assert imports == ([True] if accepted else [])
 
 
 @pytest.mark.parametrize("accepted", [False, True])

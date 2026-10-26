@@ -330,6 +330,10 @@ def test_batch_invalid_late_target_leaves_roster_unchanged(monkeypatch, roster):
 def test_controller_persists_each_target_in_one_revision_and_reopens(
     tmp_path, roster, cancel
 ):
+    # Both targets are starting a new meal; already-delivering targets cannot
+    # receive another delivery action.
+    roster = replace(roster, enrollments=tuple(e for e in roster.enrollments
+        if e.person_id != roster.persons[0].person_id))
     initial = RevisionRecord(
         RevisionMetadata(
             roster.revision_id,
@@ -377,6 +381,9 @@ def test_controller_persists_each_target_in_one_revision_and_reopens(
         def selected_intake_channel(self):
             return IntakeChannel.EMAIL
 
+        def selected_note(self):
+            return "합성 비고\n추가 안내"
+
     messages = SimpleNamespace(
         critical=lambda *args: pytest.fail(str(args)),
         warning=lambda *args: pytest.fail(str(args)),
@@ -403,6 +410,7 @@ def test_controller_persists_each_target_in_one_revision_and_reopens(
             assert record.metadata.decisions["batch_meal_status_change"][
                 "intake_channel"
             ] == IntakeChannel.EMAIL.value
+            assert record.metadata.decisions["batch_meal_status_change"]["note"] == "합성 비고\n추가 안내"
             for pid, meal in targets:
                 history = session.database.status_history(pid, meal)
                 assert len(history.events) == 1

@@ -391,7 +391,7 @@ def test_roster_history_context_menu_emits_exact_row_identity(session, monkeypat
     emitted = []
     window.meal_history_cancel_requested.connect(lambda *args: emitted.append(args))
     def choose(menu, *args):
-        assert menu.actions()[0].text() == "선택한 변경 취소…"
+        assert menu.actions()[0].text() == "선택한 변경 취소"
         menu.actions()[0].trigger()
     class Menu(module.QMenu):
         def exec(self, *args):

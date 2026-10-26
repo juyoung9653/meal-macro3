@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
+import re
 
 from PySide6.QtCore import QSignalBlocker, Qt
 from PySide6.QtWidgets import (
@@ -25,8 +26,21 @@ class _Column:
 
 _COLUMNS = tuple(_Column(key, label) for key, label in (
     ("name", "성명"), ("meal", "식종"), ("status", "구분"),
-    ("period", "적용 기간"), ("actor", "변경자"), ("revision", "변경번호"),
+    ("intake_channel", "접수 경로"), ("period", "적용 기간"), ("note", "비고"),
+    ("actor", "변경자"), ("revision", "변경번호"),
 ))
+
+
+def _revision_sort_key(value):
+    return tuple((0, int(part)) if part.isdigit() else (1, part.casefold())
+                 for part in re.split(r"(\d+)", value))
+
+
+def _entry_values(item):
+    start = item.period.starts_on.isoformat() if item.period.starts_on else "시작일 미지정"
+    end = item.period.ends_on.isoformat() if item.period.ends_on else ""
+    return (item.name, item.meal.value, item.status.value, item.intake_channel or "-",
+            f"{start} ~ {end}", item.note, item.actor, item.revision_code)
 
 
 class MonthlyMealHistoryDialog(QDialog):
@@ -44,6 +58,8 @@ class MonthlyMealHistoryDialog(QDialog):
         self._column_searches: dict[str, str] = {}
         self._column_values: dict[str, frozenset[str]] = {}
         self._loaded = False
+        self._entries = ()
+        self._sort_criteria = ()
         root = QVBoxLayout(self)
         title = QLabel("월별 식종 변경 이력")
         title.setObjectName("workspaceTitle")
@@ -100,7 +116,7 @@ class MonthlyMealHistoryDialog(QDialog):
         self.error.setWordWrap(True)
         self.error.hide()
         root.addWidget(self.error)
-        self.table = QTableWidget(0, 6)
+        self.table = QTableWidget(0, len(_COLUMNS))
         self.table.setObjectName("monthlyMealHistoryTable")
         self._column_search_header = ColumnSearchHeader(
             self.table, values_provider=self.column_filter_values,
@@ -112,15 +128,17 @@ class MonthlyMealHistoryDialog(QDialog):
         self._column_search_header.replace_columns(_COLUMNS)
         self._column_search_header.search_changed.connect(self._set_column_search)
         self._column_search_header.values_changed.connect(self._set_column_values)
+        self._column_search_header.setSectionsClickable(True)
+        self._column_search_header.sectionClicked.connect(self._cycle_sort)
         self.table.horizontalScrollBar().valueChanged.connect(self._column_search_header.update_positions)
-        self._column_search_header.setToolTip("열 제목 옆 ▾: 검색과 값 선택 필터")
+        self._column_search_header.setToolTip("열 제목 클릭: 오름차순 → 내림차순 → 해제 · 먼저 선택한 열부터 우선 정렬 · ▾: 검색과 값 필터")
         self._column_search_header.setMinimumSectionSize(80)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setAlternatingRowColors(True)
         self.table.verticalHeader().setVisible(False)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        for column, width in enumerate((120, 85, 100, 270, 110, 170)):
+        for column, width in enumerate((120, 85, 100, 100, 235, 220, 110, 170)):
             self.table.setColumnWidth(column, width)
         self.table.setWordWrap(True)
         self.table.setTextElideMode(Qt.TextElideMode.ElideNone)
@@ -155,6 +173,7 @@ class MonthlyMealHistoryDialog(QDialog):
 
     def refresh(self, *_args) -> None:
         self._loaded = False
+        self._entries = ()
         self.table.setRowCount(0)
         self.summary.clear()
         try:
@@ -168,17 +187,45 @@ class MonthlyMealHistoryDialog(QDialog):
             self.error.show()
             return
         self.error.hide()
-        self.table.setRowCount(len(result.entries))
-        for row, item in enumerate(result.entries):
-            start = item.period.starts_on.isoformat() if item.period.starts_on else "시작일 미지정"
-            end = item.period.ends_on.isoformat() if item.period.ends_on else "종료일 없음"
-            values = (item.name, item.meal.value, item.status.value,
-                      f"{start} ~ {end}", item.actor, item.revision_code)
-            for column, value in enumerate(values):
+        self._entries = tuple(sorted(result.entries,
+            key=lambda item: _revision_sort_key(item.revision_code), reverse=True))
+        self._loaded = True
+        self._render_sorted_entries()
+
+    def _cycle_sort(self, column):
+        if not 0 <= column < len(_COLUMNS):
+            return
+        key = _COLUMNS[column].key
+        criteria = list(self._sort_criteria)
+        found = next((index for index, (name, _) in enumerate(criteria) if name == key), None)
+        if found is None:
+            criteria.append((key, Qt.SortOrder.AscendingOrder))
+        elif criteria[found][1] == Qt.SortOrder.AscendingOrder:
+            criteria[found] = (key, Qt.SortOrder.DescendingOrder)
+        else:
+            criteria.pop(found)
+        self._sort_criteria = tuple(criteria)
+        self._render_sorted_entries()
+
+    def _render_sorted_entries(self):
+        entries = list(self._entries)
+        for key, order in reversed(self._sort_criteria):
+            column = next(index for index, item in enumerate(_COLUMNS) if item.key == key)
+            def sort_value(item):
+                if key == "revision":
+                    return _revision_sort_key(item.revision_code)
+                if key == "period":
+                    return (item.period.starts_on or date.min, item.period.ends_on or date.max)
+                return _entry_values(item)[column].casefold()
+            entries.sort(key=sort_value, reverse=order == Qt.SortOrder.DescendingOrder)
+        self.table.setRowCount(len(entries))
+        for row, item in enumerate(entries):
+            for column, value in enumerate(_entry_values(item)):
                 cell = QTableWidgetItem(value)
                 cell.setToolTip(value)
                 self.table.setItem(row, column, cell)
-        self._loaded = True
+        self._column_search_header.set_sort_criteria(
+            self._sort_criteria or (("revision", Qt.SortOrder.DescendingOrder),))
         self._apply_filters()
 
     def column_filter_values(self, key: str) -> tuple[str, ...]:
@@ -227,7 +274,8 @@ class MonthlyMealHistoryDialog(QDialog):
             self.summary.clear()
             return
         total = self.table.rowCount()
-        text = (f"조회 {shown:,}건 / 전체 {total:,}건 · 적용 시작일이 최근인 순서"
+        sort_text = "선택한 열 기준 정렬" if self._sort_criteria else "최신 변경번호 순서"
+        text = (f"조회 {shown:,}건 / 전체 {total:,}건 · {sort_text}"
                 if total or active else "선택한 달에 적용되는 식종 변경 이력이 없습니다.")
         if active:
             text += "\n필터: " + ", ".join(column.label for column in _COLUMNS if column.key in active)

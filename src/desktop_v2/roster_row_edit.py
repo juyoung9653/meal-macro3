@@ -30,6 +30,7 @@ from src.domain.roster_row_changes import build_roster_row_revision
 from src.domain.row_household_conflicts import row_household_conflicts
 from src.domain.revisions import RevisionActor
 from src.domain.status import MealStatus
+from src.domain.intake import IntakeChannel
 from src.importing.households import household_matching_rules_from_snapshot, match_existing_household_id
 from src.storage.database_session import (
     AutomaticBackupResult,
@@ -76,6 +77,7 @@ class RosterRowCreateRequest:
     household_id: UUID | None
     statuses: dict[Meal, tuple[MealStatus, date | None]]
     meal_starts_on: dict[Meal, date] = field(default_factory=dict)
+    intake_channel: IntakeChannel | None = None
 
 
 class RosterRowCreateDialog(QDialog):
@@ -157,6 +159,12 @@ class RosterRowCreateDialog(QDialog):
             self._meal_checks[meal] = check
             meals_row.addWidget(check)
         delivery_form.addRow("가입 식종 *", meals_row)
+        self._intake_channel = QComboBox()
+        self._intake_channel.setObjectName("intakeChannel")
+        self._intake_channel.addItem("-", None)
+        for channel in IntakeChannel:
+            self._intake_channel.addItem(channel.value, channel)
+        delivery_form.addRow("접수 경로", self._intake_channel)
         day = start_date or date.today()
         self._start_date_edits: dict[Meal, WheelSafeDateEdit] = {}
         for meal, check in self._meal_checks.items():
@@ -276,7 +284,9 @@ class RosterRowCreateDialog(QDialog):
         self._start_date = starts_on
         assignments = {meal: (self._driver_combos[meal].currentData(), None) for meal in meals if self._driver_combos[meal].currentData() is not None}
         self._request = RosterRowCreateRequest(
-            profile, meals, starts_on, assignments, household_id, {}, starts_by_meal
+            profile, meals, starts_on, assignments, household_id, {}, starts_by_meal,
+            intake_channel=(IntakeChannel(self._intake_channel.currentData())
+                            if self._intake_channel.currentData() is not None else None),
         )
         self.accept()
 
@@ -443,6 +453,7 @@ class RosterRowEditController:
                     },
                     initial_statuses=request.statuses,
                     status_event_ids={meal: uuid4() for meal in request.statuses},
+                    intake_channel=request.intake_channel,
                 )
                 conflicts = row_household_conflicts(snapshot, prepared)
                 if conflicts:

@@ -214,3 +214,60 @@ def test_slow_task_shows_only_after_one_second_with_enabled_modal(app):
         released.set()
         parent.close()
         parent.deleteLater()
+
+
+@pytest.mark.parametrize("fail", [False, True])
+@pytest.mark.parametrize("after", ["stay", "new_dialog", "close"])
+def test_common_progress_restores_work_window_and_preserves_followup_dialog(app, monkeypatch, fail, after):
+    from PySide6.QtWidgets import QDialog, QLineEdit, QVBoxLayout, QWidget
+    from src.desktop_v2 import startup_loading as loading
+    monkeypatch.setattr(loading, "PROGRESS_DELAY_MS", 10)
+    main = QWidget()
+    main.show()
+    source = QDialog(main)
+    layout = QVBoxLayout(source)
+    editor = QLineEdit("입력 중인 값")
+    layout.addWidget(editor)
+    source.show()
+    source.activateWindow()
+    editor.setFocus()
+    editor.selectAll()
+    app.processEvents()
+    activations = []
+    original_activate = source.activateWindow
+    def activate():
+        activations.append(True)
+        original_activate()
+    monkeypatch.setattr(source, "activateWindow", activate)
+    released = Event()
+    timer = QTimer()
+    timer.timeout.connect(lambda: released.set() if isinstance(app.activeModalWidget(), StartupLoadingDialog) else None)
+    timer.start(5)
+    def work():
+        assert released.wait(5)
+        if fail:
+            raise ValueError("합성 저장 오류")
+    following = None
+    try:
+        # Even a call incorrectly parented to the main window returns to the active editor.
+        if fail:
+            with pytest.raises(ValueError, match="합성 저장 오류"):
+                run_progress_task(work, message="검증", parent=main)
+        else:
+            run_progress_task(work, message="검증", parent=main)
+        assert len(activations) == 1
+        assert editor.selectedText() == "입력 중인 값"
+        if after == "new_dialog":
+            following = QDialog(source)
+            following.show()
+        elif after == "close":
+            source.close()
+        app.processEvents()
+        assert len(activations) == (2 if after == "stay" else 1)
+    finally:
+        timer.stop()
+        released.set()
+        if following is not None:
+            following.close()
+        source.close()
+        main.close()

@@ -859,6 +859,11 @@ class RosterTableModel(QAbstractTableModel):
         )
         return True
 
+    def replace_column_aliases(self, aliases) -> None:
+        self._column_aliases = dict(aliases)
+        self._columns = self._build_columns()
+        self.headerDataChanged.emit(Qt.Orientation.Horizontal, 0, len(self._columns) - 1)
+
     def _matches_archive_filter(self, person: Person) -> bool:
         return (
             self._archive_mode is None
@@ -2527,6 +2532,62 @@ class RosterWindow(QMainWindow):
     def _sheet_layout_key(self, sheet_id: str) -> str:
         return f"{self._sheet_settings_key}/layout/{sheet_id}"
 
+    def export_view_layout(self):
+        """Capture all sheet layouts, without search, filters, dates or roster values."""
+        self._column_layout.save()
+        sheets = []
+        for sheet_id, name in self._sheets:
+            layout, _ = self._column_layout._read_layout_at(self._sheet_layout_key(sheet_id))
+            sheets.append({"id": sheet_id, "name": name,
+                           "layout": layout or self._column_layout._default_layout()})
+        return {"version": 1, "sheets": sheets, "active": self._active_sheet_id,
+                "aliases": dict(self._column_aliases)}
+
+    def import_view_layout(self, value):
+        from src.domain.view_layout import validate_view_layout
+        state = validate_view_layout(value)
+        previous = self.export_view_layout()
+        try:
+            self._apply_view_layout(state)
+        except Exception:
+            self._apply_view_layout(previous)
+            raise
+
+    def _apply_view_layout(self, state):
+        selected = self.selected_person_cell()
+        self._column_layout.save()
+        settings = self._search_settings
+        # Remove only this operating file's sheet layouts, leaving filters untouched.
+        settings.remove(f"{self._sheet_settings_key}/layout")
+        for sheet in state["sheets"]:
+            settings.setValue(self._sheet_layout_key(sheet["id"]),
+                              json.dumps(sheet["layout"], ensure_ascii=False))
+        self._sheets = [(sheet["id"], sheet["name"]) for sheet in state["sheets"]]
+        self._active_sheet_id = state["active"]
+        self._column_aliases = dict(state["aliases"])
+        self._model.replace_column_aliases(self._column_aliases)
+        self._save_column_aliases()
+        self._save_sheets()
+        settings.sync()
+        if settings.status() != QSettings.Status.NoError:
+            raise OSError("화면 설정을 이 PC에 저장하지 못했습니다.")
+        self._sheet_tabs.blockSignals(True)
+        try:
+            while self._sheet_tabs.count():
+                self._sheet_tabs.removeTab(0)
+            for _, name in self._sheets:
+                self._sheet_tabs.addTab(name)
+            self._sheet_tabs.setCurrentIndex(self._sheet_index(self._active_sheet_id))
+        finally:
+            self._sheet_tabs.blockSignals(False)
+        self._column_layout.switch_layout(self._sheet_layout_key(self._active_sheet_id),
+            save_current=False, hide_new_custom_columns=self._active_sheet_id != self._default_sheet_id())
+        self._column_layout.replace_columns(self._model.columns)
+        self._column_search_header.replace_columns(self._model.columns)
+        self._refresh_column_filter_strip()
+        if selected is not None:
+            self.restore_person_cell(selected)
+
     def columns_visible_in_any_sheet(self) -> set[str]:
         self._column_layout.save()
         visible = set()
@@ -2788,8 +2849,9 @@ class RosterWindow(QMainWindow):
         self._meal_history_list.setObjectName("mealHistory")
         self._meal_history_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._meal_history_list.customContextMenuRequested.connect(self._open_meal_history_context_menu)
-        self._meal_history_list.setToolTip("식종 변경을 우클릭하면 선택한 변경 한 건을 취소할 수 있습니다.")
-        self._meal_history_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._meal_history_list.setToolTip("Ctrl·Shift로 여러 기록을 선택한 뒤 우클릭하면 한 번에 취소할 수 있습니다.")
+        self._meal_history_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self._meal_history_list.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._meal_history_list.setUniformItemSizes(False)
         self._meal_history_list.setSpacing(2)
         self._meal_history_list.setWordWrap(True)
@@ -2826,11 +2888,21 @@ class RosterWindow(QMainWindow):
             self._add_household_shared_exception_action(menu, person, column_key)
             self._add_person_context_actions(menu, person, None)
             return menu
+        targets = batch_targets if len(batch_targets) > 1 else ((person.person_id, meal),)
+        allowed_statuses = set(MealStatus)
+        for person_id, selected_meal in targets:
+            current_status = self._model.effective_status_on(person_id, selected_meal, self._model.service_day)
+            if current_status is MealStatus.DELIVERY:
+                allowed_statuses.intersection_update((MealStatus.PAUSED, MealStatus.STOPPED))
+            elif current_status is MealStatus.STOPPED:
+                allowed_statuses.intersection_update((MealStatus.DELIVERY,))
         for label, status in (
             ("배송", MealStatus.DELIVERY),
             ("일시중지", MealStatus.PAUSED),
             ("중지", MealStatus.STOPPED),
         ):
+            if status not in allowed_statuses:
+                continue
             if len(batch_targets) > 1:
                 action = menu.addAction(f"선택한 식종 {len(batch_targets)}개 · {label}")
                 action.triggered.connect(
@@ -3271,7 +3343,9 @@ class RosterWindow(QMainWindow):
         for row in rows:
             if isinstance(row, MealHistoryRow):
                 title = f"{row.meal} · {row.category}"
-                period = f"기간 {row.period}"
+                period = f"접수 경로 {row.intake_channel}\n기간 {row.period}"
+                if row.note:
+                    period += f"\n비고 {row.note}"
                 tooltip = f"{title}\n{period}"
             else:
                 title, tooltip = row
@@ -3290,6 +3364,7 @@ class RosterWindow(QMainWindow):
                 title_label.setStyleSheet("font-weight: 700;")
                 entry_layout.addWidget(title_label)
                 period_label = QLabel(period)
+                period_label.setTextFormat(Qt.TextFormat.PlainText)
                 period_label.setWordWrap(True)
                 period_label.setStyleSheet("font-size: 12px;")
                 entry_layout.addWidget(period_label)
@@ -3308,8 +3383,17 @@ class RosterWindow(QMainWindow):
         target = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
         if target is None:
             return
+        if not item.isSelected():
+            self._meal_history_list.clearSelection()
+            self._meal_history_list.setCurrentItem(item)
+            item.setSelected(True)
+        targets = tuple(selected.data(Qt.ItemDataRole.UserRole)
+                        for selected in self._meal_history_list.selectedItems()
+                        if selected.data(Qt.ItemDataRole.UserRole) is not None)
+        target = targets[0] if len(targets) == 1 else targets
         menu = QMenu(self)
-        action = menu.addAction("선택한 변경 취소…")
+        label = f"선택한 변경 {len(targets)}건 취소" if len(targets) > 1 else "선택한 변경 취소"
+        action = menu.addAction(label)
         revision_id = self._roster.revision_id
         action.triggered.connect(lambda: self.meal_history_cancel_requested.emit(target, revision_id))
         menu.exec(self._meal_history_list.viewport().mapToGlobal(position))

@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QComboBox,
     QScrollArea,
@@ -49,7 +50,7 @@ from src.domain.status import (
 )
 from src.domain.revisions import RevisionActor
 from src.domain.meal_status_changes import build_meal_status_revision
-from src.domain.meal_status_changes import build_batch_meal_status_revision
+from src.domain.meal_status_changes import build_batch_meal_status_revision, validate_meal_status_transition
 from src.domain.intake import IntakeChannel
 
 from .date_edit import WheelSafeDateEdit
@@ -210,6 +211,9 @@ class MealStatusChangeDialog(QDialog):
         value = self._intake_channel.currentData()
         return None if value is None else IntakeChannel(value)
 
+    def selected_note(self) -> str:
+        return self._note.toPlainText().strip()
+
     def _build_ui(self, anchor_day: date) -> None:
         outer = QVBoxLayout(self)
         outer.setContentsMargins(12, 12, 12, 12)
@@ -307,7 +311,7 @@ class MealStatusChangeDialog(QDialog):
         intake_row.addWidget(_field_label("접수 경로"))
         self._intake_channel = QComboBox()
         self._intake_channel.setObjectName("intakeChannel")
-        self._intake_channel.addItem("미선택", None)
+        self._intake_channel.addItem("-", None)
         for channel in IntakeChannel:
             self._intake_channel.addItem(channel.value, channel)
         intake_row.addWidget(self._intake_channel, 1)
@@ -359,6 +363,14 @@ class MealStatusChangeDialog(QDialog):
             self._continue_by_meal[meal] = no_end
         period_layout.addLayout(period_grid)
         root.addWidget(period_frame)
+
+        root.addWidget(_field_label("비고"))
+        self._note = QPlainTextEdit()
+        self._note.setObjectName("mealStatusNote")
+        self._note.setAccessibleName("식종 변경 비고")
+        self._note.setPlaceholderText("필요한 내용을 입력해주세요. 선택한 대상·식종의 변경 이력에 함께 저장됩니다.")
+        self._note.setFixedHeight(72)
+        root.addWidget(self._note)
 
         summary = QFrame()
         summary.setObjectName("changeSummary")
@@ -488,6 +500,11 @@ class MealStatusChangeDialog(QDialog):
                     )
             except (TypeError, ValueError) as error:
                 return str(error)
+        try:
+            validate_meal_status_transition(self._roster, self._all_histories,
+                self.selected_targets(), status, periods)
+        except ValueError as error:
+            return str(error)
         if status is MealStatus.DELIVERY:
             return None if self.selected_targets() else "적용할 항목을 선택해주세요."
         targets = self.selected_targets()
@@ -711,12 +728,17 @@ class MealStatusChangeController:
             )
             intake_getter = getattr(dialog, "selected_intake_channel", None)
             intake_channel = intake_getter() if callable(intake_getter) else None
+            note_getter = getattr(dialog, "selected_note", None)
+            note = note_getter() if callable(note_getter) else ""
             target_getter = getattr(dialog, "selected_targets", None)
             selected = target_getter() if callable(target_getter) else ()
             is_batch = targets is not None or any(
                 selected_person_id != person_id
                 for selected_person_id, _meal in selected
             )
+            changed_targets = tuple(selected) if is_batch else tuple((person_id, meal) for meal in meals)
+            validate_meal_status_transition(roster, all_histories, changed_targets,
+                dialog.selected_status(), periods)
             if is_batch:
                 used_meals = {meal for _person_id, meal in selected}
                 prepared = build_batch_meal_status_revision(
@@ -734,6 +756,7 @@ class MealStatusChangeController:
                         if meal in used_meals
                     },
                     intake_channel=intake_channel,
+                    note=note,
                 )
             else:
                 prepared = build_meal_status_revision(
@@ -748,6 +771,7 @@ class MealStatusChangeController:
                     event_ids={meal: self._event_id_factory() for meal in meals},
                     periods_by_meal=periods,
                     intake_channel=intake_channel,
+                    note=note,
                 )
             backup_result = save_revision(self._session, prepared.record, parent=parent)
         except Exception as error:  # noqa: BLE001 - report persistence failures at the UI boundary
