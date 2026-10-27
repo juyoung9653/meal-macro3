@@ -76,7 +76,7 @@ def test_semantic_total_does_not_use_single_character_substring_fallback():
 
 
 @pytest.mark.parametrize("profile", ["급식", "행복도시락"])
-def test_invoice_relationship_is_editable_but_total_and_provider_are_automatic(profile):
+def test_invoice_automatic_defaults_are_editable(profile):
     spec = mapping_editor_spec(profile, "invoice")
     normalized = {
         "".join(target.split()).replace("(급식수)", ""): target
@@ -87,12 +87,14 @@ def test_invoice_relationship_is_editable_but_total_and_provider_are_automatic(p
 
     assert spec.defaults[relationship] == "아동과의 관계"
     assert relationship not in spec.locked_targets
-    assert total in spec.locked_targets
-    assert "제공기관" in spec.locked_targets
-    assert spec.target_labels["제공기관"] == "제공기관 (공통 설정 자동 적용)"
+    assert spec.locked_targets == ()
+    assert spec.defaults[total] == "__auto_total"
+    assert spec.defaults["연번"] == "__auto_sequence"
+    assert spec.defaults["제공기관"] == "제공기관"
+    assert "__auto_total" in spec.selectable_source_options
 
 
-def test_effective_invoice_mapping_ignores_stale_automatic_column_overrides():
+def test_effective_invoice_mapping_honors_automatic_column_overrides():
     defaults = {
         "__calc_total": "계 (급식수)",
         "아동과의 관계": "아동과의 관계",
@@ -110,9 +112,9 @@ def test_effective_invoice_mapping_ignores_stale_automatic_column_overrides():
     )
 
     assert mapping["아동과의 관계"] == "custom:relationship"
-    assert "계 (급식수)" not in mapping
-    assert mapping["제공기관"] == "제공기관"
-    assert "연번" not in mapping
+    assert mapping["계 (급식수)"] == "아동과의 관계"
+    assert mapping["제공기관"] == "학교명"
+    assert mapping["연번"] == "학교명"
 
 
 @pytest.mark.parametrize("profile", ["급식", "행복도시락"])

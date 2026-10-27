@@ -166,7 +166,7 @@ def test_delivery_editor_accepts_arbitrary_form_and_cancel_keeps_original(app):
 
     dialog = PersonProfileEditDialog(_person(), household_delivery_settings=())
     assert not dialog._save_button.isEnabled()
-    dialog._delivery_forms[Meal.LUNCH].setText("  보냉 도시락  ")
+    dialog._delivery_forms[Meal.LUNCH].setCurrentText("  보냉 도시락  ")
     assert dialog._save_button.isEnabled()
     assert dialog.delivery_settings()[0].form == "보냉 도시락"
     dialog.reject()
@@ -246,7 +246,7 @@ def test_delivery_only_scope_defaults_and_no_profile_controls(app):
     assert tuple(day.currentIndex() for day in dialog._physical_delivery_days[breakfast]) == (0, 1, 2, 3, 4, 4, 4)
     assert dialog._delivery_status[breakfast].text() == "기본값"
     assert not dialog._save_button.isEnabled()
-    dialog._delivery_forms[breakfast].setText("식재료 박스")
+    dialog._delivery_forms[breakfast].setCurrentText("식재료 박스")
     assert dialog._save_button.isEnabled()
     assert dialog.delivery_settings()[0].form == "식재료 박스"
 
@@ -280,7 +280,7 @@ def test_person_without_household_can_edit_delivery_and_profile_copy_is_separate
     standalone = PersonProfileEditDialog(person, delivery_only=True)
     assert standalone._delivery_forms[Meal.DINNER].isEnabled()
     assert not standalone.household_delivery.isEnabled()
-    standalone._delivery_forms[Meal.DINNER].setText("도시락")
+    standalone._delivery_forms[Meal.DINNER].setCurrentText("도시락")
     assert standalone._save_button.isEnabled()
 
     sibling = Person(uuid4(), PersonProfile("가족"))

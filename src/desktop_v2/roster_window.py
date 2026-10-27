@@ -239,6 +239,7 @@ class RosterTableModel(QAbstractTableModel):
             SchoolLunchCalendar() if school_calendar is None else school_calendar
         )
         self._column_aliases = dict(column_aliases or {})
+        self._column_alignments = {}
         self._imported_profile_fields = frozenset(imported_profile_fields)
         self._household_shared_columns: frozenset[str] = frozenset()
         self._household_shared_exceptions: frozenset[tuple[UUID, str]] = frozenset()
@@ -677,17 +678,7 @@ class RosterTableModel(QAbstractTableModel):
             font.setBold(True)
             return font
         if role == Qt.ItemDataRole.TextAlignmentRole:
-            if (
-                column.meal is not None
-                or column.key in {"birth_date", "grade", "sequence"}
-                or (
-                    column.custom_field is not None
-                    and column.custom_field.field_type in {
-                        CustomFieldType.NUMBER, CustomFieldType.DATE,
-                    }
-                )
-            ):
-                return Qt.AlignmentFlag.AlignCenter
+            return self.column_alignment(column.key, column=column)
         if role == Qt.ItemDataRole.ToolTipRole:
             value = self._display_value(person, column, context)
             if column.key == "sequence":
@@ -700,6 +691,23 @@ class RosterTableModel(QAbstractTableModel):
                 return f"{value}\n더블클릭하여 수정" if value else "더블클릭하여 수정"
             return None if not value else str(value)
         return None
+
+    def set_column_alignments(self, alignments):
+        self._column_alignments = dict(alignments)
+        if self.rowCount() and self.columnCount():
+            self.dataChanged.emit(self.index(0, 0), self.index(self.rowCount() - 1, self.columnCount() - 1),
+                                  [Qt.ItemDataRole.TextAlignmentRole])
+
+    def column_alignment(self, key, *, column=None):
+        if key in self._column_alignments:
+            return Qt.AlignmentFlag(self._column_alignments[key])
+        if column is None:
+            column = next(column for column in self._columns if column.key == key)
+        if (column.meal is not None or key in {"birth_date", "grade", "sequence"}
+                or (column.custom_field is not None and column.custom_field.field_type in {
+                    CustomFieldType.NUMBER, CustomFieldType.DATE})):
+            return Qt.AlignmentFlag.AlignCenter
+        return Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
 
     def flags(self, index: QModelIndex) -> Qt.ItemFlag:
         flags = super().flags(index)
@@ -2311,7 +2319,7 @@ class RosterWindow(QMainWindow):
             lambda: header.set_sort_criteria(self._model.sort_criteria)
         )
         header.setToolTip(
-            "열 이름 클릭: 오름차순 → 내림차순 → 이 열 정렬 해제 · 먼저 선택한 열부터 우선 정렬 · 숫자: 우선순위 · ▾: 검색과 값 필터 · 드래그: 칼럼 이동 · 우클릭: 이름 변경·숨기기"
+            "열 이름 클릭: 오름차순 → 내림차순 → 이 열 정렬 해제 · 먼저 선택한 열부터 우선 정렬 · 숫자: 우선순위 · ▾: 검색과 값 필터 · 드래그: 칼럼 이동 · 우클릭: 이름 변경·숨기기·가로/세로 정렬"
         )
         self._column_layout = RosterColumnLayout(
             self._table, self._model.columns, settings=self._search_settings, parent=self,

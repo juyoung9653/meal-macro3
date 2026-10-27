@@ -42,6 +42,8 @@ class SubstituteOptions:
     groups_per_page: int = 18
     fallbacks: Mapping[str, str] | None = None
     column_labels: Mapping[str, str] = field(default_factory=dict)
+    horizontal_alignments: Mapping[str, str] = field(default_factory=dict)
+    vertical_alignments: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self):
         if not isinstance(self.driver_key, str) or not self.driver_key:
@@ -57,6 +59,14 @@ class SubstituteOptions:
             raise ValueError("페이지 구분 방식이 올바르지 않습니다.")
         if type(self.groups_per_page) is not int or not 1 <= self.groups_per_page <= 100:
             raise ValueError("페이지당 가구 수는 1~100이어야 합니다.")
+        for name, allowed in (("horizontal_alignments", ("left", "center", "right")),
+                              ("vertical_alignments", ("top", "center", "bottom"))):
+            values = getattr(self, name)
+            if not isinstance(values, Mapping) or any(
+                not isinstance(key, str) or value not in allowed for key, value in values.items()
+            ):
+                raise ValueError("배송대타 칼럼 정렬 설정이 올바르지 않습니다.")
+            object.__setattr__(self, name, MappingProxyType(dict(values)))
         object.__setattr__(self, "columns", columns)
         for mapping in (self.fallbacks, self.column_labels):
             if mapping is not None and (
@@ -74,6 +84,8 @@ class SubstituteOptions:
         return {"driver_key": self.driver_key, "columns": self.columns,
                 "orientation": self.orientation, "split": self.split,
                 "groups_per_page": self.groups_per_page,
+                "horizontal_alignments": dict(self.horizontal_alignments),
+                "vertical_alignments": dict(self.vertical_alignments),
                 **({"fallbacks": dict(self.fallbacks), "column_labels": dict(self.column_labels)}
                    if self.fallbacks is not None else {})}
 

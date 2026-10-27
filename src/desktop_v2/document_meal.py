@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from uuid import uuid4
+
+from .document_navigation import DOCUMENT_BACK
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -19,15 +21,17 @@ from PySide6.QtWidgets import (
     QPushButton,
     QRadioButton,
     QScrollArea,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
-from src.domain.daily_report_choices import DailyReportChoices, build_daily_report_choices_revision, daily_report_choices_from_snapshot
+from src.domain.daily_report_choices import ReportRemarkOptions, DailyReportChoices, build_daily_report_choices_revision, daily_report_choices_from_snapshot
 from src.domain.revisions import format_revision_timestamp
 from src.domain.roster import Meal
 from src.domain.delivery_substitute import SubstituteOptions
 
+from .dialog_workflow import DialogRequest, dialog_workflow, launch
 from .import_controller import current_windows_actor
 from .startup_loading import save_revision
 from .document_hub import DocumentAction
@@ -38,15 +42,21 @@ from .theme import application_stylesheet, register_application_fonts
 def suggest_document_meals(
     action: DocumentAction,
     anchor_meal: Meal,
+    starts_on: date | None = None,
 ) -> tuple[Meal, ...]:
-    """Use all meals for omission-sensitive documents; explicitly pick substitute."""
+    """Use the delivery date for delivery documents and all meals for billing."""
 
     if not isinstance(action, DocumentAction):
         raise TypeError("문서 작업은 DocumentAction이어야 합니다.")
     if not isinstance(anchor_meal, Meal):
         raise TypeError("문서 기본 식종은 Meal이어야 합니다.")
-    if action is DocumentAction.DELIVERY_SUBSTITUTE:
-        return ()
+    if action in (DocumentAction.DELIVERY_SUBSTITUTE, DocumentAction.DELIVERY_REPORT):
+        day = starts_on or date.today()
+        if day.weekday() < 4:
+            return (Meal.DINNER,)
+        if day.weekday() == 4:
+            return (Meal.BREAKFAST,)
+        return (anchor_meal,)
     return tuple(Meal)
 
 
@@ -58,10 +68,15 @@ class DocumentMealSelection:
     meals: tuple[Meal, ...]
     substitute_options: SubstituteOptions | None = None
     delivery_forms: tuple[str | None, ...] | None = None
+    remark_options: ReportRemarkOptions = ReportRemarkOptions()
 
     def __post_init__(self) -> None:
         if not isinstance(self.period, DocumentPeriodSelection):
             raise TypeError("문서 기간 선택이 올바르지 않습니다.")
+        if not isinstance(self.remark_options, ReportRemarkOptions):
+            raise TypeError("비고 설정이 올바르지 않습니다.")
+        if self.remark_options != ReportRemarkOptions() and self.period.action is not DocumentAction.DELIVERY_REPORT:
+            raise ValueError("일일식수에서만 비고 설정을 사용할 수 있습니다.")
         meals = tuple(self.meals)
         if not meals:
             raise ValueError("문서에 포함할 식종을 하나 이상 선택해야 합니다.")
@@ -114,9 +129,12 @@ class DocumentMealDialog(QDialog):
         self._available_delivery_forms: tuple[str | None, ...] | None = None
         self._buttons_by_form: dict[str | None, QCheckBox] = {}
         self._excluded_forms = set()
+        self._remark_options = ReportRemarkOptions()
+        self._remark_columns = ()
         self._defaults = suggest_document_meals(
             period.action,
             period.anchor_meal,
+            period.starts_on,
         )
 
         register_application_fonts()
@@ -124,8 +142,8 @@ class DocumentMealDialog(QDialog):
         self.setWindowTitle(f"{period.action.label} 식종 선택")
         self.setModal(True)
         if period.action is DocumentAction.DELIVERY_REPORT:
-            self.resize(780, 700)
-            self.setMinimumSize(700, 680)
+            self.resize(780, 750)
+            self.setMinimumSize(700, 730)
         else:
             self.resize(780, 550)
             self.setMinimumSize(700, 510)
@@ -147,9 +165,12 @@ class DocumentMealDialog(QDialog):
     def set_report_choices(self, choices: DailyReportChoices) -> None:
         if self._period.action is not DocumentAction.DELIVERY_REPORT:
             return
+        # Stored form exclusions survive; each document starts with its date-based meal.
         self._excluded_forms = set(choices.excluded_forms)
+        self._remark_options = choices.remarks
+        self._refresh_remark_summary()
         for meal, button in self._buttons_by_meal.items():
-            button.setChecked(meal in choices.meals)
+            button.setChecked(meal in self._defaults)
         for form, button in self._buttons_by_form.items():
             button.setChecked(form not in self._excluded_forms)
         self._refresh_state()
@@ -160,7 +181,7 @@ class DocumentMealDialog(QDialog):
         # missing form stays excluded when it reappears.
         excluded = self._excluded_forms - set(self._buttons_by_form)
         excluded.update(form for form, button in self._buttons_by_form.items() if not button.isChecked())
-        return DailyReportChoices(selected.meals, tuple(excluded))
+        return DailyReportChoices(selected.meals, tuple(excluded), self._remark_options)
 
     def set_available_delivery_forms(self, forms: tuple[str | None, ...]) -> None:
         """Configure report choices from the already selected historical source."""
@@ -201,7 +222,28 @@ class DocumentMealDialog(QDialog):
         return DocumentMealSelection(
             self._period, self.selected_meals(),
             delivery_forms=self.selected_delivery_forms(),
+            remark_options=self._remark_options,
         )
+
+    def set_report_columns(self, columns):
+        self._remark_columns = tuple(columns)
+
+    def _refresh_remark_summary(self):
+        if hasattr(self, "_remark_summary"):
+            options = self._remark_options
+            self._remark_summary.setText(
+                f"우선순위 칼럼 {len(options.columns)}개 · 별도 배송 형태 {len(options.separate_forms)}개 · "
+                + ("기존 비고 위" if options.position == "above" else "기존 비고 아래")
+            )
+
+    @dialog_workflow
+    def _edit_remarks(self):
+        from .report_remarks import ReportRemarksDialog
+        dialog = ReportRemarksDialog(self._remark_options, self._remark_columns,
+                                     self._available_delivery_forms or (), self)
+        if (yield DialogRequest(dialog)) == QDialog.DialogCode.Accepted:
+            self._remark_options = dialog.options()
+            self._refresh_remark_summary()
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -274,6 +316,28 @@ class DocumentMealDialog(QDialog):
             form_panel_layout.addWidget(scroll)
             self._form_panel.hide()
             root.addWidget(self._form_panel)
+            self._extra_settings_toggle = QToolButton()
+            self._extra_settings_toggle.setText("추가 설정")
+            self._extra_settings_toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+            self._extra_settings_toggle.setArrowType(Qt.ArrowType.RightArrow)
+            self._extra_settings_toggle.setCheckable(True)
+            self._extra_settings_toggle.setObjectName("linkAction")
+            root.addWidget(self._extra_settings_toggle, 0, Qt.AlignmentFlag.AlignLeft)
+            self._remark_panel = QWidget()
+            remark_row = QHBoxLayout(self._remark_panel)
+            remark_row.setContentsMargins(0, 0, 0, 0)
+            remark_button = QPushButton("비고 설정…")
+            remark_button.clicked.connect(lambda: launch(self._edit_remarks))
+            remark_row.addWidget(remark_button)
+            self._remark_summary = QLabel()
+            self._remark_summary.setWordWrap(True)
+            remark_row.addWidget(self._remark_summary, 1)
+            root.addWidget(self._remark_panel)
+            self._remark_panel.hide()
+            self._extra_settings_toggle.toggled.connect(self._remark_panel.setVisible)
+            self._extra_settings_toggle.toggled.connect(lambda checked:
+                self._extra_settings_toggle.setArrowType(Qt.ArrowType.DownArrow if checked else Qt.ArrowType.RightArrow))
+            self._refresh_remark_summary()
 
         self._summary = QLabel()
         self._summary.setObjectName("documentMealSummary")
@@ -299,7 +363,7 @@ class DocumentMealDialog(QDialog):
             QDialogButtonBox.StandardButton.Cancel
         ).setText("뒤로")
         self._dialog_buttons.accepted.connect(self._accept_if_valid)
-        self._dialog_buttons.rejected.connect(self.reject)
+        self._dialog_buttons.rejected.connect(lambda: self.done(DOCUMENT_BACK))
         root.addWidget(self._dialog_buttons)
 
     def _build_header(self) -> QFrame:
@@ -438,7 +502,7 @@ def _meal_instruction(period: DocumentPeriodSelection) -> str:
     if period.action is DocumentAction.DELIVERY_SUBSTITUTE:
         return "배송대타는 담당자 한 명의 배송표를 만들기 때문에 식종 하나만 선택합니다."
     if period.action is DocumentAction.DELIVERY_REPORT:
-        return "선택한 식종과 제외한 배송 형태는 운영 DB에 저장되어 다른 PC에서도 적용됩니다. 처음에는 모두 선택합니다."
+        return "기간 시작일 기준 월~목은 석식, 금요일은 조식을 기본 선택합니다. 식종은 변경할 수 있으며, 제외한 배송 형태는 저장된 설정을 사용합니다."
     return "누락을 막기 위해 조식·중식·석식을 모두 선택했습니다. 필요 없는 식종만 해제하세요."
 
 

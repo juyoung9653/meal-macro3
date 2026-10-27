@@ -48,6 +48,7 @@ def test_settings_hub_has_db_and_computer_local_jobs(app):
         "초기 명단 적용일",
         "가구 소속 기록 복구",
         "문서 저장 폴더",
+        "출력 파일 보관기간",
         "운영 데이터 위치",
         "자동 백업 폴더",
         "운영 파일 비밀번호 변경",
@@ -70,42 +71,25 @@ def test_settings_hub_groups_equal_half_width_cards_at_minimum_size(app):
     dialog.show()
     app.processEvents()
 
-    assert dialog._group_actions == {
-        "공통 운영": (
-            SettingsAction.PROVIDER,
-            SettingsAction.DELIVERY_DEFAULTS,
-            SettingsAction.STOPPED_HIGHLIGHT,
-            SettingsAction.USER_VIEW_LAYOUT,
-            SettingsAction.PAUSE_CONVERSION,
-            SettingsAction.SEQUENCE_MODE,
-            SettingsAction.INITIAL_ROSTER_DATE,
-            SettingsAction.MISSING_HOUSEHOLD_REPAIR,
-            SettingsAction.OLD_ADDRESS,
-        ),
-        "문서 출력": (
-            SettingsAction.DOCUMENT_TEMPLATE,
-            SettingsAction.INVOICE_SETTINGS,
-            SettingsAction.DOCUMENT_COLUMN_MAPPING,
-            SettingsAction.SUBSTITUTE_COLUMNS,
-            SettingsAction.EXPORT_PASSWORD,
-            SettingsAction.DOCUMENT_DIRECTORY,
-        ),
-        "데이터 보관·보안": (
-            SettingsAction.DATABASE_LOCATION,
-            SettingsAction.BACKUP_DIRECTORY,
-            SettingsAction.DATABASE_PASSWORD,
-            SettingsAction.JUSO_KEY,
-        ),
-    }
-    widths = {card.width() for card in dialog._cards.values()}
-    assert len(widths) == 1
-    assert dialog._cards[SettingsAction.DATABASE_PASSWORD].width() < (
-        dialog._scroll.viewport().width() * 0.6
-    )
-    for card in dialog._cards.values():
-        labels = {label.objectName(): label for label in card.findChildren(QLabel)}
-        for name in ("settingsCardTitle", "settingsCardDescription"):
-            assert labels[name].height() >= labels[name].minimumSizeHint().height()
+    assert [dialog.tabs.tabText(i) for i in range(dialog.tabs.count())] == ["문서", "배송·식수", "화면", "데이터 관리"]
+    assert dialog.tabs.currentIndex() == 0
+    actions = [action for group in dialog._group_actions.values() for action in group]
+    assert len(actions) == len(set(actions)) == len(SettingsAction)
+    assert set(actions) == set(SettingsAction)
+    assert SettingsAction.OUTPUT_RETENTION in dialog._group_actions["문서"]
+    assert SettingsAction.SUBSTITUTE_COLUMNS in dialog._group_actions["화면"]
+    for tab, group in enumerate(dialog._group_actions.values()):
+        dialog.tabs.setCurrentIndex(tab)
+        app.processEvents()
+        widths = {dialog._cards[action].width() for action in group}
+        assert max(widths) - min(widths) <= 1
+        for action in group:
+            card = dialog._cards[action]
+            assert card.isVisible()
+            assert card.width() < dialog._tab_scrolls[tab].viewport().width() * 0.6
+            labels = {label.objectName(): label for label in card.findChildren(QLabel)}
+            for name in ("settingsCardTitle", "settingsCardDescription"):
+                assert labels[name].height() >= labels[name].minimumSizeHint().height()
     dialog.close()
 
 

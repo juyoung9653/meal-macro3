@@ -256,6 +256,7 @@ class DocumentGenerationController:
                     period.ends_on,
                     selection.document.meals,
                     delivery_forms=selection.document.delivery_forms,
+                    remark_options=selection.document.remark_options,
                 )
                 if not prepared.reports:
                     raise ValueError(
@@ -307,10 +308,12 @@ class DocumentGenerationController:
             if action is DocumentAction.INVOICE:
                 assert template_setting is not None
                 profile_key = template_setting.profile.value
+                history_column = invoice_settings_from_snapshot(current_snapshot).history_column(profile_key)
                 column_mapping = _invoice_column_mapping(
                     template_path,
                     profile_key,
                     prepared.batch.is_vacation_month,
+                    history_column=history_column,
                 )
                 mapping_setting = mapping_setting_from_snapshot(current_snapshot, profile_key, "invoice")
                 column_mapping = effective_mapping(
@@ -318,11 +321,6 @@ class DocumentGenerationController:
                     load_mapping_overrides(current_snapshot, profile_key, "invoice"),
                 )
                 column_fallbacks = effective_fallbacks(column_mapping, load_mapping_fallbacks(current_snapshot, profile_key, "invoice"), document_kind="invoice")
-                history_column = invoice_settings_from_snapshot(current_snapshot).history_column(profile_key)
-                column_mapping = {target: ("" if source == "비고" or target == history_column else source)
-                                  for target, source in column_mapping.items()}
-                column_fallbacks = {target: source for target, source in column_fallbacks.items()
-                                    if source != "비고" and target != history_column}
                 _validate_custom_mapping_sources(column_mapping, current_roster)
                 _validate_custom_mapping_sources(column_fallbacks, current_roster)
                 _count, publication = self._invoice_writer(
@@ -513,8 +511,9 @@ def _invoice_column_mapping(
     template_path: Path,
     profile_key: str,
     is_vacation_month: bool,
+    *, history_column: str | None = None,
 ) -> dict[str, str]:
-    return invoice_default_mapping(template_path, profile_key, is_vacation_month)
+    return invoice_default_mapping(template_path, profile_key, is_vacation_month, history_column=history_column)
 
 
 def _confirmation_column_mapping() -> dict[str, str]:

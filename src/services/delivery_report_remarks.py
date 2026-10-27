@@ -140,3 +140,79 @@ def _address_key(address: str) -> str:
     if match := re.search(r"(\d+)\s*호", address):
         return f"{match.group(1)}호"
     return ""
+
+
+# Stable roster keys, independent of user-facing column aliases.
+REMARK_PROFILE_COLUMNS = {
+    "name": ("성명", "name"), "birth_date": ("생년월일", "birth_date"),
+    "school_type": ("취학유형", "school_type"), "school": ("학교", "school_name"),
+    "grade": ("학년", "grade"), "class_name": ("반", "class_name"),
+    "household_head_name": ("세대주 성명", "household_head_name"),
+    "relationship_to_child": ("아동과의 관계", "relationship_to_child"),
+    "telephone": ("전화번호", "telephone"), "mobile": ("핸드폰", "mobile_phone"),
+    "jurisdiction": ("관할동", "jurisdiction"), "address": ("도로명주소", "road_address"),
+    "detail_address": ("상세주소", "detail_address"), "note": ("비고", "note"),
+}
+
+
+def report_remark_columns(roster):
+    return (
+        *((key, label) for key, (label, _) in REMARK_PROFILE_COLUMNS.items()),
+        ("sequence", "순서"), ("delivery_settings", "배송 형태"),
+        *((f"status:{meal.name.lower()}", meal.value) for meal in Meal),
+        *((f"custom:{field.definition_id}", field.name) for field in
+          sorted(roster.custom_fields, key=lambda item: item.display_order)),
+    )
+
+
+def build_additional_remarks(roster, routing, histories, day, meal, presences, options, *, form_shipments=None):
+    """Use one nonblank priority value per delivered person, grouped by driver."""
+    if not options.columns and not options.separate_forms:
+        return {}
+    values_by_staff = defaultdict(dict)
+    forms_by_staff = defaultdict(lambda: defaultdict(list))
+    seen = set()
+    for presence in sorted(presences, key=lambda item: (roster.person(item.person_id).profile.name, str(item.person_id))):
+        if presence.person_id in seen:
+            continue
+        seen.add(presence.person_id)
+        person = roster.person(presence.person_id)
+        profile = person.profile
+        view = routing.resolve(roster, person.person_id, day)
+        values = {key: getattr(profile, attribute) for key, (_, attribute) in REMARK_PROFILE_COLUMNS.items()}
+        values.update(address=view.road_address, detail_address=view.detail_address,
+                      jurisdiction=view.jurisdiction, sequence=presence.sequence,
+                      delivery_settings=presence.form)
+        values.update({f"custom:{key}": value for key, value in profile.custom_values.items()})
+        for status_meal in Meal:
+            history = histories.get((person.person_id, status_meal))
+            values[f"status:{status_meal.name.lower()}"] = (
+                history.status_on(day).value if history is not None
+                and status_meal in roster.meals_for(person.person_id, on=day) else "-"
+            )
+        for key in options.columns:
+            value = values.get(key)
+            text = "" if value is None else value.isoformat() if isinstance(value, date) else str(value).strip()
+            if text:
+                values_by_staff[presence.driver].setdefault(text, []).append(profile.name)
+                break
+        if form_shipments is None and presence.form in options.separate_forms:
+            forms_by_staff[presence.driver][presence.form].append(profile.name)
+    if form_shipments is not None:
+        seen_forms = set()
+        for shipment in sorted(form_shipments, key=lambda item: (roster.person(item.person_id).profile.name, str(item.person_id))):
+            if shipment.delivery_on != day or shipment.meal is not meal or shipment.person_id in seen_forms:
+                continue
+            seen_forms.add(shipment.person_id)
+            form = next((setting.form for setting in roster.delivery_settings_for(
+                shipment.person_id, on=shipment.service_dates[0]) if setting.meal is meal), None)
+            if form in options.separate_forms:
+                driver = routing.resolve(roster, shipment.person_id, day).drivers[meal].strip() or "미지정"
+                forms_by_staff[driver][form].append(roster.person(shipment.person_id).profile.name)
+    result = {}
+    for staff in values_by_staff.keys() | forms_by_staff.keys():
+        parts = [f"{value}\n({', '.join(names)})" for value, names in values_by_staff[staff].items()]
+        parts.extend(f"{form} 별도\n({', '.join(forms_by_staff[staff][form])})"
+                     for form in options.separate_forms if forms_by_staff[staff].get(form))
+        result[staff] = "\n".join(parts)
+    return result

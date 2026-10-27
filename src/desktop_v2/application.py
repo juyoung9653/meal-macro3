@@ -772,169 +772,219 @@ class DesktopStartupController:
 
     @dialog_workflow
     def _run_document_hub(self, session: DatabaseSession, window) -> None:
+        from .document_navigation import DOCUMENT_BACK
         service_day = window.table_model.service_day
         selected_meal = window.table_model.meal
         hub = self._document_hub_dialog_type(parent=window)
-        if (yield DialogRequest(hub)) != QDialog.DialogCode.Accepted:
-            return
-        action = hub.selected_action
-        if action not in (
-            DocumentAction.INVOICE,
-            DocumentAction.CONFIRMATION,
-            DocumentAction.DELIVERY_REPORT,
-            DocumentAction.DELIVERY_SUBSTITUTE,
-        ):
-            self._message_box.information(
-                window,
-                f"{action.label} 연결 준비 중",
-                "현재 단계에서는 청구서, 확인서와 일일식수를 만들 수 있습니다.",
-            )
-            return
-        if not (yield from invoke(self._ensure_document_prerequisites, session, window, action)):
-            return
-        try:
-            summaries = run_progress_task(
-                session.database.revision_summaries,
-                title="문서 원본을 불러오는 중입니다",
-                message="문서에 사용할 변경번호 목록을 읽는 중입니다.", parent=window,
-            )
-        except Exception as error:
-            self._message_box.critical(window, "문서 원본을 읽지 못했습니다", str(error))
-            return
-        if not summaries:
-            self._message_box.information(
-                window, "문서 원본이 없습니다", "문서에 사용할 변경 이력이 없습니다.",
-            )
-            return
-        setup = DocumentSetupRequest(
-            action,
-            max(summaries, key=lambda summary: summary.sequence),
-            service_day,
-            selected_meal,
-        )
-        period = self._document_period_dialog_type(setup, parent=window)
-        source_options_setter = getattr(period, "set_source_options_available", None)
-        if callable(source_options_setter):
-            source_options_setter(len(summaries) > 1)
+        action = None
+        period = meal = substitute = output = None
+        meal_period = substitute_input = output_document = None
+        stage = "hub"
         while True:
-            period_result = yield DialogRequest(period)
-            if period_result == DocumentPeriodDialog.REVISION_SELECTION_REQUESTED:
-                source = self._document_source_dialog_type(summaries, parent=window)
-                selection_setter = getattr(source, "set_selected_summary", None)
-                if callable(selection_setter):
-                    selection_setter(period.request.source)
-                archive_opener = getattr(source, "show_archive", None)
-                if callable(archive_opener):
-                    archive_opener()
-                if (yield DialogRequest(source)) == QDialog.DialogCode.Accepted:
-                    period.set_source(source.selected_summary)
-                continue
-            if period_result != QDialog.DialogCode.Accepted:
-                return
-            break
-        selected_period = period.selected_period()
-        meal = self._document_meal_dialog_type(
-            selected_period,
-            parent=window,
-        )
-        forms_setter = getattr(meal, "set_available_delivery_forms", None)
-        if action is DocumentAction.DELIVERY_REPORT and callable(forms_setter):
-            try:
-                forms = run_progress_task(
-                    lambda: delivery_forms_from_snapshot(
-                        session.database.snapshot(selected_period.source.revision_id)
-                    ),
-                    title="배송 형태를 불러오는 중입니다",
-                    message="선택한 변경번호의 배송 형태를 확인하는 중입니다.",
-                    parent=window,
-                )
-                forms_setter(forms)
-            except Exception as error:
-                self._message_box.critical(
-                    window, "배송 형태를 읽지 못했습니다", str(error),
-                )
-                return
-        if action is DocumentAction.DELIVERY_REPORT:
-            preferences_setter = getattr(meal, "set_report_choices", None)
-            if callable(preferences_setter):
-                try:
-                    choices = run_progress_task(lambda: load_daily_report_choices(session),
-                        title="일일식수 선택을 불러오는 중입니다", message="운영 DB에 저장된 식종과 배송 형태를 확인합니다.", parent=window)
-                    preferences_setter(choices)
-                except Exception as error:
-                    self._message_box.critical(window, "일일식수 선택을 읽지 못했습니다", str(error))
+            if stage == "hub":
+                if (yield DialogRequest(hub)) != QDialog.DialogCode.Accepted:
                     return
-        while True:
-            if (yield DialogRequest(meal)) != QDialog.DialogCode.Accepted:
-                return
-            document = meal.selection()
-            choices_getter = getattr(meal, "selected_report_choices", None)
-            if action is DocumentAction.DELIVERY_REPORT and callable(choices_getter):
-                try:
-                    roster, backup = save_daily_report_choices(session, choices_getter(), parent=window)
-                    self._replace_roster_if_changed(session, window, roster)
-                except Exception as error:
-                    self._message_box.critical(window, "일일식수 선택을 저장하지 못했습니다", str(error))
+                if hub.selected_action == action and period is not None:
+                    stage = "period"
                     continue
-                if backup is not None and backup.error is not None:
-                    self._message_box.warning(window, "선택은 저장됐지만 자동 백업에 실패했습니다", str(backup.error))
-            break
-        if action is DocumentAction.DELIVERY_SUBSTITUTE:
-            try:
-                from .substitute_preferences import preferences, exclude_hidden_columns
-                from src.services.sqlite_delivery_substitute_service import substitute_columns_from_roster, ROSTER_COLUMN_KEYS
-                model = getattr(window, "table_model", None)
-                roster_columns = getattr(model, "columns", None)
-                def prepare_substitute():
-                    source = session.database.snapshot(document.period.source.revision_id)
-                    columns = (substitute_columns_from_roster(roster_columns, source_snapshot=source)
-                               if roster_columns is not None else None)
-                    return prepare_delivery_substitute_data(
-                        source,
-                        document.period.starts_on, document.meals[0],
-                        mapping_snapshot=session.database.snapshot(session.database.current_roster().revision_id),
-                        columns=columns, fallbacks={},
+                action = hub.selected_action
+                meal = substitute = output = None
+                meal_period = substitute_input = output_document = None
+                if action not in (
+                    DocumentAction.INVOICE,
+                    DocumentAction.CONFIRMATION,
+                    DocumentAction.DELIVERY_REPORT,
+                    DocumentAction.DELIVERY_SUBSTITUTE,
+                ):
+                    self._message_box.information(
+                        window,
+                        f"{action.label} 연결 준비 중",
+                        "현재 단계에서는 청구서, 확인서와 일일식수를 만들 수 있습니다.",
                     )
-                prepared = run_progress_task(
-                    prepare_substitute,
-                    title="배송대타 대상을 불러오는 중입니다",
-                    message="선택한 날짜의 실제 배송 대상과 담당자를 확인하고 있습니다.", parent=window,
+                    return
+                if not (yield from invoke(self._ensure_document_prerequisites, session, window, action)):
+                    return
+                try:
+                    summaries = run_progress_task(
+                        session.database.revision_summaries,
+                        title="문서 원본을 불러오는 중입니다",
+                        message="문서에 사용할 변경번호 목록을 읽는 중입니다.", parent=window,
+                    )
+                except Exception as error:
+                    self._message_box.critical(window, "문서 원본을 읽지 못했습니다", str(error))
+                    return
+                if not summaries:
+                    self._message_box.information(
+                        window, "문서 원본이 없습니다", "문서에 사용할 변경 이력이 없습니다.",
+                    )
+                    return
+                setup = DocumentSetupRequest(
+                    action,
+                    max(summaries, key=lambda summary: summary.sequence),
+                    service_day,
+                    selected_meal,
                 )
-                if not prepared.rows:
-                    self._message_box.information(window, "배송대타 대상이 없습니다", "선택한 날짜·식종에 실제 배송할 대상이 없습니다.")
+                period = self._document_period_dialog_type(setup, parent=window)
+                source_options_setter = getattr(period, "set_source_options_available", None)
+                if callable(source_options_setter):
+                    source_options_setter(len(summaries) > 1)
+                stage = "period"
+                continue
+            if stage == "period":
+                period_result = yield DialogRequest(period)
+                if period_result == DOCUMENT_BACK:
+                    stage = "hub"
+                    continue
+                if period_result == DocumentPeriodDialog.REVISION_SELECTION_REQUESTED:
+                    source = self._document_source_dialog_type(summaries, parent=window)
+                    selection_setter = getattr(source, "set_selected_summary", None)
+                    if callable(selection_setter):
+                        selection_setter(period.request.source)
+                    archive_opener = getattr(source, "show_archive", None)
+                    if callable(archive_opener):
+                        archive_opener()
+                    if (yield DialogRequest(source)) == QDialog.DialogCode.Accepted:
+                        period.set_source(source.selected_summary)
+                    continue
+                if period_result != QDialog.DialogCode.Accepted:
                     return
-                substitute = self._delivery_substitute_dialog_type(document, prepared, parent=window)
-                scope_setter = getattr(substitute, "set_preferences_scope", None)
-                if callable(scope_setter):
-                    scope_setter(str(session.credentials.database_id))
-                visibility_setter = getattr(substitute, "set_visible_columns", None)
-                visible_getter = getattr(window, "columns_visible_in_any_sheet", None)
-                store, key = preferences(str(session.credentials.database_id))
-                if callable(visibility_setter) and callable(visible_getter) and exclude_hidden_columns(store, key):
-                    visibility_setter({ROSTER_COLUMN_KEYS.get(key, key) for key in visible_getter()})
-                if (yield DialogRequest(substitute)) != QDialog.DialogCode.Accepted:
+                selected_period = period.selected_period()
+                if meal is None or selected_period != meal_period:
+                    meal = self._document_meal_dialog_type(
+                        selected_period,
+                        parent=window,
+                    )
+                    forms_setter = getattr(meal, "set_available_delivery_forms", None)
+                    if action is DocumentAction.DELIVERY_REPORT and callable(forms_setter):
+                        try:
+                            forms = run_progress_task(
+                                lambda: delivery_forms_from_snapshot(
+                                    session.database.snapshot(selected_period.source.revision_id)
+                                ),
+                                title="배송 형태를 불러오는 중입니다",
+                                message="선택한 변경번호의 배송 형태를 확인하는 중입니다.",
+                                parent=window,
+                            )
+                            forms_setter(forms)
+                            columns_setter = getattr(meal, "set_report_columns", None)
+                            if callable(columns_setter):
+                                from src.services.delivery_report_remarks import report_remark_columns
+                                from src.domain.projections import roster_from_historical_snapshot
+                                source = session.database.snapshot(selected_period.source.revision_id)
+                                columns = report_remark_columns(roster_from_historical_snapshot(source))
+                                labels = {column.key: column.label for column in getattr(getattr(window, "table_model", None), "columns", ())}
+                                columns_setter(tuple((key, labels.get(key, label)) for key, label in columns))
+                        except Exception as error:
+                            self._message_box.critical(
+                                window, "배송 형태를 읽지 못했습니다", str(error),
+                            )
+                            return
+                    if action is DocumentAction.DELIVERY_REPORT:
+                        preferences_setter = getattr(meal, "set_report_choices", None)
+                        if callable(preferences_setter):
+                            try:
+                                choices = run_progress_task(lambda: load_daily_report_choices(session),
+                                    title="일일식수 선택을 불러오는 중입니다", message="운영 DB에 저장된 식종과 배송 형태를 확인합니다.", parent=window)
+                                preferences_setter(choices)
+                            except Exception as error:
+                                self._message_box.critical(window, "일일식수 선택을 읽지 못했습니다", str(error))
+                                return
+                    meal_period = selected_period
+                stage = "meal"
+                continue
+            if stage == "meal":
+                meal_result = yield DialogRequest(meal)
+                if meal_result == DOCUMENT_BACK:
+                    stage = "period"
+                    continue
+                if meal_result != QDialog.DialogCode.Accepted:
                     return
-                document = substitute.selection()
-            except Exception as error:
-                self._message_box.critical(window, "배송대타 대상을 읽지 못했습니다", str(error))
+                document = meal.selection()
+                choices_getter = getattr(meal, "selected_report_choices", None)
+                if action is DocumentAction.DELIVERY_REPORT and callable(choices_getter):
+                    try:
+                        roster, backup = save_daily_report_choices(session, choices_getter(), parent=window)
+                        self._replace_roster_if_changed(session, window, roster)
+                    except Exception as error:
+                        self._message_box.critical(window, "일일식수 선택을 저장하지 못했습니다", str(error))
+                        continue
+                    if backup is not None and backup.error is not None:
+                        self._message_box.warning(window, "선택은 저장됐지만 자동 백업에 실패했습니다", str(backup.error))
+                stage = "substitute" if action is DocumentAction.DELIVERY_SUBSTITUTE else "output"
+                continue
+            if stage == "substitute":
+                try:
+                    base_document = meal.selection()
+                    if substitute is None or substitute_input != base_document:
+                        document = base_document
+                        from .substitute_preferences import preferences, exclude_hidden_columns
+                        from src.services.sqlite_delivery_substitute_service import substitute_columns_from_roster, ROSTER_COLUMN_KEYS
+                        model = getattr(window, "table_model", None)
+                        roster_columns = getattr(model, "columns", None)
+                        def prepare_substitute():
+                            source = session.database.snapshot(document.period.source.revision_id)
+                            columns = (substitute_columns_from_roster(roster_columns, source_snapshot=source)
+                                       if roster_columns is not None else None)
+                            return prepare_delivery_substitute_data(
+                                source,
+                                document.period.starts_on, document.meals[0],
+                                mapping_snapshot=session.database.snapshot(session.database.current_roster().revision_id),
+                                columns=columns, fallbacks={},
+                            )
+                        prepared = run_progress_task(
+                            prepare_substitute,
+                            title="배송대타 대상을 불러오는 중입니다",
+                            message="선택한 날짜의 실제 배송 대상과 담당자를 확인하고 있습니다.", parent=window,
+                        )
+                        if not prepared.rows:
+                            self._message_box.information(window, "배송대타 대상이 없습니다", "선택한 날짜·식종에 실제 배송할 대상이 없습니다.")
+                            return
+                        substitute = self._delivery_substitute_dialog_type(document, prepared, parent=window)
+                        scope_setter = getattr(substitute, "set_preferences_scope", None)
+                        if callable(scope_setter):
+                            scope_setter(str(session.credentials.database_id))
+                        visibility_setter = getattr(substitute, "set_visible_columns", None)
+                        visible_getter = getattr(window, "columns_visible_in_any_sheet", None)
+                        store, key = preferences(str(session.credentials.database_id))
+                        if callable(visibility_setter) and callable(visible_getter) and exclude_hidden_columns(store, key):
+                            visibility_setter({ROSTER_COLUMN_KEYS.get(key, key) for key in visible_getter()})
+                        substitute_input = base_document
+                    substitute_result = yield DialogRequest(substitute)
+                    if substitute_result == DOCUMENT_BACK:
+                        stage = "meal"
+                        continue
+                    if substitute_result != QDialog.DialogCode.Accepted:
+                        return
+                    document = substitute.selection()
+                except Exception as error:
+                    self._message_box.critical(window, "배송대타 대상을 읽지 못했습니다", str(error))
+                    return
+                stage = "output"
+                continue
+            if stage == "output":
+                if output is None or output_document != document:
+                    output = self._document_output_dialog_type(
+                        document, self._settings.document_output_directory, parent=window,
+                    )
+                    output_document = document
+                output_result = yield DialogRequest(output)
+                if output_result == DOCUMENT_BACK:
+                    stage = "substitute" if action is DocumentAction.DELIVERY_SUBSTITUTE else "meal"
+                    continue
+                if output_result != QDialog.DialogCode.Accepted:
+                    return
+                selection = output.selection()
+                if selection.mode is DocumentOutputMode.NEW_DEFAULT:
+                    try:
+                        self._settings.save_document_output_directory(selection.directory)
+                    except OSError as error:
+                        self._message_box.critical(window, "문서 저장 폴더를 저장하지 못했습니다", str(error))
+                        return
+                selected_signal = getattr(window, "document_output_selected", None)
+                if selected_signal is not None and hasattr(selected_signal, "emit"):
+                    selected_signal.emit(selection)
+
                 return
-        output = self._document_output_dialog_type(
-            document,
-            self._settings.document_output_directory,
-            parent=window,
-        )
-        if (yield DialogRequest(output)) != QDialog.DialogCode.Accepted:
-            return
-        selection = output.selection()
-        if selection.mode is DocumentOutputMode.NEW_DEFAULT:
-            try:
-                self._settings.save_document_output_directory(selection.directory)
-            except OSError as error:
-                self._message_box.critical(window, "문서 저장 폴더를 저장하지 못했습니다", str(error))
-                return
-        selected_signal = getattr(window, "document_output_selected", None)
-        if selected_signal is not None and hasattr(selected_signal, "emit"):
-            selected_signal.emit(selection)
 
     @dialog_workflow
     def _show_document_completion(self, result, window) -> None:
@@ -977,6 +1027,10 @@ class DesktopStartupController:
     def _run_settings_hub(self, session: DatabaseSession, window) -> None:
         hub = self._settings_hub_dialog_type(parent=window)
         if (yield DialogRequest(hub)) != QDialog.DialogCode.Accepted:
+            return
+        if hub.selected_action is SettingsAction.OUTPUT_RETENTION:
+            from .output_retention import OutputRetentionDialog
+            yield DialogRequest(OutputRetentionDialog(self._settings, parent=window))
             return
         if hub.selected_action is SettingsAction.USER_VIEW_LAYOUT:
             yield from invoke(window._user_view_layout_controller.run)

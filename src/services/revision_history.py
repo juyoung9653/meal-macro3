@@ -9,6 +9,7 @@ from uuid import UUID
 from src.domain.complaints import COMPLAINT_KIND
 from src.domain.delivery_defaults import DELIVERY_DEFAULTS_KIND
 from src.domain.delivery_routing import DRIVER_KIND, DRIVER_ORDER_KIND, ROUTING_EVENT_KIND
+from src.domain.daily_driver_order import DAILY_DRIVER_ORDER_KIND
 from src.domain.document_column_mappings import MAPPING_ENTITY_KIND
 from src.domain.document_templates import DOCUMENT_TEMPLATE_SETTING_KIND
 from src.domain.invoice_settings import INVOICE_SETTINGS_KIND
@@ -51,6 +52,7 @@ _KIND_LABELS = {
     CANCELLATION_KIND: "식종 변경 등록 취소",
     DRIVER_KIND: "배송담당",
     DRIVER_ORDER_KIND: "기사 표시 순서",
+    DAILY_DRIVER_ORDER_KIND: "일일식수 기사 순서",
     ROUTING_EVENT_KIND: "배송 변경",
     COMPLAINT_KIND: "민원",
     DELIVERY_DEFAULTS_KIND: "식종별 배송 기본값",

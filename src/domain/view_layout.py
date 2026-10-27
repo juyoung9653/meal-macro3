@@ -31,7 +31,14 @@ def validate_view_layout(value):
                 or not all(isinstance(k, str) and type(w) is int and 0 < w <= 100000
                            for k, w in widths.items())):
             raise ValueError("칼럼 순서·너비·숨김 설정이 올바르지 않습니다.")
+        alignments = layout.get("alignments", {})
+        if not isinstance(alignments, dict) or any(
+            not isinstance(k, str) or type(v) is not int or v not in {33, 65, 129, 34, 66, 130, 36, 68, 132}
+            for k, v in alignments.items()
+        ):
+            raise ValueError("칼럼 가로·세로 정렬 설정이 올바르지 않습니다.")
         cleaned.append({"id": key, "name": name, "layout": {
+            **({"alignments": dict(alignments)} if alignments else {}),
             "order": list(order), "hidden": list(hidden), "widths": dict(widths)}})
     active = value.get("active")
     if active not in ids:

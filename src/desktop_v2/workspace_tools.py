@@ -1,7 +1,7 @@
 """Compact entry points for related roster work."""
 from PySide6.QtCore import QSignalBlocker, Qt
 from PySide6.QtWidgets import (QComboBox, QDialog, QHBoxLayout, QLabel, QListWidget, QMenu,
-    QListWidgetItem, QPushButton, QSpinBox, QTabWidget, QVBoxLayout, QWidget)
+    QListWidgetItem, QPushButton, QSpinBox, QTabWidget, QVBoxLayout, QWidget, QWidgetAction)
 
 from .theme import application_stylesheet, register_application_fonts
 from .monthly_statistics import MonthlyStatisticsDialog
@@ -154,6 +154,14 @@ class ColumnManagerDialog(QDialog):
         root.addLayout(actions)
         self.shared_button = _button("칼럼 가구 공용 설정", self._shared)
         self._shared_menu = QMenu(self)
+        self._shared_list = QListWidget(self._shared_menu)
+        self._shared_list.setAccessibleName("가구 공용 칼럼 선택")
+        self._shared_list.setVerticalScrollMode(QListWidget.ScrollMode.ScrollPerPixel)
+        self._shared_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._shared_list.itemChanged.connect(self._shared_item_changed)
+        self._shared_list_action = QWidgetAction(self._shared_menu)
+        self._shared_list_action.setDefaultWidget(self._shared_list)
+        self._shared_menu.addAction(self._shared_list_action)
         root.addWidget(self.shared_button)
         root.addWidget(_button("닫기", self.accept))
         window.table_model.modelReset.connect(self._reload)
@@ -186,21 +194,30 @@ class ColumnManagerDialog(QDialog):
         self._window.custom_fields_requested.emit()
 
     def _shared(self):
-        self._shared_menu.clear()
         allowed = available_shared_column_keys(self._window.roster)
         shared = self._window.table_model._household_shared_columns
-        for index in range(self.columns.count()):
-            item = self.columns.item(index)
-            key = item.data(Qt.ItemDataRole.UserRole)
-            if key not in allowed:
-                continue
-            action = self._shared_menu.addAction(item.text())
-            action.setData(key)
-            action.setCheckable(True)
-            action.setChecked(key in shared)
-            action.setToolTip("체크하면 가구 공용으로 사용하고, 해제하면 현재 값을 유지하며 공용 사용을 끝냅니다.")
-            action.triggered.connect(lambda checked=False, key=key: self._select_shared(key))
+        with QSignalBlocker(self._shared_list):
+            self._shared_list.clear()
+            for index in range(self.columns.count()):
+                item = self.columns.item(index)
+                key = item.data(Qt.ItemDataRole.UserRole)
+                if key not in allowed:
+                    continue
+                option = QListWidgetItem(item.text(), self._shared_list)
+                option.setData(Qt.ItemDataRole.UserRole, key)
+                option.setFlags(option.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                option.setCheckState(Qt.CheckState.Checked if key in shared else Qt.CheckState.Unchecked)
+                option.setToolTip("체크하면 가구 공용으로 사용하고, 해제하면 현재 값을 유지하며 공용 사용을 끝냅니다.")
+        available = self.screen().availableGeometry()
+        row_height = max(26, self._shared_list.sizeHintForRow(0))
+        self._shared_list.setFixedSize(min(max(320, self.shared_button.width()), available.width() - 40),
+                                      min(360, available.height() // 2, max(60, self._shared_list.count() * row_height + 6)))
         self._shared_menu.popup(self.shared_button.mapToGlobal(self.shared_button.rect().bottomLeft()))
+        self._shared_list.setFocus()
+
+    def _shared_item_changed(self, item):
+        self._shared_menu.close()
+        self._select_shared(item.data(Qt.ItemDataRole.UserRole))
 
     def _select_shared(self, key):
         self.accept()

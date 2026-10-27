@@ -17,6 +17,7 @@ from src.domain.entitlements import (
 )
 from src.domain.delivery_defaults import delivery_defaults_state
 from src.domain.delivery_routing import RoutingState, routing_state_from_snapshot
+from src.domain.daily_driver_order import daily_driver_orders
 from src.domain.projections import (
     roster_from_historical_snapshot,
     status_events_from_historical_snapshot,
@@ -41,7 +42,8 @@ from src.domain.service_adjustments import (
     service_adjustment_schedule_state,
 )
 from src.domain.status import StatusEvent, StatusHistory, resolve_status_history
-from src.services.delivery_report_remarks import build_status_remarks
+from src.services.delivery_report_remarks import build_status_remarks, build_additional_remarks, report_remark_columns
+from src.domain.daily_report_choices import ReportRemarkOptions
 from src.services.delivery_service import (
     DeliveryReport,
     DeliveryReportRow,
@@ -116,6 +118,7 @@ def prepare_delivery_report_data(
     *,
     staff_sort: Mapping[Meal | str, Sequence[str]] | None = None,
     delivery_forms: Sequence[str | None] | None = None,
+    remark_options: ReportRemarkOptions = ReportRemarkOptions(),
 ) -> PreparedDeliveryReportData:
     """Build report rows from entitlement service dates and physical shipments.
 
@@ -126,7 +129,7 @@ def prepare_delivery_report_data(
 
     return _prepare_delivery_data(
         snapshot, period_start, period_end, meals, staff_sort=staff_sort,
-        build_reports=True, delivery_forms=delivery_forms,
+        build_reports=True, delivery_forms=delivery_forms, remark_options=remark_options,
     )
 
 
@@ -173,6 +176,7 @@ def _prepare_delivery_data(
     staff_sort: Mapping[Meal | str, Sequence[str]] | None,
     build_reports: bool,
     delivery_forms: Sequence[str | None] | None = None,
+    remark_options: ReportRemarkOptions = ReportRemarkOptions(),
     missing_lunch_schedule_as_zero: bool = False,
 ) -> PreparedDeliveryReportData:
     if not isinstance(snapshot, HistoricalSnapshot):
@@ -185,6 +189,10 @@ def _prepare_delivery_data(
     normalized_staff_sort = _normalize_staff_sort(staff_sort)
 
     roster = roster_from_historical_snapshot(snapshot)
+    if not isinstance(remark_options, ReportRemarkOptions):
+        raise TypeError("일일식수 비고 설정이 올바르지 않습니다.")
+    if build_reports and set(remark_options.columns) - {key for key, _ in report_remark_columns(roster)}:
+        raise ValueError("비고에 선택한 칼럼이 원본에 없습니다. 비고 설정이나 원본 변경번호를 확인해주세요.")
     selected_forms: tuple[str | None, ...] | None = None
     if delivery_forms is not None:
         if not build_reports:
@@ -196,8 +204,9 @@ def _prepare_delivery_data(
             raise ValueError("선택한 원본의 배송 설정에 없는 배송 형태가 있습니다.")
     routing = routing_state_from_snapshot(snapshot)
     if staff_sort is None:
+        orders = daily_driver_orders(snapshot, routing)
         normalized_staff_sort = _normalize_staff_sort({
-            meal: tuple(driver.name for driver in routing.drivers)
+            meal: tuple(routing._drivers_by_id[driver_id].name for driver_id in orders[meal])
             for meal in selected_meals
         })
     school_calendar = school_lunch_calendar_from_snapshot(snapshot)
@@ -229,13 +238,16 @@ def _prepare_delivery_data(
     shipments: list[PhysicalShipment] = []
     exclusions: Counter[str] = Counter()
     allowed_forms = set(selected_forms) if selected_forms is not None else None
+    remark_forms = (set(remark_options.separate_forms)
+                    if build_reports and remark_options.include_excluded_deliveries else set())
+    evaluated_forms = allowed_forms | remark_forms if allowed_forms is not None else None
     histories: dict[tuple[UUID, Meal], StatusHistory] = {}
     for person in roster.persons:
         for meal in selected_meals:
             eligible_service_days = (
-                ordered_service_days if allowed_forms is None else tuple(
+                ordered_service_days if evaluated_forms is None else tuple(
                     day for day in ordered_service_days
-                    if _delivery_form_on(roster, person.person_id, meal, day) in allowed_forms
+                    if _delivery_form_on(roster, person.person_id, meal, day) in evaluated_forms
                 )
             )
             if not eligible_service_days:
@@ -248,6 +260,7 @@ def _prepare_delivery_data(
             )
             histories[(person.person_id, meal)] = history
             for service_on in eligible_service_days:
+                counted_form = allowed_forms is None or _delivery_form_on(roster, person.person_id, meal, service_on) in allowed_forms
                 if meal not in roster.meals_for(person.person_id, on=service_on):
                     continue
                 provision = adjustments.provision_for(meal, service_on)
@@ -263,7 +276,8 @@ def _prepare_delivery_data(
                     if delivery_provision.treatment is not ServiceTreatment.NORMAL:
                         candidate_delivery = delivery_provision.delivery_on
                 if candidate_delivery is None:
-                    exclusions["delivery_day_closed"] += 1
+                    if counted_form:
+                        exclusions["delivery_day_closed"] += 1
                     continue
                 try:
                     available = regular_service_available(
@@ -298,7 +312,7 @@ def _prepare_delivery_data(
                 )
                 entitlement = decision.entitlement
                 if entitlement is None:
-                    if period_start <= service_on <= normal_evaluation_end:
+                    if counted_form and period_start <= service_on <= normal_evaluation_end:
                         exclusions.update(item.value for item in decision.exclusions)
                     continue
                 shipments.append(PhysicalShipment(person.person_id, meal, candidate_delivery, (service_on,)))
@@ -308,6 +322,9 @@ def _prepare_delivery_data(
         for item in shipments
         if evaluation_start <= item.delivery_on <= period_end
     )
+    remark_shipments = tuple(item for item in coalesced_shipments
+                             if _shipment_form(roster, item) in remark_forms
+                             and period_start <= item.delivery_on <= period_end)
     if selected_forms is not None:
         coalesced_shipments = tuple(
             item for item in coalesced_shipments
@@ -316,11 +333,18 @@ def _prepare_delivery_data(
 
     reports: tuple[DeliveryReport, ...] = ()
     if build_reports:
+        for key in remark_options.columns:
+            if key.startswith("status:"):
+                status_meal = Meal[key.split(":", 1)[1].upper()]
+                for person in roster.persons:
+                    histories.setdefault((person.person_id, status_meal), resolve_status_history(
+                        person.person_id, status_meal, tuple(events_by_key[(person.person_id, status_meal)]),
+                        same_month_pause=conversion.same_month))
         target_keys = tuple(
             sorted(
                 {
                     (item.delivery_on, item.meal)
-                    for item in coalesced_shipments
+                    for item in (*coalesced_shipments, *remark_shipments)
                     if period_start <= item.delivery_on <= period_end
                 },
                 key=lambda item: (item[0], tuple(Meal).index(item[1])),
@@ -372,6 +396,10 @@ def _prepare_delivery_data(
                     roster, routing, histories, day, meal,
                     coalesced_shipments, allowed_forms,
                 ),
+                build_additional_remarks(roster, routing, histories, day, meal,
+                                         presences.get((day, meal), ()), remark_options,
+                                         form_shipments=remark_shipments if remark_forms else None),
+                remark_options.position,
             )
             for day, meal in target_keys
         )
@@ -389,6 +417,8 @@ def _prepare_delivery_data(
             "source_revision_id": str(snapshot.revision_id),
             "selected_meals": tuple(meal.value for meal in selected_meals),
             **({"selected_delivery_forms": selected_forms} if build_reports else {}),
+            **({"remark_options": remark_options.manifest()}
+               if build_reports and remark_options != ReportRemarkOptions() else {}),
             "report_period": {
                 "basis": "physical_delivery_day",
                 "starts_on": period_start.isoformat(),
@@ -686,11 +716,13 @@ def _build_report(
     previous: _DeliveryAggregate | None,
     staff_sort: Sequence[str],
     status_remarks: Mapping[str, str],
+    additional_remarks: Mapping[str, str] | None = None,
+    remark_position: str = "above",
 ) -> DeliveryReport:
     # None denotes unavailable comparison data; equal buckets suppress deltas.
     if previous is None:
         previous = current
-    all_staff = set(current.buckets_by_staff) | set(previous.buckets_by_staff) | set(status_remarks)
+    all_staff = set(current.buckets_by_staff) | set(previous.buckets_by_staff) | set(status_remarks) | set(additional_remarks or {})
     configured_order = {
         name: index for index, name in enumerate(_normalized_names(staff_sort))
     }
@@ -724,10 +756,11 @@ def _build_report(
                     for index in range(5)
                 ),
                 people,
-                "\n".join(filter(None, (
-                    status_remarks.get(staff, ""),
-                    _form_memo(current.forms_by_staff.get(staff, {})),
-                ))),
+                _combine_remarks(
+                    "\n".join(filter(None, (status_remarks.get(staff, ""),
+                                           _form_memo(current.forms_by_staff.get(staff, {}))))),
+                    (additional_remarks or {}).get(staff, ""), remark_position,
+                ),
                 "\n".join(
                     ", ".join(ordered_areas[index : index + 2])
                     for index in range(0, len(ordered_areas), 2)
@@ -863,3 +896,8 @@ def _contains(starts_on: date, ends_on: date, day: date) -> bool:
 def _validate_date(value: object, label: str) -> None:
     if isinstance(value, datetime) or not isinstance(value, date):
         raise TypeError(f"{label}은 date여야 합니다.")
+
+
+def _combine_remarks(existing, additional, position):
+    parts = (additional, existing) if position == "above" else (existing, additional)
+    return "\n".join(part for part in parts if part)

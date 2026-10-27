@@ -50,15 +50,16 @@ def test_invoice_note_uses_history_not_roster_memo(status, start, end, text):
     assert prepare_monthly_document_data(cancelled, date(2026, 10, 1), date(2026, 10, 31), (Meal.DINNER,), revisions=records).batch.deliveries[0].note == ""
 
 
-def test_history_destination_is_template_selected_and_not_a_roster_mapping(tmp_path):
+def test_history_destination_is_an_editable_default(tmp_path):
     from src.core.settings import get_settings
     from src.generators.invoice_generator import make_invoice_publication
     from src.templates.config import get_template_data_start_row, get_template_sheet_name, read_template_columns
     source, records = history_source(MealStatus.STOPPED, date(2026, 10, 29), None)
     prepared = prepare_monthly_document_data(source, date(2026, 10, 1), date(2026, 10, 31), (Meal.DINNER,), revisions=records)
     spec = mapping_editor_spec("급식", "invoice", history_column="비고")
-    assert "비고" in spec.locked_targets
-    assert "비고" not in spec.selectable_source_options
+    assert "비고" not in spec.locked_targets
+    assert "비고" in spec.selectable_source_options
+    assert spec.defaults["비고"] == "__auto_history"
     template = get_settings().get_invoice_template_path("급식")
     path = tmp_path / "history.xlsx"
     make_invoice_publication(prepared.batch, {}, str(path), template, history_note_column="비고")
@@ -69,10 +70,14 @@ def test_history_destination_is_template_selected_and_not_a_roster_mapping(tmp_p
         assert book[sheet].cell(get_template_data_start_row(), columns.index("비고") + 1).value == "석식: 10/29~ 중지"
     finally:
         book.close()
-    invalid = tmp_path / "invalid-history.xlsx"
-    with pytest.raises(ValueError, match="자동 계산 칼럼"):
-        make_invoice_publication(prepared.batch, {}, str(invalid), template, history_note_column="조식")
-    assert not invalid.exists()
+    changed = tmp_path / "changed-history.xlsx"
+    make_invoice_publication(prepared.batch, {"조식": "__auto_history", "비고": "비고"}, str(changed), template, history_note_column="비고")
+    book = openpyxl.load_workbook(changed)
+    try:
+        assert book[sheet].cell(get_template_data_start_row(), columns.index("조식") + 1).value == "석식: 10/29~ 중지"
+        assert book[sheet].cell(get_template_data_start_row(), columns.index("비고") + 1).value == "명단의 일반 메모"
+    finally:
+        book.close()
 
 
 def test_invoice_settings_reopen_noop_and_historical_source(tmp_path):

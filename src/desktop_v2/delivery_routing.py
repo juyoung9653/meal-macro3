@@ -43,6 +43,7 @@ from src.domain.delivery_routing import (
     routing_state_from_snapshot,
 )
 from src.domain.roster import Meal, RosterSnapshot
+from src.domain.daily_driver_order import build_daily_driver_order_revision
 from src.storage.encrypted_database import RevisionConflictError
 
 from .date_edit import WheelSafeDateEdit
@@ -164,6 +165,11 @@ class DriverReplacementLaunch:
     source_driver: UUID | None
 
 
+@dataclass(frozen=True)
+class DailyDriverOrderLaunch:
+    pass
+
+
 class DriverRegistryDialog(QDialog):
     """Only name and phone are user-facing driver attributes."""
 
@@ -180,7 +186,7 @@ class DriverRegistryDialog(QDialog):
                 "기사를 등록하면 식종별 배송담당과 기사 필터에서 선택할 수 있습니다."
             )
         )
-        guidance = QLabel("기사 행을 드래그해 순서를 바꾼 뒤 ‘순서 저장’을 누르세요. 일일식수 문서에도 이 기사 순서를 적용합니다.")
+        guidance = QLabel("기사 행을 드래그해 기본 순서를 바꾼 뒤 ‘순서 저장’을 누르세요. 일일식수의 식종별 순서는 ‘일일식수 기사 순서’에서 정합니다.")
         guidance.setWordWrap(True)
         layout.addWidget(guidance)
         self.table = DriverOrderTable(len(state.drivers))
@@ -207,6 +213,10 @@ class DriverRegistryDialog(QDialog):
         order_row.addWidget(self.order_button)
         layout.addLayout(order_row)
         self.table.orderChanged.connect(self._order_changed)
+        self.daily_order_button = QPushButton("일일식수 기사 순서")
+        self.daily_order_button.setObjectName("quietAction")
+        self.daily_order_button.clicked.connect(self._daily_order)
+        layout.addWidget(self.daily_order_button)
         self.name = QLineEdit()
         self.phone = QLineEdit()
         form = QFormLayout()
@@ -232,6 +242,13 @@ class DriverRegistryDialog(QDialog):
         layout.addLayout(buttons)
         self.error = QLabel()
         layout.addWidget(self.error)
+
+    def _daily_order(self):
+        if self._order_pending():
+            self.error.setText("변경한 기본 기사 순서를 먼저 저장한 뒤 일일식수 기사 순서를 열어주세요.")
+            return
+        self._request = DailyDriverOrderLaunch()
+        self.accept()
 
     def _replace_assignments(self):
         if self._order_pending():
@@ -746,6 +763,7 @@ class DeliveryRoutingController:
         change_dialog_type=RoutingChangeDialog,
         batch_change_dialog_type=BatchRoutingChangeDialog,
         replacement_dialog_type=DriverReplacementDialog,
+        daily_order_dialog_type=None,
         message_box=QMessageBox,
         actor_provider=current_windows_actor,
     ):
@@ -754,6 +772,10 @@ class DeliveryRoutingController:
         self._change_dialog_type = change_dialog_type
         self._batch_change_dialog_type = batch_change_dialog_type
         self._replacement_dialog_type = replacement_dialog_type
+        if daily_order_dialog_type is None:
+            from .daily_driver_order import DailyDriverOrderDialog
+            daily_order_dialog_type = DailyDriverOrderDialog
+        self._daily_order_dialog_type = daily_order_dialog_type
         self._message_box = message_box
         self._actor_provider = actor_provider
 
@@ -789,6 +811,14 @@ class DeliveryRoutingController:
                 if (yield DialogRequest(dialog, self._session)) != QDialog.DialogCode.Accepted:
                     return DeliveryRoutingOutcome(*self._load()) if outcome.roster is not None else outcome
                 request = dialog.request()
+                if isinstance(request, DailyDriverOrderLaunch):
+                    result = yield from invoke(self.run_daily_order, parent=parent)
+                    if result.roster is not None:
+                        outcome = result
+                        if on_saved is not None:
+                            on_saved(outcome)
+                    dialog = None
+                    continue
                 if isinstance(request, DriverReplacementLaunch):
                     replacement = yield from invoke(self.run_replacement, service_day or date.today(),
                                                     parent=parent, source_driver=request.source_driver)
@@ -838,6 +868,39 @@ class DeliveryRoutingController:
                     dialog.setResult(QDialog.DialogCode.Rejected)
                     continue
                 return outcome
+
+    @dialog_workflow
+    def run_daily_order(self, parent=None):
+        dialog = None
+        while True:
+            try:
+                if dialog is None:
+                    roster, routing = self._load()
+                    snapshot = self._session.database.snapshot(roster.revision_id)
+                    dialog = self._daily_order_dialog_type(snapshot, routing, parent)
+                if (yield DialogRequest(dialog, self._session)) != QDialog.DialogCode.Accepted:
+                    return DeliveryRoutingOutcome()
+                record = build_daily_driver_order_revision(
+                    roster, snapshot, routing, orders=dialog.request(),
+                    actor=self._actor_provider(), recorded_at=datetime.now(UTC), revision_id=uuid4(),
+                )
+                if record is None:
+                    return DeliveryRoutingOutcome()
+                result = self._commit(record, parent)
+                if hasattr(dialog, "mark_saved"):
+                    dialog.mark_saved()
+                return result
+            except Exception as error:
+                message = (
+                    "다른 창에서 운영 자료가 변경되어 저장하지 않았습니다. "
+                    "변경한 순서는 이 창에 남아 있습니다. 창을 닫고 변경 내용을 버린 뒤 다시 열어주세요."
+                    if isinstance(error, RevisionConflictError) else str(error)
+                )
+                self._message_box.critical(parent, "일일식수 기사 순서를 저장하지 못했습니다", message)
+                if dialog is None or not hasattr(dialog, "error"):
+                    return DeliveryRoutingOutcome()
+                dialog.error.setText(f"저장하지 못했습니다: {message}")
+                dialog.setResult(QDialog.DialogCode.Rejected)
 
     @dialog_workflow
     def run_replacement(self, day, parent=None, *, source_driver=None):

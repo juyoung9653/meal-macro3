@@ -120,6 +120,11 @@ class DeliveryTemplateDialog(QDialog):
             button.setObjectName("quietAction")
             button.clicked.connect(handler)
             layout.addWidget(button)
+        if action is DocumentAction.DELIVERY_SUBSTITUTE:
+            limits = QLabel("템플릿의 셀 정렬·줄바꿈·표시 형식·열 너비·행 높이·인쇄 설정 변경은 출력에 반영되지 않습니다. "
+                            "정렬과 용지·페이지 구분은 배송대타를 만들 때 선택하세요.")
+            limits.setWordWrap(True)
+            layout.addWidget(limits)
         hint = QLabel("양식의 ‘수정 안내’ 시트를 확인하세요. Excel에서 저장하고 닫은 뒤 ‘이 양식 사용’을 누르세요.\n선택은 이 PC의 운영 파일·급식/행복도시락별로 기억합니다. 취소하면 기존 양식 선택을 유지하며, Excel에서 이미 저장한 수정 내용은 되돌리지 않습니다.")
         hint.setWordWrap(True)
         hint.setObjectName("settingsHubNote")

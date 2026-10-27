@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QScrollArea,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -39,6 +40,7 @@ class SettingsAction(StrEnum):
     INITIAL_ROSTER_DATE = "initial_roster_date"
     MISSING_HOUSEHOLD_REPAIR = "missing_household_repair"
     DOCUMENT_DIRECTORY = "document_directory"
+    OUTPUT_RETENTION = "output_retention"
     DATABASE_LOCATION = "database_location"
     BACKUP_DIRECTORY = "backup_directory"
     DATABASE_PASSWORD = "database_password"
@@ -60,6 +62,7 @@ class SettingsAction(StrEnum):
 
 
 _SETTINGS_COPY = {
+    SettingsAction.OUTPUT_RETENTION: ("출력 파일 보관기간", "output 폴더의 파일을 자동 삭제할 보관기간을 정합니다. 기본은 1개월입니다.", "공통 설정으로 저장"),
     SettingsAction.USER_VIEW_LAYOUT: (
         "다른 사용자 화면 설정 가져오기",
         "같은 DB를 사용하는 다른 사용자의 시트 배치와 칼럼 설정을 가져옵니다.",
@@ -148,6 +151,7 @@ _SETTINGS_COPY = {
 }
 
 _SETTINGS_STAMPS = {
+    SettingsAction.OUTPUT_RETENTION: "보관",
     SettingsAction.USER_VIEW_LAYOUT: "화면",
     SettingsAction.SUBSTITUTE_COLUMNS: "칼럼",
     SettingsAction.PAUSE_CONVERSION: "변환",
@@ -170,40 +174,25 @@ _SETTINGS_STAMPS = {
 }
 
 _SETTINGS_GROUPS = (
-    (
-        "공통 운영",
-        (
-            SettingsAction.PROVIDER,
-            SettingsAction.DELIVERY_DEFAULTS,
-            SettingsAction.STOPPED_HIGHLIGHT,
-            SettingsAction.USER_VIEW_LAYOUT,
-            SettingsAction.PAUSE_CONVERSION,
-            SettingsAction.SEQUENCE_MODE,
-            SettingsAction.INITIAL_ROSTER_DATE,
-            SettingsAction.MISSING_HOUSEHOLD_REPAIR,
-            SettingsAction.OLD_ADDRESS,
-        ),
-    ),
-    (
-        "문서 출력",
-        (
-            SettingsAction.DOCUMENT_TEMPLATE,
-            SettingsAction.INVOICE_SETTINGS,
-            SettingsAction.DOCUMENT_COLUMN_MAPPING,
-            SettingsAction.SUBSTITUTE_COLUMNS,
-            SettingsAction.EXPORT_PASSWORD,
-            SettingsAction.DOCUMENT_DIRECTORY,
-        ),
-    ),
-    (
-        "데이터 보관·보안",
-        (
-            SettingsAction.DATABASE_LOCATION,
-            SettingsAction.BACKUP_DIRECTORY,
-            SettingsAction.DATABASE_PASSWORD,
-            SettingsAction.JUSO_KEY,
-        ),
-    ),
+    ("문서", (
+        SettingsAction.DOCUMENT_TEMPLATE, SettingsAction.DOCUMENT_COLUMN_MAPPING,
+        SettingsAction.PROVIDER, SettingsAction.EXPORT_PASSWORD,
+        SettingsAction.DOCUMENT_DIRECTORY, SettingsAction.OUTPUT_RETENTION,
+    )),
+    ("배송·식수", (
+        SettingsAction.DELIVERY_DEFAULTS, SettingsAction.SEQUENCE_MODE,
+        SettingsAction.INVOICE_SETTINGS, SettingsAction.STOPPED_HIGHLIGHT,
+        SettingsAction.PAUSE_CONVERSION,
+    )),
+    ("화면", (
+        SettingsAction.SUBSTITUTE_COLUMNS, SettingsAction.USER_VIEW_LAYOUT,
+    )),
+    ("데이터 관리", (
+        SettingsAction.DATABASE_LOCATION, SettingsAction.BACKUP_DIRECTORY,
+        SettingsAction.DATABASE_PASSWORD, SettingsAction.OLD_ADDRESS,
+        SettingsAction.JUSO_KEY, SettingsAction.INITIAL_ROSTER_DATE,
+        SettingsAction.MISSING_HOUSEHOLD_REPAIR,
+    )),
 )
 
 
@@ -287,47 +276,37 @@ class SettingsHubDialog(QDialog):
         root.setSpacing(14)
         root.addWidget(self._build_header())
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        card_container = QWidget()
-        card_groups = QVBoxLayout(card_container)
-        card_groups.setContentsMargins(0, 0, 0, 0)
-        card_groups.setSpacing(14)
         for action in SettingsAction:
             card = _SettingsActionCard(action, stamp=_SETTINGS_STAMPS[action])
-            card.clicked.connect(
-                lambda _checked=False, selected=action: self._choose(selected)
-            )
+            card.clicked.connect(lambda _checked=False, selected=action: self._choose(selected))
             self._cards[action] = card
         self._group_actions = dict(_SETTINGS_GROUPS)
+        self.tabs = QTabWidget()
+        self.tabs.setObjectName("settingsTabs")
+        self._tab_scrolls = []
         for title, actions in _SETTINGS_GROUPS:
-            heading = QLabel(title)
-            heading.setObjectName("editEyebrow")
-            card_groups.addWidget(heading)
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QFrame.Shape.NoFrame)
+            container = QWidget()
+            layout = QVBoxLayout(container)
+            layout.setContentsMargins(10, 12, 10, 10)
             cards = QGridLayout()
-            cards.setContentsMargins(0, 0, 0, 0)
             cards.setHorizontalSpacing(12)
             cards.setVerticalSpacing(12)
             for index, action in enumerate(actions):
                 cards.addWidget(self._cards[action], index // 2, index % 2)
             cards.setColumnStretch(0, 1)
             cards.setColumnStretch(1, 1)
-            card_groups.addLayout(cards)
-        card_groups.addStretch(1)
-        scroll.setWidget(card_container)
-        self._scroll = scroll
-        root.addWidget(scroll, 1)
-
-        note = QLabel(
-            "제공기관·Excel 비밀번호·문서 양식·출력 연결·배송 기본값은 변경 이력에 남습니다. 문서 저장 폴더·운영 데이터 위치·자동 백업 폴더는 같은 프로그램 폴더를 사용하는 모든 PC에 적용됩니다."
-        )
+            layout.addLayout(cards)
+            layout.addStretch(1)
+            scroll.setWidget(container)
+            self._tab_scrolls.append(scroll)
+            self.tabs.addTab(scroll, title)
+        self.tabs.setCurrentIndex(0)
+        root.addWidget(self.tabs, 1)
+        note = QLabel("설정별 적용 범위는 각 항목에 표시됩니다.")
         note.setObjectName("settingsHubNote")
-        note.setWordWrap(True)
-        note.setSizePolicy(
-            QSizePolicy.Policy.Preferred,
-            QSizePolicy.Policy.Maximum,
-        )
         root.addWidget(note)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
@@ -345,7 +324,7 @@ class SettingsHubDialog(QDialog):
         layout = QVBoxLayout(frame)
         layout.setContentsMargins(18, 15, 18, 16)
         layout.setSpacing(4)
-        eyebrow = QLabel("공통 설정 · 보관과 잠금")
+        eyebrow = QLabel("문서 · 배송·식수 · 화면 · 데이터 관리")
         eyebrow.setObjectName("editEyebrow")
         title = QLabel("설정")
         title.setObjectName("workspaceTitle")

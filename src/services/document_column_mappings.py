@@ -21,6 +21,7 @@ from src.domain.roster import (
     additional_telephone_field_ordinal,
 )
 from src.domain.invoice_settings import InvoiceSettings, invoice_settings_from_snapshot
+from src.domain.document_column_sources import INVOICE_SOURCE_LABELS, invoice_output_defaults, AUTO_HISTORY
 from src.domain.delivery_substitute import STANDARD_COLUMNS
 from src.templates.config import auto_detect_semantic_columns, get_template_sheet_name, read_template_columns
 
@@ -42,7 +43,6 @@ _CONFIRM_DEFAULTS = {
     "세대주 성명": "세대주 성명", "핸드폰": "핸드폰", "관할동": "관할동",
 }
 _CONFIRM_LOCKED: tuple[str, ...] = ()
-_INVOICE_AUTOMATIC_TARGETS = ("연번", "제공기관")
 SUBSTITUTE_MEALS = ("석식", "조식", "중식")
 
 
@@ -65,7 +65,7 @@ class MappingEditorSpec:
     selectable_source_options: tuple[str, ...] | None = None
 
 
-def invoice_default_mapping(template_path: Path, profile: str, is_vacation_month: bool) -> dict[str, str]:
+def invoice_default_mapping(template_path: Path, profile: str, is_vacation_month: bool, *, history_column: str | None = None) -> dict[str, str]:
     columns = read_template_columns(str(template_path), sheet_name=get_template_sheet_name(is_vacation_month, profile))
     mapping = auto_detect_semantic_columns(columns)
     aliases = {
@@ -82,7 +82,12 @@ def invoice_default_mapping(template_path: Path, profile: str, is_vacation_month
             source = "취학유형"
         if source is not None:
             mapping[column] = source
-    return mapping
+    # Personal notes were not printed by default. They are now an explicit choice.
+    mapping = {target: ("" if source == "비고" else source) for target, source in mapping.items()}
+    history_column = InvoiceSettings().history_column(profile) if history_column is None else history_column
+    if history_column in columns:
+        mapping[history_column] = AUTO_HISTORY
+    return invoice_output_defaults(mapping, columns)
 
 
 def confirmation_default_mapping() -> dict[str, str]:
@@ -104,24 +109,14 @@ def mapping_editor_spec(
     settings = settings or get_settings()
     if document_kind == "invoice":
         path = Path(settings.get_invoice_template_path(profile)).resolve()
-        defaults = invoice_default_mapping(path, profile, False)
+        defaults = invoice_default_mapping(path, profile, False, history_column=history_column)
         if profile == "행복도시락":
-            defaults.update(invoice_default_mapping(path, profile, True))
+            defaults.update(invoice_default_mapping(path, profile, True, history_column=history_column))
         columns = _template_invoice_columns(path, profile)
-        calculated = {
-            value
-            for key, value in defaults.items()
-            if key.startswith("__calc_") and value in columns
-        }
         targets = tuple(columns)
         for target in targets:
             defaults.setdefault(target, "")
-        locked = tuple(
-            sorted(calculated | (set(_INVOICE_AUTOMATIC_TARGETS) & set(columns)))
-        )
-        history_column = InvoiceSettings().history_column(profile) if history_column is None else history_column
-        if history_column in columns:
-            locked = (*locked, history_column)
+        locked = ()
     elif document_kind == "substitute":
         defaults = substitute_default_mapping(roster)
         targets = tuple(defaults)
@@ -134,10 +129,12 @@ def mapping_editor_spec(
     if document_kind == "substitute":
         source_options.extend(("배송순서", "배송 형태"))
     if document_kind == "invoice":
-        source_options.remove("비고")
+        source_options.extend(source for source in INVOICE_SOURCE_LABELS if source not in source_options)
     labels = {key: key for key in source_options}
     labels["학교명"] = "학교"
     labels[FULL_ADDRESS_FIELD] = "전체 주소 (도로명주소 + 상세주소)"
+    if document_kind == "invoice":
+        labels.update(INVOICE_SOURCE_LABELS)
     if roster is not None:
         text_fields = tuple(field for field in roster.custom_fields if field.field_type is CustomFieldType.TEXT)
         if any(additional_telephone_field_ordinal(field.name) is not None for field in text_fields):
@@ -161,7 +158,7 @@ def mapping_editor_spec(
     labels[""] = "비움"
     selectable_sources = tuple(
         source for source in source_options
-        if not source or (
+        if not source or (document_kind == "invoice" and source in INVOICE_SOURCE_LABELS) or (
             (source in _SOURCE_COLUMN_KEYS or source.startswith("custom:")
              or (document_kind == "substitute" and source in ("배송순서", "배송 형태")))
             and (
@@ -202,23 +199,15 @@ def _template_invoice_columns(path: Path, profile: str) -> tuple[str, ...]:
 
 def effective_mapping(defaults: Mapping[str, str], overrides: Mapping[str, str]) -> dict[str, str]:
     result = dict(defaults)
-    protected_targets = {
-        value
-        for key, value in defaults.items()
-        if key.startswith("__calc_") and value
-    }
-    protected_targets.update(_INVOICE_AUTOMATIC_TARGETS)
     for target, source in overrides.items():
-        if not target.startswith("__calc_") and target not in protected_targets:
+        if not target.startswith("__calc_"):
             result[target] = source
     return result
 
 
 def effective_fallbacks(defaults: Mapping[str, str], fallbacks: Mapping[str, str], *, document_kind: str) -> dict[str, str]:
-    protected = set(_CONFIRM_LOCKED) if document_kind == "confirmation" else set(_INVOICE_AUTOMATIC_TARGETS)
-    protected.update(value for key, value in defaults.items() if key.startswith("__calc_") and value)
     return {target: source for target, source in fallbacks.items()
-            if source and not target.startswith("__calc_") and target not in protected}
+            if source and not target.startswith("__calc_")}
 
 
 def build_mapping_revision(

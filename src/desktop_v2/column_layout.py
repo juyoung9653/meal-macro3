@@ -6,7 +6,8 @@ import json
 from collections.abc import Callable, Sequence
 from typing import Any
 
-from PySide6.QtCore import QObject, QSettings
+from PySide6.QtCore import QObject, QSettings, Qt
+from PySide6.QtGui import QActionGroup
 from PySide6.QtWidgets import QMenu, QTableView, QWidget
 
 
@@ -51,6 +52,7 @@ class RosterColumnLayout(QObject):
             self._key(column): self._width(column) for column in self._columns
         }
         self._applying = False
+        self._alignments = {}
         self._model_reset = False
         self._header = table.horizontalHeader()
         self._header.setSectionsMovable(True)
@@ -84,6 +86,32 @@ class RosterColumnLayout(QObject):
             hide_action.triggered.connect(
                 lambda _checked=False, key=column_key: self._set_hidden(key, True)
             )
+
+        if target is not None and callable(getattr(self._table.model(), "set_column_alignments", None)):
+            alignment_menu = QMenu("정렬", menu)
+            menu.addMenu(alignment_menu)
+            menu._alignment_menu = alignment_menu
+            alignment_menu._axis_menus = []
+            current = self._table.model().column_alignment(column_key)
+            for label, mask, choices in (
+                ("가로정렬", Qt.AlignmentFlag.AlignHorizontal_Mask,
+                 (("왼쪽", Qt.AlignmentFlag.AlignLeft), ("가운데", Qt.AlignmentFlag.AlignHCenter), ("오른쪽", Qt.AlignmentFlag.AlignRight))),
+                ("세로정렬", Qt.AlignmentFlag.AlignVertical_Mask,
+                 (("위", Qt.AlignmentFlag.AlignTop), ("가운데", Qt.AlignmentFlag.AlignVCenter), ("아래", Qt.AlignmentFlag.AlignBottom))),
+            ):
+                submenu = QMenu(label, alignment_menu)
+                alignment_menu.addMenu(submenu)
+                alignment_menu._axis_menus.append(submenu)
+                group = QActionGroup(submenu)
+                submenu._alignment_group = group
+                group.setExclusive(True)
+                for text, flag in choices:
+                    action = submenu.addAction(text)
+                    action.setCheckable(True)
+                    action.setChecked(current & mask == flag)
+                    group.addAction(action)
+                    action.triggered.connect(lambda checked=False, key=column_key, mask=mask, flag=flag:
+                                             self.set_alignment(key, mask, flag))
 
         hidden_menu = QMenu("숨기기 해제", menu)
         menu.addMenu(hidden_menu)
@@ -189,7 +217,16 @@ class RosterColumnLayout(QObject):
                 if key in previous["widths"]:
                     widths[key] = previous["widths"][key]
         self._known_widths.update(widths)
-        self._write_layout({"order": order, "hidden": hidden, "widths": widths})
+        self._write_layout({"order": order, "hidden": hidden, "widths": widths,
+                            **({"alignments": dict(self._alignments)} if self._alignments else {})})
+
+    def set_alignment(self, key, mask, flag):
+        model = self._table.model()
+        current = int(model.column_alignment(key))
+        self._alignments[key] = (current & ~int(mask)) | int(flag)
+        model.set_column_alignments(self._alignments)
+        self._table.viewport().update()
+        self.save()
 
     def _connect_model(self, model: object | None) -> None:
         if model is None:
@@ -255,6 +292,10 @@ class RosterColumnLayout(QObject):
         if self._hide_new_custom_columns:
             hidden.update(key for key in keys if key.startswith("custom:") and key not in saved_order)
         widths = layout["widths"]
+        self._alignments = dict(layout.get("alignments", {}))
+        setter = getattr(self._table.model(), "set_column_alignments", None)
+        if callable(setter):
+            setter(self._alignments)
         self._applying = True
         try:
             for visual, key in enumerate(order):
@@ -321,8 +362,14 @@ class RosterColumnLayout(QObject):
         ):
             return None, True
         keys = set(self._keys())
+        raw_alignments = value.get("alignments", {})
+        alignments = ({key: alignment for key, alignment in raw_alignments.items()
+                       if (key in keys or key in self._preserve_temporary_keys)
+                       and type(alignment) is int and alignment in {33, 65, 129, 34, 66, 130, 36, 68, 132}}
+                      if isinstance(raw_alignments, dict) else {})
         return (
             {
+                **({"alignments": alignments} if alignments else {}),
                 "order": [item for item in order if item in keys or item in self._preserve_temporary_keys],
                 "hidden": [item for item in hidden if item in keys or item in self._preserve_temporary_keys],
                 "widths": {item: width for item, width in widths.items() if item in keys or item in self._preserve_temporary_keys},

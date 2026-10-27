@@ -26,6 +26,8 @@ def main() -> int:
         if not outcome.ready:
             return 1 if outcome.status is StartupStatus.FAILED else 0
         assert outcome.window is not None
+        from .output_retention import OutputCleanupScheduler
+        outcome.window._output_cleanup = OutputCleanupScheduler(settings, outcome.window)
         outcome.window.show()
         return app.exec()
     except Exception as error:

@@ -6,6 +6,8 @@ from calendar import monthrange
 from dataclasses import dataclass
 from datetime import date, datetime
 
+from .document_navigation import DOCUMENT_BACK
+
 from PySide6.QtCore import QDate, Qt
 from PySide6.QtWidgets import (
     QComboBox,
@@ -176,7 +178,7 @@ class DocumentPeriodDialog(QDialog):
             "뒤로"
         )
         self._buttons.accepted.connect(self._accept_if_valid)
-        self._buttons.rejected.connect(self.reject)
+        self._buttons.rejected.connect(lambda: self.done(DOCUMENT_BACK))
         root.addWidget(self._buttons)
 
     def _build_header(self) -> QFrame:

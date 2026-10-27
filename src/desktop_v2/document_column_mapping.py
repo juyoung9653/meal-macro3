@@ -159,7 +159,7 @@ class DocumentColumnMappingDialog(QDialog):
         self._scroll.setFrameShape(QFrame.Shape.NoFrame)
         root.addWidget(self._scroll, 1)
 
-        note = QLabel("식수·청구금액·연번 등 계산 칼럼은 자동으로 채워지며 수정할 수 없습니다.")
+        note = QLabel("식수·청구금액·연번은 자동 계산이 기본입니다. 다른 항목이나 비움으로 바꿀 수 있습니다.")
         self._scope_note = note
         note.setObjectName("settingsHubNote")
         note.setWordWrap(True)
@@ -214,7 +214,7 @@ class DocumentColumnMappingDialog(QDialog):
         self._scope_note.setText(
             "주소는 연결한 값만 출력합니다. 상세주소는 자동으로 합치지 않으며 DB 가구 묶음은 유지합니다."
             if self.document_kind == "confirmation" else
-            "식수·청구금액·연번 등 계산 칼럼은 자동으로 채워지며 수정할 수 없습니다.")
+            "식수·청구금액·연번은 자동 계산이 기본입니다. 계산값을 다른 출력 칼럼에 연결하거나 명단 항목·비움으로 바꿀 수 있습니다.")
         container = QWidget()
         grid = QGridLayout(container)
         grid.setContentsMargins(2, 2, 4, 2)

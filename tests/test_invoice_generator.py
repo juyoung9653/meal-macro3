@@ -280,7 +280,7 @@ def test_invoice_writer_applies_output_password(tmp_path: Path):
         ),
     ],
 )
-def test_generated_invoice_keeps_relationship_editable_and_automatic_columns_protected(
+def test_generated_invoice_honors_replacements_for_automatic_columns(
     tmp_path: Path,
     meal_type: str,
     is_vacation_month: bool,
@@ -313,8 +313,8 @@ def test_generated_invoice_keeps_relationship_editable_and_automatic_columns_pro
         },
     )
     assert mapping[relationship_target] == custom_relationship
-    assert mapping["제공기관"] == "제공기관"
-    assert total_target not in mapping
+    assert mapping["제공기관"] == "학교명"
+    assert mapping[total_target] == "아동과의 관계"
 
     batch = MonthlyDeliveryBatch(
         2026,
@@ -370,9 +370,8 @@ def test_generated_invoice_keeps_relationship_editable_and_automatic_columns_pro
             provider_column = original_columns.index("제공기관") + 1
             sheet = workbook[output_sheet]
             assert sheet.cell(4, relation_column).value == "할머니"
-            assert sheet.cell(4, provider_column).value == "공통센터"
-            total_formula = sheet.cell(4, total_column).value
-            assert isinstance(total_formula, str) and total_formula.startswith("=")
+            assert sheet.cell(4, provider_column).value == "오래된 기관"
+            assert sheet.cell(4, total_column).value == "기본 관계"
     finally:
         workbook.close()
 
@@ -395,10 +394,9 @@ def test_invoice_ordinals_restart_per_filtered_sheet(tmp_path, profile, vacation
     ))
     batch = MonthlyDeliveryBatch(2026, 8, MealPrices(10000, 10000, 10000), vacation, deliveries)
     mapping = invoice_default_mapping(template, profile, vacation)
-    mapping["연번"] = "성명"  # Neither saved mappings nor fallbacks may replace automatic numbering.
     output = tmp_path / "numbered.xlsx"
     count, _ = make_invoice_publication(batch, mapping, str(output), str(template),
-        meal_type=profile, column_fallbacks={"연번": "성명"})
+        meal_type=profile)
     assert count == 3
     book = openpyxl.load_workbook(output, data_only=False)
     try:

@@ -22,10 +22,14 @@ from ..core.invoice_data import (
     MonthlyDeliveryBatch,
 )
 from .mapping_values import resolve_mapping_value
+from ..domain.document_column_sources import (
+    AUTO_SEQUENCE, AUTO_BREAKFAST, AUTO_LUNCH, AUTO_DINNER, AUTO_TOTAL,
+    AUTO_PRICE, AUTO_HISTORY, TEMPLATE_VALUE, invoice_output_defaults,
+)
 from ..excel.excel_utils import CENTER_ALIGN, adjust_formula, copy_style
 from ..excel.publication import WorkbookPublicationResult, publish_workbook
 from ..templates.config import (
-    col_name_to_index,
+    read_template_column_indexes,
     get_template_data_start_row,
     read_template_columns,
 )
@@ -51,19 +55,17 @@ def _map_person_to_row(
     mapping: dict,
     template_columns: list[str],
     column_fallbacks: Mapping[str, str] | None = None,
+    *, calculated_values: Mapping[str, object] | None = None,
 ) -> dict:
     """Typed recipient plus template mapping → {template_col_name: value}."""
     row_data: dict[str, object] = {}
-    source = person.roster.extra
-    calculated = {value for key, value in mapping.items() if key.startswith("__calc_")}
+    source = {**person.roster.extra, **(calculated_values or {})}
     for col in template_columns:
-        if col == "연번":
-            continue
         roster_key = mapping.get(col, "")
         secondary = (column_fallbacks or {}).get(col, "")
         if roster_key or secondary:
             row_data[col] = resolve_mapping_value(source, roster_key, secondary)
-        elif col in mapping and col not in calculated and col != "제공기관":
+        elif col in mapping:
             row_data[col] = ""
     return row_data
 
@@ -113,29 +115,21 @@ def _fill_invoice_sheet(
 ) -> int:
     """단일 시트에 people 데이터를 채운다. 작성 건수 반환."""
     template_columns = read_template_columns(template_path, sheet_name=sheet_name)
-    col_idx_map = col_name_to_index(template_columns)
+    col_idx_map = read_template_column_indexes(template_path, sheet_name=sheet_name)
 
-    bf_col = col_mapping.get("__calc_breakfast", "조식")
-    dn_col = col_mapping.get("__calc_dinner", "석식")
-    lh_col = col_mapping.get("__calc_lunch", "중식")
-    price_col = col_mapping.get("__calc_price", "청구금액")
-    sequence_col_idx = col_idx_map.get("연번")
-
-    # 지정한 이력 칼럼은 명단 연결값 대신 이력을 쓰고 줄바꿈을 적용한다.
     _memo_col_name = ("평일중식중지=>초1-2,고3" if meal_type == "급식" else "비고") if history_note_column is None else history_note_column
-    _memo_col_idx = col_idx_map.get(_memo_col_name)
-    if history_note_column and history_note_column not in col_idx_map:
-        raise ValueError(f"{sheet_name} 템플릿에 이력 칼럼 '{history_note_column}'이 없습니다. 식수·청구서 설정에서 다시 선택해주세요.")
-    if history_note_column and history_note_column in {
-        "연번", "제공기관", bf_col, dn_col, lh_col, price_col,
-        col_mapping.get("__calc_total", "계"),
-    }:
-        raise ValueError("식수·청구금액 등 자동 계산 칼럼은 이력 칼럼으로 선택할 수 없습니다.")
+    col_mapping = invoice_output_defaults(col_mapping, template_columns, _memo_col_name)
+    count_columns = {
+        source: next((col for col in template_columns if col_mapping.get(col) == source), "")
+        for source in (AUTO_BREAKFAST, AUTO_DINNER, AUTO_LUNCH)
+    }
+    preserve_template = object()
 
     ws = wb[sheet_name]
     row_idx = get_template_data_start_row()
     data_start_row = row_idx
-    written_cols: set[int] = set()
+    written_cols: dict[int, set[int]] = {}
+    template_values = [ws.cell(data_start_row, c).value for c in range(1, ws.max_column + 1)]
 
     _write_global_note(
         ws,
@@ -146,54 +140,46 @@ def _fill_invoice_sheet(
     )
 
     for ordinal, person in enumerate(people, start=1):
-        breakfast_cnt = person.breakfast_count
-        dinner_cnt = person.dinner_count
-        lunch_cnt = person.lunch_count
-
-        row_data = _map_person_to_row(person, col_mapping, template_columns, column_fallbacks)
-        if history_note_column:
-            row_data[history_note_column] = person.note
-        if sequence_col_idx is not None:
-            row_data["연번"] = ordinal
-        mapped_targets = set(row_data) - {bf_col, dn_col, lh_col, price_col, col_mapping.get("__calc_total", "계")}
-
-        # 식사 건수: 시트에 해당 컬럼이 있을 때만 기록
-        if bf_col in col_idx_map:
-            row_data[bf_col] = breakfast_cnt
-        if dn_col in col_idx_map:
-            row_data[dn_col] = dinner_cnt
-        if lh_col in col_idx_map:
-            row_data[lh_col] = lunch_cnt
-
-
-
-        # 단일 단가면 기존 수식을 유지하고, 월중 단가 변경이 있으면
-        # 서비스일별 계산이 끝난 정확한 금액을 숫자로 기록한다.
-        if price_col in col_idx_map:
-            row_data[price_col] = (
-                person.billing_amount
-                if person.billing_amount is not None
-                else _build_price_formula(
-                    col_idx_map,
-                    bf_col,
-                    dn_col,
-                    lh_col,
-                    row_idx,
-                    prices,
-                )
-            )
-
-
-
+        # References follow calculated meal columns, never user-replaced values.
+        # When a count column is absent, use the original calculated facts.
+        has_counts = all(count_columns.values())
+        amount = person.amount(prices)
+        total = person.total_count
+        if has_counts:
+            references = [f"{_col_idx_to_letter(col_idx_map[col])}{row_idx}" for col in count_columns.values()]
+            total = "=" + "+".join(references)
+            if person.billing_amount is None:
+                amount = _build_price_formula(col_idx_map, count_columns[AUTO_BREAKFAST],
+                    count_columns[AUTO_DINNER], count_columns[AUTO_LUNCH], row_idx, prices)
+        calculated = {
+            AUTO_SEQUENCE: ordinal, AUTO_BREAKFAST: person.breakfast_count,
+            AUTO_DINNER: person.dinner_count, AUTO_LUNCH: person.lunch_count,
+            AUTO_TOTAL: total, AUTO_PRICE: amount, AUTO_HISTORY: person.note,
+            TEMPLATE_VALUE: preserve_template,
+        }
+        source_values = {**person.roster.extra, **calculated}
+        selected_sources = {
+            target: (primary if resolve_mapping_value(source_values, primary) != ""
+                     else (column_fallbacks or {}).get(target, ""))
+            for target, primary in col_mapping.items() if target in col_idx_map
+        }
+        row_data = _map_person_to_row(person, col_mapping, template_columns,
+            column_fallbacks, calculated_values=calculated)
+        row_data = {target: value for target, value in row_data.items() if value is not preserve_template}
+        numeric_sources = {AUTO_BREAKFAST, AUTO_DINNER, AUTO_LUNCH, AUTO_TOTAL, AUTO_PRICE}
         # ── Phase 1: 데이터 값 쓰기 ──
         for col_name, value in row_data.items():
             c_idx = col_idx_map.get(col_name)
             if c_idx is None:
                 continue
-            written_cols.add(c_idx)
+            written_cols.setdefault(row_idx, set()).add(c_idx)
             cell = ws.cell(row=row_idx, column=c_idx)
 
-            if c_idx == _memo_col_idx:
+            selected = selected_sources.get(col_name)
+            if selected in (AUTO_HISTORY, "비고") or (
+                col_name in ("비고", "평일중식중지=>초1-2,고3")
+                and selected not in numeric_sources | {AUTO_SEQUENCE}
+            ):
                 # 비고: 명단 원본의 plain text
                 txt = str(value) if value is not None else ""
                 cell.value = txt
@@ -202,14 +188,14 @@ def _fill_invoice_sheet(
                 est_height = max(17, line_count * 17)
                 if est_height > (ws.row_dimensions[row_idx].height or 0):
                     ws.row_dimensions[row_idx].height = est_height
-            elif c_idx == sequence_col_idx:
+            elif selected_sources.get(col_name) == AUTO_SEQUENCE:
                 # 연번은 이 시트에 실제 출력한 행 순서다.
                 cell.value = value
                 cell.number_format = "0"
                 cell.alignment = CENTER_ALIGN
             else:
                 v = to_numeric(value)
-                cell.value = None if col_name not in mapped_targets and isinstance(v, (int, float)) and v == 0 else v
+                cell.value = None if selected_sources.get(col_name) in numeric_sources and isinstance(v, (int, float)) and v == 0 else v
                 cell.alignment = CENTER_ALIGN
 
         row_idx += 1
@@ -226,8 +212,8 @@ def _fill_invoice_sheet(
             for c_idx in range(1, len(_tmpl_cells) + 1):
                 src_cell = _tmpl_cells[c_idx - 1]
                 dst_cell = ws.cell(row=r, column=c_idx)
-                if c_idx not in written_cols and src_cell.value is not None:
-                    val = src_cell.value
+                if c_idx not in written_cols.get(r, set()) and template_values[c_idx - 1] is not None:
+                    val = template_values[c_idx - 1]
                     if isinstance(val, str) and str(val).startswith("="):
                         val = adjust_formula(str(val), r - data_start_row)
                     dst_cell.value = val

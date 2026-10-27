@@ -71,7 +71,6 @@ def _period(
     (
         DocumentAction.INVOICE,
         DocumentAction.CONFIRMATION,
-        DocumentAction.DELIVERY_REPORT,
     ),
 )
 def test_omission_sensitive_documents_default_to_all_meals(action):
@@ -79,11 +78,12 @@ def test_omission_sensitive_documents_default_to_all_meals(action):
 
 
 @pytest.mark.parametrize("anchor_meal", tuple(Meal))
-def test_substitute_requires_explicit_meal(anchor_meal):
+def test_substitute_default_uses_selected_date(anchor_meal):
     assert suggest_document_meals(
         DocumentAction.DELIVERY_SUBSTITUTE,
         anchor_meal,
-    ) == ()
+        ANCHOR_DAY,
+    ) == (Meal.DINNER,)
 
 
 def test_selection_requires_unique_meals_and_stores_enum_order():
@@ -145,8 +145,8 @@ def test_substitute_dialog_is_exclusive_without_current_screen_meal(app):
     dialog.show()
     app.processEvents()
 
-    assert dialog.selected_meals() == ()
-    assert not dialog._save_button.isEnabled()
+    assert dialog.selected_meals() == (Meal.DINNER,)
+    assert dialog._save_button.isEnabled()
     assert not dialog.findChildren(QLabel, "documentMealAnchorBadge")
     assert all("화면 식종" not in label.text() for label in dialog.findChildren(QLabel))
 
@@ -244,6 +244,6 @@ def test_report_choices_persist_in_database_and_cancel_keeps_previous(app, tmp_p
     with DatabaseSession.create(tmp_path / "other.sqlite3", "password") as other:
         initialize(other, roster_fixture())
         dialog = open_dialog(other)
-        assert dialog.selected_meals() == tuple(Meal)
+        assert dialog.selected_meals() == (Meal.DINNER,)
         assert dialog.selected_delivery_forms() == (None, "도시락", "식재료 박스")
         dialog.close()

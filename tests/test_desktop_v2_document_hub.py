@@ -36,12 +36,14 @@ def test_hub_groups_exact_four_document_jobs_without_default_choice(app):
     dialog.show()
     app.processEvents()
 
-    assert tuple(dialog._cards) == tuple(DocumentAction)
     assert [action.label for action in dialog._cards] == [
+        "일일식수",
+        "배송목록",
         "청구서",
         "확인서",
-        "일일식수",
-        "배송대타",
+    ]
+    assert [card.accessibleName() for card in dialog._cards.values()] == [
+        "1 일일식수", "2 배송목록", "3 청구서", "4 확인서",
     ]
     assert dialog._cards[DocumentAction.INVOICE].property("category") == "settlement"
     assert (
@@ -67,8 +69,8 @@ def test_one_card_click_accepts_the_exact_document_job(app, action):
 def test_card_copy_explains_the_output_in_plain_language(app):
     assert "한 달 식수" in DocumentAction.INVOICE.description
     assert "선택한 기간" in DocumentAction.CONFIRMATION.description
-    assert "담당·순서" in DocumentAction.DELIVERY_REPORT.description
-    assert "인수인계" in DocumentAction.DELIVERY_SUBSTITUTE.description
+    assert DocumentAction.DELIVERY_REPORT.description == "가구수 및 도시락 갯수를 날짜별 엑셀로 정리합니다"
+    assert DocumentAction.DELIVERY_SUBSTITUTE.description == "기사별 배송 리스트를 만듭니다"
 
 
 def test_setup_request_keeps_the_exact_action_and_sealed_source(app):

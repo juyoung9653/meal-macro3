@@ -115,8 +115,8 @@ def test_historical_secondary_source_retained_but_new_unknown_rejected():
     assert build_mapping_revision(revision,snap,"급식","invoice",{"Name":"first"},desired_fallbacks={"Name":"retired"},**options) is None
     with pytest.raises(ValueError):
         build_mapping_revision(revision,snap,"급식","invoice",{"Name":"first"},desired_fallbacks={"Name":"new-unknown"},**options)
-    assert effective_fallbacks({"__calc_total":"total"},{"total":"first","Name":"first","연번":"first"},document_kind="invoice")=={"Name":"first"}
-    assert effective_fallbacks({}, {"도로명주소":"first","성명":"first"},document_kind="confirmation")=={"성명":"first"}
+    assert effective_fallbacks({"__calc_total":"total"},{"total":"first","Name":"first","연번":"first"},document_kind="invoice")=={"total":"first","Name":"first","연번":"first"}
+    assert effective_fallbacks({}, {"도로명주소":"first","성명":"first"},document_kind="confirmation")=={"도로명주소":"first","성명":"first"}
 
 
 def test_editor_secondary_only_dirty_switch_reset_cancel():

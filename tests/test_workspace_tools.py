@@ -102,13 +102,15 @@ def test_column_manager_visibility_reset_and_shared_entry(window):
     assert dialog.shared_button.isEnabled()
     dialog.shared_button.click()
     assert called == []
-    action = next(action for action in dialog._shared_menu.actions() if action.data() == "address")
-    assert action.isChecked() == ("address" in window.table_model._household_shared_columns)
+    item = next(dialog._shared_list.item(i) for i in range(dialog._shared_list.count())
+                if dialog._shared_list.item(i).data(Qt.UserRole) == "address")
+    assert (item.checkState() == Qt.Checked) == ("address" in window.table_model._household_shared_columns)
     dialog._shared_menu.close()
     assert called == []
     dialog.shared_button.click()
-    action = next(action for action in dialog._shared_menu.actions() if action.data() == "address")
-    action.trigger()
+    item = next(dialog._shared_list.item(i) for i in range(dialog._shared_list.count())
+                if dialog._shared_list.item(i).data(Qt.UserRole) == "address")
+    item.setCheckState(Qt.Unchecked if item.checkState() == Qt.Checked else Qt.Checked)
     assert called == ["address"]
 
 
@@ -132,3 +134,27 @@ def test_new_menu_has_twelve_jobs_and_filter_is_outside_more(window):
     assert len(actions) == 12
     assert window._special_only_action not in actions
     assert window._special_only_filter.isVisible()
+
+
+def test_shared_columns_many_items_scroll_without_filling_screen(app):
+    from dataclasses import replace
+    from src.domain.roster import CustomFieldDefinition, CustomFieldType
+    roster = _roster()
+    start = max((field.display_order for field in roster.custom_fields), default=-1) + 1
+    fields = tuple(CustomFieldDefinition(uuid4(), f"칼럼 {i}", CustomFieldType.TEXT, start + i) for i in range(100))
+    window = RosterWindow(replace(roster, custom_fields=roster.custom_fields + fields))
+    window.show()
+    dialog = ColumnManagerDialog(window)
+    dialog.show()
+    dialog._shared()
+    app.processEvents()
+    assert dialog._shared_list.count() >= 100
+    assert dialog._shared_list.height() <= 360
+    scrollbar = dialog._shared_list.verticalScrollBar()
+    assert scrollbar.maximum() > 0
+    scrollbar.setValue(scrollbar.maximum())
+    app.processEvents()
+    assert scrollbar.value() == scrollbar.maximum()
+    dialog._shared_menu.close()
+    dialog.close()
+    window.close()

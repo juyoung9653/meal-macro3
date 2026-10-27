@@ -53,11 +53,11 @@ _ACTION_COPY = {
     ),
     DocumentAction.DELIVERY_REPORT: (
         "일일식수",
-        "배송 대상과 담당·순서를 날짜별 Excel로 정리합니다.",
+        "가구수 및 도시락 갯수를 날짜별 엑셀로 정리합니다",
     ),
     DocumentAction.DELIVERY_SUBSTITUTE: (
-        "배송대타",
-        "담당자가 바뀌는 날의 인수인계용 배송표를 만듭니다.",
+        "배송목록",
+        "기사별 배송 리스트를 만듭니다",
     ),
 }
 
@@ -98,7 +98,7 @@ class _DocumentActionCard(QPushButton):
         self.action = action
         self.setObjectName("documentActionCard")
         self.setProperty("category", category)
-        self.setAccessibleName(action.label)
+        self.setAccessibleName(f"{stamp} {action.label}")
         self.setAccessibleDescription(action.description)
         self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.setMinimumHeight(108)
@@ -169,25 +169,25 @@ class DocumentHubDialog(QDialog):
         trays.setSpacing(14)
         trays.addWidget(
             self._build_tray(
-                "정산 문서",
-                "식수·금액과 제공 내역",
+                "배송 문서",
+                "게시판 및 외포장 배포",
                 (
-                    (DocumentAction.INVOICE, "청구"),
-                    (DocumentAction.CONFIRMATION, "확인"),
+                    (DocumentAction.DELIVERY_REPORT, "1"),
+                    (DocumentAction.DELIVERY_SUBSTITUTE, "2"),
                 ),
-                category="settlement",
+                category="route",
             ),
             1,
         )
         trays.addWidget(
             self._build_tray(
-                "배송 문서",
-                "현장 배포와 인수인계",
+                "정산 문서",
+                "식수금액과 제공내역",
                 (
-                    (DocumentAction.DELIVERY_REPORT, "식수"),
-                    (DocumentAction.DELIVERY_SUBSTITUTE, "대타"),
+                    (DocumentAction.INVOICE, "3"),
+                    (DocumentAction.CONFIRMATION, "4"),
                 ),
-                category="route",
+                category="settlement",
             ),
             1,
         )

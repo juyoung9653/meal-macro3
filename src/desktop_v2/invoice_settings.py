@@ -45,7 +45,7 @@ class InvoiceSettingsDialog(QDialog):
             form.addRow(f"{profile} 양식 · 이력 넣을 칼럼", combo)
             self.history_columns[profile] = combo
         layout.addLayout(form)
-        note = QLabel("선택한 템플릿 칼럼에는 명단 비고 대신 식종 변경 이력만 자동으로 들어갑니다.\n석식: 10/29~ 중지\n석식: 10/23~10/29 일시중지")
+        note = QLabel("선택한 칼럼의 기본값을 식종 변경 이력으로 정합니다.\n청구서·확인서 항목 설정에서 따로 연결한 칼럼은 해당 연결을 우선 사용합니다.\n예: 석식: 10/23~10/29 일시중지")
         note.setWordWrap(True)
         layout.addWidget(note)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)

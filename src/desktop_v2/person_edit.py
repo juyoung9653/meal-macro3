@@ -135,7 +135,7 @@ class PersonProfileEditDialog(QDialog):
         self._defaults_roster = defaults_roster
         self._delivery_days: dict[Meal, tuple[QCheckBox, ...]] = {}
         self._physical_delivery_days: dict[Meal, tuple[QComboBox, ...]] = {}
-        self._delivery_forms: dict[Meal, QLineEdit] = {}
+        self._delivery_forms: dict[Meal, QComboBox] = {}
         self._delivery_status: dict[Meal, QLabel] = {}
         self._initial_delivery_values: dict[Meal, tuple[tuple[int, ...], tuple[int, ...], str]] = {}
         self._force_reset_meals: set[Meal] = set()
@@ -402,10 +402,18 @@ class PersonProfileEditDialog(QDialog):
                 delivery_days.append(delivery_day)
             meal_layout.addLayout(weekday_grid)
             form_row = QHBoxLayout()
-            form_edit = QLineEdit()
-            form_edit.setPlaceholderText("비워두면 기본 형태 · 예: 도시락, 식재료 박스")
-            form_edit.setText(setting.form if setting and setting.form is not None else "")
-            form_edit.textChanged.connect(self._refresh_form_state)
+            form_edit = QComboBox()
+            form_edit.setEditable(True)
+            form_edit.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+            form_edit.setAccessibleName(f"{meal.value} 배송 형태 · 기존 항목 선택 또는 직접 입력")
+            owners = ((*self._defaults_roster.persons, *self._defaults_roster.households)
+                      if self._defaults_roster is not None else self._household_members)
+            forms = {item.form for owner in owners for item in (owner.delivery_settings or ()) if item.form}
+            forms.update(item.form for item in self._effective_delivery_settings if item.form)
+            form_edit.addItems(["", *sorted(forms)])
+            form_edit.lineEdit().setPlaceholderText("기본 형태 (빈칸) · 기존 항목 선택 / 직접 입력")
+            form_edit.setCurrentText(setting.form if setting and setting.form is not None else "")
+            form_edit.currentTextChanged.connect(self._refresh_form_state)
             form_row.addWidget(QLabel("배송 형태"))
             form_row.addWidget(form_edit, 1)
             meal_layout.addLayout(form_row)
@@ -440,7 +448,7 @@ class PersonProfileEditDialog(QDialog):
         self._force_reset_meals.add(meal)
         self._show_inherited_weekdays(meal)
         self._show_inherited_delivery_weekdays(meal)
-        self._delivery_forms[meal].clear()
+        self._delivery_forms[meal].setCurrentText("")
         self._refresh_form_state()
 
     def _show_inherited_weekdays(self, meal: Meal) -> None:
@@ -472,7 +480,7 @@ class PersonProfileEditDialog(QDialog):
         return (
             tuple(index for index, day in enumerate(self._delivery_days[meal]) if day.isChecked()),
             tuple(day.currentIndex() for day in self._physical_delivery_days[meal]),
-            " ".join(self._delivery_forms[meal].text().split()),
+            " ".join(self._delivery_forms[meal].currentText().split()),
         )
 
     def _setting_from_values(self, meal: Meal, values: tuple[tuple[int, ...], tuple[int, ...], str]) -> HouseholdDeliverySetting | None:

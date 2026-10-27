@@ -1,6 +1,7 @@
 """템플릿 설정 — 명단→청구서 컬럼 대응"""
 
 import functools
+from pathlib import Path
 
 import openpyxl
 from openpyxl.cell.cell import MergedCell
@@ -71,22 +72,37 @@ def auto_detect_semantic_columns(template_columns: list[str]) -> dict[str, str]:
     return result
 
 
-@functools.lru_cache(maxsize=4)
 def read_template_columns(
     template_path: str, sheet_name: str | None = None, meal_type: str = "급식"
 ) -> list[str]:
+    path = Path(template_path).resolve()
+    stat = path.stat()
+    resolved_sheet = sheet_name or get_template_sheet_name(meal_type=meal_type)
+    return [name for name, _ in _read_template_columns(str(path), resolved_sheet, stat.st_mtime_ns, stat.st_size)]
+
+
+def read_template_column_indexes(
+    template_path: str, sheet_name: str | None = None, meal_type: str = "급식"
+) -> dict[str, int]:
+    """Return physical Excel positions, including gaps between named columns."""
+    path = Path(template_path).resolve()
+    stat = path.stat()
+    resolved_sheet = sheet_name or get_template_sheet_name(meal_type=meal_type)
+    return dict(_read_template_columns(str(path), resolved_sheet, stat.st_mtime_ns, stat.st_size))
+
+
+@functools.lru_cache(maxsize=4)
+def _read_template_columns(template_path: str, sheet_name: str, mtime_ns: int, size: int) -> tuple[tuple[str, int], ...]:
     """템플릿 파일 Row 1-2 헤더를 읽어 컬럼명 목록 반환.
 
     머지된 셀 처리, 개행 제거, 괄호 접미사 제거 자동 처리.
     sheet_name이 None이면 get_template_sheet_name(meal_type=meal_type) 사용.
     """
-    if sheet_name is None:
-        sheet_name = get_template_sheet_name(meal_type=meal_type)
     wb = openpyxl.load_workbook(template_path)
     try:
         ws = wb[sheet_name]
 
-        columns: list[str] = []
+        columns: list[tuple[str, int]] = []
         for col in range(1, ws.max_column + 1):
             c1 = ws.cell(row=1, column=col)
             c2 = ws.cell(row=2, column=col)
@@ -95,22 +111,25 @@ def read_template_columns(
 
             if isinstance(c1, MergedCell):
                 if name_r2:
-                    columns.append(name_r2)
+                    columns.append((name_r2, col))
                 continue
 
             name_r1 = str(c1.value or "").strip()
 
             if name_r2:
-                columns.append(name_r2)
+                columns.append((name_r2, col))
             elif name_r1:
                 name = name_r1.replace("\n", "")
                 for suffix in ["(급식수)", "(원)"]:
                     name = name.removesuffix(suffix)
-                columns.append(name)
+                columns.append((name, col))
 
-        return columns
+        return tuple(columns)
     finally:
         wb.close()
+
+
+read_template_columns.cache_clear = _read_template_columns.cache_clear
 
 
 def col_name_to_index(template_columns: list[str]) -> dict[str, int]:

@@ -99,7 +99,8 @@ def test_new_choices_only_include_roster_columns_and_clear_missing_binding(profi
     expected = {"", "성명", "생년월일", "학교명", "학년", "전화번호", "핸드폰", "관할동", "도로명주소", "상세주소", "비고", "세대주 성명"}
     expected.update(f"custom:{field.definition_id}" for field in roster.custom_fields)
     if kind == "invoice":
-        expected.discard("비고")
+        from src.domain.document_column_sources import INVOICE_SOURCE_LABELS
+        expected.update(INVOICE_SOURCE_LABELS)
     try:
         assert set(specs[(profile, kind)].selectable_source_options) == expected
         for combo in (*view._combos.values(), *view._fallback_combos.values()):

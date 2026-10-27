@@ -138,3 +138,18 @@ class DesktopStorageSettings:
 
     def save_document_output_directory(self, directory: str | Path) -> None:
         self._save({PATH_KEYS[2]: self._stored_path(directory)})
+
+
+    @property
+    def output_retention_months(self) -> int:
+        value = self._settings.value("documents/output_retention_months", 1)
+        try:
+            months = int(value)
+        except (TypeError, ValueError):
+            return 0
+        return months if not isinstance(value, bool) and 0 <= months <= 120 else 0
+
+    def save_output_retention_months(self, months: int) -> None:
+        if type(months) is not int or not 0 <= months <= 120:
+            raise ValueError("보관기간은 0~120개월로 입력해주세요.")
+        self._save({"documents/output_retention_months": months})

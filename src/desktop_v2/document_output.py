@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 
+from .document_navigation import DOCUMENT_BACK
+
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QDialog,
@@ -273,7 +275,7 @@ class DocumentOutputDialog(QDialog):
         self._save_button.setObjectName("primaryAction")
         buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("뒤로")
         buttons.accepted.connect(self._accept_if_valid)
-        buttons.rejected.connect(self.reject)
+        buttons.rejected.connect(lambda: self.done(DOCUMENT_BACK))
         root.addWidget(buttons)
 
     def _build_header(self) -> QFrame:
@@ -330,6 +332,18 @@ class DocumentOutputDialog(QDialog):
             form_detail.setObjectName("documentOutputContextDetail")
             form_detail.setWordWrap(True)
             copy.addWidget(form_detail)
+        if period.action is DocumentAction.DELIVERY_REPORT:
+            options = self._document.remark_options
+            if options.columns or options.separate_forms:
+                position = "기존 비고 위" if options.position == "above" else "기존 비고 아래"
+                text = f"추가 비고: 우선순위 칼럼 {len(options.columns)}개 · {position}"
+                if options.separate_forms:
+                    text += " · 별도 표시: " + ", ".join(options.separate_forms)
+                    text += " (제외한 배송도 표시)" if options.include_excluded_deliveries else " (포함한 배송만)"
+                remark_detail = QLabel(text)
+                remark_detail.setObjectName("documentOutputContextDetail")
+                remark_detail.setWordWrap(True)
+                copy.addWidget(remark_detail)
         layout.addLayout(copy, 1)
         return frame
 

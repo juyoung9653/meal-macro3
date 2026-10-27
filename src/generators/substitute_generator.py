@@ -18,7 +18,7 @@ from src.excel.publication import WorkbookPublicationResult, publish_workbook
 from src.excel.substitute_excel_metrics import apply_excel_metrics
 from src.excel.substitute_page_layout import SheetGroup, SheetLayout
 
-SUBSTITUTE_RENDER_CONTRACT_VERSION = 7
+SUBSTITUTE_RENDER_CONTRACT_VERSION = 8
 _LABELS = {"name": "이름", "road_address": "신주소", "note": "비고2"}
 _FILLS = {2: "E6B8B7", 3: "B8CCE4", 4: "D8E4BC", 5: "CCC0DA"}
 _THIN = Side(style="thin", color="000000")
@@ -210,6 +210,20 @@ def _apply_template_styles(workbook, layout, data, options, styles):
                     cell.border = border
 
 
+def _apply_column_alignments(workbook, layout, options):
+    """Apply selected column alignment after native Excel layout processing."""
+    ws = workbook.active
+    for col, key in enumerate(options.columns, 1):
+        for row in range(2, layout.data_end_row + 1):
+            cell = ws.cell(row, col)
+            alignment = copy(cell.alignment)
+            if key in options.horizontal_alignments:
+                alignment.horizontal = options.horizontal_alignments[key]
+            if key in options.vertical_alignments:
+                alignment.vertical = options.vertical_alignments[key]
+            cell.alignment = alignment
+
+
 def build_substitute_workbook(data: PreparedSubstituteData, options: SubstituteOptions,
                               *, template_path: str | Path | None = None) -> Workbook:
     if template_path is None:
@@ -224,6 +238,7 @@ def build_substitute_workbook(data: PreparedSubstituteData, options: SubstituteO
             _apply_template_styles(workbook, layout, data, options, styles)
         apply_excel_metrics(workbook, columns, layout, options,
                             **({"preserve_styles": True} if styles is not None else {}))
+        _apply_column_alignments(workbook, layout, options)
     except Exception:
         workbook.close()
         raise
