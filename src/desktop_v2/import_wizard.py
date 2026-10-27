@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QPushButton,
     QProgressBar,
+    QSpinBox,
     QScrollArea,
     QStackedWidget,
     QTableWidget,
@@ -378,7 +379,7 @@ class RosterImportWizard(QDialog):
         layout.addLayout(
             self._page_heading(
                 "1. 기존 Excel 파일 선택",
-                "Excel 파일의 표를 선택하고 명단 범위를 확인합니다. 파일은 수정하지 않습니다.",
+                "Excel 표 또는 두 줄 머리글 시트를 선택합니다. 파일은 수정하지 않습니다.",
             )
         )
         form = QFormLayout()
@@ -408,10 +409,22 @@ class RosterImportWizard(QDialog):
         self.password_edit.editingFinished.connect(self._retry_password_if_needed)
         form.addRow("Excel 파일 비밀번호", self.password_edit)
 
+        self.source_layout_combo = QComboBox()
+        self.source_layout_combo.addItem("자동 · Excel 표 우선", "auto")
+        self.source_layout_combo.addItem("두 줄 머리글 시트", "two-row")
+        self.source_layout_combo.currentIndexChanged.connect(self._source_layout_changed)
+        form.addRow("머리글 읽기", self.source_layout_combo)
+        self.header_row_spin = QSpinBox()
+        self.header_row_spin.setRange(1, 1_048_575)
+        self.header_row_spin.setValue(1)
+        self.header_row_spin.setEnabled(False)
+        self.header_row_spin.setToolTip("두 줄 머리글 중 첫 번째 행입니다. 데이터는 두 번째 머리글 다음 행부터 읽습니다.")
+        self.header_row_spin.valueChanged.connect(self._header_row_changed)
+        form.addRow("머리글 시작 행", self.header_row_spin)
         self.table_combo = QComboBox()
         self.table_combo.setEnabled(False)
         self.table_combo.currentIndexChanged.connect(self._table_changed)
-        form.addRow("명단 표 *", self.table_combo)
+        form.addRow("명단 표 / 시트 *", self.table_combo)
 
         self.inspect_button = QPushButton("표 미리보기")
         self.inspect_button.setObjectName("browseAction")
@@ -892,9 +905,10 @@ class RosterImportWizard(QDialog):
         if not path_text:
             self._show_error("기존 Excel 파일을 선택해주세요.")
             return False
-        selected_table = (
-            self.table_combo.currentData() if self.table_combo.count() else None
-        )
+        selected_source = self.table_combo.currentData() if self.table_combo.count() else None
+        two_rows = self.source_layout_combo.currentData() == "two-row"
+        header_row = self.header_row_spin.value()
+        selected_table = None if two_rows else selected_source
         self._inspection = None
         self._preview = None
         self._cell_overrides.clear()
@@ -911,8 +925,12 @@ class RosterImportWizard(QDialog):
                 lambda: inspect_workbook(
                     path_text,
                     password=password,
-                    require_table=True,
+                    require_table=not two_rows,
                     table_name=selected_table,
+                    sheet_name=selected_source if two_rows else None,
+                    header_row=header_row,
+                    header_row_count=2 if two_rows else 1,
+                    allow_two_row_headers=True,
                 ),
             )
         except (WorkbookImportPasswordRequiredError, WorkbookImportPasswordError) as error:
@@ -937,10 +955,19 @@ class RosterImportWizard(QDialog):
         self._source_password = password
         self.inspect_button.setText("표 미리보기")
         self._inspection = inspection
-        self._populate_tables(inspection.tables, inspection.selected_table)
+        if inspection.selected_table is None:
+            self.source_layout_combo.blockSignals(True)
+            self.source_layout_combo.setCurrentIndex(self.source_layout_combo.findData("two-row"))
+            self.source_layout_combo.blockSignals(False)
+            self.header_row_spin.setEnabled(True)
+            self._populate_sheets(inspection)
+        else:
+            self._populate_tables(inspection.tables, inspection.selected_table)
         self._render_raw_preview(inspection)
+        source_name = inspection.selected_table or inspection.selected_sheet
+        header_note = " · 두 줄 머리글은 세분화된 제목 우선" if inspection.header_row_count == 2 else ""
         self.file_status.setText(
-            f"{inspection.selected_table} · 헤더 {len(inspection.columns)}열 · "
+            f"{source_name} · 헤더 {len(inspection.columns)}열{header_note} · "
             f"미리보기 {len(inspection.preview_rows)}행을 확인했습니다."
         )
         try:
@@ -971,6 +998,34 @@ class RosterImportWizard(QDialog):
             self.table_combo.setEnabled(bool(tables))
         finally:
             self._loading_structure = False
+
+    def _populate_sheets(self, inspection: WorkbookInspection) -> None:
+        self._loading_structure = True
+        try:
+            self.table_combo.clear()
+            for name in inspection.sheet_names:
+                self.table_combo.addItem(name, name)
+            self.table_combo.setCurrentIndex(self.table_combo.findData(inspection.selected_sheet))
+            self.table_combo.setEnabled(True)
+        finally:
+            self._loading_structure = False
+
+    def _source_layout_changed(self, *_args) -> None:
+        if self._loading_structure:
+            return
+        self.header_row_spin.setEnabled(self.source_layout_combo.currentData() == "two-row")
+        self._invalidate_structure()
+
+    def _header_row_changed(self, *_args) -> None:
+        if self._loading_structure:
+            return
+        self._inspection = None
+        self._preview = None
+        self._cell_overrides.clear()
+        self.raw_table.clear()
+        self.raw_table.setRowCount(0)
+        self.raw_table.setColumnCount(0)
+        self._refresh_actions()
 
     def _retry_password_if_needed(self) -> None:
         if (
@@ -1231,9 +1286,13 @@ class RosterImportWizard(QDialog):
             sequence_column=_combo_text(self.sequence_combo),
             source_reference_column=_combo_text(self.source_reference_combo),
             header_row=self._inspection.header_row,
-            data_start_row=self._inspection.tables[
-                self.table_combo.currentIndex()
-            ].data_start_row,
+            header_row_count=self._inspection.header_row_count,
+            data_start_row=(
+                next(table.data_start_row for table in self._inspection.tables
+                     if table.name == self._inspection.selected_table)
+                if self._inspection.selected_table is not None
+                else self._inspection.header_row + self._inspection.header_row_count
+            ),
             fallback_profile_columns=fallback_columns,
             meal_true_values=_parse_value_list(self.true_values_edit.text()),
             meal_false_values=_parse_value_list(self.false_values_edit.text()),
@@ -1724,6 +1783,7 @@ class RosterImportWizard(QDialog):
             return False
         path_text = self.path_edit.text().strip()
         selected_table = self._inspection.selected_table
+        selected_sheet = self._inspection.selected_sheet
         password = self.password_edit.text() or self._source_password or ""
         try:
             preview = self._run_busy_task(
@@ -1733,6 +1793,7 @@ class RosterImportWizard(QDialog):
                     path_text,
                     profile,
                     table_name=selected_table,
+                    sheet_name=selected_sheet,
                     password=password,
                     cell_overrides=self._cell_overrides,
                     identity_by_mobile=self.purpose_combo.currentData() == ImportPurpose.VACATION_LUNCH,
@@ -1907,6 +1968,14 @@ class RosterImportWizard(QDialog):
         self._inspect_source()
 
     def _invalidate_structure(self, *_args) -> None:
+        if self.sender() is self.path_edit and hasattr(self, "source_layout_combo"):
+            self.source_layout_combo.blockSignals(True)
+            self.source_layout_combo.setCurrentIndex(0)
+            self.source_layout_combo.blockSignals(False)
+            self.header_row_spin.blockSignals(True)
+            self.header_row_spin.setValue(1)
+            self.header_row_spin.blockSignals(False)
+            self.header_row_spin.setEnabled(False)
         self._inspection = None
         self._preview = None
         self._cell_overrides.clear()

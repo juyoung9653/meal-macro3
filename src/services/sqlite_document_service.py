@@ -449,15 +449,18 @@ def _household_for_service_dates(
 def _service_date_ranges(service_dates: tuple[date, ...]) -> str:
     """List exact service dates, compacting only consecutive calendar days."""
     days = sorted(set(service_dates))
-    ranges: list[str] = []
-    for day in days:
-        if ranges and day == ends_on + timedelta(days=1):
+    if not days:
+        return "없음"
+    starts_on = ends_on = days[0]
+    ranges = [starts_on.isoformat()]
+    for day in days[1:]:
+        if day == ends_on + timedelta(days=1):
             ends_on = day
             ranges[-1] = f"{starts_on.isoformat()} ~ {ends_on.isoformat()}"
         else:
             starts_on = ends_on = day
             ranges.append(day.isoformat())
-    return ", ".join(ranges) or "없음"
+    return ", ".join(ranges)
 
 
 def _relevant_adjustment_ids(

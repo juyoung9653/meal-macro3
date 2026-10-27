@@ -546,7 +546,7 @@ def test_startup_wires_revision_history_signal_to_injected_dialog(app):
         roster_window_type=Window,
         revision_history_dialog_type=Dialog,
     )
-    controller._histories = lambda _session, _roster: {}
+    controller._histories = lambda _session, _roster, _snapshot: {}
     controller._revision_display_code = lambda _session, _roster: "20261014-110000"
 
     outcome = controller._start_with_dialog(Access(), None)
@@ -559,11 +559,11 @@ def test_startup_wires_revision_history_signal_to_injected_dialog(app):
     assert not dialog.isVisible()
 
 
-def test_person_meal_history_has_five_columns_and_matching_details(app):
+def test_person_meal_history_has_current_columns_and_matching_details(app):
     from src.desktop_v2.meal_history import MEAL_HISTORY_HEADINGS
     headings = MEAL_HISTORY_HEADINGS
-    rows = (("중식", "일시중지", "2026-10-15 ~ 2026-10-20",
-             "합성 담당자", "20261014-001"),)
+    rows = (("중식", "일시중지", "전화", "2026-10-15 ~ 2026-10-20",
+             "병원 방문", "합성 담당자", "20261014-001"),)
     tables = {
         "정보 변경": (("성명",), ()),
         "식종 변경": (headings, rows),
@@ -576,20 +576,21 @@ def test_person_meal_history_has_five_columns_and_matching_details(app):
     app.processEvents()
 
     view = dialog.findChild(QTableView, "history_식종 변경")
-    assert view.model().columnCount() == 5
+    assert headings == ("식종", "구분", "접수 경로", "기간", "비고", "변경자", "변경번호")
+    assert view.model().columnCount() == len(headings)
     assert view.wordWrap()
     assert view.textElideMode() is Qt.TextElideMode.ElideNone
     assert view.verticalHeader().sectionResizeMode(0) is QHeaderView.ResizeMode.ResizeToContents
     header = view.horizontalHeader()
     assert tuple(headings[header.logicalIndex(index)] for index in range(header.count())) == headings
-    assert all(not view.isColumnHidden(index) for index in range(5))
+    assert all(not view.isColumnHidden(index) for index in range(len(headings)))
     assert view.horizontalScrollBar().maximum() == 0
-    assert view.model().data(view.model().index(0, 2)) == "2026-10-15 ~ 2026-10-20"
-    assert view.model().data(view.model().index(0, 4)) == "20261014-001"
+    assert tuple(view.model().data(view.model().index(0, column))
+                 for column in range(len(headings))) == rows[0]
     details = dialog.findChild(QPlainTextEdit, "historyDetails_식종 변경")
     assert details.toPlainText() == chr(10).join((
-        "식종: 중식", "구분: 일시중지", "기간: 2026-10-15 ~ 2026-10-20",
-        "변경자: 합성 담당자", "변경번호: 20261014-001",
+        "식종: 중식", "구분: 일시중지", "접수 경로: 전화", "기간: 2026-10-15 ~ 2026-10-20",
+        "비고: 병원 방문", "변경자: 합성 담당자", "변경번호: 20261014-001",
     ))
     dialog.close()
 

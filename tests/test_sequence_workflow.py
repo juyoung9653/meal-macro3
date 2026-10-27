@@ -267,7 +267,10 @@ def test_real_ctrl_click_and_right_click_keep_exact_targets(app, tmp_path, monke
     def menu_for(*args):
         menu = original(*args)
         menus.append(menu)
-        return SimpleNamespace(exec=lambda _pos: menu.actions()[2].trigger())
+        return SimpleNamespace(exec=lambda _pos: next(
+            action for action in menu.actions()
+            if action.text() == f"선택한 식종 {len(targets)}개 · 중지"
+        ).trigger())
     monkeypatch.setattr(window, "_create_context_menu", menu_for)
     point = table.visualRect(breakfast).center()
     QTest.mouseClick(table.viewport(), Qt.RightButton, pos=point)

@@ -572,3 +572,19 @@ def test_confirmation_conflict_shows_actual_identity_and_mapped_values(tmp_path)
     assert "internal-household-id" not in message
     assert "출력용 별칭" not in message
     assert not list(tmp_path.iterdir())
+
+
+def test_confirmation_external_text_stays_literal(tmp_path, confirm_template):
+    person = _roster_person("=1+1", "#N/A")
+    batch = MonthlyDeliveryBatch(2026, 6, MealPrices(9500, 9500, 9500), False, (person,))
+    output = tmp_path / "literal-confirm.xlsx"
+    make_confirm_publication(batch, {}, output, confirm_template, meal_type="급식")
+    workbook = openpyxl.load_workbook(output)
+    try:
+        cells = [cell for sheet in workbook for row in sheet for cell in row
+                 if cell.value in ("=1+1", "#N/A")]
+        assert {cell.value for cell in cells} == {"=1+1", "#N/A"}
+        assert all(cell.data_type == "s" for cell in cells)
+        assert workbook.active["I6"].value == 1
+    finally:
+        workbook.close()

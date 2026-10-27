@@ -116,6 +116,8 @@ def _mark_as_schema_four(path: Path) -> None:
         connection.execute("BEGIN IMMEDIATE")
         connection.execute("ALTER TABLE household_projection DROP COLUMN delivery_settings_json")
         connection.execute("ALTER TABLE person_projection DROP COLUMN delivery_settings_json")
+        # Version 10's table must not remain in a synthetic version-4 database.
+        connection.execute("DROP TABLE user_view_layout")
         connection.execute("DROP TRIGGER schema_migration_no_delete")
         connection.execute("DELETE FROM schema_migration WHERE version >= 5")
         connection.execute(

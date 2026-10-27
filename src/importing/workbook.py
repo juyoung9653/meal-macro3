@@ -34,7 +34,7 @@ from openpyxl.utils.exceptions import InvalidFileException
 from openpyxl.workbook.workbook import Workbook
 from openpyxl.worksheet._read_only import ReadOnlyWorksheet
 from openpyxl.worksheet.table import Table
-from openpyxl.xml.functions import fromstring
+from openpyxl.xml.functions import fromstring, iterparse
 
 from src.domain.roster import CustomFieldDefinition, CustomFieldType, Meal, normalize_phone
 
@@ -191,6 +191,7 @@ class WorkbookInspection:
     header_fingerprint: str
     tables: tuple[WorkbookTable, ...] = ()
     selected_table: str | None = None
+    header_row_count: int = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -391,21 +392,32 @@ def inspect_workbook(
     preview_limit: int = 8,
     require_table: bool = False,
     table_name: str | None = None,
+    header_row_count: int = 1,
+    allow_two_row_headers: bool = False,
 ) -> WorkbookInspection:
     """Read only structure and a small display preview for mapping."""
 
     source_path = _source_path(path)
     header_row = _positive_int(header_row, "헤더 행")
+    header_row_count = _positive_int(header_row_count, "머리글 행 수")
+    if header_row_count not in (1, 2):
+        raise ValueError("머리글은 한 줄 또는 두 줄이어야 합니다.")
     preview_limit = _positive_int(preview_limit, "미리보기 행 수")
-    start_row = header_row + 1 if data_start_row is None else _positive_int(
+    start_row = header_row + header_row_count if data_start_row is None else _positive_int(
         data_start_row,
         "데이터 시작 행",
     )
-    if start_row <= header_row:
+    if start_row < header_row + header_row_count:
         raise ValueError("데이터 시작 행은 헤더 행보다 뒤여야 합니다.")
     table_mode = require_table or table_name is not None
     with _open_workbook(source_path, password or "") as workbook:
         tables = _workbook_tables(workbook) if table_mode else ()
+        if table_mode and not tables and table_name is None and allow_two_row_headers:
+            worksheet = _select_sheet(workbook, sheet_name)
+            if _has_split_header(worksheet, header_row):
+                table_mode = False
+                header_row_count = 2
+                start_row = header_row + 2
         try:
             selected_table = _select_table(tables, table_name) if table_mode else None
             if selected_table:
@@ -416,17 +428,18 @@ def inspect_workbook(
                 else _select_sheet(workbook, sheet_name)
             )
             if selected_table:
+                header_row_count = 1
                 header_row = selected_table.header_row
                 start_row = selected_table.data_start_row
                 columns = _read_columns(
                     worksheet, header_row, selected_table.min_col, selected_table.max_col
                 )
             else:
-                columns = _read_columns(worksheet, header_row)
+                columns = _read_columns(worksheet, header_row, header_row_count=header_row_count)
         except WorkbookStructureError as error:
             error.tables = tables
             raise
-        fingerprint = _header_fingerprint(header_row, columns)
+        fingerprint = _header_fingerprint(header_row, columns, header_row_count=header_row_count)
         rows = _preview_rows(
             worksheet,
             start_row,
@@ -440,6 +453,7 @@ def inspect_workbook(
             sheet_names=tuple(workbook.sheetnames),
             selected_sheet=worksheet.title,
             header_row=header_row,
+            header_row_count=header_row_count,
             columns=columns,
             preview_rows=rows,
             header_fingerprint=fingerprint,
@@ -491,6 +505,7 @@ def parse_workbook(
             profile = replace(
                 profile,
                 header_row=selected_table.header_row,
+                header_row_count=1,
                 data_start_row=selected_table.data_start_row,
             )
             columns = _read_columns(
@@ -510,8 +525,8 @@ def parse_workbook(
                         f"선택한 표의 데이터 범위 밖 셀은 수정할 수 없습니다: {letter}{row_number}"
                     )
         else:
-            columns = _read_columns(worksheet, profile.header_row)
-        fingerprint = _header_fingerprint(profile.header_row, columns)
+            columns = _read_columns(worksheet, profile.header_row, header_row_count=profile.header_row_count)
+        fingerprint = _header_fingerprint(profile.header_row, columns, header_row_count=profile.header_row_count)
         column_indexes = _resolve_profile_columns(profile, columns)
         names = custom_column_names(columns)
         custom_fields = tuple(
@@ -765,9 +780,78 @@ def _select_table(tables: tuple[WorkbookTable, ...], name: str | None) -> Workbo
     raise WorkbookStructureError(f"선택한 Excel 표를 찾을 수 없습니다: {name}")
 
 
+def _header_merges(worksheet, header_row: int):
+    """Read merge metadata without loading all worksheet cells into memory."""
+    end_row = header_row + 1
+    if isinstance(worksheet, ReadOnlyWorksheet):
+        internal = cast(Any, worksheet)
+        with internal.parent._archive.open(internal._worksheet_path) as stream:
+            ranges = []
+            for _event, element in iterparse(stream, events=("end",)):
+                if element.tag.rsplit("}", 1)[-1] == "mergeCell":
+                    bounds = range_boundaries(element.attrib["ref"])
+                    if bounds[1] <= end_row and bounds[3] >= header_row:
+                        ranges.append(bounds)
+                element.clear()
+    else:
+        ranges = [merged.bounds for merged in worksheet.merged_cells.ranges
+                  if merged.min_row <= end_row and merged.max_row >= header_row]
+    return tuple(ranges)
+
+
+def _has_split_header(worksheet, header_row: int) -> bool:
+    """Auto-detect only an explicit parent merge with separate child headings."""
+    lower = next(worksheet.iter_rows(min_row=header_row + 1, max_row=header_row + 1,
+                                    max_col=_MAX_COLUMNS, values_only=True), ())
+    for left, top, right, bottom in _header_merges(worksheet, header_row):
+        if top == bottom == header_row and right > left:
+            children = [value for value in lower[left - 1:min(right, _MAX_COLUMNS)]
+                        if not _is_blank(value)]
+            if len(children) >= 2 and all(isinstance(value, str) for value in children):
+                return True
+    return False
+
+
+def _read_split_columns(worksheet, header_row: int, min_col: int, max_col: int):
+    end_row = header_row + 1
+    rows = tuple(worksheet.iter_rows(min_row=header_row, max_row=end_row,
+                                     min_col=1, max_col=max_col, values_only=True))
+    merges = _header_merges(worksheet, header_row)
+    for left, top, right, bottom in merges:
+        if left <= max_col and right >= min_col and (top < header_row or bottom > end_row):
+            raise WorkbookStructureError("머리글 병합이 선택한 두 줄 밖까지 이어집니다. 머리글 시작 행을 확인해주세요.")
+    headers = []
+    for column in range(min_col, max_col + 1):
+        candidates = []
+        for offset, row in enumerate(rows):
+            row_number = header_row + offset
+            merged = next((bounds for bounds in merges
+                           if bounds[0] <= column <= bounds[2]
+                           and bounds[1] <= row_number <= bounds[3]), None)
+            if merged:
+                left, top, right, _bottom = merged
+                value = rows[top - header_row][left - 1]
+                width = right - left + 1
+            else:
+                value, width = row[column - 1], 1
+            label = _display_value(value)
+            if label:
+                # A narrower heading is more specific; ties prefer the lower row.
+                candidates.append((width, -row_number, label))
+        headers.append(min(candidates)[2] if candidates else "")
+    last = max((index for index, label in enumerate(headers, 1) if label), default=0)
+    if not last:
+        raise WorkbookStructureError(f"{header_row}~{end_row}행에서 머리글을 찾지 못했습니다.")
+    return tuple(SourceColumn(index, get_column_letter(index), headers[index - min_col])
+                 for index in range(min_col, min_col + last))
+
+
 def _read_columns(
-    worksheet, header_row: int, min_col: int = 1, max_col: int | None = None
+    worksheet, header_row: int, min_col: int = 1, max_col: int | None = None,
+    *, header_row_count: int = 1,
 ) -> tuple[SourceColumn, ...]:
+    if header_row_count == 2:
+        return _read_split_columns(worksheet, header_row, min_col, max_col or _MAX_COLUMNS)
     bounded = max_col is not None
     max_col = _MAX_COLUMNS if max_col is None else max_col
     cells = next(
@@ -796,6 +880,7 @@ def _read_columns(
 def _header_fingerprint(
     header_row: int,
     columns: tuple[SourceColumn, ...],
+    *, header_row_count: int = 1,
 ) -> str:
     payload = {
         "header_row": header_row,
@@ -804,6 +889,8 @@ def _header_fingerprint(
             for column in columns
         ],
     }
+    if header_row_count != 1:
+        payload["header_row_count"] = header_row_count
     encoded = json.dumps(
         payload,
         ensure_ascii=False,

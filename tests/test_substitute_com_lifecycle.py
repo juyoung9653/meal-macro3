@@ -68,6 +68,8 @@ def test_owned_worker_releases_proxies_before_uninitializing(monkeypatch, failur
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Native Windows Excel integration")
+@pytest.mark.slow
+@pytest.mark.excel
 def test_repeated_native_exports_exit_without_com_disconnect():
     # A separate interpreter exposes native first-chance exception output even
     # when pytest captures it, and bounds an actual COM hang to 90 seconds.
@@ -79,7 +81,7 @@ import win32api
 import win32con
 import win32event
 import win32process
-from tests.test_substitute_legacy_parity import synthetic
+from tests.test_substitute_native_output import synthetic
 from src.domain.delivery_substitute import SubstituteOptions
 from src.generators.substitute_generator import build_substitute_workbook
 from src.excel import substitute_excel_metrics as metrics

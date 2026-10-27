@@ -9,6 +9,13 @@ from openpyxl.styles import Alignment
 CENTER_ALIGN = Alignment(horizontal="center", vertical="center")
 
 
+def write_literal_cell(cell, value):
+    """Write external data without interpreting text as a formula or Excel error."""
+    cell.value = value
+    if isinstance(value, str):
+        cell.data_type = "s"
+
+
 def copy_cell(src, dst):
     """셀 값 + 서식 복사"""
     dst.value = src.value

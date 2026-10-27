@@ -1678,7 +1678,7 @@ def test_numeric_and_date_custom_columns_are_centered_including_empty_cells(app)
             ):
                 assert alignment == Qt.AlignmentFlag.AlignCenter
             elif column.key == "name" or column.custom_field is not None:
-                assert alignment is None
+                assert alignment == Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
 
 
 def test_delivery_weekday_only_override_is_visible_in_special_household_summary(app):

@@ -128,9 +128,13 @@ def run_worker_with_delayed_progress(worker: QThread, dialog: QDialog) -> None:
             return
         if not source_window.isVisible() or not source_window.isEnabled():
             return
-        # A subsequent confirmation/completion window must keep its own focus.
-        if any(isinstance(window, QDialog) and window is not dialog
-               and window is not source_window and window not in windows and window.isVisible()
+        # Respect a window selected during the wait or before the queued restore.
+        active_window = app.activeWindow()
+        if (active_window is not None and active_window not in (dialog, source_window)
+                and active_window.isVisible()):
+            return
+        if any(window is not dialog and window is not source_window
+               and window not in windows and window.isVisible()
                for window in app.topLevelWidgets()):
             return
         source_window.raise_()

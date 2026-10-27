@@ -1,6 +1,9 @@
 """Text in narrow Qt controls retains its original value without elision."""
 
 import os
+from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
@@ -15,7 +18,21 @@ from PySide6.QtWidgets import QApplication, QComboBox, QLabel, QLineEdit, QListW
 from src.desktop_v2.theme import application_stylesheet, register_application_fonts
 
 
+@pytest.mark.isolated_ui
 def test_views_and_tabs_disable_qt_text_elision():
+    # Application-wide repolishing must not depend on widgets from earlier tests.
+    # Keep the real QApplication stylesheet and all rendering assertions below.
+    result = subprocess.run(
+        [sys.executable, "-X", "faulthandler", "-c",
+         "from tests.test_desktop_text_clipping import _assert_text_elision; _assert_text_elision()"],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Windows fatal exception" not in result.stderr, result.stderr
+
+
+def _assert_text_elision():
     app = QApplication.instance() or QApplication([])
     register_application_fonts()
     previous_stylesheet = app.styleSheet()

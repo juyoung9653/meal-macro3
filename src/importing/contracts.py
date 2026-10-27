@@ -73,6 +73,7 @@ class ImportMappingProfile:
     ignored_columns: tuple[str, ...] = ()
     provider_value: str | None = None
     custom_field_names: Mapping[UUID, str] = field(default_factory=dict)
+    header_row_count: int = 1
 
     def __post_init__(self) -> None:
         _validate_uuid(self.profile_id, "import profile ID")
@@ -134,8 +135,11 @@ class ImportMappingProfile:
             "원본 참조 열",
         )
         header_row = _positive_int(self.header_row, "헤더 행")
+        header_row_count = _positive_int(self.header_row_count, "머리글 행 수")
+        if header_row_count not in (1, 2):
+            raise ValueError("머리글은 한 줄 또는 두 줄이어야 합니다.")
         data_start_row = _positive_int(self.data_start_row, "데이터 시작 행")
-        if data_start_row <= header_row:
+        if data_start_row < header_row + header_row_count:
             raise ValueError("데이터 시작 행은 헤더 행보다 뒤여야 합니다.")
         fallback_columns: dict[ProfileField, tuple[str, ...]] = {}
         for raw_field, raw_columns in self.fallback_profile_columns.items():
@@ -211,6 +215,7 @@ class ImportMappingProfile:
             "custom_field_columns",
             MappingProxyType(custom_columns),
         )
+        object.__setattr__(self, "header_row_count", header_row_count)
         object.__setattr__(self, "header_row", header_row)
         object.__setattr__(self, "data_start_row", data_start_row)
         object.__setattr__(
@@ -256,6 +261,7 @@ class ImportMappingProfile:
                 )
             },
             "header_row": self.header_row,
+            **({"header_row_count": self.header_row_count} if self.header_row_count != 1 else {}),
             "data_start_row": self.data_start_row,
             "fallback_profile_columns": {
                 field.value: list(columns)
@@ -310,6 +316,7 @@ class ImportMappingProfile:
                 UUID(str(key)): value for key, value in custom_columns.items()
             },
             header_row=manifest.get("header_row", 1),
+            header_row_count=manifest.get("header_row_count", 1),
             data_start_row=manifest.get("data_start_row", 2),
             fallback_profile_columns={
                 ProfileField(str(key)): _manifest_sequence(value, str(key))

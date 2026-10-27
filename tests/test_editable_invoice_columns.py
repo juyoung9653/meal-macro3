@@ -229,3 +229,24 @@ def test_saved_unlocked_columns_reopen_and_reach_controller_output(tmp_path):
         finally:
             workbook.close()
             buffer.close()
+
+
+def test_invoice_external_text_stays_literal_and_calculations_stay_formulas(tmp_path):
+    template = _template(tmp_path / "template.xlsx")
+    batch = _batch()
+    person = replace(batch.deliveries[0], note="=1+1",
+        roster=RosterEntry(2, {"성명": "=1+1", "비고": "#N/A", "제공기관": "=2+2"}))
+    output = tmp_path / "literal.xlsx"
+    make_invoice_publication(replace(batch, deliveries=(person,)),
+        _new_mapping(), str(output), str(template))
+    workbook = openpyxl.load_workbook(output)
+    try:
+        sheet = workbook.active
+        for address, value in {"B4": "=1+1", "H4": "=1+1", "I4": "#N/A", "J4": "=2+2"}.items():
+            assert sheet[address].value == value
+            assert sheet[address].data_type == "s"
+        for address in ("F4", "G4", "K4"):
+            assert sheet[address].data_type == "f"
+        assert sheet["C4"].value == 2 and sheet["C4"].data_type == "n"
+    finally:
+        workbook.close()

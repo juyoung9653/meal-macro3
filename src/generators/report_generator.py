@@ -17,6 +17,7 @@ from openpyxl.worksheet.page import PageMargins
 
 from ..core.diff_format import has_diff, strip_diff
 from ..core.settings import get_settings
+from ..excel.excel_utils import write_literal_cell
 from ..excel.publication import WorkbookPublicationResult, publish_workbook
 from ..services.delivery_service import DeliveryReport
 
@@ -321,7 +322,7 @@ def _fill_data(ws, report: DeliveryReport, *, preserve_template_styles=False) ->
         else:
             c_h.value = ""
 
-        ws.cell(gr, 9).value = row.reference_areas
+        write_literal_cell(ws.cell(gr, 9), row.reference_areas)
 
     if preserve_template_styles:
         for col, style in enumerate(summary_styles, 1):

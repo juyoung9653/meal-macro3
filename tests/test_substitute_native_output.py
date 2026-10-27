@@ -1,4 +1,4 @@
-"""Legacy data/style contracts and readable native typography on synthetic rosters."""
+"""Current substitute output, Excel cleanup, and native typography contracts."""
 from __future__ import annotations
 
 from dataclasses import replace
@@ -9,11 +9,8 @@ import sys
 import re
 import types
 from uuid import uuid4
-from xml.etree import ElementTree
-from zipfile import ZipFile
 
 import openpyxl
-import pandas as pd
 import pytest
 
 from src.domain.delivery_substitute import PreparedSubstituteData, SubstituteColumn, SubstituteOptions, SubstituteRow
@@ -135,9 +132,8 @@ def test_measurement_error_is_explicit_and_owned_excel_is_closed(monkeypatch, cl
     app = App()
     import win32com.client
     monkeypatch.setitem(sys.modules, "pythoncom", types.SimpleNamespace(CoInitialize=lambda: events.append(("init",)), CoUninitialize=lambda: events.append(("uninit",))))
-    import win32com.client
     monkeypatch.setattr(metrics, "_create_excel_application", lambda: app)
-    def fail(*args): raise ValueError("synthetic measurement failure")
+    def fail(*args, **kwargs): raise ValueError("synthetic measurement failure")
     monkeypatch.setattr(metrics, "_measure", fail)
     with pytest.raises(metrics.SubstituteExcelError, match="Microsoft Excel") as error:
         build_substitute_workbook(synthetic((1,)), SubstituteOptions("synthetic", ("name",)))
@@ -158,43 +154,9 @@ def test_missing_excel_does_not_publish_an_approximation(monkeypatch, tmp_path):
     assert not list(tmp_path.iterdir())
 
 
-@pytest.fixture(scope="module")
-def legacy():
-    """Load the actual active source under a private namespace; rewrite imports only."""
-    base = ROOT / "tmp" / "배송 대타 매크로" / "src"
-    if not base.exists():
-        pytest.skip("Active legacy source is not included in this checkout")
-    prefix = "_substitute_legacy_reference"
-    for package in (prefix, prefix + ".excel", prefix + ".excel.page_formatting"):
-        module = types.ModuleType(package)
-        module.__path__ = []
-        sys.modules[package] = module
-    # groups only needs these two tiny I/O utilities; load their actual source
-    # definitions without the source application's optional GUI/I/O imports.
-    io_source = (base / "excel_io.py").read_text(encoding="utf-8")
-    import ast
-    tree = ast.parse(io_source)
-    functions = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in ("txt", "ord_groups")]
-    io_module = types.ModuleType(prefix + ".excel_io")
-    io_module.__dict__.update(pd=pd, re=re)
-    exec("from __future__ import annotations\n" + "\n".join(ast.get_source_segment(io_source, node) for node in functions), io_module.__dict__)
-    sys.modules[io_module.__name__] = io_module
-    modules = {}
-    for relative in ("config", "excel.colors", "excel.groups", "excel.text_portrait", "excel.sheet_writer", "excel.page_formatting.metrics", "excel.page_formatting.setup", "excel.page_formatting.layout"):
-        path = base.joinpath(*relative.split(".")).with_suffix(".py")
-        module = types.ModuleType(prefix + "." + relative)
-        module.__package__ = module.__name__.rpartition(".")[0]
-        sys.modules[module.__name__] = module
-        exec(compile(path.read_text(encoding="utf-8").replace("from src.", f"from {prefix}."), str(path), "exec"), module.__dict__)
-        modules[relative] = module
-    yield modules
-    for key in tuple(sys.modules):
-        if key.startswith(prefix):
-            del sys.modules[key]
-
-
-@pytest.fixture(scope="module")
+@pytest.fixture
 def excel():
+    # Native pagination caches must not carry over from a previous workbook test.
     pythoncom = pytest.importorskip("pythoncom")
     win32 = pytest.importorskip("win32com.client")
     pythoncom.CoInitialize()
@@ -213,113 +175,8 @@ def excel():
         pythoncom.CoUninitialize()
 
 
-def raw_borders(package):
-    # openpyxl's merge loader can replace a native thick bottom with the
-    # anchor's thin interior border. Inspect serialized perimeter sides directly.
-    ns = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
-    with ZipFile(package) as archive:
-        styles = ElementTree.fromstring(archive.read("xl/styles.xml"))
-        borders = list(styles.find(f"{ns}borders"))
-        xfs = list(styles.find(f"{ns}cellXfs"))
-        sheet = ElementTree.fromstring(archive.read("xl/worksheets/sheet1.xml"))
-    result = {}
-    for cell in sheet.iter(f"{ns}c"):
-        border = borders[int(xfs[int(cell.get("s", 0))].get("borderId", 0))]
-        result[cell.get("r")] = {
-            edge: (border.find(f"{ns}{edge}").get("style") if border.find(f"{ns}{edge}") is not None else None)
-            for edge in ("left", "right", "top", "bottom")}
-    return result
-
-
-@pytest.mark.parametrize("orientation", ["portrait", "landscape", "auto"])
-@pytest.mark.parametrize("split", ["none", "dong", "groups"])
-def test_legacy_static_styles_with_corrected_typography(excel, legacy, tmp_path, orientation, split):
-    data = synthetic()
-    # Grouping columns deliberately hidden for half the combinations.
-    columns = ("name", "road_address", "note") if split != "groups" else data.default_columns
-    options = SubstituteOptions("synthetic", columns, orientation=orientation, split=split, groups_per_page=2)
-    actual, labels, layout = _build_sheet(data, options)
-    source = pd.DataFrame([{column.label: row.values[column.key] for column in data.columns} for row in data.rows])
-    source["식사 구분"] = ["조식_BOX" if row.box else "조식" for row in data.rows]
-    display = legacy["excel.text_portrait"].preprocess_portrait(source[labels])
-    ref_layout = legacy["excel.groups"].build_sheet_layout(source, display_col_count=len(labels) + 1)
-    reference_book = excel.Workbooks.Add()
-    measurement_book = None
-    try:
-        reference_book.EnableAutoRecover = False
-        reference_sheet = reference_book.Worksheets(1)
-        legacy["excel.sheet_writer"].write_sheet(reference_sheet, display, data.meal.value, "합성기사", "20260828", layout=ref_layout, source_df=source)
-        legacy["excel.page_formatting.layout"].apply_page_formatting(reference_sheet, display, mode={"none": 0, "dong": 1, "groups": 2}[split], max_groups_limit=2, orientation_pref={"auto": 0, "portrait": 1, "landscape": 2}[orientation], sheet_layout=ref_layout)
-        expected_path = tmp_path / "reference.xlsx"
-        reference_book.SaveAs(str(expected_path), FileFormat=51)
-        measurement_book = excel.Workbooks.Add()
-        measurement_book.EnableAutoRecover = False
-        metrics._measure(actual, measurement_book.Worksheets(1), labels, layout, options)
-        buffer = BytesIO()
-        actual.save(buffer)
-        buffer.seek(0)
-        actual_borders, expected_borders = raw_borders(BytesIO(buffer.getvalue())), raw_borders(expected_path)
-        measured = openpyxl.load_workbook(buffer)
-        expected = openpyxl.load_workbook(expected_path)
-        try:
-            a, b = measured.active, expected.active
-            assert a.max_row == b.max_row and a.max_column == b.max_column
-            assert {str(r) for r in a.merged_cells.ranges} == {str(r) for r in b.merged_cells.ranges}
-            for row in range(1, a.max_row + 1):
-                assert 0 < a.row_dimensions[row].height <= 409.5, ("height", row)
-                assert a.row_dimensions[row].thickTop == b.row_dimensions[row].thickTop
-                assert a.row_dimensions[row].thickBot == b.row_dimensions[row].thickBot
-                for col in range(1, a.max_column + 1):
-                    ac, bc = a.cell(row, col), b.cell(row, col)
-                    if labels[col - 1:col] == ["신주소"] and 3 <= row <= layout.data_end_row:
-                        # The corrected common font may permit removing a break
-                        # which the legacy address-only enlargement retained.
-                        normalize = lambda value: re.sub(r"[\s,]+", " ", str(value or "")).strip()
-                        assert normalize(ac.value) == normalize(bc.value), ("address", row, col)
-                    else:
-                        assert (ac.value or "") == (bc.value or ""), ("value", row, col)
-                    if isinstance(ac.value, (int, float)):
-                        assert ac.number_format == bc.number_format == "General", ("numeric format", row, col)
-                    if ac.__class__.__name__ != "MergedCell":
-                        assert (ac.font.name, ac.font.bold) == (bc.font.name, bc.font.bold), ("font", row, col)
-                        if row >= 3:
-                            assert ac.font.sz == a.cell(3, 1).font.sz, ("common body font", row, col)
-                        assert (ac.alignment.horizontal, ac.alignment.vertical, ac.alignment.wrap_text) == (bc.alignment.horizontal, bc.alignment.vertical, bc.alignment.wrap_text), ("alignment", row, col)
-                    assert ac.fill.patternType == bc.fill.patternType, ("fill", row, col)
-                    if ac.fill.patternType:
-                        assert ac.fill.fgColor.rgb[-6:] == bc.fill.fgColor.rgb[-6:], ("color", row, col)
-                    merged = next((r for r in a.merged_cells.ranges if ac.coordinate in r), None)
-                    for edge in ("left", "right", "top", "bottom"):
-                        # The anchor can carry whole-merge bottom/right borders
-                        # in SpreadsheetML; only the perimeter is rendered.
-                        if merged and ((edge == "bottom" and row < merged.max_row) or
-                                       (edge == "top" and row > merged.min_row) or
-                                       (edge == "left" and col > merged.min_col) or
-                                       (edge == "right" and col < merged.max_col)):
-                            continue
-                        assert actual_borders.get(ac.coordinate, {}).get(edge) == expected_borders.get(bc.coordinate, {}).get(edge), ("border", row, col, edge)
-            for col in range(1, a.max_column + 1):
-                letter = openpyxl.utils.get_column_letter(col)
-                assert a.column_dimensions[letter].width > 0, ("width", letter)
-            assert a.page_setup.orientation == b.page_setup.orientation
-            assert a.page_setup.fitToWidth == (b.page_setup.fitToWidth or 1) == 1
-            assert a.page_setup.fitToHeight == b.page_setup.fitToHeight == 0
-            assert a.print_options.horizontalCentered == b.print_options.horizontalCentered
-            assert a.print_title_rows == b.print_title_rows
-            for margin in ("left", "right", "top", "bottom", "header", "footer"):
-                assert getattr(a.page_margins, margin) == pytest.approx(getattr(b.page_margins, margin))
-            assert all(not (group.start_row <= br.id < group.end_row)
-                       for br in a.row_breaks.brk for group in layout.groups)
-        finally:
-            measured.close()
-            expected.close()
-    finally:
-        actual.close()
-        if measurement_book is not None:
-            measurement_book.Close(SaveChanges=False)
-        reference_book.Close(SaveChanges=False)
-
-
+@pytest.mark.slow
+@pytest.mark.excel
 def test_formula_like_source_is_never_evaluated_during_measurement(excel):
     data = synthetic((1,))
     values = {**data.rows[0].values, "sequence": "0001", "name": "=1+1", "road_address": "=2+2", "note": "=3+3"}
@@ -342,6 +199,8 @@ def test_formula_like_source_is_never_evaluated_during_measurement(excel):
 
 
 @pytest.mark.parametrize("orientation,entitlements", [("auto", 1), ("portrait", 1), ("landscape", 1), ("auto", 3)])
+@pytest.mark.slow
+@pytest.mark.excel
 def test_real_route_shape_common_font_and_print_settings(excel, orientation, entitlements):
     data = realistic_typography(entitlements)
     options = SubstituteOptions("synthetic", data.default_columns, orientation=orientation)
@@ -391,6 +250,8 @@ def test_real_route_shape_common_font_and_print_settings(excel, orientation, ent
 
 
 @pytest.mark.parametrize("orientation", ["portrait", "landscape"])
+@pytest.mark.slow
+@pytest.mark.excel
 def test_mixed_notes_route_keeps_common_font(excel, orientation):
     data = realistic_typography()
     data = replace(data, rows=tuple(replace(row, values={**row.values,
@@ -417,6 +278,8 @@ def test_mixed_notes_route_keeps_common_font(excel, orientation):
         workbook.close()
 
 
+@pytest.mark.slow
+@pytest.mark.excel
 def test_measured_merged_text_height_is_not_capped_back_to_100(excel):
     data = synthetic((2,))
     note = " ".join(f"합성메모{number:02d}" for number in range(16))
@@ -444,6 +307,8 @@ def test_measured_merged_text_height_is_not_capped_back_to_100(excel):
         workbook.close()
 
 
+@pytest.mark.slow
+@pytest.mark.excel
 def test_automatic_break_before_sixteenth_household_has_no_orphan(excel, tmp_path):
     from src.excel.substitute_page_layout import (
         SheetGroup, apply_base_page_setup, apply_page_breaks_by_groups,

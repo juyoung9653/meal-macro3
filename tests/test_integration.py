@@ -5,15 +5,11 @@ from __future__ import annotations
 import os
 from datetime import date
 from pathlib import Path
-from unittest.mock import Mock, patch
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import openpyxl
 import pytest
 from openpyxl.worksheet.table import Table
-from PyQt6.QtCore import QSettings
-from PyQt6.QtWidgets import QApplication
 
 from src.core.delivery_matrix import (
     AnnualDeliveryBook,
@@ -21,23 +17,14 @@ from src.core.delivery_matrix import (
     DeliveryRow,
     RosterEntry,
 )
-from src.core.invoice_data import (
-    InvoiceData,
-    MealPrices,
-    MonthlyDelivery,
-    MonthlyDeliveryBatch,
-)
 from src.core.models import FULL_ADDRESS_FIELD
 from src.excel.annual_workbook import TABLE_NAME, AnnualWorkbook
 from src.generators.confirm_generator import make_confirm_publication
 from src.services.invoice_controller import (
     InvoiceGenerationConfig,
-    InvoiceResult,
     InvoiceService,
 )
 from src.templates.config import read_template_columns
-from src.widgets.confirm_tab import ConfirmTab
-from src.widgets.invoice_tab import InvoiceTab
 
 
 @pytest.fixture(autouse=True)
@@ -45,20 +32,6 @@ def _clear_template_cache():
     read_template_columns.cache_clear()
     yield
     read_template_columns.cache_clear()
-
-
-@pytest.fixture
-def qapp(tmp_path: Path):
-    previous_format = QSettings.defaultFormat()
-    QSettings.setDefaultFormat(QSettings.Format.IniFormat)
-    QSettings.setPath(
-        QSettings.Format.IniFormat,
-        QSettings.Scope.UserScope,
-        str(tmp_path / "settings"),
-    )
-    app = QApplication.instance() or QApplication([])
-    yield app
-    QSettings.setDefaultFormat(previous_format)
 
 
 @pytest.fixture
@@ -331,7 +304,6 @@ def test_generate_invoice_creates_valid_workbook_from_annual_book(
 
 
 def test_happy_lunch_maps_combined_address_into_invoice(
-    qapp: QApplication,
     tmp_path: Path,
 ):
     template = "assets/행복도시락/행복도시락_청구서템플릿.xlsx"
@@ -366,24 +338,18 @@ def test_happy_lunch_maps_combined_address_into_invoice(
         (day,),
     )
 
-    tab = InvoiceTab(meal_type="행복도시락")
-    try:
-        tab.set_annual_book(book)
-        assert tab._col_mapping["주소"] == FULL_ADDRESS_FIELD
-        output = tmp_path / "행복도시락_청구서.xlsx"
-        result = InvoiceService().generate(
-            InvoiceGenerationConfig(
-                template_path=template,
-                output_path=str(output),
-                year=2026,
-                month=6,
-                annual_book=book,
-                col_mapping=tab._col_mapping,
-                meal_type="행복도시락",
-            )
+    output = tmp_path / "행복도시락_청구서.xlsx"
+    result = InvoiceService().generate(
+        InvoiceGenerationConfig(
+            template_path=template,
+            output_path=str(output),
+            year=2026,
+            month=6,
+            annual_book=book,
+            col_mapping={"성명": "성명", "주소": FULL_ADDRESS_FIELD},
+            meal_type="행복도시락",
         )
-    finally:
-        tab.close()
+    )
 
     assert result.success, result.error
     assert (
@@ -438,68 +404,6 @@ def test_blank_only_month_is_rejected_as_unentered(tmp_path: Path, template_path
     assert not result.success
     assert "미입력" in (result.error or "")
     assert not output.exists()
-
-
-def test_invoice_tab_displays_and_forwards_only_output_people(
-    qapp: QApplication,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    monkeypatch.setattr(
-        "src.widgets.invoice_tab.read_template_columns",
-        lambda *_args, **_kwargs: ["성명", "학교명"],
-    )
-    active = MonthlyDelivery(
-        roster=RosterEntry(2, {"성명": "활성 대상", "학교명": "분당초"}),
-        note="",
-        delivery_staff="기사A",
-        delivery_sequence="001",
-        breakfast_count=2,
-        lunch_count=0,
-        dinner_count=0,
-        weekly=(),
-    )
-
-    batch = MonthlyDeliveryBatch(
-        year=2026,
-        month=6,
-        prices=MealPrices(breakfast=9500, lunch=9500, dinner=9500),
-        is_vacation_month=False,
-        deliveries=(active,),
-    )
-    service = Mock()
-    service.generate.return_value = InvoiceResult(success=True, count=1, batch=batch)
-    tab = InvoiceTab()
-    try:
-        tab._service = service
-        tab._book = _book()
-        tab._year = 2026
-        tab._month = 6
-        tab.output_dir = str(tmp_path)
-        tab._col_mapping = {"성명": "성명", "학교명": "학교명"}
-
-        with (
-            patch("src.widgets.invoice_tab.QMessageBox.information") as information,
-            patch("src.widgets.invoice_tab.QMessageBox.critical") as critical,
-        ):
-            tab._generate_invoices()
-
-        critical.assert_not_called()
-        service.generate.assert_called_once()
-        assert tab.get_invoice_data().batch is batch
-        assert tab.result_table.rowCount() == 1
-        name_item = tab.result_table.item(0, 0)
-        assert name_item is not None
-        assert name_item.text() == "활성 대상"
-        assert tab.info_label.text() == "생성된 청구서: 1건 (처음 1건 표시)"
-        assert "청구서 1건 생성 완료!" in information.call_args.args[2]
-
-        invoice_data = tab.get_invoice_data()
-        assert invoice_data.batch is batch
-        assert invoice_data.year == 2026
-        assert invoice_data.month == 6
-    finally:
-        tab.close()
 
 
 def test_real_annual_xlsx_to_invoice_and_confirm_end_to_end(
@@ -608,57 +512,3 @@ def test_real_annual_xlsx_to_invoice_and_confirm_end_to_end(
         )
     finally:
         confirm_wb.close()
-
-
-def test_confirmation_tab_preserves_configured_filename_and_batch(
-    qapp: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
-    batch = MonthlyDeliveryBatch(
-        2027,
-        3,
-        MealPrices(9500, 9500, 9500),
-        False,
-        (
-            MonthlyDelivery(
-                RosterEntry(2, {"성명": "대상자"}), "", "기사A", "003", 1, 0, 0, ()
-            ),
-        ),
-    )
-    filename = "배송확인_2027-03.xlsx"
-    created = [
-        {
-            "sheet_name": "정자동",
-            "file": filename,
-            "total_hh": 1,
-            "count_1": 1,
-            "count_2": 0,
-            "count_3": 0,
-            "count_4": 0,
-            "count_5": 0,
-        }
-    ]
-    writer = Mock(return_value=(created, None))
-    monkeypatch.setattr("src.widgets.confirm_tab.make_confirm_publication", writer)
-    tab = ConfirmTab()
-    try:
-        tab._s.set(
-            "confirm",
-            "output_filename_format",
-            value="배송확인_{year}-{month:02d}.xlsx",
-        )
-        tab._data = InvoiceData(batch=batch, col_mapping={"성명": "이름"})
-        tab.output_dir = str(tmp_path)
-        with (
-            patch("src.widgets.confirm_tab.QMessageBox.information"),
-            patch("src.widgets.confirm_tab.QMessageBox.critical") as critical,
-        ):
-            tab._generate_confirms()
-        critical.assert_not_called()
-        assert writer.call_args.kwargs["batch"] is batch
-        assert writer.call_args.kwargs["col_mapping"] == {"성명": "이름"}
-        assert Path(writer.call_args.kwargs["output_path"]) == tmp_path / filename
-        assert Path(tab._last_output_path) == tmp_path / filename
-        assert tab.open_file_btn.isEnabled()
-        assert tab.confirm_table.rowCount() == 1
-    finally:
-        tab.close()

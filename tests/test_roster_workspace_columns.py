@@ -79,7 +79,7 @@ def test_meal_cell_context_targets_clicked_meal_and_history(app, roster, tmp_pat
     window.status_action_requested.connect(lambda *args: requested.append(args))
     window.complaint_requested.connect(lambda *args: complaints.append(args))
     menu = window._create_context_menu(person, Meal.BREAKFAST)
-    menu.actions()[1].trigger()
+    next(action for action in menu.actions() if action.text() == "조식 일시중지").trigger()
     next(action for action in menu.actions() if action.text() == "민원").trigger()
     assert requested == [(person.person_id, Meal.BREAKFAST, MealStatus.PAUSED)]
     assert complaints == [(person.person_id, Meal.BREAKFAST)]

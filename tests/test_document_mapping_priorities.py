@@ -17,6 +17,7 @@ from src.domain.document_column_mappings import (
     MAPPING_ENTITY_KIND, build_mapping_revision, mapping_entity_id,
     mapping_setting_from_state, load_mapping_fallbacks)
 from src.domain.revisions import HistoricalSnapshot, EntityRef, RevisionActor
+from src.generators.mapping_values import resolve_mapping_value
 from src.generators.invoice_generator import make_invoice_publication
 from src.generators.confirm_generator import make_confirm_publication
 from src.services.document_column_mappings import invoice_default_mapping, confirmation_default_mapping, effective_fallbacks
@@ -34,42 +35,99 @@ class _ExpectedErrors:
 
 
 
-@pytest.mark.parametrize("profile",["급식","행복도시락"])
-@pytest.mark.parametrize("kind",["invoice","confirmation"])
-@pytest.mark.parametrize("primary,secondary,expected",[("first","second","first"),(None,"second","second"),("  ","second","second"),("",None,None),(0,"second",0),(False,"second",False),(None,0,0),(None,False,False),("  ",FULL_ADDRESS_FIELD,"Road Unit"),("PRIMARY_FULL","second","Road Unit")])
-def test_actual_workbooks_choose_first_nonblank_per_recipient(tmp_path,profile,kind,primary,secondary,expected):
-    primary_key=FULL_ADDRESS_FIELD if primary=="PRIMARY_FULL" else "custom:primary";secondary_key="custom:secondary"
-    person=_roster_person("Synthetic","Road",detail_address="Unit")
-    extra={**person.roster.extra,primary_key:primary,secondary_key:secondary}
-    person=replace(person,roster=RosterEntry(2,extra))
-    batch=MonthlyDeliveryBatch(2026,6,MealPrices(10000,10000,10000),False,(person,))
-    settings=get_settings();out=tmp_path/"priority.xlsx"
-    fallback=FULL_ADDRESS_FIELD if secondary==FULL_ADDRESS_FIELD else secondary_key
-    if kind=="invoice":
-        template=settings.get_invoice_template_path(profile)
-        mapping=invoice_default_mapping(template,profile,False)
-        mapping["성명"]=primary_key
-        make_invoice_publication(batch,mapping,str(out),str(template),meal_type=profile,column_fallbacks={"성명":fallback})
-        original_sheet="청구서" if profile=="급식" else "학기_총괄"
-        col=read_template_columns(str(template),sheet_name=original_sheet).index("성명")+1
-        workbook=openpyxl.load_workbook(out)
-        actual=workbook["청구서" if profile=="급식" else "총괄"].cell(4,col).value
-        assert actual==expected
-        if expected is not None:
-            assert type(actual) is type(expected)
+# Keep every boundary value, but write eight recipients into one real workbook.
+_PRIORITY_CASES = [
+    pytest.param("first", "second", "first", id="primary-wins"),
+    pytest.param(None, "second", "second", id="missing-primary"),
+    pytest.param("  ", "second", "second", id="blank-primary"),
+    pytest.param("", None, "", id="both-missing"),
+    pytest.param(0, "second", 0, id="primary-zero"),
+    pytest.param(False, "second", False, id="primary-false"),
+    pytest.param(None, 0, 0, id="fallback-zero"),
+    pytest.param(None, False, False, id="fallback-false"),
+]
+
+
+@pytest.mark.parametrize("primary,secondary,expected", _PRIORITY_CASES)
+def test_priority_value_preserves_missing_zero_and_false(primary, secondary, expected):
+    actual = resolve_mapping_value({"first": primary, "second": secondary}, "first", "second")
+    assert actual == expected
+    assert type(actual) is type(expected)
+
+
+def _assert_priority_workbook(tmp_path, profile, kind, people, expected,
+                              primary="custom:primary", fallback="custom:secondary"):
+    batch = MonthlyDeliveryBatch(2026, 6, MealPrices(10000, 10000, 10000), False, tuple(people))
+    settings = get_settings()
+    out = tmp_path / "priority.xlsx"
+    if kind == "invoice":
+        template = settings.get_invoice_template_path(profile)
+        mapping = invoice_default_mapping(template, profile, False)
+        mapping["성명"] = primary
+        make_invoice_publication(batch, mapping, str(out), str(template), meal_type=profile,
+                                 column_fallbacks={"성명": fallback})
+        original_sheet = "청구서" if profile == "급식" else "학기_총괄"
+        col = read_template_columns(str(template), sheet_name=original_sheet).index("성명") + 1
+        workbook = openpyxl.load_workbook(out)
+        try:
+            sheet = workbook["청구서" if profile == "급식" else "총괄"]
+            for index, value in enumerate(expected):
+                actual = sheet.cell(4 + index, col).value
+                serialized = None if value == "" else value
+                assert actual == serialized, f"recipient {index}"
+                if serialized is not None:
+                    assert type(actual) is type(serialized), f"recipient {index}"
+        finally:
+            workbook.close()
     else:
-        template=settings.get_confirm_template_path(profile)
-        mapping=confirmation_default_mapping()
-        mapping.update({"성명":primary_key,"세대주 성명":primary_key,"핸드폰":primary_key})
-        make_confirm_publication(batch,mapping,out,str(template),meal_type=profile,
-            column_fallbacks={"성명":fallback,"세대주 성명":fallback,"핸드폰":fallback})
-        workbook=openpyxl.load_workbook(out)
-        placeholders=scan_placeholders(str(template),["1명"])["1명"]
-        rendered=None if expected is None else str(expected)
-        for placeholder in ("child1","carer1","phone1"):
-            row,col=placeholders[placeholder][0]
-            assert workbook["정자동"].cell(row,col).value==rendered
-    workbook.close()
+        template = settings.get_confirm_template_path(profile)
+        mapping = confirmation_default_mapping()
+        mapping.update({key: primary for key in ("성명", "세대주 성명", "핸드폰")})
+        created, _ = make_confirm_publication(batch, mapping, out, str(template), meal_type=profile,
+            column_fallbacks={key: fallback for key in ("성명", "세대주 성명", "핸드폰")})
+        assert created[0]["count_1"] == len(people)
+        placeholders = scan_placeholders(str(template), ["1명"])["1명"]
+        source = openpyxl.load_workbook(template)
+        try:
+            block_rows = source["1명"].max_row
+        finally:
+            source.close()
+        workbook = openpyxl.load_workbook(out)
+        try:
+            for index, value in enumerate(expected):
+                rendered = None if value == "" else str(value)
+                for placeholder in ("child1", "carer1", "phone1"):
+                    row, col = placeholders[placeholder][0]
+                    cell = workbook["정자동"].cell(row + index * block_rows, col)
+                    assert cell.value == rendered, f"recipient {index}: {placeholder}"
+        finally:
+            workbook.close()
+
+
+@pytest.mark.parametrize("profile", ["급식", "행복도시락"])
+@pytest.mark.parametrize("kind", ["invoice", "confirmation"])
+def test_actual_workbooks_choose_first_nonblank_per_recipient(tmp_path, profile, kind):
+    people, expected = [], []
+    for index, case in enumerate(_PRIORITY_CASES):
+        primary, secondary, value = case.values
+        person = _roster_person(f"Synthetic {index}", f"Road {index}", detail_address="Unit")
+        people.append(replace(person, household_key=f"household-{index}",
+            roster=RosterEntry(index + 2, {**person.roster.extra,
+                "custom:primary": primary, "custom:secondary": secondary})))
+        expected.append(value)
+    _assert_priority_workbook(tmp_path, profile, kind, people, expected)
+
+
+@pytest.mark.parametrize("profile", ["급식", "행복도시락"])
+@pytest.mark.parametrize("kind", ["invoice", "confirmation"])
+@pytest.mark.parametrize("priority", ["primary", "fallback"])
+def test_actual_workbooks_resolve_composed_address(tmp_path, profile, kind, priority):
+    person = _roster_person("Synthetic", "Road", detail_address="Unit")
+    person = replace(person, roster=RosterEntry(2, {**person.roster.extra,
+        "custom:primary": "  ", "custom:secondary": "wrong"}))
+    _assert_priority_workbook(tmp_path, profile, kind, (person,), ("Road Unit",),
+        primary=FULL_ADDRESS_FIELD if priority == "primary" else "custom:primary",
+        fallback=FULL_ADDRESS_FIELD if priority == "fallback" else "custom:secondary")
 
 
 def test_confirmation_aliases_use_same_priority_rule(tmp_path):

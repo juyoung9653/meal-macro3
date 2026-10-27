@@ -139,6 +139,8 @@ def test_effective_routing_address_status_enrollment_and_revision():
 
 @pytest.mark.parametrize("orientation", ["portrait", "landscape", "auto"])
 @pytest.mark.parametrize("split", ["none", "dong", "groups"])
+@pytest.mark.slow
+@pytest.mark.excel
 def test_layout_options_group_breaks_and_long_text(orientation, split):
     snapshot, _ = source(sizes=(2, 1, 1))
     data = prepare_delivery_substitute_data(snapshot, DAY, Meal.BREAKFAST)
@@ -174,6 +176,8 @@ def test_more_than_five_people_and_missing_driver_do_not_use_report_constraints(
     wb.close()
 
 
+@pytest.mark.slow
+@pytest.mark.excel
 def test_workbook_encrypts_preserves_text_and_never_overwrites(tmp_path):
     snapshot, _ = source()
     data = prepare_delivery_substitute_data(snapshot, DAY, Meal.BREAKFAST)
@@ -203,6 +207,8 @@ class Messages:
     def warning(self, *args): self.warnings.append(args)
 
 
+@pytest.mark.slow
+@pytest.mark.excel
 def test_real_generation_run_backup_restore_branch_and_gui_worker(app, session, tmp_path):
     selection = selection_for(session, tmp_path)
     gui = get_ident()
@@ -248,6 +254,8 @@ def test_real_generation_run_backup_restore_branch_and_gui_worker(app, session, 
     session.database.check_integrity()
 
 
+@pytest.mark.slow
+@pytest.mark.excel
 def test_failure_rolls_back_output_and_run_and_backup_only_failure_succeeds(app, session, tmp_path, monkeypatch):
     selection = selection_for(session, tmp_path)
     messages = Messages()
@@ -318,6 +326,8 @@ def test_schema_eight_upgrade_preserves_old_runs_and_accepts_substitute(tmp_path
             connection.execute("DELETE FROM document_run WHERE run_id = ?", (str(run.run_id),))
 
 
+@pytest.mark.slow
+@pytest.mark.excel
 def test_long_name_preserves_one_row_per_person_without_merging_names():
     snapshot, _ = source(sizes=(2,))
     data = prepare_delivery_substitute_data(snapshot, DAY, Meal.BREAKFAST)

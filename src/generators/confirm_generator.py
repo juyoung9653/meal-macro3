@@ -15,7 +15,7 @@ from ..core.invoice_data import (
 )
 from .mapping_values import resolve_mapping_value
 from ..core.settings import get_settings
-from ..excel.excel_utils import adjust_formula, build_merged_anchor_map, copy_cell
+from ..excel.excel_utils import adjust_formula, build_merged_anchor_map, copy_cell, write_literal_cell
 from ..excel.publication import WorkbookPublicationResult, publish_workbook
 from ..templates.template_scanner import scan_placeholders, validate_placeholders
 
@@ -52,9 +52,9 @@ def _set_ph(ws, ph_map, key, current_row, value, tpl_anchor_map=None):
         out_col = ph_col
         if tpl_anchor_map and (ph_row, ph_col) in tpl_anchor_map:
             ar, ac = tpl_anchor_map[(ph_row, ph_col)]
-            ws.cell(row=current_row + ar - 1, column=ac).value = value
+            write_literal_cell(ws.cell(row=current_row + ar - 1, column=ac), value)
         else:
-            ws.cell(row=out_row, column=out_col).value = value
+            write_literal_cell(ws.cell(row=out_row, column=out_col), value)
 
 
 def _pre_build_anchor_maps(wb, tpl_sheet_names: list[str]) -> dict[str, dict]:

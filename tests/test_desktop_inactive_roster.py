@@ -502,7 +502,7 @@ def test_more_menu_click_and_global_search_combine_with_header_filter(app, tmp_p
     assert "보관 기준 설정" not in {action.text() for action in menu.actions()}
     menu.popup(window._more_button.mapToGlobal(window._more_button.rect().bottomLeft()))
     app.processEvents()
-    group = next(action for action in menu.actions() if action.text() == "명단 관리")
+    group = next(action for action in menu.actions() if action.text() == "명단·파일")
     QTest.mouseMove(menu, pos=menu.actionGeometry(group).center())
     QTest.keyClick(menu, Qt.Key.Key_Right)
     app.processEvents()

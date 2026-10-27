@@ -26,7 +26,7 @@ from ..domain.document_column_sources import (
     AUTO_SEQUENCE, AUTO_BREAKFAST, AUTO_LUNCH, AUTO_DINNER, AUTO_TOTAL,
     AUTO_PRICE, AUTO_HISTORY, TEMPLATE_VALUE, invoice_output_defaults,
 )
-from ..excel.excel_utils import CENTER_ALIGN, adjust_formula, copy_style
+from ..excel.excel_utils import CENTER_ALIGN, adjust_formula, copy_style, write_literal_cell
 from ..excel.publication import WorkbookPublicationResult, publish_workbook
 from ..templates.config import (
     read_template_column_indexes,
@@ -182,7 +182,7 @@ def _fill_invoice_sheet(
             ):
                 # 비고: 명단 원본의 plain text
                 txt = str(value) if value is not None else ""
-                cell.value = txt
+                write_literal_cell(cell, txt)
                 cell.alignment = _MEMO_ALIGN
                 line_count = txt.count("\n") + 1
                 est_height = max(17, line_count * 17)
@@ -195,7 +195,11 @@ def _fill_invoice_sheet(
                 cell.alignment = CENTER_ALIGN
             else:
                 v = to_numeric(value)
-                cell.value = None if selected_sources.get(col_name) in numeric_sources and isinstance(v, (int, float)) and v == 0 else v
+                v = None if selected in numeric_sources and isinstance(v, (int, float)) and v == 0 else v
+                if selected in (AUTO_TOTAL, AUTO_PRICE):
+                    cell.value = v  # Only program-generated calculations may be formulas.
+                else:
+                    write_literal_cell(cell, v)
                 cell.alignment = CENTER_ALIGN
 
         row_idx += 1
@@ -243,7 +247,7 @@ def _write_global_note(
 
     cell = ws.cell(row=subtotal_row, column=note_col_idx)
     sample = ws.cell(row=sample_data_row, column=note_col_idx)
-    cell.value = global_note
+    write_literal_cell(cell, global_note)
     cell.font = copy(sample.font)
     cell.alignment = _MEMO_ALIGN
 

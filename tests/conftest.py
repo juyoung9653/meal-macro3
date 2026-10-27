@@ -88,3 +88,53 @@ def _isolate_roster_archive_settings(monkeypatch, tmp_path):
             str(tmp_path / 'roster-archive.ini'), settings_type.Format.IniFormat
         ),
     )
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _keep_qt_application_alive():
+    """Module-local app fixtures must not destroy Qt between GUI test modules."""
+    import sys
+
+    widgets = sys.modules.get("PySide6.QtWidgets")
+    if widgets is None:
+        yield None
+        return
+    app = widgets.QApplication.instance() or widgets.QApplication([])
+    yield app
+
+
+@pytest.fixture(autouse=True)
+def _collect_qt_objects_on_gui_thread(_keep_qt_application_alive):
+    """Release prior-test UI cycles before a later data worker can collect them."""
+    yield
+    if _keep_qt_application_alive is None:
+        return
+    import gc
+    from PySide6.QtCore import QCoreApplication, QEvent
+
+    gc.collect()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
+
+@pytest.fixture(autouse=True)
+def _require_marker_for_native_excel(request, monkeypatch):
+    """Keep the quick suite from silently acquiring a new real-Excel dependency."""
+    if request.node.get_closest_marker("excel") is not None:
+        return
+    import sys
+
+    metrics = sys.modules.get("src.excel.substitute_excel_metrics")
+    if metrics is None:
+        return
+
+    def unmarked_excel():
+        pytest.fail("Real Excel requires @pytest.mark.excel and @pytest.mark.slow")
+
+    monkeypatch.setattr(metrics, "_create_excel_application", unmarked_excel)
+
+
+def pytest_collection_modifyitems(items):
+    """A native Excel test must always be excluded by the documented quick command."""
+    for item in items:
+        if item.get_closest_marker("excel") and not item.get_closest_marker("slow"):
+            raise pytest.UsageError(f"{item.nodeid}: excel tests must also have the slow marker")
