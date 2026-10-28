@@ -329,7 +329,9 @@ def test_committed_initial_import_is_automatically_backed_up_and_restorable(
 
         assert result.succeeded
         assert result.record is not None
-        assert result.record.path != initial_backup.path
+        assert result.record.path == initial_backup.path
+        assert initial_backup.latest_revision_id is None
+        assert result.record.latest_revision_id == REVISION_ID
         assert session.database.current_roster().person(PERSON_ID).profile.name == (
             "홍길동"
         )

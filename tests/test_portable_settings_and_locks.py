@@ -227,7 +227,7 @@ def test_constructor_failure_releases_database_handle(tmp_path, monkeypatch):
     import src.storage.database_session as module
     def fail(*args, **kwargs):
         raise RuntimeError("backup initialization failure")
-    monkeypatch.setattr(module, "DatabaseBackupService", fail)
+    monkeypatch.setattr(module, "DatabaseReplicaService", fail)
     with pytest.raises(RuntimeError):
         DatabaseSession.open(path, "secret", backup_directory=tmp_path)
     with DatabaseSession.open(path, "secret"):
