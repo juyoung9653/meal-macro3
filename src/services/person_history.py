@@ -310,7 +310,12 @@ def _label(value: str) -> str:
         "road_address": "도로명주소", "detail_address": "상세주소", "driver_ids": "배송담당",
         "periods": "기간", "starts_on": "시작일", "ends_on": "종료일", "source_text": "사유",
         "status": "상태", "sequence": "배송순서", "driver": "배송담당",
-    }.get(value, value)
+    }.get(value, _history_field_label(value))
+
+
+def _history_field_label(value):
+    from .revision_history import _field_label
+    return _field_label(value)
 
 
 def _person_name(roster: RosterSnapshot, person_id: UUID | None, before: Mapping, after: Mapping) -> str:

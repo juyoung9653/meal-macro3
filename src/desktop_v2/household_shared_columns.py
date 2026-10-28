@@ -266,9 +266,10 @@ class HouseholdSharedColumnDialog(QDialog):
         note = QLabel(
             f"조회일 {service_day:%Y-%m-%d}에 같은 가구원끼리 값이 다른 가구만 표시합니다. "
             "값이 이미 같은 가구는 그대로 유지합니다. 명단 검색·숨김 조건과 관계없습니다. "
-            "공용 값을 직접 입력하고 복사·붙여넣기로 수정할 수 있습니다. 서로 다른 값은 직접 결정해야 합니다. "
+            "왼쪽 값 셀을 클릭하면 해당 공용 입력칸이 그 내용으로 바뀝니다. 직접 입력하거나 복사·붙여넣기로 수정할 수도 있습니다. "
             "저장 후 같은 가구에서 이 칼럼을 수정하면 함께 적용됩니다. 해제하면 현재 값은 유지합니다."
         )
+        self.note = note
         note.setWordWrap(True)
         layout.addWidget(note)
         controls = QHBoxLayout()
@@ -311,6 +312,10 @@ class HouseholdSharedColumnDialog(QDialog):
             current_grid = _CurrentValuesGrid(
                 components, row.member_names, row.existing_values, self.table,
             )
+            current_grid.cellClicked.connect(
+                lambda row, column, grid=current_grid, target=row_index:
+                self._use_current_value(target, grid, row, column)
+            )
             self._current_value_grids.append(current_grid)
             self.table.setCellWidget(row_index, 0, current_grid)
             for column, value in enumerate(row.values, 1):
@@ -342,6 +347,18 @@ class HouseholdSharedColumnDialog(QDialog):
         self.enabled.toggled.connect(self._update_enabled)
         self._loading = False
         self._update_enabled(enabled)
+
+    def _use_current_value(self, target_row, grid, source_row, source_column):
+        if not self.table.values_editable or source_row % 2 == 0:
+            return
+        source = grid.item(source_row, source_column)
+        if source is None:
+            return
+        item = self.table.item(target_row, source_column + 1)
+        item.setText(source.data(grid.RAW_VALUE_ROLE) or "")
+        # A clicked empty cell is also an explicit decision.
+        item.setData(Qt.ItemDataRole.UserRole, True)
+        self.table.setCurrentItem(item)
 
     def _column_resized(self, column, _old_width, _new_width):
         self._resize_review_rows()

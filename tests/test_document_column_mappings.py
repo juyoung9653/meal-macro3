@@ -56,8 +56,9 @@ def test_confirmation_explicit_empty_mapping_clears_person_field():
 def test_confirmation_address_and_jurisdiction_are_editable():
     spec = mapping_editor_spec("급식", "confirmation")
     assert spec.locked_targets == ()
-    assert {"도로명주소", "관할동"} <= set(spec.targets)
-    assert "상세주소" not in spec.targets
+    assert {"{addr}", "{dong}"} <= set(spec.targets)
+    assert spec.defaults["{addr}"] == "도로명주소"
+    assert spec.defaults["{dong}"] == "관할동"
 
 
 def test_semantic_total_prefers_normalized_exact_header_over_relationship_substring():

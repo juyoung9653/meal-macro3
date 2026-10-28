@@ -112,7 +112,7 @@ def test_person_edit_detects_projection_tamper_and_rolls_back(tmp_path, tamper_t
         assert database.revision_metadata(REVISION_ID).revision_id == REVISION_ID
 
 
-def test_backup_reuses_parent_only_within_creation_and_checks_staged_disk(tmp_path, monkeypatch):
+def test_backup_reuses_authenticated_parent_and_checks_staged_disk(tmp_path, monkeypatch):
     import src.storage.database_backup as module
     folder = tmp_path / "backups"
     folder.mkdir()
@@ -127,8 +127,8 @@ def test_backup_reuses_parent_only_within_creation_and_checks_staged_disk(tmp_pa
         monkeypatch.setattr(module, "_decode_snapshot", tracked)
         second = _save(service, session, START + timedelta(minutes=1))
         assert second.backup_kind == "incremental"
-        assert decoded.count(first.path) == 1
-        assert len(decoded) == 2  # parent and freshly read staged archive
+        assert decoded.count(first.path) == 0
+        assert len(decoded) == 1  # freshly read staged archive; parent hashes rechecked
 
         def corrupt_staged(record, key, parent):
             if record.path.suffix == ".tmp":

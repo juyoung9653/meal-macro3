@@ -146,3 +146,35 @@ def test_cell_validation_reads_only_input_rules(app):
     ).save(source.persons[0].person_id, "note", "saved")
     assert result.completed and len(saved) == 1
     assert reads == [(RULES_KIND,)]
+
+
+def test_profile_refresh_reuses_histories_but_structural_change_reloads(app, tmp_path, monkeypatch):
+    from tests.test_encrypted_database import KEY, _roster_record, _roster_snapshot
+    from src.storage.encrypted_database import EncryptedDatabase
+    source = _roster_snapshot(uuid4())
+    with EncryptedDatabase.create(tmp_path / "db.sqlite3", KEY) as database:
+        database.append_revision(_roster_record(source))
+        session = SimpleNamespace(database=database)
+        controller = DesktopStartupController.__new__(DesktopStartupController)
+        first = controller._prepare_startup(session)
+        changed = replace(
+            source, revision_id=uuid4(), persons=(replace(source.persons[0],
+                profile=replace(source.persons[0].profile, note="saved")),))
+        database.append_revision(_roster_record(changed, before=source))
+        reads = []
+        original = database.status_events
+        def tracked():
+            reads.append(True)
+            return original()
+        monkeypatch.setattr(database, "status_events", tracked)
+        second = controller._prepare_startup(session, changed)
+        assert reads == []
+        assert second.histories is first.histories
+        assert second.roster == changed and second.snapshot.revision_id == changed.revision_id
+        structural = replace(changed, revision_id=uuid4(), persons=(*changed.persons,
+            Person(uuid4(), PersonProfile("new person"))))
+        database.append_revision(_roster_record(structural, before=changed))
+        third = controller._prepare_startup(session, structural)
+        assert reads == [True]
+        assert third.histories is not second.histories
+        assert len(third.histories) > len(second.histories)

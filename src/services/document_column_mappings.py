@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from uuid import UUID
@@ -24,6 +24,7 @@ from src.domain.invoice_settings import InvoiceSettings, invoice_settings_from_s
 from src.domain.document_column_sources import INVOICE_SOURCE_LABELS, invoice_output_defaults, AUTO_HISTORY
 from src.domain.delivery_substitute import STANDARD_COLUMNS
 from src.templates.config import auto_detect_semantic_columns, get_template_sheet_name, read_template_columns
+from src.templates.confirmation_fields import AUTO_CONFIRMATION, confirmation_fields
 
 _STANDARD_SOURCES = (
     "성명", "생년월일", "학교명", "학년", "전화번호", "핸드폰", "관할동",
@@ -38,11 +39,6 @@ _SOURCE_COLUMN_KEYS = {
     "취학유형": "school_type", "세대주 성명": "household_head_name",
     "아동과의 관계": "relationship_to_child",
 }
-_CONFIRM_DEFAULTS = {
-    "도로명주소": "도로명주소", "성명": "성명",
-    "세대주 성명": "세대주 성명", "핸드폰": "핸드폰", "관할동": "관할동",
-}
-_CONFIRM_LOCKED: tuple[str, ...] = ()
 SUBSTITUTE_MEALS = ("석식", "조식", "중식")
 
 
@@ -63,6 +59,8 @@ class MappingEditorSpec:
     target_labels: Mapping[str, str]
     source_labels: Mapping[str, str]
     selectable_source_options: tuple[str, ...] | None = None
+    missing_sheets: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    template_sheets: tuple[str, ...] = ()
 
 
 def invoice_default_mapping(template_path: Path, profile: str, is_vacation_month: bool, *, history_column: str | None = None) -> dict[str, str]:
@@ -98,6 +96,14 @@ def confirmation_default_mapping() -> dict[str, str]:
     }
 
 
+def confirmation_template_fields(path, sheets, roster=None):
+    names = {source: source for source in _STANDARD_SOURCES}
+    if roster is not None:
+        for definition in roster.custom_fields:
+            names.setdefault(definition.name, f"custom:{definition.definition_id}")
+    return confirmation_fields(path, sheets, named_sources=names)
+
+
 def mapping_editor_spec(
     profile: str, document_kind: str, *, settings: SettingsManager | None = None,
     roster: RosterSnapshot | None = None,
@@ -107,6 +113,8 @@ def mapping_editor_spec(
     if profile not in ("급식", "행복도시락") or document_kind not in ("invoice", "confirmation", "substitute"):
         raise ValueError("지원하지 않는 문서 양식 또는 문서 종류입니다.")
     settings = settings or get_settings()
+    missing_sheets = {}
+    template_sheets = ()
     if document_kind == "invoice":
         path = Path(settings.get_invoice_template_path(profile)).resolve()
         defaults = invoice_default_mapping(path, profile, False, history_column=history_column)
@@ -122,9 +130,11 @@ def mapping_editor_spec(
         targets = tuple(defaults)
         locked = ()
     else:
-        defaults = confirmation_default_mapping()
-        targets = tuple(_CONFIRM_DEFAULTS)
-        locked = _CONFIRM_LOCKED
+        template_sheets = tuple(settings.get("templates", "confirm_sheet_names"))
+        defaults, missing_sheets = confirmation_template_fields(
+            settings.get_confirm_template_path(profile), template_sheets, roster)
+        targets = tuple(defaults)
+        locked = ()
     source_options = list(_STANDARD_SOURCES)
     if document_kind == "substitute":
         source_options.extend(("배송순서", "배송 형태"))
@@ -133,6 +143,9 @@ def mapping_editor_spec(
     labels = {key: key for key in source_options}
     labels["학교명"] = "학교"
     labels[FULL_ADDRESS_FIELD] = "전체 주소 (도로명주소 + 상세주소)"
+    if document_kind == "confirmation":
+        source_options.append(AUTO_CONFIRMATION)
+        labels[AUTO_CONFIRMATION] = "기존 자동 값 (제목·주차·식수 등)"
     if document_kind == "invoice":
         labels.update(INVOICE_SOURCE_LABELS)
     if roster is not None:
@@ -158,7 +171,7 @@ def mapping_editor_spec(
     labels[""] = "비움"
     selectable_sources = tuple(
         source for source in source_options
-        if not source or (document_kind == "invoice" and source in INVOICE_SOURCE_LABELS) or (
+        if not source or (document_kind == "confirmation" and source == AUTO_CONFIRMATION) or (document_kind == "invoice" and source in INVOICE_SOURCE_LABELS) or (
             (source in _SOURCE_COLUMN_KEYS or source.startswith("custom:")
              or (document_kind == "substitute" and source in ("배송순서", "배송 형태")))
             and (
@@ -185,7 +198,8 @@ def mapping_editor_spec(
             else:
                 reason = "자동 계산"
             target_labels[key] = f"{key} ({reason})"
-    return MappingEditorSpec(defaults, targets, tuple(source_options), locked, target_labels, labels, selectable_sources)
+    return MappingEditorSpec(defaults, targets, tuple(source_options), locked, target_labels, labels,
+                             selectable_sources, missing_sheets, template_sheets)
 
 
 def _template_invoice_columns(path: Path, profile: str) -> tuple[str, ...]:
@@ -220,6 +234,10 @@ def build_mapping_revision(
     spec = mapping_editor_spec(profile, document_kind, settings=settings, roster=roster,
                                history_column=invoice_settings_from_snapshot(snapshot).history_column(profile))
     editable = {key: spec.defaults[key] for key in spec.targets if key not in spec.locked_targets}
+    if document_kind == "confirmation":
+        # Older callers/settings still use semantic column names. Keep reading
+        # and saving them while the editor now exposes actual template tokens.
+        editable.update(confirmation_default_mapping())
     return _build_mapping_revision(
         current_revision_id, snapshot, profile, document_kind, desired_mapping,
         desired_fallbacks=desired_fallbacks,

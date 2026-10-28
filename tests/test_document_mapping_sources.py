@@ -26,6 +26,7 @@ from src.services.document_column_mappings import (
 from src.services.sqlite_document_service import _roster_entry
 from src.templates.config import get_template_sheet_name, read_template_columns
 from src.templates.template_scanner import scan_placeholders
+from src.templates.confirmation_fields import AUTO_CONFIRMATION
 
 
 def _roster():
@@ -101,12 +102,18 @@ def test_new_choices_only_include_roster_columns_and_clear_missing_binding(profi
     if kind == "invoice":
         from src.domain.document_column_sources import INVOICE_SOURCE_LABELS
         expected.update(INVOICE_SOURCE_LABELS)
+    else:
+        expected.add(AUTO_CONFIRMATION)
+    target = "성명" if kind == "invoice" else "{child1}"
     try:
         assert set(specs[(profile, kind)].selectable_source_options) == expected
-        for combo in (*view._combos.values(), *view._fallback_combos.values()):
+        for combo in view._combos.values():
             enabled = {combo.itemData(i) for i in range(combo.count()) if combo.model().item(i).isEnabled()}
             assert enabled == expected
-        combo = view._combos["성명"]
+        for combo in view._fallback_combos.values():
+            enabled = {combo.itemData(i) for i in range(combo.count()) if combo.model().item(i).isEnabled()}
+            assert enabled == expected - {AUTO_CONFIRMATION}
+        combo = view._combos[target]
         assert combo.currentData() == ""
         assert combo.findData("반") == -1
         assert all("기존 연결" not in combo.itemText(i) for i in range(combo.count()))
@@ -121,9 +128,11 @@ def test_new_choices_only_include_roster_columns_and_clear_missing_binding(profi
             saved_id, saved, profile, kind, view.desired_mapping(), roster=roster,
             actor=RevisionActor("tester", "synthetic"), recorded_at=datetime.now(UTC), revision_id=uuid4(),
         )
-        assert cleared.setting.overrides["성명"] == ""
+        assert cleared.setting.overrides[target] == ""
+        if kind == "confirmation":
+            assert "성명" not in cleared.setting.overrides
         # The stored household-head field is now a registered roster column.
-        head_target = next(target for target in view._combos if "세대주" in target)
+        head_target = next(key for key in view._combos if "세대주" in key) if kind == "invoice" else "{carer1}"
         head = view._combos[head_target]
         head.setCurrentIndex(head.findData("학교명"))
         view._reset_scope()
@@ -137,7 +146,7 @@ def test_new_choices_only_include_roster_columns_and_clear_missing_binding(profi
             roster=roster, actor=RevisionActor("tester", "synthetic"),
             recorded_at=datetime.now(UTC), revision_id=uuid4(),
         )
-        assert changed.setting.overrides["성명"] == "도로명주소"
+        assert changed.setting.overrides[target] == "도로명주소"
     finally:
         view.close()
 
@@ -232,13 +241,14 @@ def test_synthetic_address_is_unselectable_but_same_named_real_column_is_availab
     view = DocumentColumnMappingDialog(specs, overrides, fallbacks=fallbacks)
     view._profile_combo.setCurrentIndex(view._profile_combo.findData(profile))
     view._document_combo.setCurrentIndex(view._document_combo.findData(kind))
+    target = "성명" if kind == "invoice" else "{child1}"
     try:
         for combo in (*view._combos.values(), *view._fallback_combos.values()):
             assert combo.findData(FULL_ADDRESS_FIELD) == -1
             assert combo.findData("도로명주소") >= 0 and combo.findData("상세주소") >= 0
             assert combo.findData(f"custom:{field.definition_id}") >= 0
-        assert view.desired_mapping()["성명"] == ""
-        assert "성명" not in view.desired_fallbacks()
+        assert view.desired_mapping()[target] == ""
+        assert target not in view.desired_fallbacks()
         assert not view._dirty()
         revision_id = uuid4()
         state = {"policy_version": 2, "version": 1, "profile": profile, "document_kind": kind,
@@ -248,7 +258,9 @@ def test_synthetic_address_is_unselectable_but_same_named_real_column_is_availab
         changed = build_mapping_revision(revision_id, snapshot, profile, kind, view.desired_mapping(),
             desired_fallbacks=view.desired_fallbacks(), roster=roster, actor=RevisionActor("tester","synthetic"),
             recorded_at=datetime.now(UTC), revision_id=uuid4())
-        assert changed.setting.overrides["성명"] == ""
+        assert changed.setting.overrides[target] == ""
+        if kind == "confirmation":
+            assert "성명" not in changed.setting.overrides
         assert not changed.setting.fallbacks
         view.reject()
         assert state["overrides"]["성명"] == FULL_ADDRESS_FIELD

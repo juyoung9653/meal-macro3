@@ -195,3 +195,24 @@ def test_month_dialog_refresh_reads_latest_database_revision(app, tmp_path):
         assert dialog.summary.text().endswith("전체 0")
         assert not dialog.error.isVisible()
         dialog.close()
+
+
+
+def test_monthly_dialog_changes_date_basis_and_retains_it_across_months(app):
+    from src.desktop_v2.monthly_statistics import MonthlyStatisticsDialog
+    from src.services.monthly_meal_statistics import MealCountBasis
+    snapshot, _ = _snapshot()
+    dialog = MonthlyStatisticsDialog(date(2026, 10, 1), lambda y, m: build_monthly_meal_statistics(snapshot, y, m))
+    try:
+        assert dialog.table.item(29, 2).text() == "3"
+        assert dialog.table.horizontalHeaderItem(0).text() == "배송일"
+        dialog.basis.setCurrentIndex(dialog.basis.findData(MealCountBasis.SERVICE))
+        assert dialog.table.item(29, 2).text() == "1"
+        assert dialog.table.horizontalHeaderItem(0).text() == "식사일"
+        dialog._shift_month(1)
+        assert dialog.basis.currentData() == MealCountBasis.SERVICE
+        assert dialog.table.item(0, 2).text() == "1"
+        dialog.basis.setCurrentIndex(dialog.basis.findData(MealCountBasis.DELIVERY))
+        assert dialog.table.item(0, 2).text() == "0"
+    finally:
+        dialog.close()

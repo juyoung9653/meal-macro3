@@ -262,6 +262,7 @@ def test_password_rotation_keeps_chain_and_historical_states_restorable(tmp_path
     folder = tmp_path / "backups"
     folder.mkdir()
     with DatabaseSession.create(tmp_path / "source.sqlite3", "before", "recovery", backup_directory=folder) as session:
+        session._backup_service = DatabaseBackupService(folder)
         full = session.backup_now()
         changed = session.append_revision(_record()).record
         assert changed.backup_kind == "incremental"
@@ -330,6 +331,7 @@ def test_backup_creation_failure_keeps_existing_points_and_committed_revision(tm
     folder = tmp_path / "backups"
     folder.mkdir()
     with DatabaseSession.create(tmp_path / "source.sqlite3", "password", backup_directory=folder) as session:
+        session._backup_service = DatabaseBackupService(folder)
         first = session.backup_now()
         original = first.path.read_bytes()
         real_replace = module.os.replace

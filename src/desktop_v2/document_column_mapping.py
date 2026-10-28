@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 from src.domain.revisions import RevisionActor
 from src.domain.roster import RosterSnapshot
 from src.domain.invoice_settings import invoice_settings_from_snapshot
+from src.templates.confirmation_fields import AUTO_CONFIRMATION, placeholder_mapping
 from src.services.document_column_mappings import (
     MappingEditorSpec, build_mapping_revision, load_mapping_overrides, load_mapping_fallbacks,
     mapping_editor_spec,
@@ -85,6 +86,8 @@ class DocumentColumnMappingDialog(QDialog):
     def _initial_mapping(self, scope: tuple[str, str]) -> dict[str, str]:
         spec = self._specs[scope]
         overrides = self._overrides[scope]
+        if scope[1] == "confirmation":
+            overrides = placeholder_mapping(spec.defaults, overrides)
         selectable = spec.source_options if spec.selectable_source_options is None else spec.selectable_source_options
         return {
             key: source if source in selectable else ""
@@ -98,7 +101,10 @@ class DocumentColumnMappingDialog(QDialog):
     def _initial_fallbacks(self, scope):
         spec = self._specs[scope]
         selectable = spec.source_options if spec.selectable_source_options is None else spec.selectable_source_options
-        return {key: source for key, source in self._fallbacks.get(scope, {}).items()
+        values = self._fallbacks.get(scope, {})
+        if scope[1] == "confirmation":
+            values = placeholder_mapping({target: "" for target in spec.targets}, values)
+        return {key: source for key, source in values.items()
                 if key in spec.targets and key not in spec.locked_targets and source and source in selectable}
 
     def _dirty(self) -> bool:
@@ -148,6 +154,8 @@ class DocumentColumnMappingDialog(QDialog):
         headings = QHBoxLayout()
         for index, text in enumerate(("출력 칼럼", "1순위", "2순위 · 1순위가 비면", "연결 상태")):
             label = QLabel(text)
+            if index == 0:
+                self._target_heading = label
             label.setObjectName("editEyebrow")
             if index == 3:
                 label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
@@ -209,12 +217,17 @@ class DocumentColumnMappingDialog(QDialog):
         self._combos = {}
         self._fallback_combos = {}
         self._indicators = {}
-        self.setMinimumHeight(450)
+        self.setMinimumHeight(520 if self.document_kind == "confirmation" else 450)
         self._reset_button.setText("이 문서 초기화")
+        self._target_heading.setText("플레이스홀더" if self.document_kind == "confirmation" else "출력 칼럼")
         self._scope_note.setText(
-            "주소는 연결한 값만 출력합니다. 상세주소는 자동으로 합치지 않으며 DB 가구 묶음은 유지합니다."
+            "번호는 가구원 순서입니다. 일부 시트에만 있는 항목도 연결할 수 있습니다."
             if self.document_kind == "confirmation" else
             "식수·청구금액·연번은 자동 계산이 기본입니다. 계산값을 다른 출력 칼럼에 연결하거나 명단 항목·비움으로 바꿀 수 있습니다.")
+        self._scope_note.setToolTip(
+            "child1·phone2처럼 끝의 숫자는 가구원 순서이며, 번호 없는 명단 항목은 첫 가구원의 값을 사용합니다. "
+            "주소·관할동은 가구 공통 값이어야 하며 DB 가구 묶음은 유지합니다."
+            if self.document_kind == "confirmation" else "")
         container = QWidget()
         grid = QGridLayout(container)
         grid.setContentsMargins(2, 2, 4, 2)
@@ -224,6 +237,9 @@ class DocumentColumnMappingDialog(QDialog):
         for row, target in enumerate(spec.targets):
             label = QLabel(spec.target_labels[target])
             label.setWordWrap(True)
+            absent = spec.missing_sheets.get(target, ())
+            if absent:
+                label.setToolTip("없는 시트: " + ", ".join(absent))
             grid.addWidget(label, row, 0)
             if target in spec.locked_targets:
                 if self.document_kind == "confirmation":
@@ -254,6 +270,8 @@ class DocumentColumnMappingDialog(QDialog):
             self._combos[target] = field
             indicator = QLabel()
             indicator.setObjectName("settingsHubNote")
+            if self.document_kind == "confirmation":
+                indicator.setMinimumWidth(145)
             self._indicators[target] = indicator
             secondary = QComboBox()
             secondary.setMinimumWidth(140)
@@ -262,7 +280,7 @@ class DocumentColumnMappingDialog(QDialog):
             secondary.setAccessibleName(f"{spec.target_labels[target]} 2순위")
             secondary.addItem("사용 안 함", "")
             for source in selectable:
-                if source:
+                if source and source != AUTO_CONFIRMATION:
                     secondary.addItem(spec.source_labels[source], source)
             secondary.setCurrentIndex(secondary.findData(self._initial_fallbacks(self._scope).get(target, "")))
             secondary.currentIndexChanged.connect(self._refresh_indicators)
@@ -280,10 +298,16 @@ class DocumentColumnMappingDialog(QDialog):
         self._refresh_indicators()
 
     def _refresh_indicators(self, _index: int = 0) -> None:
-        defaults = self._specs[self._scope].defaults
+        spec = self._specs[self._scope]
+        defaults = spec.defaults
         for target, combo in self._combos.items():
             state = "별도 연결" if combo.currentData() != defaults.get(target, "") or self._fallback_combos[target].currentData() else "기본 연결"
-            self._indicators[target].setText(state)
+            absent = spec.missing_sheets.get(target, ())
+            warning = (f"\n전체 시트에 있지 않음 ({len(spec.template_sheets) - len(absent)}/{len(spec.template_sheets)})"
+                       if absent else "")
+            self._indicators[target].setText(state + warning)
+            self._indicators[target].setWordWrap(True)
+            self._indicators[target].setToolTip("없는 시트: " + ", ".join(absent) if absent else "")
             combo.setToolTip(f"{combo.currentText()} · {state}")
             secondary = self._fallback_combos[target]
             secondary.setToolTip(secondary.currentText())

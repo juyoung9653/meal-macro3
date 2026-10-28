@@ -27,7 +27,7 @@ class InvoiceSettingsDialog(QDialog):
         self.include_next_month = QCheckBox("이번 달에 묶어 배송하는 다음 달 식수 포함")
         self.include_next_month.setChecked(current.include_next_month)
         layout.addWidget(self.include_next_month)
-        guide = QLabel("월별 식수·청구서·확인서에 함께 적용합니다. 예: 10/30 배송에 포함된 11/1 조식.\n일일식수는 실제 배송할 전체 식수를 표시합니다.")
+        guide = QLabel("체크: 10/30에 배송하는 11/1 조식을 10월 청구서·확인서에 포함합니다.\n해제: 식사일 기준으로 계산해 해당 조식을 11월로 이월합니다.\n월별 식수는 보기 기준을 선택할 수 있으며, 일일식수는 실제 배송 수량을 표시합니다.")
         guide.setWordWrap(True)
         layout.addWidget(guide)
         form = QFormLayout()

@@ -12,7 +12,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6")
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QDialogButtonBox
 
 from src.desktop_v2.document_source import DocumentSourceDialog
 from src.domain.revisions import (
@@ -138,3 +138,39 @@ def test_intentional_picker_open_shows_archive_and_keeps_previous_choice(app):
     assert dialog._archive_list.currentRow() == 1
     assert dialog.selected_summary == first
     dialog.reject()
+
+
+def test_one_search_filters_code_reason_and_actor_without_selecting_hidden_row(app):
+    dialog = DocumentSourceDialog(_summaries())
+    dialog._search.setText("20260826-001 첫 명단")
+    assert dialog._archive_list.item(0).isHidden()
+    assert not dialog._archive_list.item(1).isHidden()
+    assert dialog.selected_revision_id == LATEST_ID
+    assert not dialog._buttons.button(QDialogButtonBox.StandardButton.Ok).isEnabled()
+    dialog._archive_list.setCurrentRow(1)
+    assert dialog.selected_revision_id == FIRST_ID
+    assert dialog._buttons.button(QDialogButtonBox.StandardButton.Ok).isEnabled()
+    dialog._search.setText("없는 결과")
+    assert dialog._search_result.text() == "검색 결과가 없습니다."
+    dialog._search.setText("TESTER")
+    assert all(not dialog._archive_list.item(i).isHidden() for i in range(2))
+    assert dialog.selected_revision_id == FIRST_ID
+    dialog._latest_button.click()
+    assert dialog._search.text() == ""
+    assert dialog.selected_revision_id == LATEST_ID
+    dialog.reject()
+
+
+def test_search_includes_audit_contents_from_provider(app):
+    calls = []
+    def search(text):
+        calls.append(text)
+        return {FIRST_ID}
+    dialog = DocumentSourceDialog(_summaries(), search_provider=search)
+    dialog._search.setText("바뀐 주소")
+    dialog._filter_archive()
+    assert calls == ["바뀐 주소"]
+    assert not dialog._archive_list.item(1).isHidden()
+    assert dialog._archive_list.item(0).isHidden()
+    dialog.reject()
+    assert not dialog._search_timer.isActive()

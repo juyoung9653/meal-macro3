@@ -4,13 +4,14 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QPushButton,
@@ -38,6 +39,7 @@ class DocumentSourceDialog(QDialog):
         self,
         summaries: tuple[RevisionSummary, ...],
         parent: QWidget | None = None,
+        *, search_provider=None,
     ) -> None:
         super().__init__(parent)
         values = tuple(summaries)
@@ -52,6 +54,7 @@ class DocumentSourceDialog(QDialog):
         )
         self._latest = self._summaries[0]
         self._selected = self._latest
+        self._search_provider = search_provider
 
         register_application_fonts()
         self.setObjectName("documentSourceDialog")
@@ -67,6 +70,16 @@ class DocumentSourceDialog(QDialog):
     def selected_revision_id(self) -> UUID:
         return self._selected.revision_id
 
+    def done(self, result):
+        self._search_timer.stop()
+        super().done(result)
+
+    def accept(self):
+        if self._search_timer.isActive():
+            self._filter_archive()
+        if self._buttons.button(QDialogButtonBox.StandardButton.Ok).isEnabled():
+            super().accept()
+
     @property
     def selected_summary(self) -> RevisionSummary:
         return self._selected
@@ -78,6 +91,7 @@ class DocumentSourceDialog(QDialog):
     def set_selected_summary(self, summary: RevisionSummary) -> None:
         for index, candidate in enumerate(self._summaries):
             if candidate.revision_id == summary.revision_id:
+                self._search.clear()
                 self._archive_list.setCurrentRow(index)
                 self._selected = candidate
                 self._render_selection()
@@ -125,6 +139,8 @@ class DocumentSourceDialog(QDialog):
         self._buttons.button(QDialogButtonBox.StandardButton.Ok).setObjectName(
             "primaryAction"
         )
+        for button in self._buttons.buttons():
+            button.setAutoDefault(False)
         self._buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("취소")
         self._buttons.accepted.connect(self.accept)
         self._buttons.rejected.connect(self.reject)
@@ -200,10 +216,26 @@ class DocumentSourceDialog(QDialog):
         helper.setObjectName("muted")
         helper.setWordWrap(True)
         layout.addWidget(helper)
+        self._search = QLineEdit()
+        self._search.setPlaceholderText("변경번호·변경 내용·사유·변경자 검색")
+        self._search.setAccessibleName("변경번호와 변경 내용 통합 검색")
+        self._search.setClearButtonEnabled(True)
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(180)
+        self._search_timer.timeout.connect(self._filter_archive)
+        self._search.textChanged.connect(self._queue_search)
+        self._search.returnPressed.connect(self._filter_archive)
+        layout.addWidget(self._search)
+        self._search_result = QLabel()
+        self._search_result.setObjectName("muted")
+        self._search_result.setWordWrap(True)
+        layout.addWidget(self._search_result)
         self._archive_list = QListWidget()
         self._archive_list.setObjectName("revisionArchiveList")
         self._archive_list.setAlternatingRowColors(True)
         self._archive_list.setWordWrap(True)
+        self._archive_list.setMinimumHeight(140)
         self._archive_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         for index, summary in enumerate(self._summaries):
             prefix = "최신 · " if index == 0 else ""
@@ -218,6 +250,47 @@ class DocumentSourceDialog(QDialog):
         layout.addWidget(self._archive_list, 1)
         return frame
 
+    def _queue_search(self):
+        if self._search_provider is None or not self._search.text().strip():
+            self._filter_archive()
+        else:
+            self._search_result.setText("검색 중…")
+            self._buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(False)
+            self._search_timer.start()
+
+    def _filter_archive(self):
+        self._search_timer.stop()
+        query = self._search.text().strip()
+        tokens = query.casefold().split()
+        extra = frozenset()
+        if tokens and self._search_provider is not None:
+            try:
+                extra = self._search_provider(query)
+            except Exception:
+                self._search_result.setText("변경 내용을 검색하지 못했습니다. 검색어를 지우거나 다시 입력해주세요.")
+                return
+        self._archive_list.blockSignals(True)
+        count = 0
+        try:
+            for index, summary in enumerate(self._summaries):
+                text = (f"{_archive_item_text(summary)} {summary.actor.username} "
+                        f"{summary.display_code} {summary.recorded_at.isoformat()}").casefold()
+                visible = all(token in text for token in tokens) or summary.revision_id in extra
+                self._archive_list.item(index).setHidden(not visible)
+                count += visible
+        finally:
+            self._archive_list.blockSignals(False)
+        self._search_result.setText(f"검색 결과 {count}건" if count else "검색 결과가 없습니다.")
+        self._update_accept_state()
+
+    def _update_accept_state(self):
+        if not hasattr(self, "_buttons"):
+            return
+        selected = next((self._archive_list.item(i) for i, summary in enumerate(self._summaries)
+                         if summary.revision_id == self.selected_revision_id), None)
+        self._buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(
+            selected is not None and not selected.isHidden() and not self._search_timer.isActive())
+
     def _select_archive_item(self) -> None:
         items = self._archive_list.selectedItems()
         if not items:
@@ -227,8 +300,10 @@ class DocumentSourceDialog(QDialog):
             return
         self._selected = summary
         self._render_selection()
+        self._update_accept_state()
 
     def _select_latest(self) -> None:
+        self._search.clear()
         self._archive_list.setCurrentRow(0)
         self._selected = self._latest
         self._render_selection()
@@ -240,7 +315,7 @@ class DocumentSourceDialog(QDialog):
             "변경번호 목록 닫기" if visible else "이전 변경번호 선택"
         )
         if visible:
-            self._archive_list.setFocus(Qt.FocusReason.OtherFocusReason)
+            self._search.setFocus(Qt.FocusReason.OtherFocusReason)
         self.adjustSize()
 
     def _render_selection(self) -> None:
@@ -276,7 +351,7 @@ def _summary_detail(summary: RevisionSummary) -> str:
 
 
 def _archive_item_text(summary: RevisionSummary) -> str:
-    return f"{format_revision_timestamp(summary.recorded_at)}\n{summary.reason}\n{_summary_detail(summary)}"
+    return f"{summary.display_code} · {format_revision_timestamp(summary.recorded_at)}\n{summary.reason}\n{_summary_detail(summary)}"
 
 
 def _archive_item_tooltip(summary: RevisionSummary) -> str:

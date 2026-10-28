@@ -472,6 +472,7 @@ def parse_workbook(
     cell_overrides: Mapping[tuple[int, str], object] | None = None,
     table_name: str | None = None,
     identity_by_mobile: bool = False,
+    existing_custom_fields: Sequence[CustomFieldDefinition] = (),
 ) -> WorkbookImportPreview:
     """Parse mapped cells with optional in-memory corrections."""
 
@@ -529,8 +530,9 @@ def parse_workbook(
         fingerprint = _header_fingerprint(profile.header_row, columns, header_row_count=profile.header_row_count)
         column_indexes = _resolve_profile_columns(profile, columns)
         names = custom_column_names(columns)
+        existing_definitions = {item.definition_id: item for item in existing_custom_fields}
         custom_fields = tuple(
-            CustomFieldDefinition(
+            existing_definitions[definition_id] if definition_id in existing_definitions else CustomFieldDefinition(
                 definition_id,
                 profile.custom_field_names.get(
                     definition_id, names[get_column_letter(column_indexes[token])]
@@ -559,6 +561,20 @@ def parse_workbook(
             overrides,
             end_row=selected_table.data_end_row if selected_table else None,
         )
+    from .custom_values import import_custom_value
+    invalid_custom_cells = set()
+    for row in raw:
+        for definition in custom_fields:
+            value = row.custom_values.get(definition.definition_id)
+            try:
+                parsed = import_custom_value(definition, value)
+                if definition.field_type is not CustomFieldType.TEXT:
+                    row.custom_values[definition.definition_id] = None if parsed is None else str(parsed)
+            except (ValueError, TypeError) as error:
+                token = profile.custom_field_columns[definition.definition_id]
+                issues.append(ImportIssue(row.row_number, get_column_letter(column_indexes[token]),
+                                          str(error), current_value=value or ""))
+                invalid_custom_cells.add((row.row_number, definition.definition_id))
     observations = _merge_observations(
         raw,
         source_path.name,
@@ -570,6 +586,19 @@ def parse_workbook(
         automatic_source_resolutions,
         identity_by_mobile=identity_by_mobile,
     )
+    for observation in observations:
+        for definition in custom_fields:
+            if any((row, definition.definition_id) in invalid_custom_cells for row in observation.source.row_numbers):
+                continue
+            value = observation.custom_values.get(definition.definition_id)
+            try:
+                import_custom_value(definition, value)
+            except (ValueError, TypeError) as error:
+                token = profile.custom_field_columns[definition.definition_id]
+                issues.append(ImportIssue(
+                    observation.source.row_numbers[0], get_column_letter(column_indexes[token]),
+                    str(error), current_value=value or "",
+                ))
     if not observations and not issues:
         issues.append(ImportIssue(None, None, "가져올 데이터 행이 없습니다."))
     return WorkbookImportPreview(

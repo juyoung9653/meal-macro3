@@ -123,15 +123,21 @@ def stable_import_person_ids(monkeypatch):
 class _Messages:
     critical_calls: list[tuple] = []
     warning_calls: list[tuple] = []
+    information_calls: list[tuple] = []
 
     @classmethod
     def reset(cls):
         cls.critical_calls = []
         cls.warning_calls = []
+        cls.information_calls = []
 
     @classmethod
     def critical(cls, *args):
         cls.critical_calls.append(args)
+
+    @classmethod
+    def information(cls, *args):
+        cls.information_calls.append(args)
 
     @classmethod
     def warning(cls, *args):
@@ -291,6 +297,18 @@ _AcceptedFollowupReview = _AcceptedReview
 _AcceptedMatchedFollowupReview = _AcceptedReview
 
 
+class _AcceptedImportValues:
+    def __init__(self, current, result, plan, parent):
+        from src.importing.values import import_value_rows
+        self.rows = import_value_rows(current, result, plan)
+
+    def exec(self):
+        return QDialog.DialogCode.Accepted
+
+    def choices(self):
+        return {row.key: row.proposed for row in self.rows if not row.automatic}
+
+
 class _AcceptedProfileEditDialog:
     def __init__(self, person, parent=None, *, message_box=None):
         self._profile = replace(
@@ -428,7 +446,7 @@ def test_clean_import_skips_review_and_commits_first_revision_and_backup(
     assert len(outcome.roster.households) == 1
     assert outcome.roster.memberships[0].person_id == PERSON_ID
     assert outcome.backup_result is not None and outcome.backup_result.succeeded
-    assert len(tuple((tmp_path / "backups").glob("*.mealbackup"))) == 2
+    assert len(tuple((tmp_path / "backups").glob("*.mealreplica"))) == 1
     assert _Messages.critical_calls == []
     assert _Messages.warning_calls == []
     latest = session.database.latest_revision()
@@ -440,7 +458,7 @@ def test_clean_import_skips_review_and_commits_first_revision_and_backup(
 
 
 @pytest.mark.parametrize("needs_correction", [False, True])
-def test_real_wizard_direct_import_persists_once_and_rejects_duplicate_source(
+def test_real_wizard_direct_import_persists_once_and_skips_unchanged_source(
     app, tmp_path, monkeypatch, needs_correction,
 ):
     _Messages.reset()
@@ -495,14 +513,15 @@ def test_real_wizard_direct_import_persists_once_and_rejects_duplicate_source(
                 assert outcome.completed, _Messages.critical_calls
                 assert outcome.backup_result.succeeded
             else:
-                assert outcome.status is GuidedImportStatus.FAILED
+                assert outcome.completed
+                assert outcome.backup_result is None
             assert len(writes) == 1
             roster = session.database.current_roster()
             assert len(roster.persons) == 1
             assert roster.persons[0].person_id == PERSON_ID
             assert writes[-1].metadata.effective_on == date(2026, 8, 17)
-        assert len(_Messages.critical_calls) == 1
-        assert "변경되는 내용이 없습니다" in _Messages.critical_calls[0][-1]
+        assert _Messages.critical_calls == []
+        assert "변경할 내용이 없어" in _Messages.information_calls[0][-1]
         assert _Messages.warning_calls == []
 
 
@@ -571,7 +590,7 @@ def test_later_import_joins_existing_household_and_backup_restores_it(
     )
     assert later.backup_result is not None and later.backup_result.succeeded
     backup_path = later.backup_result.record.path
-    assert len(tuple((tmp_path / "backups").glob("*.mealbackup"))) == 3
+    assert len(tuple((tmp_path / "backups").glob("*.mealreplica"))) == 1
     session.close()
 
     with DatabaseSession.restore_and_open_with_user_password(
@@ -614,6 +633,7 @@ def test_later_mapped_blanks_preserve_profile_through_backup_restore(
             )
         ),
         review_type=_AcceptedMatchedFollowupReview,
+        import_value_review_type=_AcceptedImportValues,
         actor_provider=lambda: RevisionActor("tester", "S-1-5-21-test"),
         message_box=_Messages,
     ).run()
@@ -701,7 +721,7 @@ def test_direct_profile_edit_can_clear_values_and_backup_restores_revision(
     )
     assert edited.backup_result is not None and edited.backup_result.succeeded
     backup_path = edited.backup_result.record.path
-    assert len(tuple((tmp_path / "backups").glob("*.mealbackup"))) == 3
+    assert len(tuple((tmp_path / "backups").glob("*.mealreplica"))) == 1
     assert _Messages.critical_calls == []
     assert _Messages.warning_calls == []
     session.close()
@@ -793,7 +813,7 @@ def test_multi_meal_delivery_auto_enrolls_and_backup_restores_events(
     ).events[0].event_id == LUNCH_STATUS_EVENT_ID
     assert changed.backup_result is not None and changed.backup_result.succeeded
     backup_path = changed.backup_result.record.path
-    assert len(tuple((tmp_path / "backups").glob("*.mealbackup"))) == 4
+    assert len(tuple((tmp_path / "backups").glob("*.mealreplica"))) == 1
     assert _Messages.critical_calls == []
     assert _Messages.warning_calls == []
     session.close()

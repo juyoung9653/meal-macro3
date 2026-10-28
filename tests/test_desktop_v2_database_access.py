@@ -32,7 +32,7 @@ from src.storage.database_session import (
 )
 from src.storage.database_credentials import credential_path_for
 from src.storage.database_backup import inspect_backup
-from src.storage.database_backup import DatabaseBackupService
+from src.storage.database_replica import DatabaseReplicaService
 from tests.test_database_backup import REVISION_ID, _record
 
 
@@ -86,7 +86,7 @@ def test_first_setup_creates_db_initial_backup_and_path_only_settings(
     assert dialog.backup_result.succeeded
     assert settings.database_path == database_path.resolve()
     assert settings.backup_directory == backup_directory.resolve()
-    assert len(tuple(backup_directory.glob("*.mealbackup"))) == 1
+    assert len(tuple(backup_directory.glob("*.mealreplica"))) == 1
     settings_text = settings_file.read_text(encoding="utf-8")
     assert "everyday-password" not in settings_text
     assert "institution-recovery" not in settings_text
@@ -133,13 +133,13 @@ def test_backup_folder_change_verifies_first_backup_and_switches_live_session(ap
     settings = _settings(settings_file)
     settings.save_paths(source, old_folder)
     prune_calls = []
-    original_create = DatabaseBackupService.create_backup
+    original_create = DatabaseReplicaService.create_backup
 
     def recording_create(self, *args, **kwargs):
         prune_calls.append((self.directory, kwargs.get("prune", True)))
         return original_create(self, *args, **kwargs)
 
-    monkeypatch.setattr(DatabaseBackupService, "create_backup", recording_create)
+    monkeypatch.setattr(DatabaseReplicaService, "create_backup", recording_create)
     with DatabaseSession.create(source, "password", backup_directory=old_folder) as session:
         old_archive = session.backup_now().path
         old_hash = hashlib.sha256(old_archive.read_bytes()).digest()
@@ -150,14 +150,14 @@ def test_backup_folder_change_verifies_first_backup_and_switches_live_session(ap
         dialog._submit()
         assert dialog.result() == QDialog.DialogCode.Accepted
         assert session.backup_directory == new_folder.resolve()
-        first_new = tuple(new_folder.glob("*.mealbackup"))
+        first_new = tuple(new_folder.glob("*.mealreplica"))
         assert len(first_new) == 1
         assert inspect_backup(first_new[0]).path == first_new[0]
         assert (new_folder.resolve(), False) in prune_calls
         session.backup_now()
-        assert len(tuple(new_folder.glob("*.mealbackup"))) == 2
+        assert len(tuple(new_folder.glob("*.mealreplica"))) == 1
         assert hashlib.sha256(old_archive.read_bytes()).digest() == old_hash
-        assert tuple(old_folder.glob("*.mealbackup")) == (old_archive,)
+        assert tuple(old_folder.glob("*.mealreplica")) == (old_archive,)
 
     assert settings.database_path == source.resolve()
     assert _settings(settings_file).backup_directory == new_folder.resolve()
@@ -175,14 +175,14 @@ def test_backup_folder_cancel_same_path_and_invalid_paths_are_noops(app, tmp_pat
         dialog = BackupDirectoryDialog(session, settings)
         dialog.backup_directory_edit.setText(str(tmp_path / "unused"))
         dialog.reject()
-        assert not tuple(folder.glob("*.mealbackup"))
+        assert not tuple(folder.glob("*.mealreplica"))
         assert session.backup_directory == folder.resolve()
 
         dialog = BackupDirectoryDialog(session, settings)
         dialog.backup_directory_edit.setText(str(folder).upper())
         dialog._submit()
         assert dialog.result() == QDialog.DialogCode.Accepted
-        assert not tuple(folder.glob("*.mealbackup"))
+        assert not tuple(folder.glob("*.mealreplica"))
 
         for invalid in ("", str(tmp_path / "missing"), str(source)):
             dialog = BackupDirectoryDialog(session, settings)
@@ -202,14 +202,14 @@ def test_backup_folder_write_failure_keeps_previous_location(app, tmp_path, monk
     new_folder.mkdir()
     settings = _settings(tmp_path / "settings.ini")
     settings.save_paths(source, old_folder)
-    original_create = DatabaseBackupService.create_backup
+    original_create = DatabaseReplicaService.create_backup
 
     def refuse_new(self, *args, **kwargs):
         if self.directory == new_folder.resolve():
             raise PermissionError("access denied")
         return original_create(self, *args, **kwargs)
 
-    monkeypatch.setattr(DatabaseBackupService, "create_backup", refuse_new)
+    monkeypatch.setattr(DatabaseReplicaService, "create_backup", refuse_new)
     with DatabaseSession.create(source, "password", backup_directory=old_folder) as session:
         dialog = BackupDirectoryDialog(session, settings)
         dialog.backup_directory_edit.setText(str(new_folder))
@@ -270,7 +270,7 @@ def test_backup_folder_settings_failure_rolls_back_without_switching(app, tmp_pa
         assert settings.database_path == source.resolve()
         assert session.backup_directory == old_folder.resolve()
         session.backup_now()
-        assert len(tuple(old_folder.glob("*.mealbackup"))) == 1
+        assert len(tuple(old_folder.glob("*.mealreplica"))) == 1
 
 
 def test_operating_password_change_reopens_and_restores_new_backup(app, tmp_path):
@@ -309,7 +309,7 @@ def test_operating_password_change_invalid_cancel_and_noop_leave_files_untouched
     backups.mkdir()
     with DatabaseSession.create(path, "current-password", backup_directory=backups) as session:
         before = credential_path_for(path).read_bytes()
-        backup_count = len(tuple(backups.glob("*.mealbackup")))
+        backup_count = len(tuple(backups.glob("*.mealreplica")))
         for current, new, confirmation in (
             ("wrong-password", "new-password", "new-password"),
             ("wrong-password", "wrong-password", "wrong-password"),
@@ -337,7 +337,7 @@ def test_operating_password_change_invalid_cancel_and_noop_leave_files_untouched
         assert not dialog.password_changed
         assert not dialog.backup_result.attempted
         assert credential_path_for(path).read_bytes() == before
-        assert len(tuple(backups.glob("*.mealbackup"))) == backup_count
+        assert len(tuple(backups.glob("*.mealreplica"))) == backup_count
 
 
 def test_operating_password_backup_failure_still_changes_password(app, tmp_path, monkeypatch):

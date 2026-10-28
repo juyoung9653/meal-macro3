@@ -33,6 +33,7 @@ _FORMAT = "meal-delivery-v2-backup"
 _VERSION = 1
 _SNAPSHOT_VERSION = 2
 FULL_BACKUP_INTERVAL = timedelta(days=7)
+MAX_INCREMENTAL_CHAIN = 32
 _DATABASE_MEMBER = "database.sqlite3"
 _CREDENTIAL_MEMBER = "credentials.json"
 _MANIFEST_MEMBER = "manifest.json"
@@ -87,6 +88,7 @@ class BackupRecord:
     full_created_at: datetime | None = None
     snapshot_size: int | None = None
     snapshot_sha256: str | None = None
+    authenticated_manifest_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -113,6 +115,11 @@ class DatabaseBackupService:
         ):
             raise ValueError("백업 보관 개수는 1 이상의 정수 또는 None이어야 합니다.")
         self._max_backups = max_backups
+        self._snapshot_cache = None
+
+    def clear_cache(self) -> None:
+        """Release the one plaintext in-memory image when its session ends."""
+        self._snapshot_cache = None
 
     @property
     def directory(self) -> Path:
@@ -156,7 +163,7 @@ class DatabaseBackupService:
 
         snapshot = database.snapshot_bytes()
         latest_revision_id = database.latest_revision_id()
-        compressed = backup_snapshot.compress_full(snapshot)
+        compressed = None
         parent = None
         previous_snapshot = None
         verified_chain = ()
@@ -171,13 +178,27 @@ class DatabaseBackupService:
                     and predecessor.full_created_at is not None
                     and timestamp - predecessor.full_created_at < FULL_BACKUP_INTERVAL):
                 try:
-                    previous_snapshot = _reconstruct_snapshot(predecessor, database_key, records=records)
-                    delta = backup_snapshot.compress_delta(previous_snapshot, snapshot)
-                    if len(delta) < len(compressed):
-                        compressed, parent = delta, predecessor
-                        verified_chain = _snapshot_chain(predecessor, records=records)
+                    chain = _snapshot_chain(predecessor, records=records)
+                    if len(chain) < MAX_INCREMENTAL_CHAIN:
+                        cached = self._snapshot_cache
+                        key_digest = hashlib.sha256(database_key).digest()
+                        # list_backups freshly hashes disk payloads and manifests.
+                        # Reuse decoded bytes only for that identical authenticated
+                        # chain; size/mtime alone must never authorize this cache.
+                        if cached is not None and cached[:2] == (key_digest, chain):
+                            previous_snapshot = cached[2]
+                        else:
+                            previous_snapshot = _reconstruct_snapshot(predecessor, database_key, records=records)
+                        delta = backup_snapshot.compress_delta(previous_snapshot, snapshot)
+                        if len(delta) > max(4096, len(snapshot) // 100):
+                            compressed = backup_snapshot.compress_full(snapshot)
+                        if compressed is None or len(delta) < len(compressed):
+                            compressed, parent = delta, predecessor
+                            verified_chain = chain
                 except (BackupFormatError, BackupIntegrityError, OSError):
                     logger.warning("이전 백업을 검증할 수 없어 전체 백업을 생성합니다: %s", predecessor.path)
+        if compressed is None:
+            compressed = backup_snapshot.compress_full(snapshot)
         backup_id = uuid4()
         credential_payload = credentials.to_bytes()
         manifest = {
@@ -228,6 +249,8 @@ class DatabaseBackupService:
             temporary_archive.unlink(missing_ok=True)
 
         record = replace(staged_record, path=final_path)
+        self._snapshot_cache = (hashlib.sha256(database_key).digest(),
+                                (*verified_chain, record), snapshot)
         if prune:
             try:
                 self.prune_backups(record.database_id, protected_path=record.path)
@@ -364,6 +387,9 @@ class DatabaseBackupService:
 
 
 def inspect_backup(path: str | Path) -> BackupRecord:
+    from .database_replica import REPLICA_EXTENSION, inspect_replica
+    if Path(path).suffix.casefold() == REPLICA_EXTENSION:
+        return inspect_replica(path)
     return _inspect_backup(path, verify_credentials=True)
 
 
@@ -440,12 +466,18 @@ def _inspect_backup(path: str | Path, *, verify_credentials: bool) -> BackupReco
         full_created_at=manifest.get("full_created_at"),
         snapshot_size=manifest.get("snapshot_size"),
         snapshot_sha256=manifest.get("snapshot_sha256"),
+        authenticated_manifest_sha256=(
+            hashlib.sha256(backup_snapshot._aad(json.loads(manifest_payload))).hexdigest()
+            if manifest["version"] == 2 else None
+        ),
     )
 
 
 def backup_has_recovery_password(path: str | Path) -> bool:
     """Check whether a validated backup contains a legacy recovery key slot."""
     record = inspect_backup(path)
+    if record.format_version == 3:
+        return DatabaseCredentials.load(record.path).recovery_slot is not None
     with zipfile.ZipFile(record.path, mode="r") as archive:
         payload = _read_small_member(archive, _CREDENTIAL_MEMBER, _MAX_CREDENTIAL_BYTES)
     return DatabaseCredentials.from_bytes(payload).recovery_slot is not None
@@ -682,6 +714,10 @@ def _restore_backup(
     use_recovery: bool,
     _lock: ExclusiveFileLock | None = None,
 ) -> Path:
+    from .database_replica import REPLICA_EXTENSION, restore_replica
+    if Path(backup_path).suffix.casefold() == REPLICA_EXTENSION:
+        return restore_replica(backup_path, destination_database_path, password,
+            use_recovery=use_recovery, new_user_password=new_user_password, _lock=_lock)
     owned = _lock is None
     lock = _lock if _lock is not None else database_lock(destination_database_path).acquire()
     try:

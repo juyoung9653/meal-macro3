@@ -45,6 +45,10 @@ class PreparedImportRevision:
     stored_household_rule: StoredHouseholdMatchingRule | None
 
 
+class NoImportChanges(ValueError):
+    """The confirmed import leaves both data and settings unchanged."""
+
+
 class ImportPurpose(StrEnum):
     DATABASE = "database"
     VACATION_LUNCH = "vacation_lunch"
@@ -68,6 +72,7 @@ def build_import_revision(
     purpose: ImportPurpose = ImportPurpose.DATABASE,
     lunch_status_events: tuple[StatusEvent, ...] = (),
     lunch_value_choices: Mapping | None = None,
+    value_choices: Mapping | None = None,
 ) -> PreparedImportRevision:
     """Apply reviewed identities, households, and rules in the same commit."""
 
@@ -127,6 +132,9 @@ def build_import_revision(
             current_roster, result, preview, plan, revision_id,
             recorded_at, tuple(lunch_status_events), lunch_value_choices,
         )
+    elif current_roster is not None:
+        from .values import apply_import_values
+        result = apply_import_values(current_roster, result, plan, value_choices)
     if current_roster is None and not result.snapshot.persons:
         raise ValueError("최초 명단에서는 한 명 이상을 추가해야 합니다.")
 
@@ -164,7 +172,7 @@ def build_import_revision(
     if household_rule_change is not None:
         changes = (*changes, household_rule_change)
     if not changes:
-        raise ValueError("이번 가져오기로 변경되는 내용이 없습니다.")
+        raise NoImportChanges("이번 가져오기로 변경되는 내용이 없습니다.")
 
     observation_sources = {
         str(observation.observation_id): {

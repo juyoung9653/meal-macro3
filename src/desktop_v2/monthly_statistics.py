@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QPushButton, QSpinBox, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
-from src.services.monthly_meal_statistics import MonthlyMealStatistics
+from src.services.monthly_meal_statistics import MealCountBasis, MonthlyMealStatistics
 from .theme import application_stylesheet, register_application_fonts
 
 
@@ -32,9 +32,19 @@ class MonthlyStatisticsDialog(QDialog):
         title.setObjectName("workspaceTitle")
         root.addWidget(title)
         title.setVisible(not embedded)
-        scope = QLabel("실제 배송일 기준 · 전체 명단")
-        scope.setObjectName("workspaceSubtitle")
-        root.addWidget(scope)
+        self.scope = QLabel("전체 명단 · 선택한 날짜 기준으로 식수를 표시합니다.")
+        self.scope.setObjectName("workspaceSubtitle")
+        root.addWidget(self.scope)
+        basis_row = QHBoxLayout()
+        basis_row.addWidget(QLabel("보기 기준"))
+        self.basis = QComboBox()
+        self.basis.setAccessibleName("월별 식수 보기 기준")
+        self.basis.addItem("실제 배송일 기준 (나가는 날)", MealCountBasis.DELIVERY)
+        self.basis.addItem("식사일 기준", MealCountBasis.SERVICE)
+        self.basis.setToolTip("10/30 배송의 11/1 조식: 실제 배송일 기준은 10/30, 식사일 기준은 11/1에 표시합니다.")
+        basis_row.addWidget(self.basis)
+        basis_row.addStretch(1)
+        root.addLayout(basis_row)
         period = QHBoxLayout()
         previous = QPushButton("이전 달")
         previous.setObjectName("quietAction")
@@ -67,6 +77,7 @@ class MonthlyStatisticsDialog(QDialog):
         period_host.setVisible(not embedded)
         self.year.valueChanged.connect(self.refresh)
         self.month.currentIndexChanged.connect(self.refresh)
+        self.basis.currentIndexChanged.connect(self.refresh)
         self.error = QLabel()
         self.error.setObjectName("errorMessage")
         self.error.setWordWrap(True)
@@ -123,13 +134,17 @@ class MonthlyStatisticsDialog(QDialog):
             self.error.show()
             return
         self.error.hide()
+        result = result.for_basis(self.basis.currentData())
+        self.scope.setText(self.basis.currentText() + " · 전체 명단")
+        self.table.setHorizontalHeaderItem(0, QTableWidgetItem("배송일" if result.basis is MealCountBasis.DELIVERY else "식사일"))
         self.table.setRowCount(len(result.days) + 1)
         for row, item in enumerate(result.days):
             self._set_row(row, (item.day.isoformat(), item.dinner, item.breakfast, item.lunch, item.total))
         self._set_row(len(result.days), ("월 합계", result.dinner_total, result.breakfast_total, result.lunch_total, result.total))
         self.summary.setText(f"월 합계  석식 {result.dinner_total:,} · 조식 {result.breakfast_total:,} · 중식 {result.lunch_total:,} · 전체 {result.total:,}")
-        next_month = "포함" if result.include_next_month else "제외"
-        self.revision_note.setText(f"다음 달 식수 {next_month} · 설정 → 식수·청구서 설정에서 변경\n조회 당시 최신 운영 데이터 기준 · 새로고침으로 변경 내용을 반영합니다")
+        billing = "배송한 달에 포함" if result.include_next_month else "식사하는 달로 이월"
+        self.revision_note.setWordWrap(True)
+        self.revision_note.setText(f"청구서·확인서의 다음 달 식수: {billing} · 설정 → 식수·청구서 설정에서 변경\n이 화면은 선택한 보기 기준으로 계산합니다. 조회 당시 최신 운영 데이터 기준입니다.")
 
     def _set_row(self, row: int, values) -> None:
         for column, value in enumerate(values):

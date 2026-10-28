@@ -5,7 +5,7 @@ from __future__ import annotations
 from .dialog_workflow import DialogRequest, dialog_workflow, invoke, launch
 
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 
 from PySide6.QtWidgets import QDialog, QMessageBox, QWidget
@@ -16,7 +16,8 @@ from src.domain.delivery_routing import (
 from src.domain.roster import Meal
 from src.domain.status import resolve_status_history
 from src.domain.pause_conversion import PAUSE_CONVERSION_KIND, pause_conversion_from_snapshot
-from src.domain.revisions import format_revision_timestamp
+from src.domain.revisions import ChangeOperation, format_revision_timestamp
+from src.domain.projections import PERSON_KIND
 from src.domain.school_calendar import SCHOOL_LUNCH_SCHEDULE_KIND, school_lunch_calendar_from_snapshot
 from src.domain.service_adjustments import SERVICE_ADJUSTMENT_SCHEDULE_KIND, service_adjustment_schedule_from_snapshot
 from src.domain.household_shared import HOUSEHOLD_SHARED_KIND
@@ -837,6 +838,11 @@ class DesktopStartupController:
                     continue
                 if period_result == DocumentPeriodDialog.REVISION_SELECTION_REQUESTED:
                     source = self._document_source_dialog_type(summaries, parent=window)
+                    if isinstance(source, DocumentSourceDialog) and hasattr(session.database, "search_revision_ids"):
+                        source._search_provider = lambda text: run_progress_task(
+                            lambda: session.database.search_revision_ids(text),
+                            title="변경 이력을 검색하는 중입니다",
+                            message="변경번호와 변경 내용을 확인합니다.", parent=source)
                     selection_setter = getattr(source, "set_selected_summary", None)
                     if callable(selection_setter):
                         selection_setter(period.request.source)
@@ -1568,6 +1574,22 @@ class DesktopStartupController:
             roster = session.database.current_roster()
         if roster is None:
             return None
+        previous_session, previous = getattr(self, "_last_preparation", (None, None))
+        record = getattr(session.database, "last_committed_record", None)
+        if (previous_session is session and previous is not None and record is not None
+                and record.metadata.revision_id == roster.revision_id
+                and record.metadata.parent_revision_id == previous.roster.revision_id
+                and all(change.entity_kind == PERSON_KIND
+                        and change.operation is ChangeOperation.UPDATE for change in record.changes)):
+            # Profile corrections do not alter schedules, input rules or meal
+            # status histories. The table already refreshes only changed people.
+            prepared = replace(
+                previous, roster=roster,
+                snapshot=replace(previous.snapshot, revision_id=roster.revision_id),
+                revision_display_code=self._revision_display_code(session, roster),
+            )
+            self._last_preparation = (session, prepared)
+            return prepared
         read_kinds = getattr(session.database, "snapshot_for_kinds", None)
         snapshot = (
             read_kinds(roster.revision_id, (
@@ -1578,7 +1600,7 @@ class DesktopStartupController:
             if callable(read_kinds) else session.database.snapshot(roster.revision_id)
         )
         profiles = import_profiles_from_snapshot(snapshot)
-        return _StartupPreparation(
+        prepared = _StartupPreparation(
             roster=roster,
             histories=self._histories(session, roster, snapshot),
             revision_display_code=self._revision_display_code(session, roster),
@@ -1589,6 +1611,8 @@ class DesktopStartupController:
             ),
             snapshot=snapshot,
         )
+        self._last_preparation = (session, prepared)
+        return prepared
 
     @staticmethod
     def _revision_display_code(session: DatabaseSession, roster) -> str:

@@ -13,10 +13,10 @@ from src.domain.revisions import RevisionRecord
 from .database_backup import (
     BackupPasswordRotation,
     BackupRecord,
-    DatabaseBackupService,
     restore_backup_with_recovery_password,
     restore_backup_with_user_password,
 )
+from .database_replica import DatabaseReplicaService, ReplicaBackupRecord
 from .database_credentials import (
     CredentialAlreadyExistsError,
     CredentialFormatError,
@@ -34,7 +34,7 @@ _DATABASE_KEY_BYTES = 32
 class AutomaticBackupResult:
     """A DB change has succeeded; this separately reports its backup outcome."""
 
-    record: BackupRecord | None = None
+    record: BackupRecord | ReplicaBackupRecord | None = None
     error: Exception | None = None
     rotation: BackupPasswordRotation | None = None
     rotation_error: Exception | None = None
@@ -77,7 +77,7 @@ class DatabaseSession:
         self._backup_service = (
             None
             if backup_directory is None
-            else DatabaseBackupService(backup_directory)
+            else DatabaseReplicaService(backup_directory)
         )
         self._closed = False
         self.last_committed_roster = None
@@ -308,7 +308,7 @@ class DatabaseSession:
         self._database.append_document_run(run)
         return self.try_backup_now()
 
-    def backup_now(self) -> BackupRecord:
+    def backup_now(self) -> ReplicaBackupRecord:
         self._require_open()
         if self._backup_service is None:
             raise RuntimeError("자동 백업 폴더가 설정되지 않았습니다.")
@@ -319,19 +319,27 @@ class DatabaseSession:
             self._key_bytes(),
         )
 
-    def prepare_backup_directory(self, directory: str | Path) -> DatabaseBackupService:
+    def prepare_backup_directory(self, directory: str | Path) -> DatabaseReplicaService:
         """Verify a candidate service with a backup before it becomes active."""
         self._require_open()
-        replacement = DatabaseBackupService(directory)
+        replacement = DatabaseReplicaService(directory)
         credentials = DatabaseCredentials.load(self.path)
-        replacement.create_backup(
-            self._database, credentials, self._key_bytes(), prune=False,
-        )
+        try:
+            replacement.create_backup(
+                self._database, credentials, self._key_bytes(), prune=False,
+            )
+        except BaseException:
+            replacement.clear_cache()
+            raise
+        replacement.clear_cache()
         return replacement
 
-    def activate_backup_directory(self, replacement: DatabaseBackupService) -> None:
+    def activate_backup_directory(self, replacement: DatabaseReplicaService) -> None:
         """Activate a service already checked by prepare_backup_directory."""
+        previous = self._backup_service
         self._backup_service = replacement
+        if previous is not None and previous is not replacement:
+            previous.clear_cache()
 
     def try_backup_now(self) -> AutomaticBackupResult:
         self._require_open()
@@ -383,6 +391,8 @@ class DatabaseSession:
         try:
             self._database.close()
         finally:
+            if self._backup_service is not None:
+                self._backup_service.clear_cache()
             for index in range(len(self._database_key)):
                 self._database_key[index] = 0
             self._closed = True

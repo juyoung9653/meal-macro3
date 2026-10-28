@@ -252,3 +252,20 @@ def _validate_cell_value(value):
 
 def _kst(value):
     return value.astimezone(_KST).replace(tzinfo=None) if value.tzinfo else value.replace(tzinfo=None)
+
+
+
+def build_complaints_workbook(headings, rows):
+    """Export the visible complaint rows, preserving literal text and dates."""
+    book = Workbook()
+    book.remove(book.active)
+    try:
+        sheet = _add_table(book, "민원", headings, rows)
+        for row in sheet.iter_rows(min_row=2):
+            row[0].number_format = "yyyy-mm-dd"
+        sheet.column_dimensions["E"].width = 65
+        sheet.column_dimensions["G"].width = 24
+        return book
+    except Exception:
+        book.close()
+        raise

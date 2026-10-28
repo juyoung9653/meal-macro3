@@ -13,10 +13,13 @@ def display(value):
 
 
 class LunchValueReviewDialog(QDialog):
+    _rows_for = staticmethod(lunch_value_rows)
+    _apply_values = staticmethod(apply_lunch_values)
+
     def __init__(self, current, result, plan, parent=None):
         super().__init__(parent)
         self._current, self._result, self._plan = current, result, plan
-        self.rows = lunch_value_rows(current, result, plan)
+        self.rows = self._rows_for(current, result, plan)
         self._choices = {}
         register_application_fonts()
         self.setStyleSheet(application_stylesheet())
@@ -30,6 +33,7 @@ class LunchValueReviewDialog(QDialog):
             "같은 단계의 다른 학교나 판단하기 어려운 값은 직접 확인합니다.\n"
             "가져온 값이 빈칸이면 기존 값을 제안합니다. 반영할 값을 지우면 해당 값을 비웁니다."
         )
+        self.guide = guide
         guide.setWordWrap(True)
         layout.addWidget(guide)
         tools = QHBoxLayout()
@@ -90,7 +94,7 @@ class LunchValueReviewDialog(QDialog):
                     choices[row.key] = row.parse(self.table.item(index, 4).text())
                 except (ValueError, TypeError) as error:
                     raise ValueError(f"{row.name} · {row.label}: {error}") from error
-            persons, _ = apply_lunch_values(self._current, self._result, self._plan, choices)
+            persons, _ = self._apply_values(self._current, self._result, self._plan, choices)
             definitions = {d.definition_id: d for d in self._result.snapshot.custom_fields}
             for person in persons:
                 for key, value in person.profile.custom_values.items():

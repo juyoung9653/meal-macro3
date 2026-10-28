@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from calendar import monthrange
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, timedelta
 from uuid import UUID
+from enum import StrEnum
 
 from src.domain.revisions import HistoricalSnapshot
 from src.domain.roster import Meal
@@ -13,6 +14,11 @@ from src.domain.invoice_settings import invoice_settings_from_snapshot
 from src.services.sqlite_delivery_report_service import prepare_physical_delivery_data
 
 MEALS = (Meal.DINNER, Meal.BREAKFAST, Meal.LUNCH)
+
+
+class MealCountBasis(StrEnum):
+    DELIVERY = "delivery"
+    SERVICE = "service"
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,6 +43,19 @@ class MonthlyMealStatistics:
     breakfast_total: int
     lunch_total: int
     include_next_month: bool = True
+    basis: MealCountBasis = MealCountBasis.DELIVERY
+    delivery_days: tuple[MonthlyMealDay, ...] = ()
+    service_days: tuple[MonthlyMealDay, ...] = ()
+
+    def for_basis(self, basis):
+        basis = MealCountBasis(basis)
+        days = self.delivery_days if basis is MealCountBasis.DELIVERY else self.service_days
+        if not days:
+            days = self.days
+        return replace(self, days=days, basis=basis,
+                       dinner_total=sum(item.dinner for item in days),
+                       breakfast_total=sum(item.breakfast for item in days),
+                       lunch_total=sum(item.lunch for item in days))
 
     @property
     def total(self) -> int:
@@ -52,31 +71,27 @@ def build_monthly_meal_statistics(snapshot: HistoricalSnapshot, year: int, month
     start = date(year, month, 1)
     end = start + timedelta(days=monthrange(year, month)[1] - 1)
     physical = prepare_physical_delivery_data(
-        snapshot, start, end, MEALS, missing_lunch_schedule_as_zero=True,
+        snapshot, start, end, MEALS, missing_lunch_schedule_as_zero=True, include_service_period=True,
     )
-    counts: dict[date, dict[Meal, int]] = {}
+    counts = {basis: {} for basis in MealCountBasis}
     policy = invoice_settings_from_snapshot(snapshot)
     for shipment in physical.shipments:
-        # The source also includes earlier comparison shipments. Never count those.
-        if not start <= shipment.delivery_on <= end:
-            continue
-        by_meal = counts.setdefault(shipment.delivery_on, {})
-        amount = sum(policy.include_next_month or service_on <= end for service_on in shipment.service_dates)
-        by_meal[shipment.meal] = by_meal.get(shipment.meal, 0) + amount
-    days = tuple(
-        MonthlyMealDay(
-            day,
-            counts.get(day, {}).get(Meal.DINNER, 0),
-            counts.get(day, {}).get(Meal.BREAKFAST, 0),
-            counts.get(day, {}).get(Meal.LUNCH, 0),
-        )
-        for offset in range((end - start).days + 1)
-        for day in (start + timedelta(days=offset),)
+        for service_on in shipment.service_dates:
+            for basis, day in ((MealCountBasis.DELIVERY, shipment.delivery_on),
+                               (MealCountBasis.SERVICE, service_on)):
+                if start <= day <= end:
+                    by_meal = counts[basis].setdefault(day, {})
+                    by_meal[shipment.meal] = by_meal.get(shipment.meal, 0) + 1
+    def make_days(basis):
+        return tuple(MonthlyMealDay(
+            day, counts[basis].get(day, {}).get(Meal.DINNER, 0),
+            counts[basis].get(day, {}).get(Meal.BREAKFAST, 0),
+            counts[basis].get(day, {}).get(Meal.LUNCH, 0),
+        ) for offset in range((end - start).days + 1)
+          for day in (start + timedelta(days=offset),))
+    result = MonthlyMealStatistics(
+        snapshot.revision_id, year, month, (), 0, 0, 0,
+        policy.include_next_month, delivery_days=make_days(MealCountBasis.DELIVERY),
+        service_days=make_days(MealCountBasis.SERVICE),
     )
-    return MonthlyMealStatistics(
-        snapshot.revision_id, year, month, days,
-        sum(item.dinner for item in days),
-        sum(item.breakfast for item in days),
-        sum(item.lunch for item in days),
-        policy.include_next_month,
-    )
+    return result.for_basis(MealCountBasis.DELIVERY if policy.include_next_month else MealCountBasis.SERVICE)

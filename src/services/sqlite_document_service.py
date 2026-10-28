@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import Counter, defaultdict
-from calendar import monthrange
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -60,7 +59,7 @@ from src.services.meal_service_availability import (
     RECURRING_MEAL_SERVICE_POLICY_VERSION,
 )
 
-MONTHLY_DOCUMENT_CALCULATION_CONTRACT_VERSION = 4
+MONTHLY_DOCUMENT_CALCULATION_CONTRACT_VERSION = 5
 
 
 class HouseholdServiceDatesError(ValueError):
@@ -127,15 +126,16 @@ def prepare_monthly_document_data(
     adjustments = service_adjustment_schedule_from_snapshot(snapshot)
     price_schedule = unit_price_schedule_from_snapshot(snapshot)
     status_events = status_events_from_historical_snapshot(snapshot)
-    physical = prepare_physical_delivery_data(snapshot, period_start, period_end, selected_meals)
     policy = invoice_settings_from_snapshot(snapshot)
-    month_end = date(period_end.year, period_end.month, monthrange(period_end.year, period_end.month)[1])
+    physical = prepare_physical_delivery_data(
+        snapshot, period_start, period_end, selected_meals,
+        include_service_period=not policy.include_next_month,
+    )
     delivery_dates = {
         (shipment.person_id, shipment.meal, service_on): shipment.delivery_on
         for shipment in physical.shipments
-        if period_start <= shipment.delivery_on <= period_end
         for service_on in shipment.service_dates
-        if policy.include_next_month or service_on <= month_end
+        if period_start <= (shipment.delivery_on if policy.include_next_month else service_on) <= period_end
     }
     entitlements = [MealEntitlement(*key) for key in delivery_dates]
     exclusions = physical.calculation_manifest["exclusions"]
@@ -156,7 +156,7 @@ def prepare_monthly_document_data(
         period_end,
         provider,
         routing=routing_state_from_snapshot(snapshot),
-        delivery_dates=delivery_dates,
+        delivery_dates=delivery_dates if policy.include_next_month else None,
         history_notes=invoice_history_notes(snapshot, revisions, period_start, period_end, selected_meals),
     )
     global_note = global_unit_price_note(
@@ -170,7 +170,7 @@ def prepare_monthly_document_data(
         period_start=period_start,
         period_end=period_end,
         meals=selected_meals,
-        delivery_dates=delivery_dates,
+        delivery_dates=delivery_dates if policy.include_next_month else None,
     )
     calculation_manifest = freeze_json_object(
         {
@@ -181,7 +181,7 @@ def prepare_monthly_document_data(
                 "routing_basis": "document_period_end",
             },
             "source_revision_id": str(snapshot.revision_id),
-            "period_basis": "physical_delivery_day",
+            "period_basis": "physical_delivery_day" if policy.include_next_month else "service_day",
             "include_next_month": policy.include_next_month,
             "physical_delivery": physical.calculation_manifest,
             "selected_meals": tuple(meal.value for meal in selected_meals),

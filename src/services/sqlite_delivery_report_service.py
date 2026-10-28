@@ -154,16 +154,20 @@ def prepare_physical_delivery_data(
     meals: Sequence[Meal],
     *,
     missing_lunch_schedule_as_zero: bool = False,
+    include_service_period: bool = False,
 ) -> PreparedDeliveryReportData:
     """Prepare physical shipments without report grouping or driver requirements.
 
     ``reports`` is empty; shipments and calculation provenance use the same
     entitlement rules and evaluation window as delivery reports.
     Monthly statistics may omit lunch on dates without a reviewed schedule.
+    include_service_period also retains meals eaten in the requested period,
+    including bundles physically delivered in a different month or year.
     """
     return _prepare_delivery_data(
         snapshot, period_start, period_end, meals, staff_sort=None, build_reports=False,
         missing_lunch_schedule_as_zero=missing_lunch_schedule_as_zero,
+        include_service_period=include_service_period,
     )
 
 
@@ -178,6 +182,7 @@ def _prepare_delivery_data(
     delivery_forms: Sequence[str | None] | None = None,
     remark_options: ReportRemarkOptions = ReportRemarkOptions(),
     missing_lunch_schedule_as_zero: bool = False,
+    include_service_period: bool = False,
 ) -> PreparedDeliveryReportData:
     if not isinstance(snapshot, HistoricalSnapshot):
         raise TypeError("snapshot은 HistoricalSnapshot이어야 합니다.")
@@ -291,11 +296,8 @@ def _prepare_delivery_data(
                     if (missing_lunch_schedule_as_zero and meal is Meal.LUNCH
                             and isinstance(error, SchoolLunchScheduleMissingError)):
                         continue
-                    if candidate_delivery is not None and _contains(
-                        period_start,
-                        period_end,
-                        candidate_delivery,
-                    ):
+                    if (period_start <= candidate_delivery <= period_end
+                            or (include_service_period and period_start <= service_on <= period_end)):
                         raise
                     # Earlier dates are used only for a best-effort previous-day
                     # comparison.  A schedule gap there must not block the chosen
@@ -320,7 +322,8 @@ def _prepare_delivery_data(
     coalesced_shipments = _coalesce_shipments(
         item
         for item in shipments
-        if evaluation_start <= item.delivery_on <= period_end
+        if (evaluation_start <= item.delivery_on <= period_end
+            or (include_service_period and any(period_start <= day <= period_end for day in item.service_dates)))
     )
     remark_shipments = tuple(item for item in coalesced_shipments
                              if _shipment_form(roster, item) in remark_forms
@@ -407,7 +410,8 @@ def _prepare_delivery_data(
     target_shipments = tuple(
         item
         for item in coalesced_shipments
-        if period_start <= item.delivery_on <= period_end
+        if (period_start <= item.delivery_on <= period_end
+            or (include_service_period and any(period_start <= day <= period_end for day in item.service_dates)))
     )
     manifest = freeze_json_object(
         {
@@ -469,6 +473,7 @@ def _prepare_delivery_data(
             "status_event_count": len(status_events),
             "exclusions": dict(sorted(exclusions.items())),
             "report_count": len(reports),
+            "includes_service_period": include_service_period,
             "target_shipment_count": len(target_shipments),
             "target_entitlement_count": sum(
                 item.entitlement_count for item in target_shipments

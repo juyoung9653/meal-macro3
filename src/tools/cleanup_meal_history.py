@@ -14,6 +14,7 @@ import warnings
 from src.domain.revisions import RevisionActor
 from src.services.meal_history_cleanup import build_meal_history_cleanup, plan_meal_history_cleanup
 from src.storage.database_session import DatabaseSession
+from src.storage.database_replica import DatabaseReplicaService
 
 
 def _period(period):
@@ -31,7 +32,7 @@ def main(argv=None):
     if not path.is_file():
         parser.error("운영 DB 파일을 찾을 수 없습니다.")
     backup_root = args.backup_dir or path.parent / "meal-history-cleanup-backups"
-    backup_directory = backup_root / (datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid4().hex[:8])
+    backup_directory = backup_root / (datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid4().hex[:8]) / "before"
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("error", getpass.GetPassWarning)
@@ -69,6 +70,11 @@ def main(argv=None):
             backup_directory.mkdir(parents=True, exist_ok=False)
             backup = session.backup_now()
             print(f"정리 전 백업: {backup.path}")
+            # This explicit maintenance command promises a frozen pre-change
+            # copy. Normal automatic saves keep updating one replica in place.
+            after_directory = backup_directory.parent / "after"
+            after_directory.mkdir()
+            session.activate_backup_directory(DatabaseReplicaService(after_directory))
             result = session.append_revision(record)
             print(f"정리 완료: {len(plan)}건. 가입·가구·배정은 유지했고 원본 감사 이력은 보존했습니다.")
             if result.error is not None:

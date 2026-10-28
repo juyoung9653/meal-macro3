@@ -18,6 +18,9 @@ from ..core.settings import get_settings
 from ..excel.excel_utils import adjust_formula, build_merged_anchor_map, copy_cell, write_literal_cell
 from ..excel.publication import WorkbookPublicationResult, publish_workbook
 from ..templates.template_scanner import scan_placeholders, validate_placeholders
+from ..templates.confirmation_fields import (
+    AUTO_CONFIRMATION, automatic_placeholder, placeholder_aliases, placeholder_person_index,
+)
 
 log = logging.getLogger(__name__)
 
@@ -206,6 +209,15 @@ def make_confirm_publication(
     """명단 데이터 → 확인서템플릿 채워서 단일 엑셀 파일 생성."""
     s = get_settings()
 
+    col_mapping = dict(col_mapping)
+    column_fallbacks = dict(column_fallbacks or {})
+    # Address/jurisdiction mappings also participate in household consistency
+    # checks, not only in final cell replacement.
+    for token, legacy in (("{addr}", "도로명주소"), ("{dong}", "관할동")):
+        if token in col_mapping and col_mapping[token] != AUTO_CONFIRMATION:
+            col_mapping[legacy] = col_mapping[token]
+            column_fallbacks[legacy] = column_fallbacks.get(token, "")
+
     road_address_col = _mapped_source_column(col_mapping, "도로명주소")
     detail_address_col = _mapped_source_column(col_mapping, "상세주소")
     name_col = _mapped_source_column(col_mapping, "성명", "이름")
@@ -255,11 +267,7 @@ def make_confirm_publication(
 
     ph_warnings = validate_placeholders(all_placeholders, meal_type=meal_type)
     if ph_warnings:
-        msg = "템플릿에 필수 플레이스홀더가 누락되었습니다:\n\n" + "\n".join(
-            ph_warnings
-        )
-        msg += "\n\n확인서템플릿.xlsx 파일을 확인 후 다시 실행하세요."
-        raise ValueError(msg)
+        log.info("일부 확인서 시트의 플레이스홀더가 생략되어 있습니다: %s", "; ".join(ph_warnings))
 
     for dong, hh_groups in dong_households.items():
         hh_1 = hh_2 = hh_3 = hh_4 = hh_5 = 0
@@ -456,6 +464,24 @@ def make_confirm_publication(
                             count if count else "",
                             tpl_anchor_map,
                         )
+
+            # Explicit token mappings override the default/automatic values.
+            # A token missing from this sheet simply has no output cell.
+            for key in ph_map:
+                target = "{" + key + "}"
+                source = col_mapping.get(target)
+                known = automatic_placeholder(key) or bool(placeholder_aliases(target))
+                if source == AUTO_CONFIRMATION or (source is None and known):
+                    if known:
+                        continue
+                    source = ""
+                index = placeholder_person_index(key)
+                value = ""
+                if index < len(members):
+                    value = resolve_mapping_value(
+                        members[index].roster.extra, source if source is not None else key,
+                        column_fallbacks.get(target, ""))
+                _set_ph(ws, ph_map, key, current_row, value, tpl_anchor_map)
 
             current_row += tpl_rows
 

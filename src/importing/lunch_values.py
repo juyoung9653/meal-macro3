@@ -5,6 +5,7 @@ import re
 from uuid import UUID
 
 from src.domain.roster import CustomFieldType, Meal, DeliveryAssignment, normalize_phone
+from .custom_values import import_custom_value
 from .contracts import ProfileField
 
 SCHOOL_FIELDS = ("school_type", "school_name", "grade")
@@ -22,11 +23,14 @@ def school_stage(school_type, school_name):
     def stage(text):
         text = re.sub(r"\s+", "", text or "")
         for words, rank in ((('대학교', '대학'), 5), (('고등',), 4),
-                            (('중학교', '중등'), 3), (('초등',), 2),
+                            (('중학', '중등'), 3), (('초등',), 2),
                             (('유치', '어린이'), 1), (('미취학',), 0)):
             if any(word in text for word in words):
                 return rank
-        return {"초": 2, "중": 3, "고": 4}.get(text)
+        for suffix, rank in (("초", 2), ("중", 3), ("고", 4)):
+            if text.endswith(suffix):
+                return rank
+        return None
     # A full school name is stronger evidence than an old type label.
     named = stage(school_name)
     return named if named is not None else stage(school_type)
@@ -82,6 +86,7 @@ class LunchValueRow:
         return self.person_id, self.field
 
     def parse(self, text):
+        original = text
         text = text.strip()
         if not text:
             if self.field == "name":
@@ -97,10 +102,10 @@ class LunchValueRow:
             return int(value) if value.is_integer() else value
         if self.field_type is CustomFieldType.CHOICE and text not in self.choices:
             raise ValueError("다음 값 중에서 선택해주세요: " + ", ".join(self.choices))
-        return text
+        return original if self.field_type is CustomFieldType.TEXT else text
 
 
-def lunch_value_rows(current, result, plan):
+def lunch_value_rows(current, result, plan, *, include_assignments=True):
     rows = []
     existing = {p.person_id: p for p in current.persons}
     definitions = {d.definition_id: d for d in result.snapshot.custom_fields}
@@ -151,9 +156,14 @@ def lunch_value_rows(current, result, plan):
                     add(key, getattr(old, key), None, getattr(raw, key), True)
         for definition_id in set(merged.custom_values) | set(obs.custom_values):
             before = old.custom_values.get(definition_id)
-            incoming = obs.custom_values.get(definition_id, merged.custom_values.get(definition_id))
+            incoming = (
+                import_custom_value(definitions[definition_id], obs.custom_values[definition_id])
+                if definition_id in obs.custom_values else merged.custom_values.get(definition_id)
+            )
             add("custom:" + str(definition_id), before, incoming,
                 merged.custom_values.get(definition_id), definition=definitions[definition_id])
+        if not include_assignments:
+            continue
         old_assignment = current.resolve_assignment(person_id, Meal.LUNCH)
         observed = {assignment.meal: assignment for assignment in obs.assignments}
         for key in ("driver", "sequence"):

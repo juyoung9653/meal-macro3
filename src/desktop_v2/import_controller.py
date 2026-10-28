@@ -12,14 +12,14 @@ import csv
 import getpass
 import subprocess
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from io import StringIO
 from pathlib import Path
 from uuid import UUID, uuid4
 
-from PySide6.QtWidgets import QDialog, QMessageBox, QWidget
+from PySide6.QtWidgets import QDialog, QDialogButtonBox, QMessageBox, QWidget
 
 from src.domain.revisions import RevisionActor
 from src.domain.roster import Meal, RosterSnapshot
@@ -56,7 +56,10 @@ from src.storage.database_session import (
 from .import_review import ImportReviewDialog, import_decision_rows
 from .import_wizard import RosterImportWizard
 from .lunch_value_review import LunchValueReviewDialog
+from .import_value_review import ImportValueReviewDialog
+from src.importing.values import import_value_rows
 from src.importing.lunch_values import lunch_value_rows
+from src.importing.revision import NoImportChanges
 
 
 class GuidedImportStatus(StrEnum):
@@ -87,6 +90,8 @@ class GuidedRosterImportController:
         wizard_type=RosterImportWizard,
         review_type=ImportReviewDialog,
         value_review_type=LunchValueReviewDialog,
+        shared_review_type=None,
+        import_value_review_type=ImportValueReviewDialog,
         message_box=QMessageBox,
     ) -> None:
         if not isinstance(session, DatabaseSession):
@@ -96,7 +101,11 @@ class GuidedRosterImportController:
         self._wizard_type = wizard_type
         self._review_type = review_type
         self._value_review_type = value_review_type
+        self._import_value_review_type = import_value_review_type
         self._message_box = message_box
+        # Local import avoids the shared-settings controller's actor-provider cycle.
+        from .household_shared_columns import HouseholdSharedColumnDialog
+        self._shared_review_type = shared_review_type or HouseholdSharedColumnDialog
 
     @dialog_workflow
     def run(self, parent: QWidget | None = None) -> GuidedImportOutcome:
@@ -109,6 +118,10 @@ class GuidedRosterImportController:
             allow_vacation_lunch=current_roster is not None,
             parent=parent,
         )
+        if hasattr(wizard, "set_database_columns"):
+            model = getattr(parent, "table_model", None)
+            labels = {column.key: column.label for column in getattr(model, "columns", ())}
+            wizard.set_database_columns(current_roster, labels)
         if current_roster is None and hasattr(wizard, "set_initial_import_defaults"):
             wizard.set_initial_import_defaults()
         if (yield DialogRequest(wizard, self._session)) != QDialog.DialogCode.Accepted:
@@ -175,14 +188,16 @@ class GuidedRosterImportController:
             )
             revision_id = uuid4()
             value_choices = None
-            if purpose is ImportPurpose.VACATION_LUNCH:
+            if current_roster is not None:
                 candidate = apply_reconciliation(
                     current_roster, plan, new_revision_id=revision_id,
                     decisions=decisions, custom_fields=selection.preview.custom_fields,
                 )
-                rows = lunch_value_rows(current_roster, candidate, plan)
+                lunch = purpose is ImportPurpose.VACATION_LUNCH
+                rows = (lunch_value_rows if lunch else import_value_rows)(current_roster, candidate, plan)
                 if any(not row.automatic for row in rows):
-                    value_review = self._value_review_type(current_roster, candidate, plan, parent)
+                    dialog_type = self._value_review_type if lunch else self._import_value_review_type
+                    value_review = dialog_type(current_roster, candidate, plan, parent)
                     if (yield DialogRequest(value_review, self._session)) != QDialog.DialogCode.Accepted:
                         return GuidedImportOutcome(GuidedImportStatus.CANCELLED)
                     value_choices = value_review.choices()
@@ -205,9 +220,18 @@ class GuidedRosterImportController:
                 existing_household_rule=(None if purpose is ImportPurpose.VACATION_LUNCH else selection.existing_household_rule),
                 purpose=purpose,
                 lunch_status_events=lunch_events,
-                lunch_value_choices=value_choices,
+                lunch_value_choices=value_choices if purpose is ImportPurpose.VACATION_LUNCH else None,
+                value_choices=value_choices if purpose is ImportPurpose.DATABASE else None,
             )
+            if current_roster is not None:
+                record = yield from self._review_shared_values(prepared.record, current_roster, parent)
+                if record is None:
+                    return GuidedImportOutcome(GuidedImportStatus.CANCELLED)
+                prepared = replace(prepared, record=record)
             backup_result = save_revision(self._session, prepared.record, parent=parent)
+        except NoImportChanges:
+            self._message_box.information(parent, "기존 명단을 유지했습니다", "선택한 결과로 변경할 내용이 없어 새 변경 기록과 백업을 만들지 않았습니다.")
+            return GuidedImportOutcome(GuidedImportStatus.COMPLETED, self._session.database.current_roster())
         except Exception as error:
             self._message_box.critical(
                 parent,
@@ -240,6 +264,55 @@ class GuidedRosterImportController:
             committed_roster_after_save(self._session, prepared.result.snapshot),
             backup_result,
         )
+
+    def _review_shared_values(self, record, current_roster, parent):
+        from src.domain.household_shared import (
+            HouseholdSharedConflict, expand_household_shared_revision,
+            household_shared_components, household_shared_rows,
+        )
+        from src.domain.import_shared import (
+            IMPORT_SHARED_VALUES, apply_import_shared_values,
+            import_candidate_snapshot, with_import_shared_values,
+        )
+        from src.domain.projections import roster_from_historical_snapshot
+
+        snapshot = self._session.database.snapshot(current_roster.revision_id)
+        while True:
+            try:
+                # Dry-run the same rules used by storage, before attempting a save.
+                expand_household_shared_revision(snapshot, record)
+                return record
+            except HouseholdSharedConflict as conflict:
+                key, on = conflict.column_key, conflict.effective_on
+                if key in record.metadata.decisions.get(IMPORT_SHARED_VALUES, {}):
+                    raise
+            candidate = import_candidate_snapshot(snapshot, apply_import_shared_values(snapshot, record))
+            roster = roster_from_historical_snapshot(candidate)
+            components = household_shared_components(roster, key, snapshot=candidate)
+            rows = household_shared_rows(roster, key, on, snapshot=candidate)
+            values = {row.household_id: row.values for row in rows}
+            conflicts = tuple(row for row in rows if any(value is None for value in row.values))
+            label = ({"sequence": "배송순서", "delivery_settings": "배송 설정",
+                      "status:breakfast": "조식", "status:lunch": "중식", "status:dinner": "석식"}
+                     .get(key, components[0].label))
+            dialog = self._shared_review_type(label, True, components, conflicts or rows, on, parent)
+            dialog.setWindowTitle("명단 가져오기 · 공용 값 확인 · " + label)
+            dialog.enabled.setEnabled(False)
+            dialog.note.setText(
+                f"가져올 명단의 {on:%Y-%m-%d} 기준 공용 값을 확인해주세요. "
+                "왼쪽 값 셀을 클릭하면 오른쪽 입력칸이 그 내용으로 교체되며 직접 수정할 수도 있습니다. "
+                "모든 칼럼을 확인한 뒤 명단과 함께 저장합니다. 중간에 취소하면 아무것도 저장하지 않습니다."
+            )
+            dialog.buttons.button(QDialogButtonBox.StandardButton.Save).setText("다음")
+
+            def validate(enabled, draft_values):
+                draft = with_import_shared_values(record, key, on, {**values, **draft_values})
+                apply_import_shared_values(snapshot, draft)
+
+            dialog.validation_callback = validate
+            if (yield DialogRequest(dialog, self._session)) != QDialog.DialogCode.Accepted:
+                return None
+            record = with_import_shared_values(record, key, on, {**values, **dialog.selected_values()})
 
     def _current_import_settings(
         self,

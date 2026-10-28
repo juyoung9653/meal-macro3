@@ -27,6 +27,7 @@ from src.domain.roster import (
     normalize_phone,
 )
 
+from .custom_values import import_custom_value
 from .reconciliation import (
     ReconciliationDisposition,
     ReconciliationPlan,
@@ -197,6 +198,12 @@ def apply_reconciliation(
                 )
 
         merged_profile = staged.observation.merged_profile(base_profile)
+        values = dict(merged_profile.custom_values)
+        definitions = {item.definition_id: item for item in custom_fields}
+        for definition_id, raw in staged.observation.custom_values.items():
+            if raw is not None and definition_id in definitions:
+                values[definition_id] = import_custom_value(definitions[definition_id], raw)
+        merged_profile = replace(merged_profile, custom_values=values)
         merged_profile, used_telephone_fields = _merge_additional_phones(
             merged_profile,
             merged_profile.telephone,

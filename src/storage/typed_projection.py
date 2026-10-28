@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from collections.abc import Iterable, Mapping
 from datetime import date
 from uuid import UUID
@@ -58,7 +59,7 @@ def apply_typed_projection_changes(
     connection: apsw.Connection,
     revision_id: UUID,
     changes: tuple[AuditChange, ...],
-    *, restoring: bool = False, cancelling: bool = False,
+    *, restoring: bool = False, cancelling: bool = False, current_states=None,
 ) -> None:
     """Apply recognized audit entities inside the caller's transaction."""
 
@@ -68,10 +69,10 @@ def apply_typed_projection_changes(
     if not typed_changes:
         return
 
-    if all(change.entity_kind == PERSON_KIND for change in typed_changes):
-        # Cell edits touch only person rows. Check their before-images through
-        # the primary key; the full post-write validation below the caller's
-        # apply boundary still checks every projection and roster constraint.
+    if current_states is not None:
+        current = current_states
+    elif all(change.entity_kind == PERSON_KIND for change in typed_changes):
+        # Unverified callers must read their before-images from the database.
         current = {}
         for change in typed_changes:
             for person_id, state in _load_person_states(connection, change.entity_id):
@@ -225,10 +226,51 @@ def _load_typed_state_and_roster(
     return states, roster
 
 
-def validate_typed_projections(connection: apsw.Connection) -> RosterSnapshot | None:
+def validate_typed_projections(
+    connection: apsw.Connection, *, expected=None,
+    previous_roster: RosterSnapshot | None = None, changes=None,
+) -> RosterSnapshot | None:
     """Compare every typed current row with the latest audit state of each entity."""
 
-    expected: dict[EntityRef, Mapping[str, JsonValue]] = {}
+    if expected is not None:
+        expected = {ref: state for ref, state in expected.items()
+                    if ref.entity_kind in TYPED_ENTITY_KINDS}
+        if previous_roster is not None and changes is not None and all(
+            change.entity_kind == PERSON_KIND and change.operation is ChangeOperation.UPDATE
+            for change in changes
+        ):
+            # The caller verified the prior state and owns the write transaction.
+            # Re-read changed rows and retain unchanged immutable domain objects.
+            people = {}
+            for change in changes:
+                rows = tuple(_load_person_states(connection, change.entity_id))
+                if len(rows) != 1 or rows[0][1] != expected.get(EntityRef(PERSON_KIND, change.entity_id)):
+                    raise ProjectionContractError("수정한 사람 정보가 변경 이력과 다릅니다.")
+                people[change.entity_id] = person_from_state(*rows[0])
+            latest = connection.execute("SELECT revision_id FROM revision ORDER BY sequence DESC LIMIT 1").fetchone()
+            try:
+                return replace(previous_roster, revision_id=UUID(str(latest[0])),
+                               persons=tuple(people.get(p.person_id, p) for p in previous_roster.persons))
+            except (TypeError, ValueError) as error:
+                raise ProjectionContractError(str(error)) from error
+    else:
+        expected = _latest_typed_states(connection)
+
+    try:
+        actual, roster = _load_typed_state_and_roster(connection)
+    except (TypeError, ValueError) as error:
+        raise ProjectionContractError(
+            f"typed projection을 domain 객체로 복원할 수 없습니다: {error}"
+        ) from error
+    if actual != expected:
+        raise ProjectionContractError(
+            "typed projection이 revision ledger의 최신 상태와 다릅니다."
+        )
+    return roster
+
+
+def _latest_typed_states(connection):
+    expected = {}
     for row in connection.execute(
         """
         SELECT entity_kind, entity_id, after_json FROM (
@@ -248,18 +290,7 @@ def validate_typed_projections(connection: apsw.Connection) -> RosterSnapshot | 
         reference = EntityRef(str(row[0]), UUID(str(row[1])))
         expected[reference] = json.loads(str(row[2]))
 
-    try:
-        actual, roster = _load_typed_state_and_roster(connection)
-    except (TypeError, ValueError) as error:
-        raise ProjectionContractError(
-            f"typed projection을 domain 객체로 복원할 수 없습니다: {error}"
-        ) from error
-    # Both serializers return plain dict/list/scalar canonical states.
-    if actual != expected:
-        raise ProjectionContractError(
-            "typed projection이 revision ledger의 최신 상태와 다릅니다."
-        )
-    return roster
+    return expected
 
 
 def _apply_change(

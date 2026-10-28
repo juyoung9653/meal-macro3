@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections import OrderedDict
 from itertools import groupby
 from collections.abc import Iterable
 from datetime import UTC, date, datetime, timedelta, timezone
@@ -80,6 +81,13 @@ class EncryptedDatabase:
     def __init__(self, path: Path, connection: apsw.Connection) -> None:
         self._path = path
         self._connection: apsw.Connection | None = connection
+        self._verified_stamp = None
+        self._verified_entities = None
+        self._verified_roster = None
+        self._read_stamp = None
+        self._revision_cache = OrderedDict()
+        self._last_committed_record = None
+        self._branch_registry_cache = None
 
     @classmethod
     def create(cls, path: str | Path, key: bytes) -> EncryptedDatabase:
@@ -98,7 +106,9 @@ class EncryptedDatabase:
             _initialize_schema(connection)
             _verify_encrypted_header(database_path)
             _apply_runtime_pragmas(connection)
-            return cls(database_path, connection)
+            database = cls(database_path, connection)
+            database._remember_verified({}, None)
+            return database
         except Exception:
             if connection is not None:
                 connection.close()
@@ -115,15 +125,75 @@ class EncryptedDatabase:
         connection = _connect(database_path, key, create=False)
         try:
             _upgrade_schema(connection)
+            connection.execute("BEGIN")
             _validate_schema(connection)
-            _validate_ledger(connection)
-            _validate_typed_projection_integrity(connection)
+            entities, registry = _validate_ledger(connection)
+            roster = _validate_typed_projection_integrity(connection, expected=entities)
             _validate_document_runs(connection)
+            database = cls(database_path, connection)
+            database._remember_verified(entities, roster)
+            database._remember_branch_registry(registry)
+            connection.execute("ROLLBACK")
             _apply_runtime_pragmas(connection)
         except Exception:
             connection.close()
             raise
-        return cls(database_path, connection)
+        return database
+
+    def _state_stamp(self):
+        connection = self._require_connection()
+        return (connection.total_changes(), connection.pragma("data_version"),
+                connection.pragma("schema_version"))
+
+    def _is_verified(self):
+        return self._verified_stamp is not None and self._verified_stamp == self._state_stamp()
+
+    def _remember_verified(self, entities, roster, *, stamp=None):
+        if self._require_connection().txn_state() == apsw.SQLITE_TXN_WRITE:
+            # A caller-owned write transaction may still roll back without
+            # changing total_changes again. Never cache its uncommitted state.
+            self._verified_stamp = None
+            return
+        self._verified_entities = entities
+        self._verified_roster = roster
+        self._verified_stamp = self._state_stamp() if stamp is None else stamp
+
+    @property
+    def last_committed_record(self):
+        """A local append usable for incremental refresh only while still current."""
+        return self._last_committed_record if self._is_verified() else None
+
+    def _refresh_read_cache(self):
+        stamp = self._state_stamp()
+        if self._read_stamp != stamp:
+            self._revision_cache.clear()
+            self._read_stamp = stamp
+        return self._require_connection().get_autocommit() or self._is_verified()
+
+    def _remember_branch_registry(self, registry, *, stamp=None):
+        if self._require_connection().txn_state() == apsw.SQLITE_TXN_WRITE:
+            # Outer transactions can roll back without changing total_changes.
+            self._branch_registry_cache = None
+            return
+        self._branch_registry_cache = (self._state_stamp() if stamp is None else stamp, registry)
+
+    def _branch_registry(self):
+        cached = self._branch_registry_cache
+        if cached is not None and cached[0] == self._state_stamp():
+            return cached[1]
+        self._branch_registry_cache = None
+        from src.services.revision_branches import registry_from_connection
+        connection = self._require_connection()
+        owned = connection.get_autocommit()
+        if owned:
+            connection.execute("BEGIN")
+        try:
+            registry = registry_from_connection(connection)
+            self._remember_branch_registry(registry)
+            return registry
+        finally:
+            if owned:
+                connection.execute("ROLLBACK")
 
     @property
     def path(self) -> Path:
@@ -142,6 +212,16 @@ class EncryptedDatabase:
         nested = not connection.get_autocommit()
         connection.execute("SAVEPOINT append_revision" if nested else "BEGIN IMMEDIATE")
         try:
+            trusted = not nested and self._is_verified()
+            if not trusted:
+                # Also detects direct SQL writes/DDL on this connection and writes
+                # committed by another connection. Never trust only a revision ID.
+                validate_typed_projections(connection)
+                entities, registry = _validate_ledger(connection)
+                _validate_document_runs(connection)
+            else:
+                entities = self._verified_entities
+                registry = self._branch_registry()
             row = connection.execute(
                 "SELECT revision_id FROM revision ORDER BY sequence DESC LIMIT 1"
             ).fetchone()
@@ -152,8 +232,9 @@ class EncryptedDatabase:
                     "parent revision이 현재 최신 revision과 다릅니다. "
                     f"expected={expected_parent}, actual={actual_parent}"
                 )
-            from src.services.revision_branches import registry_from_connection
-            registry = registry_from_connection(connection)
+            # Take the registry out of the read cache before applying a candidate.
+            # Publish it only after COMMIT; every failure discards the candidate.
+            self._branch_registry_cache = None
             registry.apply(record.metadata.revision_id, record.metadata.decisions)
             restoring = "snapshot_restore_target" in record.metadata.decisions
             from src.domain.meal_history_cancellation import (
@@ -211,8 +292,20 @@ class EncryptedDatabase:
                 record.changes,
                 restoring=restoring,
                 cancelling=cancelling,
+                current_states=entities if trusted else None,
             )
-            validated_roster = validate_typed_projections(connection)
+            entities = dict(entities)
+            for change in record.changes:
+                reference = EntityRef(change.entity_kind, change.entity_id)
+                if change.operation is ChangeOperation.DELETE:
+                    entities.pop(reference, None)
+                else:
+                    entities[reference] = plain_json(change.after)
+            validated_roster = validate_typed_projections(
+                connection, expected=entities,
+                previous_roster=self._verified_roster if trusted else None,
+                changes=record.changes if trusted else None,
+            )
             if record.import_batch is not None:
                 _insert_import_batch(connection, record.import_batch)
             connection.execute(
@@ -232,9 +325,18 @@ class EncryptedDatabase:
                 validated_roster
                 if shared or shared_setting_changed or restoring else None
             )
+            stamp = self._state_stamp()
             connection.execute("RELEASE SAVEPOINT append_revision" if nested else "COMMIT")
+            if not nested:
+                if trusted and self._read_stamp == self._verified_stamp:
+                    # Older revisions are immutable after a successful append.
+                    self._read_stamp = stamp
+                self._remember_verified(entities, validated_roster, stamp=stamp)
+                self._remember_branch_registry(registry, stamp=stamp)
+                self._last_committed_record = record
             return committed_roster
         except BaseException:
+            self._branch_registry_cache = None
             if nested:
                 connection.execute("ROLLBACK TO SAVEPOINT append_revision")
                 connection.execute("RELEASE SAVEPOINT append_revision")
@@ -366,6 +468,13 @@ class EncryptedDatabase:
         return metadata
 
     def revision(self, revision_id: UUID) -> RevisionRecord:
+        use_cache = self._refresh_read_cache()
+        return self._read_revision(revision_id, use_cache=use_cache)
+
+    def _read_revision(self, revision_id: UUID, *, use_cache=True) -> RevisionRecord:
+        if use_cache and revision_id in self._revision_cache:
+            self._revision_cache.move_to_end(revision_id)
+            return self._revision_cache[revision_id]
         metadata = self.revision_metadata(revision_id)
         connection = self._require_connection()
         changes = tuple(
@@ -410,7 +519,12 @@ class EncryptedDatabase:
                 effective_on=date.fromisoformat(str(batch_row[7])),
                 decisions=json.loads(str(batch_row[8])),
             )
-        return RevisionRecord(metadata, changes, import_batch)
+        result = RevisionRecord(metadata, changes, import_batch)
+        if use_cache:
+            self._revision_cache[revision_id] = result
+            if len(self._revision_cache) > 512:
+                self._revision_cache.popitem(last=False)
+        return result
 
     def snapshot(self, revision_id: UUID) -> HistoricalSnapshot:
         """Read the immutable entity state at an explicit revision."""
@@ -458,12 +572,10 @@ class EncryptedDatabase:
         return str(row[0])
 
     def branches(self):
-        from src.services.revision_branches import registry_from_connection
-        return registry_from_connection(self._require_connection()).listed()
+        return self._branch_registry().listed()
 
     def branch_revision_ids(self, revision_id=None):
-        from src.services.revision_branches import registry_from_connection
-        registry = registry_from_connection(self._require_connection())
+        registry = self._branch_registry()
         target = registry.head if revision_id is None else revision_id
         if target is None:
             return ()
@@ -471,11 +583,34 @@ class EncryptedDatabase:
 
     def branch_revision_chain(self, revision_id):
         ids = self.branch_revision_ids(revision_id)
-        records = tuple(self.revision(value) for value in ids)
+        use_cache = self._refresh_read_cache()
+        records = tuple(self._read_revision(value, use_cache=use_cache) for value in ids)
         # Cancellation commands require their last record to identify current state.
         if not ids or ids[-1] != revision_id:
-            records += (self.revision(revision_id),)
+            records += (self._read_revision(revision_id, use_cache=use_cache),)
         return records
+
+    def search_revision_ids(self, text: str) -> frozenset[UUID]:
+        """Search metadata and audit values without loading historical rosters."""
+        from src.domain.export_security import EXPORT_PASSWORD_SETTING_KIND
+        tokens = text.casefold().split()
+        if not tokens:
+            return frozenset()
+        clauses, parameters = [], []
+        for token in tokens:
+            clauses.append("""(
+                instr(lower(revision.reason || ' ' || revision.actor_username || ' ' ||
+                    revision.recorded_at || ' ' || coalesce(code.display_code, '')), ?) > 0
+                OR EXISTS (SELECT 1 FROM audit_change AS change
+                    WHERE change.revision_id = revision.revision_id AND change.entity_kind != ?
+                    AND instr(lower(coalesce(change.before_json, '') || ' ' ||
+                                    coalesce(change.after_json, '')), ?) > 0)
+            )""")
+            parameters.extend((token, EXPORT_PASSWORD_SETTING_KIND, token))
+        rows = self._require_connection().execute(
+            "SELECT revision.revision_id FROM revision LEFT JOIN revision_display_code AS code "
+            "ON code.revision_id = revision.revision_id WHERE " + " AND ".join(clauses), parameters)
+        return frozenset(UUID(str(row[0])) for row in rows)
 
     def revision_summaries(self) -> tuple[RevisionSummary, ...]:
         """List sealed revisions newest-first for history/source selection."""
@@ -578,6 +713,8 @@ class EncryptedDatabase:
     def current_roster(self) -> RosterSnapshot | None:
         """Load the typed projection used by current-state UI queries."""
 
+        if self._is_verified():
+            return self._verified_roster
         connection = self._require_connection()
         row = connection.execute(
             "SELECT revision_id FROM revision ORDER BY sequence DESC LIMIT 1"
@@ -649,13 +786,27 @@ class EncryptedDatabase:
         )
 
     def check_integrity(self) -> None:
-        rows = tuple(self._require_connection().execute("PRAGMA integrity_check"))
-        if rows != (("ok",),):
-            details = "; ".join(str(row[0]) for row in rows)
-            raise DatabaseIntegrityError(f"DB 무결성 검사 실패: {details}")
-        _validate_ledger(self._require_connection())
-        _validate_typed_projection_integrity(self._require_connection())
-        _validate_document_runs(self._require_connection())
+        connection = self._require_connection()
+        self._verified_stamp = None
+        self._last_committed_record = None
+        self._branch_registry_cache = None
+        owned = connection.get_autocommit()
+        if owned:
+            connection.execute("BEGIN")
+        try:
+            rows = tuple(connection.execute("PRAGMA integrity_check"))
+            if rows != (("ok",),):
+                details = "; ".join(str(row[0]) for row in rows)
+                raise DatabaseIntegrityError(f"DB 무결성 검사 실패: {details}")
+            entities, registry = _validate_ledger(connection)
+            roster = _validate_typed_projection_integrity(connection, expected=entities)
+            _validate_document_runs(connection)
+            self._remember_verified(entities, roster)
+            self._remember_branch_registry(registry)
+            self._last_committed_record = None
+        finally:
+            if owned:
+                connection.execute("ROLLBACK")
 
     def backup_to(self, path: str | Path, key: bytes) -> Path:
         """Create and verify a consistent encrypted online backup."""
@@ -713,7 +864,13 @@ class EncryptedDatabase:
             raise RuntimeError("진행 중인 DB transaction은 백업할 수 없습니다.")
         connection.execute("BEGIN")
         try:
-            self.check_integrity()
+            if self._is_verified():
+                # Logical state was checked on open and each atomic append.
+                # Still check SQLite's physical structure before serialization.
+                if tuple(connection.execute("PRAGMA quick_check")) != (("ok",),):
+                    raise DatabaseIntegrityError("DB 무결성 검사 실패")
+            else:
+                self.check_integrity()
             payload = connection.serialize("main")
             if payload is None:
                 raise DatabaseIntegrityError("DB snapshot을 읽을 수 없습니다.")
@@ -777,6 +934,10 @@ class EncryptedDatabase:
         return destination_path
 
     def close(self) -> None:
+        self._revision_cache.clear()
+        self._branch_registry_cache = None
+        self._verified_entities = self._verified_roster = self._verified_stamp = None
+        self._last_committed_record = None
         if self._connection is not None:
             self._connection.close()
             self._connection = None
@@ -1144,10 +1305,11 @@ def _verify_encrypted_header(path: Path) -> None:
         raise DatabaseFormatError("평문 SQLite DB는 열 수 없습니다.")
 
 
-def _validate_ledger(connection: apsw.Connection) -> None:
+def _validate_ledger(connection: apsw.Connection):
+    """Return validated current entities and the already-replayed branch registry."""
     from src.services.revision_branches import registry_from_connection
     try:
-        registry_from_connection(connection)
+        registry = registry_from_connection(connection)
     except (KeyError, TypeError, ValueError) as error:
         raise DatabaseIntegrityError("분기 기록이 올바르지 않습니다.") from error
     rows = tuple(
@@ -1308,11 +1470,12 @@ def _validate_ledger(connection: apsw.Connection) -> None:
         if revision_id in restore_targets:
             historical_targets[revision_id] = HistoricalSnapshot(revision_id, current)
         previous_id = revision_id
+    return current, registry
 
 
-def _validate_typed_projection_integrity(connection: apsw.Connection) -> None:
+def _validate_typed_projection_integrity(connection: apsw.Connection, *, expected=None):
     try:
-        validate_typed_projections(connection)
+        return validate_typed_projections(connection, expected=expected)
     except ProjectionContractError as error:
         raise DatabaseIntegrityError(str(error)) from error
 

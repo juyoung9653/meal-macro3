@@ -103,7 +103,7 @@ def test_cli_password_prompt_preview_apply_and_restorable_backup(tmp_path, monke
     assert cli.main(arguments) == 0
     assert len(prompts) == 1
     assert password not in capsys.readouterr().out
-    backups = sorted((tmp_path / "meal-history-cleanup-backups").rglob("*.mealbackup"))
+    backups = sorted((tmp_path / "meal-history-cleanup-backups").rglob("*.mealreplica"))
     with DatabaseSession.open(path, password) as session:
         assert len(session.database.status_events()) == (1 if apply else 2)
         assert (session.database.latest_revision_id() != records[-1].metadata.revision_id) is apply

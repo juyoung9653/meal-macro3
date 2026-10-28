@@ -274,7 +274,7 @@ def test_calculates_shared_invoice_and_confirmation_facts_from_source_revision()
         "석식",
     )
     assert prepared.calculation_manifest["billing"]["total_amount"] == 267_000
-    assert prepared.calculation_manifest["calculation_contract_version"] == 4
+    assert prepared.calculation_manifest["calculation_contract_version"] == 5
     assert prepared.calculation_manifest["recurring_service_policy"]["version"] == 5
 
 

@@ -556,3 +556,59 @@ def test_real_menu_reviews_only_conflicts_cancel_then_resolve_preserves_equal_ho
         assert len(opened) == 2 and not action.isChecked()
         assert session.database.current_roster().persons == saved.persons
         window.close()
+
+
+@pytest.mark.parametrize("enabled", (True, False))
+def test_click_current_value_replaces_instead_of_appending(app, enabled):
+    dialog = make_dialog(enabled=enabled, values=("직접 입력",))
+    dialog.show()
+    app.processEvents()
+    grid = dialog._current_value_grids[0]
+    try:
+        for row, expected in ((1, "기존 A"), (3, "기존 B"), (1, "기존 A")):
+            QTest.mouseClick(grid.viewport(), Qt.MouseButton.LeftButton,
+                             pos=grid.visualItemRect(grid.item(row, 0)).center())
+            assert dialog.table.item(0, 1).text() == (expected if enabled else "직접 입력")
+        QTest.mouseClick(grid.viewport(), Qt.MouseButton.LeftButton,
+                         pos=grid.visualItemRect(grid.item(0, 0)).center())
+        assert dialog.table.item(0, 1).text() == ("기존 A" if enabled else "직접 입력")
+    finally:
+        dialog.close()
+
+
+def test_click_empty_or_multiline_component_only_changes_matching_cell(app):
+    dialog = HouseholdSharedColumnDialog(
+        "배송 설정", True, (SharedComponent("a", "항목 A"), SharedComponent("b", "항목 B")),
+        (SharedHouseholdRow(uuid4(), ("첫째", "둘째"), (None, None),
+                           (("001\n다음 줄", "유지"), ("", "다른 값"))),), DAY,
+    )
+    grid = dialog._current_value_grids[0]
+    grid.cellClicked.emit(1, 0)
+    assert dialog.table.item(0, 1).text() == "001\n다음 줄"
+    assert not dialog.table.item(0, 2).data(Qt.ItemDataRole.UserRole)
+    grid.cellClicked.emit(3, 0)
+    grid.cellClicked.emit(1, 1)
+    assert list(dialog.selected_values().values()) == [("", "유지")]
+    dialog.close()
+
+
+
+def test_click_current_value_replaces_active_text_editor(app):
+    dialog = make_dialog(values=("처음",))
+    dialog.show()
+    app.processEvents()
+    try:
+        item = dialog.table.item(0, 1)
+        dialog.table.setCurrentItem(item)
+        dialog.table.editItem(item)
+        app.processEvents()
+        editor = dialog.table.findChild(QPlainTextEdit)
+        assert editor is not None
+        editor.setPlainText("입력 중인 글")
+        grid = dialog._current_value_grids[0]
+        QTest.mouseClick(grid.viewport(), Qt.MouseButton.LeftButton,
+                         pos=grid.visualItemRect(grid.item(3, 0)).center())
+        app.processEvents()
+        assert list(dialog.selected_values().values()) == [("기존 B",)]
+    finally:
+        dialog.close()

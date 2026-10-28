@@ -295,8 +295,8 @@ class CreateDatabaseDialog(_DatabaseAccessDialog):
             "폴더 선택",
             self._browse_backup_directory,
             help_text=(
-                "저장할 때마다 복원 가능한 백업이 추가되고 최신 100개만 "
-                "자동으로 보관됩니다."
+                "저장할 때마다 별도 백업 DB 하나를 갱신합니다. "
+                "명단과 전체 변경 이력을 함께 보관합니다."
             ),
         )
         self._add_password_field(
@@ -705,7 +705,7 @@ class RestoreBackupDialog(_DatabaseAccessDialog):
             title="자동 백업에서 복원하기",
             subtitle="백업 파일 하나를 선택하면 명단과 전체 변경 이력을 새 데이터 파일로 복원합니다.",
             rail_title="청구서를 다시 입력하지 않아도 됩니다",
-            rail_copy="자동 백업에는 암호화된 데이터 파일과 복구에 필요한 비밀번호 정보가 함께 들어 있습니다.",
+            rail_copy="백업 DB와 같은 폴더의 비밀번호 정보 파일이 함께 필요합니다. 백업을 옮길 때는 두 파일을 함께 복사해주세요.",
             route_stops=(
                 "자동 백업 파일 선택",
                 "비밀번호 확인",
@@ -753,7 +753,7 @@ class RestoreBackupDialog(_DatabaseAccessDialog):
             self,
             "자동 백업 파일 선택",
             start,
-            "급식 데이터 자동 백업 (*.mealbackup)",
+            "급식 데이터 자동 백업 (*.mealreplica *.mealbackup)",
         )
         if filename:
             self.backup_path_edit.setText(filename)

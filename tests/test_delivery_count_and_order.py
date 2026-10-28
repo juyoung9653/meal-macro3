@@ -262,3 +262,35 @@ def test_native_drop_before_first_visible_cell_preserves_complete_rows(app, monk
     assert len(saved) == 1 and len(saved[0]) == 2
     assert all(dialog.table.item(r, c) is not None for r in range(2) for c in range(6))
     dialog.close()
+
+
+
+@pytest.mark.parametrize("year,month,next_year,next_month,carry_days", (
+    (2026, 10, 2026, 11, (1,)),
+    (2027, 12, 2028, 1, (1, 2)),
+))
+def test_service_month_rollover_keeps_every_meal_once_and_weekly_totals(year, month, next_year, next_month, carry_days):
+    from calendar import monthrange
+    from dataclasses import asdict
+    from src.domain.invoice_settings import InvoiceSettings, INVOICE_SETTINGS_KIND, INVOICE_SETTINGS_ID
+    from src.services.monthly_meal_statistics import MealCountBasis
+    source = october_source()
+    entities = dict(source.entities)
+    entities[EntityRef(INVOICE_SETTINGS_KIND, INVOICE_SETTINGS_ID)] = asdict(InvoiceSettings(include_next_month=False))
+    source = HistoricalSnapshot(source.revision_id, entities)
+    first = prepare_monthly_document_data(source, date(year, month, 1), date(year, month, monthrange(year, month)[1]), (Meal.BREAKFAST,))
+    following = prepare_monthly_document_data(source, date(next_year, next_month, 1), date(next_year, next_month, monthrange(next_year, next_month)[1]), (Meal.BREAKFAST,))
+    dates = {item.service_on for item in following.entitlements}
+    assert {date(next_year, next_month, day) for day in carry_days} <= dates
+    assert not set(first.entitlements) & set(following.entitlements)
+    for document, y, m in ((first, year, month), (following, next_year, next_month)):
+        assert all((item.service_on.year, item.service_on.month) == (y, m) for item in document.entitlements)
+        assert sum(w.breakfast_count for row in document.batch.deliveries for w in row.weekly) == document.billing.total_count
+        screen = build_monthly_meal_statistics(source, y, m)
+        assert screen.breakfast_total == document.billing.total_count
+        assert screen.basis is MealCountBasis.SERVICE
+        assert document.calculation_manifest["period_basis"] == "service_day"
+    screen = build_monthly_meal_statistics(source, next_year, next_month)
+    for day in carry_days:
+        assert screen.for_basis(MealCountBasis.SERVICE).days[day - 1].breakfast == 1
+        assert screen.for_basis(MealCountBasis.DELIVERY).days[day - 1].breakfast == 0

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from datetime import date
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
+import re
 from uuid import UUID
 
 from src.domain.complaints import COMPLAINT_KIND
@@ -59,7 +61,7 @@ _KIND_LABELS = {
     PROVIDER_SETTING_KIND: "공통 제공기관",
     SEQUENCE_MODE_SETTING_KIND: "배송순서 입력 방식",
     HOUSEHOLD_SHARED_KIND: "가구 공용 칼럼",
-    EXPORT_PASSWORD_SETTING_KIND: "Excel 비밀번호",
+    EXPORT_PASSWORD_SETTING_KIND: "엑셀 비밀번호",
     MAPPING_ENTITY_KIND: "출력 칼럼 연결",
     DOCUMENT_TEMPLATE_SETTING_KIND: "문서 양식",
     INVOICE_SETTINGS_KIND: "식수·청구서 설정",
@@ -68,7 +70,7 @@ _KIND_LABELS = {
     UNIT_PRICE_SCHEDULE_KIND: "급식 단가",
     SERVICE_ADJUSTMENT_SCHEDULE_KIND: "휴무·대체식",
     SCHOOL_LUNCH_SCHEDULE_KIND: "학교 급식 일정",
-    IMPORT_PROFILE_KIND: "Excel 가져오기 설정",
+    IMPORT_PROFILE_KIND: "엑셀 가져오기 설정",
     HOUSEHOLD_MATCHING_RULE_KIND: "가구 묶기 기준",
 }
 
@@ -84,6 +86,34 @@ _FIELD_LABELS = {
     "include_next_month": "다음 달 식수 포함",
     "school_history_column": "급식 청구서 이력 칼럼",
     "lunchbox_history_column": "행복도시락 청구서 이력 칼럼",
+    "remarks": "비고 표시 설정",
+    "columns": "비고에 표시할 항목",
+    "position": "비고를 넣을 위치",
+    "separate_forms": "따로 표시할 배송 형태",
+    "include_excluded_deliveries": "제외한 배송도 표시",
+    "fallbacks": "값이 없을 때 사용할 항목",
+    "header_row_count": "머리글 줄 수",
+    "unit_price": "한 끼 단가",
+    "covered_periods": "확인한 기간",
+    "days": "날짜별 급식 일정",
+    "service_on": "식사일",
+    "delivery_on": "배송일",
+    "mark": "학교 급식 여부",
+    "grades_without_school_meal": "학교 급식이 없는 학년",
+    "period_start": "시작일",
+    "period_end": "종료일",
+    "treatment": "식사 제공 방법",
+    "default_delivery_on": "대체 배송일",
+    "delivery_overrides": "식사별 배송일",
+    "origin": "설정 경로",
+    "public_holiday": "공휴일",
+    "day": "날짜",
+    "mobile": "핸드폰",
+    "school": "학교명",
+    "breakfast": "조식",
+    "lunch": "중식",
+    "dinner": "석식",
+    "source": "가져올 항목",
     "name": "성명",
     "birth_date": "생년월일",
     "school_type": "취학유형",
@@ -167,7 +197,7 @@ _INTERNAL_FIELDS = {
     "rule_id",
     "header_fingerprint",
     "normalization_version",
-    "position",
+    "position", "change_id", "setting_revision_id", "normalized_school_name", "provider_id", "provider_version",
 }
 
 _KNOWN_KINDS = frozenset(_KIND_LABELS)
@@ -376,7 +406,7 @@ def _shared_column_label(
             "mobile": "핸드폰", "school": "학교명",
             "delivery_settings": "배송 설정",
             "status:dinner": "석식", "status:breakfast": "조식", "status:lunch": "중식",
-        }.get(key, _FIELD_LABELS.get(key, key))
+        }.get(key, _field_label(key))
     return _column_label(key, fallback, column_labels)
 
 
@@ -545,7 +575,7 @@ def _field_change_rows(
                     _value_text("value", new_value, snapshot, previous_snapshot),
                 )))
             continue
-        label = _FIELD_LABELS.get(field, field.replace("_", " "))
+        label = _field_label(field)
         label = _column_label(_ROSTER_FIELD_KEYS.get(field, field), label, column_labels)
         old_text = _value_text(field, old, previous_snapshot, snapshot,
                                households=previous_households)
@@ -658,7 +688,7 @@ def _change_text(change: AuditChange, snapshot=None, previous_snapshot=None) -> 
                         return str(state.get("name", "사용자 정의 항목"))
                 return "사용자 정의 항목"
             aliases = {"address": "도로명주소", "detail_address": "상세주소", "mobile": "핸드폰", "school": "학교명", "delivery_settings": "배송 설정", "status:dinner": "석식 상태", "status:breakfast": "조식 상태", "status:lunch": "중식 상태"}
-            return aliases.get(key, _FIELD_LABELS.get(key, key))
+            return aliases.get(key, _field_label(key))
         details = []
         if after - before:
             details.append("가구 공용 지정: " + ", ".join(label(key) for key in sorted(after - before)))
@@ -735,6 +765,56 @@ def _is_generated_status_source(state: Mapping, source: object) -> bool:
     return source == f"{meal} {status} · {start} ~ {end}"
 
 
+_VALUE_LABELS = {
+    "field_type": {"text": "문자", "number": "숫자", "date": "날짜", "choice": "선택 목록"},
+    "document_kind": {"invoice": "청구서", "confirmation": "확인서", "substitute": "배송대타"},
+    "date_normalization": {"auto": "자동 인식", "yyyymmdd": "연월일 숫자 8자리"},
+    "phone_normalization": {"korean": "전화번호 형식 정리", "digits": "숫자만 사용", "preserve": "원문 유지"},
+    "mode": {"separate": "식종별로 따로 입력", "unified": "한 번 입력해 모든 식종에 적용"},
+    "match_mode": {"all": "모든 기준 일치", "any": "하나 이상의 기준 일치"},
+    "position": {"above": "기존 비고 위", "below": "기존 비고 아래"},
+    "treatment": {"normal": "정상 제공", "not_provided": "미제공 · 청구 제외", "replacement": "대체식 제공 · 청구 포함"},
+    "origin": {"manual": "직접 입력", "public_holiday": "공휴일 검토"},
+    "mark": {"O": "학교에서 급식 제공", "X": "도시락 배송 필요"},
+    "source_kind": {"roster-xlsx": "엑셀 명단", "roster-combined-xlsx": "식종을 한 열에 적은 엑셀 명단", "xlsx": "엑셀 명단"},
+}
+
+
+def _field_label(key):
+    if key in _FIELD_LABELS:
+        return _FIELD_LABELS[key]
+    # Future stored keys must not become English UI labels.
+    return "기타 설정" if re.search(r"[A-Za-z]", str(key)) else str(key)
+
+
+def _reference_label(value, snapshot=None, previous_snapshot=None, *, preserve_unknown=False):
+    from src.domain.document_column_sources import INVOICE_SOURCE_LABELS
+    if value in INVOICE_SOURCE_LABELS:
+        return INVOICE_SOURCE_LABELS[value].replace("템플릿", "양식")
+    if value.startswith("custom:"):
+        return _named_entity(CUSTOM_FIELD_KIND, value[7:], snapshot, previous_snapshot)
+    if value.startswith("status:"):
+        return _field_label(value.split(":", 1)[1])
+    if ":" in value:
+        scope, key = value.split(":", 1)
+        return _field_label(scope) + " · " + _reference_label(key, snapshot, previous_snapshot)
+    return value if preserve_unknown and value not in _FIELD_LABELS else _field_label(value)
+
+
+def _source_column_text(token):
+    if isinstance(token, str) and re.fullmatch(r"[A-Z]{1,3}", token):
+        number = 0
+        for letter in token:
+            number = number * 26 + ord(letter) - ord("A") + 1
+        return f"{number}번째 열"
+    return str(token)
+
+
+def history_reason(reason):
+    # Keep operator-entered prose intact; translate legacy generated titles only.
+    return {"Excel 명단 가져오기": "엑셀 명단 가져오기"}.get(reason, reason)
+
+
 def _value_text(
     field: str,
     value: object,
@@ -750,8 +830,33 @@ def _value_text(
         return "미지정"
     if isinstance(value, bool):
         return "예" if value else "아니요"
+    if isinstance(value, str) and field in _VALUE_LABELS:
+        return _VALUE_LABELS[field].get(value, "기타 설정" if re.search(r"[A-Za-z]", value) else value)
+    if field == "columns" and isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        return " / ".join(_reference_label(str(item), snapshot, previous_snapshot) for item in value) or "없음"
+    if field in {"overrides", "fallbacks"} and isinstance(value, Mapping):
+        return ", ".join(
+            f"{_reference_label(str(key), snapshot, previous_snapshot, preserve_unknown=True)}: "
+            f"{_reference_label(str(item), snapshot, previous_snapshot, preserve_unknown=True) if item else '비움'}"
+            for key, item in value.items()
+        ) or "없음"
+    if field in {"profile_columns", "fallback_profile_columns", "meal_flag_columns", "custom_field_columns"} and isinstance(value, Mapping):
+        return ", ".join(
+            f"{_named_entity(CUSTOM_FIELD_KIND, key, snapshot, previous_snapshot) if _uuid(str(key)) else _reference_label(str(key), snapshot, previous_snapshot)}: {_source_column_text(item)}"
+            for key, item in value.items()
+        ) or "없음"
+    if field in {"combined_meals_column", "driver_column", "sequence_column", "source_reference_column", "ignored_columns"} and isinstance(value, str):
+        return _source_column_text(value)
+    if field == "received_at" and isinstance(value, str):
+        try:
+            stamp = datetime.fromisoformat(value)
+            if stamp.tzinfo is not None:
+                stamp = stamp.astimezone(ZoneInfo("Asia/Seoul"))
+            return stamp.strftime("%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return "접수 시각 확인 필요"
     if field == "criteria" and isinstance(value, str):
-        return _FIELD_LABELS.get(value, value)
+        return _reference_label(value, snapshot, previous_snapshot)
     if field == "match_mode" and value == "all":
         return "모든 기준 일치"
     if field == "mode" and value in {"separate", "unified"}:
@@ -797,10 +902,10 @@ def _value_text(
         items = []
         for key, item in value.items():
             key_text = str(key)
-            if key_text in _INTERNAL_FIELDS or _is_sensitive(key_text):
+            if (key_text in _INTERNAL_FIELDS and not (field == "remarks" and key_text == "position")) or _is_sensitive(key_text):
                 continue
             items.append(
-                f"{_FIELD_LABELS.get(key_text, key_text)}: "
+                f"{_field_label(key_text)}: "
                 f"{_value_text(key_text, item, snapshot, previous_snapshot, depth=depth + 1, households=households)}"
             )
         return ", ".join(items) or "설정 값"

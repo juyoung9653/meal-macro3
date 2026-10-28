@@ -236,18 +236,18 @@ def test_confirmation_address_and_dong_mapping_edit_reset_and_cancel(app, profil
     dialog._document_combo.setCurrentIndex(dialog._document_combo.findData("confirmation"))
     try:
         assert "상세주소" not in dialog._combos
-        for target in ("도로명주소", "관할동"):
+        expected = {target: source for target, source in (("{addr}", "도로명주소"), ("{dong}", "관할동"))
+                    if target in dialog._combos}
+        assert "{addr}" in expected
+        for target, source in expected.items():
             primary = dialog._combos[target]
             secondary = dialog._fallback_combos[target]
             primary.setCurrentIndex(primary.findData("비고"))
-            secondary.setCurrentIndex(secondary.findData(target))
-        assert dialog.desired_mapping()["도로명주소"] == "비고"
-        assert dialog.desired_mapping()["관할동"] == "비고"
-        assert dialog.desired_fallbacks()["도로명주소"] == "도로명주소"
-        assert dialog.desired_fallbacks()["관할동"] == "관할동"
+            secondary.setCurrentIndex(secondary.findData(source))
+        assert all(dialog.desired_mapping()[target] == "비고" for target in expected)
+        assert dialog.desired_fallbacks() == expected
         dialog._reset_button.click()
-        assert dialog.desired_mapping()["도로명주소"] == "도로명주소"
-        assert dialog.desired_mapping()["관할동"] == "관할동"
+        assert all(dialog.desired_mapping()[target] == source for target, source in expected.items())
         assert not dialog.desired_fallbacks()
         dialog._cancel_button.click()
         assert dialog.result() == QDialog.DialogCode.Rejected

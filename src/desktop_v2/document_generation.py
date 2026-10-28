@@ -347,6 +347,13 @@ class DocumentGenerationController:
                     load_mapping_overrides(current_snapshot, profile_key, "confirmation"),
                 )
                 column_fallbacks = effective_fallbacks(column_mapping, load_mapping_fallbacks(current_snapshot, profile_key, "confirmation"), document_kind="confirmation")
+                from src.services.document_column_mappings import confirmation_template_fields
+                from src.templates.confirmation_fields import placeholder_mapping
+                placeholder_defaults, _ = confirmation_template_fields(
+                    template_path, self._settings.get("templates", "confirm_sheet_names"), current_roster)
+                column_mapping.update(placeholder_mapping(placeholder_defaults, column_mapping))
+                column_fallbacks.update(placeholder_mapping(
+                    {target: "" for target in placeholder_defaults}, column_fallbacks))
                 _validate_custom_mapping_sources(column_mapping, current_roster)
                 _validate_custom_mapping_sources(column_fallbacks, current_roster)
                 _created, publication = self._confirmation_writer(

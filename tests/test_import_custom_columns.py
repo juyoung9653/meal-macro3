@@ -57,10 +57,18 @@ def _prepared(preview, current=None):
         )
         for item in plan.staged_people if item.matched_person_id is None
     }
+    revision_id = uuid4()
+    value_choices = None
+    if current is not None:
+        from src.importing.values import import_value_rows
+        candidate = apply_reconciliation(current, plan, new_revision_id=revision_id,
+                                         decisions=decisions, custom_fields=preview.custom_fields)
+        value_choices = {row.key: row.proposed for row in import_value_rows(current, candidate, plan)
+                         if not row.automatic}
     return build_import_revision(
-        current, preview, plan, decisions=decisions,
+        current, preview, plan, decisions=decisions, value_choices=value_choices,
         actor=RevisionActor("synthetic tester", "synthetic-sid"), recorded_at=datetime.now(UTC),
-        revision_id=uuid4(), batch_id=uuid4(),
+        revision_id=revision_id, batch_id=uuid4(),
     )
 
 

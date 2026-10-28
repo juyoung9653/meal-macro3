@@ -1,7 +1,7 @@
 """Whole-file complaint browsing is searchable, read-only, and responsive."""
 
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from types import SimpleNamespace
 from uuid import UUID
 
@@ -93,9 +93,9 @@ def test_entire_file_ignores_roster_filters_keeps_deleted_names_and_newest_first
     try:
         assert dialog.model.rowCount() == 3
         assert [row[1] for row in dialog.model.rows] == ["합성 나래", "합성 이전 대상자", "합성 가람"]
-        assert dialog.model.rows[0][0] == datetime(2026, 10, 3, 12)
+        assert dialog.model.rows[0][0] == date(2026, 10, 3)
         assert dialog.model.headings == (
-            "접수 시각(KST)", "성명", "식종", "채널", "내용", "기록 시각(KST)", "변경자",
+            "접수일", "성명", "식종", "채널", "내용", "변경자", "변경번호", "기록 시각(KST)",
         )
         assert all("UUID" not in heading and "ID" not in heading for heading in dialog.model.headings)
         assert database.calls == ["current_roster", "snapshot", "revision"]
@@ -252,3 +252,118 @@ def test_real_encrypted_database_browse_search_and_close_keep_ledger_unchanged(a
         dialog.close()
         assert session.database.revision_summaries() == before
         assert session.database.snapshot(NEXT) == snapshot
+
+
+
+def test_header_filters_sort_and_export_preserve_full_values(app, tmp_path):
+    import openpyxl
+    from src.services.database_export import build_complaints_workbook
+    dialog = ComplaintsHistoryDialog(SyntheticComplaintDatabase())
+    try:
+        assert not dialog.table.isColumnHidden(5)
+        assert not dialog.table.isColumnHidden(6)
+        dialog._cycle_sort(0)
+        assert [row[0] for row in dialog.export_rows()] == [date(2026, 10, day) for day in (1, 2, 3)]
+        dialog._cycle_sort(0)
+        assert dialog.export_rows()[0][0] == date(2026, 10, 3)
+        dialog._cycle_sort(0)
+        assert not dialog.proxy.criteria
+        dialog._set_column_values("channel", frozenset({"메일"}))
+        assert dialog.proxy.rowCount() == 1
+        dialog._set_column_search("content", "끝까지")
+        rows = dialog.export_rows()
+        assert len(rows) == 1 and "\n" in rows[0][4]
+        book = build_complaints_workbook(dialog.model.headings[:7], rows)
+        target = tmp_path / "complaints.xlsx"
+        book.save(target)
+        book.close()
+        saved = openpyxl.load_workbook(target)
+        try:
+            sheet = saved.active
+            assert sheet["E2"].value == rows[0][4]
+            assert sheet["F2"].value == "합성 담당자"
+            assert sheet["G2"].value == rows[0][6]
+            assert sheet["A2"].number_format == "yyyy-mm-dd"
+            assert sheet.auto_filter.ref == "A1:G2"
+        finally:
+            saved.close()
+        dialog._set_column_values("channel", frozenset())
+        assert dialog.proxy.rowCount() == 0
+        assert not dialog.export_button.isEnabled()
+        dialog._clear_filters()
+        assert dialog.proxy.rowCount() == 3
+    finally:
+        dialog.close()
+
+
+def test_export_text_is_literal_and_long_text_is_not_truncated():
+    from src.services.database_export import build_complaints_workbook
+    headings = ("접수일", "성명", "식종", "채널", "내용", "변경자", "변경번호")
+    row = (date(2026, 10, 28), "합성", "조식", "전화", "=1+1\n둘째 줄", "담당자", "20261028-10")
+    book = build_complaints_workbook(headings, (row,))
+    assert book.active["E2"].value == row[4] and book.active["E2"].data_type == "s"
+    book.close()
+    with pytest.raises(ValueError, match="32,767"):
+        build_complaints_workbook(headings, ((*row[:4], "가" * 32768, *row[5:]),))
+
+
+
+def test_export_button_encrypts_filtered_rows_and_cancel_does_not_write(app, tmp_path, monkeypatch):
+    from io import BytesIO
+    import msoffcrypto
+    import openpyxl
+    import src.desktop_v2.complaints_history as module
+    dialog = ComplaintsHistoryDialog(SyntheticComplaintDatabase())
+    target = tmp_path / "filtered.xlsx"
+    notices, errors = [], []
+    monkeypatch.setattr(module.QFileDialog, "getSaveFileName", lambda *a, **k: (str(target), ""))
+    monkeypatch.setattr(module.QMessageBox, "information", lambda *a: notices.append(a))
+    monkeypatch.setattr(module.QMessageBox, "critical", lambda *a: errors.append(a))
+    monkeypatch.setattr(module, "require_export_password_setting", lambda snapshot: SimpleNamespace(password="synthetic-password"))
+    try:
+        dialog._set_column_values("channel", frozenset({"메일"}))
+        dialog._export()
+        assert target.is_file() and notices and not errors
+        with target.open("rb") as source:
+            office = msoffcrypto.OfficeFile(source)
+            assert office.is_encrypted()
+            office.load_key(password="synthetic-password")
+            plain = BytesIO()
+            office.decrypt(plain)
+        book = openpyxl.load_workbook(plain)
+        try:
+            assert book.active.max_row == 2
+            assert book.active["B2"].value == "합성 나래"
+            assert "끝까지 보이는 내용" in book.active["E2"].value
+        finally:
+            book.close()
+            plain.close()
+        before = target.read_bytes()
+        monkeypatch.setattr(module.QMessageBox, "question", lambda *a: module.QMessageBox.StandardButton.No)
+        dialog._export()
+        assert target.read_bytes() == before
+        monkeypatch.setattr(module.QFileDialog, "getSaveFileName", lambda *a, **k: ("", ""))
+        dialog._export()
+        assert target.read_bytes() == before
+        assert not errors
+    finally:
+        dialog.close()
+
+
+def test_revision_sort_uses_numeric_suffix_and_header_picker_applies(app):
+    from src.desktop_v2.column_search import ColumnValuePicker
+    dialog = ComplaintsHistoryDialog(SyntheticComplaintDatabase())
+    try:
+        rows = list(dialog.model.rows)
+        dialog.model.beginResetModel()
+        dialog.model.rows = tuple((*row[:6], code, row[7]) for row, code in zip(rows, ("20261004-10", "20261004-2", "20261004-1")))
+        dialog.model.endResetModel()
+        dialog._cycle_sort(6)
+        assert [row[6] for row in dialog.export_rows()] == ["20261004-1", "20261004-2", "20261004-10"]
+        dialog.header.open_value_filter("name")
+        picker = dialog.header._menu.findChild(ColumnValuePicker)
+        picker.applied.emit("나래", None)
+        assert dialog.proxy.rowCount() == 1
+        assert dialog.export_rows()[0][1] == "합성 나래"
+    finally:
+        dialog.close()

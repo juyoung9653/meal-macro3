@@ -147,6 +147,9 @@ def test_password_rotation_preserves_historical_snapshots_and_legacy_recovery(tm
     backups = tmp_path / "backups"
     backups.mkdir()
     with DatabaseSession.create(tmp_path / "source.sqlite3", "first", "recovery", backup_directory=backups) as session:
+        # Legacy archive compatibility is tested explicitly; automatic sessions
+        # now use the single encrypted replica instead.
+        session._backup_service = DatabaseBackupService(backups)
         oldest = session.backup_now()
         session.append_revision(_record())
         middle = session.change_user_password("first", "second")
@@ -179,6 +182,7 @@ def test_password_rotation_excludes_other_database_and_reports_unreadable(tmp_pa
     broken = backups / "broken.mealbackup"
     broken.write_bytes(b"broken archive")
     with DatabaseSession.create(tmp_path / "source.sqlite3", "first", backup_directory=backups) as session:
+        session._backup_service = DatabaseBackupService(backups)
         result = session.change_user_password("first", "second")
         assert result.rotation and result.rotation.unreadable == (broken,)
         assert result.rotation.failed == ()
@@ -190,6 +194,7 @@ def test_password_rotation_continues_after_corrupt_credentials(tmp_path: Path):
     backups = tmp_path / "backups"
     backups.mkdir()
     with DatabaseSession.create(tmp_path / "source.sqlite3", "first", backup_directory=backups) as session:
+        session._backup_service = DatabaseBackupService(backups)
         corrupt = session.backup_now().path
         valid = session.backup_now().path
         with zipfile.ZipFile(corrupt) as archive:
@@ -213,6 +218,7 @@ def test_older_schema_backup_rotates_without_migrating_archive_and_restores(tmp_
     backups = tmp_path / "backups"
     backups.mkdir()
     with DatabaseSession.create(tmp_path / "source.sqlite3", "first", backup_directory=backups) as session:
+        session._backup_service = DatabaseBackupService(backups)
         archive_path = _legacy_backup(session, backups).path
         with zipfile.ZipFile(archive_path) as archive:
             database_payload = archive.read("database.sqlite3")
@@ -263,6 +269,7 @@ def test_password_rotation_replace_failure_keeps_original_and_reports_partial(tm
     backups = tmp_path / "backups"
     backups.mkdir()
     with DatabaseSession.create(tmp_path / "source.sqlite3", "first", backup_directory=backups) as session:
+        session._backup_service = DatabaseBackupService(backups)
         first = session.backup_now().path
         second = session.backup_now().path
         original = second.read_bytes()
@@ -308,7 +315,7 @@ def test_user_password_opens_db_and_recovery_password_resets_it(tmp_path: Path):
     DatabaseSession.open(database_path, "new-everyday-password").close()
 
 
-def test_successful_revision_creates_one_verified_single_file_backup(tmp_path: Path):
+def test_successful_revision_creates_one_verified_replica_backup(tmp_path: Path):
     database_path = tmp_path / "operations.sqlite3"
     backup_directory = tmp_path / "automatic-backups"
     backup_directory.mkdir()
@@ -324,18 +331,13 @@ def test_successful_revision_creates_one_verified_single_file_backup(tmp_path: P
     assert result.succeeded
     assert result.error is None
     assert result.record is not None
-    assert result.record.path.suffix == BACKUP_EXTENSION
+    assert result.record.path.suffix == ".mealreplica"
     assert result.record.latest_revision_id == REVISION_ID
-    assert tuple(backup_directory.iterdir()) == (result.record.path,)
+    assert tuple(backup_directory.glob("*.mealreplica")) == (result.record.path,)
+    assert not tuple(backup_directory.glob("*.mealbackup"))
     assert inspect_backup(result.record.path) == result.record
 
-    with zipfile.ZipFile(result.record.path) as archive:
-        assert set(archive.namelist()) == {
-            "database.sqlite3",
-            "credentials.json",
-            "manifest.json",
-        }
-        encrypted_header = archive.read("database.sqlite3")[:16]
+    encrypted_header = result.record.path.read_bytes()[:16]
     assert encrypted_header != b"SQLite format 3\x00"
 
 

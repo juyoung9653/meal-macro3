@@ -39,7 +39,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from src.services.revision_history import build_revision_change_rows
+from src.services.revision_history import build_revision_change_rows, history_reason
 from src.services.revision_branches import BRANCH_EVENT_KEY, list_branches
 from src.services.revision_restore import RESTORE_TARGET_KEY
 
@@ -87,7 +87,7 @@ class RevisionSummaryModel(QAbstractTableModel):
         label = self.branch_labels.get(summary.revision_id, "")
         prefix = f"{label} · " if label else ""
         return (
-            f"{prefix}{summary.reason}\n"
+            f"{prefix}{history_reason(summary.reason)}\n"
             f"{_recorded_text(summary.recorded_at)} · {summary.actor.username}\n"
             f"변경번호 {summary.display_code}"
         )
@@ -102,7 +102,7 @@ class RevisionSummaryModel(QAbstractTableModel):
     def search_text(self, row: int) -> str:
         summary = self.summaries[row]
         return (
-            f"{summary.display_code}\n{summary.reason}\n{summary.actor.username}\n"
+            f"{summary.display_code}\n{history_reason(summary.reason)}\n{summary.actor.username}\n"
             f"{_recorded_text(summary.recorded_at)}\n"
             f"변경번호 {summary.display_code}\n변경자 {summary.actor.username}"
         ).casefold()
@@ -620,7 +620,7 @@ class GlobalRevisionHistoryDialog(QDialog):
         self._displayed_revision_id = summary.revision_id
         self._detail_model.set_rows(())
         self._selection_title.setText(
-            f"{summary.display_code} · {summary.reason}"
+            f"{summary.display_code} · {history_reason(summary.reason)}"
         )
         applied = (
             "적용일 없음"

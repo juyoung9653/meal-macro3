@@ -76,6 +76,15 @@ _DISPLAY_MEALS = (Meal.DINNER, Meal.BREAKFAST, Meal.LUNCH)
 _MEALS = {"breakfast": Meal.BREAKFAST, "lunch": Meal.LUNCH, "dinner": Meal.DINNER}
 
 
+class HouseholdSharedConflict(ValueError):
+    """A shared column that can be resolved by an explicit household review."""
+
+    def __init__(self, column_key, effective_on, message):
+        super().__init__(message)
+        self.column_key = column_key
+        self.effective_on = effective_on
+
+
 @dataclass(frozen=True)
 class SharedComponent:
     key: str
@@ -641,7 +650,8 @@ def _propagate_enrollments(before, after, working, selected, on, exceptions):
                         target = (member.person_id, meal)
                         for old_period, old_adding in claims.get(target, ()):
                             if old_period.overlaps(clipped) and old_adding != adding:
-                                raise ValueError(
+                                raise HouseholdSharedConflict(
+                                    "status:" + name, day,
                                     "같은 가구의 식종 가입 변경이 서로 충돌합니다."
                                 )
                         claims.setdefault(target, []).append((clipped, adding))
@@ -914,6 +924,10 @@ def row_add_comparison_days(roster, person_id, effective_on):
 
 def expand_household_shared_revision(snapshot, record):
     """Expand explicit changed components before the ledger transaction commits."""
+    from .import_shared import IMPORT_SHARED_VALUES, apply_import_shared_values
+
+    record = apply_import_shared_values(snapshot, record)
+    reviewed = set(record.metadata.decisions.get(IMPORT_SHARED_VALUES, {}))
     selected = shared_columns_from_state(
         snapshot.entity(HOUSEHOLD_SHARED_KIND, HOUSEHOLD_SHARED_ID)
     )
@@ -951,7 +965,8 @@ def expand_household_shared_revision(snapshot, record):
         record.metadata.effective_on
         or record.metadata.recorded_at.astimezone(ZoneInfo("Asia/Seoul")).date()
     )
-    active = selected & set(available_shared_column_keys(after))
+    available = selected & set(available_shared_column_keys(after))
+    active = available - reviewed
     correction = record.metadata.decisions.get("profile_routing_correction", {})
     corrected_components = {
         (UUID(item["person_id"]), item["column"])
@@ -979,7 +994,7 @@ def expand_household_shared_revision(snapshot, record):
                 and old_household.household_id == household.household_id
             ):
                 continue
-            for key in active:
+            for key in sorted(active):
                 if (person.person_id, key) in exceptions:
                     continue
                 values = {
@@ -988,7 +1003,8 @@ def expand_household_shared_revision(snapshot, record):
                     if (member.person_id, key) not in exceptions
                 }
                 if len(values) > 1:
-                    raise ValueError(
+                    raise HouseholdSharedConflict(
+                        key, comparison_day,
                         f"가구 공용 값 충돌: {key}. 가구를 합치기 전에 공용 값을 일치시켜주세요."
                     )
     # Registration must not rewrite existing members or create duplicate routing
@@ -999,7 +1015,7 @@ def expand_household_shared_revision(snapshot, record):
         household = after.household_for(person.person_id, on=on)
         if household is None:
             continue
-        for key in active:
+        for key in sorted(active):
             if (person.person_id, key) in exceptions or (person.person_id, key) in corrected_components:
                 continue
             if key.startswith("status:"):
@@ -1024,7 +1040,8 @@ def expand_household_shared_revision(snapshot, record):
                     continue
                 target = (household.household_id, key, index)
                 if target in proposals and proposals[target] != value:
-                    raise ValueError(
+                    raise HouseholdSharedConflict(
+                        key, on,
                         f"가구 공용 값 충돌: {key} · {person.profile.name}. 같은 가구의 입력값을 일치시킨 뒤 다시 저장해주세요."
                     )
                 proposals[target] = value
@@ -1141,7 +1158,8 @@ def expand_household_shared_revision(snapshot, record):
                         previous_period.overlaps(period)
                         and previous_status != event.status
                     ):
-                        raise ValueError(
+                        raise HouseholdSharedConflict(
+                            key, day,
                             "같은 가구의 상태 변경이 서로 충돌합니다. 상태와 기간을 일치시켜주세요."
                         )
                 event_claims.setdefault(target, []).append((period, event.status))
@@ -1159,7 +1177,8 @@ def expand_household_shared_revision(snapshot, record):
                     member.person_id != event.person_id
                     and event.meal not in working.meals_for(member.person_id, on=day)
                 ):
-                    raise ValueError(
+                    raise HouseholdSharedConflict(
+                        key, day,
                         "공용 상태를 적용할 가구원이 해당 식종에 미가입입니다. 가구 공용 설정에서 상태를 함께 지정해주세요."
                     )
                 if member.person_id != event.person_id and not any(
@@ -1222,7 +1241,13 @@ def expand_household_shared_revision(snapshot, record):
                             target in routing_claims
                             and routing_claims[target] != proposed
                         ):
-                            raise ValueError(
+                            conflict_key = (
+                                "status:" + next(k for k, v in _MEALS.items() if v == component)
+                                if field == "driver_ids" else
+                                {"road": "address", "detail": "detail_address", "jurisdiction": "jurisdiction"}[field]
+                            )
+                            raise HouseholdSharedConflict(
+                                conflict_key, event.effective_on,
                                 "같은 가구의 주소·관할동·배송담당 변경이 서로 충돌합니다."
                             )
                         routing_claims[target] = proposed
@@ -1261,7 +1286,7 @@ def expand_household_shared_revision(snapshot, record):
                         )
     # Removing a custom definition also removes its obsolete opt-in key.
     valid_exceptions = frozenset((pid, key) for pid, key in exceptions if pid in {p.person_id for p in after.persons} and key in available_shared_column_keys(after))
-    if active != selected or valid_exceptions != exceptions:
+    if available != selected or valid_exceptions != exceptions:
         state = snapshot.entity(HOUSEHOLD_SHARED_KIND, HOUSEHOLD_SHARED_ID)
         extra.append(
             AuditChange(
@@ -1269,7 +1294,7 @@ def expand_household_shared_revision(snapshot, record):
                 HOUSEHOLD_SHARED_ID,
                 ChangeOperation.UPDATE,
                 state,
-                _shared_state(active, valid_exceptions),
+                _shared_state(available, valid_exceptions),
             )
         )
     return replace(record, changes=(*roster_audit_changes(before, working), *extra))
