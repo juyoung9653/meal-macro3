@@ -43,7 +43,7 @@ def build_driver_household_rows(
     browse_all_meals: bool = False,
     excluded_person_ids: Collection[UUID] = (),
 ) -> tuple[DriverHouseholdRow, ...]:
-    """Return one row for each effective household, driver, and address combination.
+    """Return one row per household and driver, retaining distinct field values.
 
     A registry UUID is the only registered-driver identity.  A legacy name with no
     UUID stays a separate name-only identity, so it cannot be merged with a
@@ -56,13 +56,12 @@ def build_driver_household_rows(
     excluded = frozenset(excluded_person_ids)
     household_by_person = {
         membership.person_id: membership.household_id
-        for membership in roster.memberships
-        if membership.period.contains(on)
-        and membership.person_id not in excluded
+        for membership in roster.current_memberships
+        if membership.person_id not in excluded
     }
-    groups: dict[tuple[UUID, tuple[str, UUID | str | None], str], _RowParts] = {}
+    groups: dict[tuple[UUID, tuple[str, UUID | str | None]], _RowParts] = {}
     meal_groups: dict[
-        tuple[UUID, tuple[str, UUID | str | None], str, Meal], _RowParts
+        tuple[UUID, tuple[str, UUID | str | None], Meal], _RowParts
     ] = {}
     additional_contact_fields = _additional_contact_fields(roster)
 
@@ -101,11 +100,10 @@ def build_driver_household_rows(
                 identity = ("legacy", driver_name)
             else:
                 identity = ("unassigned", None)
-            # Hide the detail in presentation without changing household grouping.
-            key = (household_key, identity, _address(resolved.road_address, resolved.detail_address))
+            key = (household_key, identity)
             parts = groups.setdefault(
                 key,
-                _RowParts(household_key, driver_id, driver_name, address),
+                _RowParts(household_key, driver_id, driver_name),
             )
             parts.add(
                 person_id=person.person_id,
@@ -113,10 +111,11 @@ def build_driver_household_rows(
                 contacts=_contacts(person, additional_contact_fields),
                 meal=meal,
                 sequence=roster.resolve_assignment(person.person_id, meal).sequence,
+                address=address,
             )
             meal_parts = meal_groups.setdefault(
                 (*key, meal),
-                _RowParts(household_key, driver_id, driver_name, address),
+                _RowParts(household_key, driver_id, driver_name),
             )
             meal_parts.add(
                 person_id=person.person_id,
@@ -124,6 +123,7 @@ def build_driver_household_rows(
                 contacts=_contacts(person, additional_contact_fields),
                 meal=meal,
                 sequence=roster.resolve_assignment(person.person_id, meal).sequence,
+                address=address,
             )
 
     rows = tuple(
@@ -167,7 +167,7 @@ class _RowParts:
     household_key: UUID
     driver_id: UUID | None
     driver_name: str
-    address: str
+    addresses: list[str] = field(default_factory=list)
     member_ids: list[UUID] = field(default_factory=list)
     member_names: list[str] = field(default_factory=list)
     meals: list[Meal] = field(default_factory=list)
@@ -183,6 +183,7 @@ class _RowParts:
         contacts: tuple[str, ...],
         meal: Meal,
         sequence: str | None,
+        address: str,
     ) -> None:
         if person_id not in self.member_ids:
             self.member_ids.append(person_id)
@@ -197,6 +198,8 @@ class _RowParts:
             self.has_empty_sequence = True
         if sequence is not None and sequence not in self.sequences:
             self.sequences.append(sequence)
+        if address and address not in self.addresses:
+            self.addresses.append(address)
 
     def row(self) -> DriverHouseholdRow:
         return DriverHouseholdRow(
@@ -206,7 +209,7 @@ class _RowParts:
             tuple(self.member_ids),
             tuple(self.member_names),
             tuple(meal for meal in MEAL_ORDER if meal in self.meals),
-            self.address,
+            "\n".join(self.addresses),
             tuple(self.contacts),
             tuple(sorted(self.sequences, key=_sequence_sort_key)),
             has_empty_sequence=self.has_empty_sequence,
@@ -261,3 +264,12 @@ def _row_sort_key(row: DriverHouseholdRow) -> tuple[str, tuple[int, int | str, s
         " ".join(row.member_names),
         str(row.household_key),
     )
+
+
+def sequence_sort_key(values):
+    """Shared route ordering for display, drag saves and household regrouping."""
+    return tuple(
+        (0, int(value.strip()), value.strip()) if value.strip().isdigit()
+        else (1, 0, value.strip().casefold())
+        for value in values if value.strip()
+    ) or ((2, 0, ""),)

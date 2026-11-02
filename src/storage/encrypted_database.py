@@ -203,7 +203,7 @@ class EncryptedDatabase:
     def schema_version(self) -> int:
         return int(self._require_connection().pragma("user_version"))
 
-    def append_revision(self, record: RevisionRecord) -> RosterSnapshot | None:
+    def append_revision(self, record: RevisionRecord, *, replay: bool = False) -> RosterSnapshot | None:
         if not isinstance(record, RevisionRecord):
             raise TypeError("record는 RevisionRecord여야 합니다.")
         if record.metadata.display_code is not None:
@@ -243,7 +243,7 @@ class EncryptedDatabase:
             from src.services.meal_history_cleanup import CLEANUP_DECISION, validate_meal_history_cleanup
             deduplicating = CLEANUP_DECISION in record.metadata.decisions
             cancelling = CANCELLATION_DECISION in record.metadata.decisions or deduplicating
-            if cancelling:
+            if cancelling and not replay:
                 if restoring or actual_parent is None:
                     raise ValueError("식종 변경 취소는 현재 명단에서 처리해야 합니다.")
                 chain = self.branch_revision_chain(actual_parent)
@@ -251,7 +251,7 @@ class EncryptedDatabase:
                 validator(
                     self._current_entity_snapshot(actual_parent), chain, record,
                 )
-            elif not restoring and any(c.entity_kind == CANCELLATION_KIND for c in record.changes):
+            elif not restoring and not replay and any(c.entity_kind == CANCELLATION_KIND for c in record.changes):
                 raise ValueError("식종 변경 취소 기록은 검증된 취소 작업으로만 저장할 수 있습니다.")
             if not restoring:
                 _validate_changes_against_current(connection, record.changes)
@@ -282,13 +282,24 @@ class EncryptedDatabase:
             from src.domain.mobile_household_merge import (
                 needs_mobile_household_merge, prepare_mobile_household_revision,
             )
-            mobile_merge = (actual_parent is not None and not restoring and not cancelling
+            from src.services.meal_status_sequence import (
+                DECISION as MEAL_STATUS_SEQUENCE_DECISION,
+                needs_meal_status_sequence, prepare_meal_status_sequence,
+            )
+            mobile_merge = (actual_parent is not None and not restoring and not cancelling and not replay
                             and needs_mobile_household_merge(record))
             if mobile_merge:
                 record = prepare_mobile_household_revision(self._current_entity_snapshot(actual_parent), record)
                 _validate_changes_against_current(connection, record.changes)
-            elif actual_parent is not None and not restoring and not cancelling and (shared or exceptions):
+            elif (actual_parent is not None and not restoring and not cancelling and not replay and (shared or exceptions)
+                  and MEAL_STATUS_SEQUENCE_DECISION not in record.metadata.decisions):
+                # Finalized status records already include shared propagation
+                # and route ordering; replica replay must preserve them exactly.
                 record = expand_household_shared_revision(self._current_entity_snapshot(actual_parent), record)
+                _validate_changes_against_current(connection, record.changes)
+            if (actual_parent is not None and not restoring and not cancelling and not replay
+                    and needs_meal_status_sequence(record)):
+                record = prepare_meal_status_sequence(self._current_entity_snapshot(actual_parent), record)
                 _validate_changes_against_current(connection, record.changes)
             _insert_revision(connection, record.metadata)
             _insert_revision_display_code(connection, record.metadata)

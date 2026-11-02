@@ -82,7 +82,7 @@ def test_selected_forms_count_only_included_people_and_households():
     assert selected.reports[0].rows[0].memo == "기본 1가구·1식\n도시락 1가구·1식"
     assert selected.calculation_manifest["selected_delivery_forms"] == (None, "도시락")
     assert selected.calculation_manifest["target_entitlement_count"] == 2
-    assert selected.calculation_manifest["calculation_contract_version"] == 5
+    assert selected.calculation_manifest["calculation_contract_version"] == 6
     assert all_forms.calculation_manifest["selected_delivery_forms"] is None
 
 
@@ -98,7 +98,7 @@ def test_explicit_empty_and_unknown_forms_fail_without_changing_other_shipment_a
     assert "selected_delivery_forms" not in physical.calculation_manifest
 
 
-def test_excluded_form_is_filtered_before_household_validation():
+def test_form_filter_still_applies_with_missing_household_record():
     snapshot, ids = _snapshot()
     roster = roster_from_historical_snapshot(snapshot)
     roster = replace(
@@ -107,8 +107,8 @@ def test_excluded_form_is_filtered_before_household_validation():
     )
     source = HistoricalSnapshot(snapshot.revision_id, roster_entity_states(roster))
 
-    with pytest.raises(ValueError, match="유효한 가구"):
-        prepare_delivery_report_data(source, DAY, DAY, (Meal.DINNER,))
+    complete = prepare_delivery_report_data(source, DAY, DAY, (Meal.DINNER,))
+    assert ids[2] in {item.person_id for item in complete.shipments}
     selected = prepare_delivery_report_data(
         source, DAY, DAY, (Meal.DINNER,), delivery_forms=(None, "도시락"),
     )

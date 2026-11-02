@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
 
 from src.domain.delivery_routing import Driver
 from src.domain.roster import Meal
+from src.services.driver_households import sequence_sort_key as _sequence_key
 
 from .column_search import ColumnSearchHeader
 from .current_sheet_export import CurrentSheetSnapshot
@@ -86,14 +87,6 @@ class _DeliveryOrderTable(DriverOrderTable):
             painter.end()
             return True
         return super().eventFilter(watched, event)
-
-
-def _sequence_key(values):
-    return tuple(
-        (0, int(value.strip()), value.strip()) if value.strip().isdigit()
-        else (1, 0, value.strip().casefold())
-        for value in values if value.strip()
-    ) or ((2, 0, ""),)
 
 
 def _sequence_targets(row):
@@ -352,15 +345,24 @@ class DriverHouseholdsDialog(QDialog):
             for target in _sequence_targets(row):
                 if target[1] in affected_meals:
                     values[target] = str(index + 1)
-        self._set_order_headers(route)
+        self._set_order_headers(route, preview=True)
         if values:
             self.order_save_requested.emit(values)
 
-    def _set_order_headers(self, route):
+    def _set_order_headers(self, route, *, preview=False):
         positions = {id(row): index + 1 for index, row in enumerate(route)}
         for index in range(self.table.rowCount()):
             row = self.table.item(index, 3).data(Qt.ItemDataRole.UserRole)
-            item = QTableWidgetItem(str(positions[id(row)]))
+            if preview:
+                label = str(positions[id(row)])
+            elif len(row.sequences) <= 1 and not (row.has_empty_sequence and any(row.sequences)):
+                label = next(iter(row.sequences), "") or "-"
+            else:
+                label = "\n".join(
+                    f"{part.meals[0].value}: {', '.join(part.sequences) or '-'}"
+                    for part in (row.meal_rows or (row,))
+                )
+            item = QTableWidgetItem(label)
             item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.table.setVerticalHeaderItem(index, item)
 

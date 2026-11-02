@@ -122,23 +122,8 @@ _MEAL_ORDER = (Meal.DINNER, Meal.BREAKFAST, Meal.LUNCH)
 def _inspector_household_members(
     roster: RosterSnapshot, person_id: UUID, on: date,
 ) -> tuple[Person, ...]:
-    """Show initial household context before its saved start, without backdating data."""
-    first = {}
-    households = {}
-    for membership in roster.memberships:
-        previous = first.get(membership.person_id)
-        if previous is None or (membership.period.starts_on or date.min) < (previous.period.starts_on or date.min):
-            first[membership.person_id] = membership
-        if membership.period.contains(on):
-            households[membership.person_id] = membership.household_id
-    for member_id, membership in first.items():
-        start = membership.period.starts_on
-        if member_id not in households and start is not None and on < start:
-            households[member_id] = membership.household_id
-    household_id = households.get(person_id)
-    if household_id is None:
-        return ()
-    return tuple(person for person in roster.persons if households.get(person.person_id) == household_id)
+    household = roster.household_for(person_id, on=on)
+    return roster.household_members(household.household_id, on=on)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1485,6 +1470,7 @@ class RosterWindow(QMainWindow):
         self._sheets, self._active_sheet_id = self._load_sheets()
         self._restoring_search = False
         self._pending_exception_filters: set[str] = set()
+        self._driver_household_dialogs = []
         self._inactive_settings = inactive_settings
         self._archive_settings = InactiveRosterSettings(inactive_settings)
         self._roster = roster
@@ -2217,6 +2203,11 @@ class RosterWindow(QMainWindow):
             ),
         )
 
+    def refresh_driver_household_dialogs(self) -> None:
+        for dialog in tuple(self._driver_household_dialogs):
+            dialog.refresh_rows()
+            dialog.source_revision_id = self._roster.revision_id
+
     @dialog_workflow
     def _show_driver_households(self) -> None:
         from .driver_households import DriverHouseholdsDialog
@@ -2245,8 +2236,12 @@ class RosterWindow(QMainWindow):
             export_signal.connect(
                 lambda snapshot: self.driver_households_export_requested.emit(snapshot, dialog)
             )
-        yield DialogRequest(dialog)
-        dialog.deleteLater()
+        self._driver_household_dialogs.append(dialog)
+        try:
+            yield DialogRequest(dialog)
+        finally:
+            self._driver_household_dialogs.remove(dialog)
+            dialog.deleteLater()
 
     def _build_table_frame(self) -> QFrame:
         frame = QFrame()

@@ -395,7 +395,7 @@ def test_shared_gate_does_not_publish_on_password_or_file_cancel(app, tmp_path, 
     assert result is None and not messages.successes
     assert bool(messages.errors) is (mode == "missing_password")
     if mode == "missing_password":
-        assert messages.errors[0][1] == "기사·식종별 Excel을 내보내지 못했습니다"
+        assert messages.errors[0][1] == "기사·식종별 가구 Excel을 내보내지 못했습니다"
     if mode == "overwrite_cancel":
         assert target.read_bytes() == b"original"
     else:

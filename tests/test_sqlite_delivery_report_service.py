@@ -180,9 +180,9 @@ def test_breakfast_report_uses_physical_friday_and_keeps_three_entitlements():
         date(2026, 8, 23),
     )
     assert prepared.calculation_manifest["target_entitlement_count"] == 3
-    assert prepared.calculation_manifest["calculation_contract_version"] == 5
+    assert prepared.calculation_manifest["calculation_contract_version"] == 6
     assert prepared.calculation_manifest["recurring_service_policy"]["version"] == 5
-    assert prepared.calculation_manifest["household_grouping"]["policy_version"] == 2
+    assert prepared.calculation_manifest["household_grouping"]["policy_version"] == 3
     assert prepared.calculation_manifest["report_period"]["basis"] == (
         "physical_delivery_day"
     )
@@ -647,7 +647,7 @@ def test_report_preserves_dated_roster_status_and_routing_transitions(day, monke
     assert prepare_delivery_report_data(snapshot, day, day, (Meal.BREAKFAST, Meal.DINNER)) == optimized
 
 
-def test_shipment_household_change_inside_bundled_weekend_remains_error():
+def test_bundled_weekend_uses_current_household_without_date_error():
     snapshot, person_ids = _snapshot()
     roster = roster_from_historical_snapshot(snapshot)
     friday = date(2026, 8, 21)
@@ -658,8 +658,10 @@ def test_shipment_household_change_inside_bundled_weekend_remains_error():
     ))
     states = dict(snapshot.entities)
     states.update(roster_entity_states(changed))
-    with pytest.raises(ValueError, match='서로 다른 가구'):
-        prepare_delivery_report_data(HistoricalSnapshot(snapshot.revision_id, states), friday, friday, (Meal.BREAKFAST,))
+    prepared = prepare_delivery_report_data(HistoricalSnapshot(snapshot.revision_id, states), friday, friday, (Meal.BREAKFAST,))
+    assert prepared.shipments
+    assert prepared.reports[0].totals.household_counts == (1, 0, 0, 0, 0)
+    assert changed.household_for(person_ids[0], on=friday).household_id == new_household.household_id
 
 
 

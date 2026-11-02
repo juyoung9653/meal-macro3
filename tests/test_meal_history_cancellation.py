@@ -46,7 +46,7 @@ def session(tmp_path):
 
 
 def initialize(session, *, enrolled=True, row_add=False, initial_status=None):
-    person = Person(uuid4(), PersonProfile("합성 대상"))
+    person = Person(uuid4(), PersonProfile("합성 대상", mobile_phone="01012345678"))
     roster = RosterSnapshot(uuid4(), persons=(person,), delivery_defaults=tuple(
         HouseholdDeliverySetting(meal, weekdays=tuple(range(7)), delivery_weekdays=tuple(range(7))) for meal in Meal), enrollments=(
         MealEnrollment(person.person_id, Meal.DINNER, InclusiveDateRange(DAY)),
@@ -324,7 +324,7 @@ def test_cancel_initial_non_delivery_reveals_separately_cancellable_start(sessio
 def shared_household(session, person):
     from src.domain.household_shared import HOUSEHOLD_SHARED_ID, HOUSEHOLD_SHARED_KIND
     before = session.database.current_roster()
-    other = Person(uuid4(), PersonProfile("합성 가구원"))
+    other = Person(uuid4(), PersonProfile("합성 가구원", mobile_phone="01012345678"))
     household = Household(uuid4())
     after = replace(before, revision_id=uuid4(), persons=(*before.persons, other),
                     households=(household,), memberships=(

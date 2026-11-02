@@ -47,7 +47,6 @@ def test_settings_hub_has_db_and_computer_local_jobs(app):
         "배송대타 칼럼 표시",
         "배송순서 입력 방식",
         "초기 명단 적용일",
-        "가구 소속 기록 복구",
         "문서 저장 폴더",
         "출력 파일 보관기간",
         "운영 데이터 위치",

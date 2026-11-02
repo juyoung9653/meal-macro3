@@ -86,7 +86,7 @@ def test_actual_relocation_form_uses_date_and_registered_uuid_for_each_meal(app)
     dialog.close()
 
 
-def test_relocation_form_shows_effective_date_household_targets(app):
+def test_relocation_form_shows_current_household_before_recorded_start(app):
     from src.domain.roster import (
         Household,
         HouseholdMembership,
@@ -109,7 +109,7 @@ def test_relocation_form_shows_effective_date_household_targets(app):
         ),
     )
     dialog = RoutingChangeDialog(roster, RoutingState(), selected.person_id, BEFORE)
-    assert not dialog.whole_household.isEnabled()
+    assert dialog.whole_household.isEnabled()
     dialog.day.setDate(QDate(DAY.year, DAY.month, DAY.day))
     assert dialog.whole_household.isEnabled()
     assert "선택, 구성원" in dialog.household_targets.text()

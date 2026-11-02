@@ -1,8 +1,7 @@
-"""Atomic, dated household merges after a UI mobile-number change."""
+"""Atomic regrouping by current criteria, with previous links kept in audit."""
 from collections import defaultdict
 from dataclasses import replace
-from datetime import date, timedelta
-from uuid import UUID
+from uuid import UUID, uuid5
 from zoneinfo import ZoneInfo
 
 from .household_shared import (
@@ -16,7 +15,7 @@ from .delivery_routing import ROUTING_EVENT_KIND, routing_state_from_snapshot
 from .import_shared import import_candidate_snapshot
 from .projections import PERSON_KIND, roster_audit_changes, roster_from_historical_snapshot
 from .revisions import AuditChange, ChangeOperation, RevisionSource
-from .roster import InclusiveDateRange, normalize_phone
+from .roster import Household, HouseholdMembership, InclusiveDateRange, normalize_phone
 
 MERGE_DECISION = "mobile_household_merge"
 REVIEW_DECISION = "mobile_household_shared_values"
@@ -39,8 +38,7 @@ def needs_mobile_household_merge(record):
          and c.before != c.after)
         or c.entity_kind in (GROUPING_KIND, ROUTING_EVENT_KIND)
         or (c.entity_kind == HOUSEHOLD_SHARED_KIND
-            and "mobile" in shared_columns_from_state(c.after)
-            and "mobile" not in shared_columns_from_state(c.before))
+            and shared_columns_from_state(c.after) - shared_columns_from_state(c.before))
         for c in record.changes
     )
 
@@ -64,9 +62,9 @@ def _compose(snapshot, candidate, record):
 
 
 def merge_mobile_households(roster, on, *, changed_person_ids=None, columns=("mobile",), snapshot=None):
-    """Merge equal nonblank column tuples; preserve earlier and scheduled memberships."""
+    """Merge the revision's current households; dates are retained only in audit."""
     buckets = defaultdict(set)
-    active = {m.person_id: m for m in roster.memberships if m.period.contains(on)}
+    active = {m.person_id: m for m in roster.current_memberships}
     seeds = set()
     routing = routing_state_from_snapshot(snapshot) if snapshot is not None and set(columns) & {"address", "detail_address", "jurisdiction"} else None
     for person in roster.persons:
@@ -97,19 +95,20 @@ def merge_mobile_households(roster, on, *, changed_person_ids=None, columns=("mo
     if not groups:
         return roster, {}
     destinations = {hid: target for target, members in groups.items() for hid in members}
-    memberships = []
-    for membership in roster.memberships:
-        target = destinations.get(membership.household_id, membership.household_id)
-        if target == membership.household_id or not membership.period.contains(on):
-            memberships.append(membership)
-            continue
-        if on > date.min and (membership.period.starts_on is None or membership.period.starts_on < on):
-            memberships.append(replace(membership,
-                period=InclusiveDateRange(membership.period.starts_on, on - timedelta(days=1))))
-        memberships.append(replace(membership, household_id=target,
-            period=InclusiveDateRange(on, membership.period.ends_on)))
+    relinked = {
+        pid: destinations[membership.household_id]
+        for pid, membership in active.items()
+        if membership.household_id in destinations
+        and (destinations[membership.household_id] != membership.household_id
+             or pid not in roster._memberships_by_person)
+    }
+    # The before-state in the immutable revision preserves the old links and
+    # dates. The new link takes effect for every operational date immediately.
+    memberships = [m for m in roster.memberships if m.person_id not in relinked]
+    memberships.extend(HouseholdMembership(pid, target, InclusiveDateRange(on))
+                       for pid, target in relinked.items())
     # Keep existing per-person delivery behaviour when household defaults differ.
-    households = {h.household_id: h for h in roster.households}
+    households = {h.household_id: h for h in roster.current_households}
     people = []
     for person in roster.persons:
         membership = active.get(person.person_id)
@@ -119,8 +118,45 @@ def merge_mobile_households(roster, on, *, changed_person_ids=None, columns=("mo
             if previous != households[target].delivery_settings:
                 person = replace(person, delivery_settings=previous)
         people.append(person)
-    merged = replace(roster, memberships=tuple(memberships), persons=tuple(people))
+    stored_households = {h.household_id: h for h in roster.households}
+    for target in relinked.values():
+        stored_households.setdefault(target, households[target])
+    merged = replace(roster, memberships=tuple(memberships), persons=tuple(people),
+                     households=tuple(stored_households.values()))
     return merged, groups
+
+
+def split_households_by_criteria(roster, on, *, columns, snapshot=None, changed_person_ids=None):
+    """Separate different current keys before shared values can propagate."""
+    routing = routing_state_from_snapshot(snapshot) if snapshot is not None else None
+    partitions = defaultdict(lambda: defaultdict(list))
+    for person in roster.persons:
+        key = profile_grouping_key(person.profile, columns,
+            routing=routing.resolve(roster, person.person_id, on) if routing is not None else None)
+        # Blank values never establish a family relationship.
+        identity = key if all(key) else ("person", str(person.person_id))
+        hid = roster.current_membership(person.person_id).household_id
+        partitions[hid][identity].append(person.person_id)
+    relinked = {}
+    households = {h.household_id: h for h in roster.households}
+    originals = {h.household_id: h for h in roster.current_households}
+    for hid, buckets in partitions.items():
+        members = {pid for people in buckets.values() for pid in people}
+        if len(buckets) < 2 or (changed_person_ids is not None and not members & changed_person_ids):
+            continue
+        ordered = sorted(buckets.items(), key=lambda item: (
+            -sum(changed_person_ids is None or pid not in changed_person_ids for pid in item[1]),
+            -len(item[1]), min(map(str, item[1])),
+        ))
+        for key, people in ordered[1:]:
+            target = uuid5(hid, repr((tuple(columns), key)))
+            households.setdefault(target, Household(target, originals[hid].delivery_settings))
+            relinked.update((pid, target) for pid in people)
+    if not relinked:
+        return roster, {}
+    memberships = tuple(m for m in roster.memberships if m.person_id not in relinked)
+    memberships += tuple(HouseholdMembership(pid, hid, InclusiveDateRange(on)) for pid, hid in relinked.items())
+    return replace(roster, memberships=memberships, households=tuple(households.values())), relinked
 
 
 def prepare_mobile_household_revision(snapshot, record):
@@ -131,12 +167,13 @@ def prepare_mobile_household_revision(snapshot, record):
     # not propagate its profile/routing changes again or create new event IDs.
     if MERGE_DECISION in record.metadata.decisions:
         return record
-    expanded = expand_household_shared_revision(snapshot, record)
-    candidate = import_candidate_snapshot(snapshot, expanded)
+    candidate = import_candidate_snapshot(snapshot, record)
     roster = roster_from_historical_snapshot(candidate)
     stored = candidate.entity(HOUSEHOLD_SHARED_KIND, HOUSEHOLD_SHARED_ID)
     exceptions = shared_exceptions_from_state(stored)
     on = record.metadata.effective_on or record.metadata.recorded_at.astimezone(ZoneInfo("Asia/Seoul")).date()
+    shared_enabled = any(c.entity_kind == HOUSEHOLD_SHARED_KIND
+        and shared_columns_from_state(c.after) - shared_columns_from_state(c.before) for c in record.changes)
     enabling = any(c.entity_kind == GROUPING_KIND for c in record.changes) or any(c.entity_kind == HOUSEHOLD_SHARED_KIND
         and "mobile" in shared_columns_from_state(c.after)
         and "mobile" not in shared_columns_from_state(c.before) for c in record.changes)
@@ -146,17 +183,71 @@ def prepare_mobile_household_revision(snapshot, record):
             return state.get("custom_values", {}).get(key[7:])
         return state.get(PROFILE_COLUMNS[key][0])
 
-    changed = {c.entity_id for c in expanded.changes if c.entity_kind == PERSON_KIND
+    changed = {c.entity_id for c in record.changes if c.entity_kind == PERSON_KIND
         and c.after is not None and (c.before is None or any(
             criterion_value(c.before, key) != criterion_value(c.after, key) for key in columns))}
     if set(columns) & {"address", "detail_address", "jurisdiction"}:
-        changed.update(UUID((c.after or c.before)["person_id"]) for c in expanded.changes
+        changed.update(UUID((c.after or c.before)["person_id"]) for c in record.changes
             if c.entity_kind == ROUTING_EVENT_KIND)
+    scope = None if enabling or record.metadata.source is RevisionSource.IMPORT else changed
+    split_scope = scope
+    if scope is not None and (scope or shared_enabled):
+        routing = routing_state_from_snapshot(candidate)
+        keys = {person.person_id: profile_grouping_key(person.profile, columns,
+            routing=routing.resolve(roster, person.person_id, on)) for person in roster.persons}
+        changed_keys = {keys[pid] for pid in scope if pid in keys and all(keys[pid])}
+        if shared_enabled:
+            # Sharing a non-key column should reconcile matching separate
+            # households without splitting unrelated legacy families.
+            households_by_key = defaultdict(set)
+            for pid, key in keys.items():
+                if all(key):
+                    households_by_key[key].add(roster.current_membership(pid).household_id)
+            changed_keys.update(key for key, household_ids in households_by_key.items() if len(household_ids) > 1)
+        # A legacy destination may itself contain different keys. Separate it
+        # before merging so that one matching member cannot pull in unrelated people.
+        split_scope = scope | {pid for pid, key in keys.items() if key in changed_keys}
+    split, separated = split_households_by_criteria(roster, on, columns=columns,
+        snapshot=candidate, changed_person_ids=split_scope)
+    if separated:
+        candidate = import_candidate_snapshot(candidate,
+            replace(record, changes=roster_audit_changes(roster, split)))
+        record = _compose(snapshot, candidate, record)
+    expanded = expand_household_shared_revision(snapshot, record)
+    candidate = import_candidate_snapshot(snapshot, expanded)
+    roster = roster_from_historical_snapshot(candidate)
     merged, groups = merge_mobile_households(roster, on,
-        changed_person_ids=None if enabling or record.metadata.source is RevisionSource.IMPORT else changed,
+        changed_person_ids=None if shared_enabled else scope,
         columns=columns, snapshot=candidate)
+    def synchronize(candidate):
+        from src.services.household_sequence import synchronize_household_sequences
+        affected = set(groups) | set(separated.values())
+        if separated:
+            original = roster_from_historical_snapshot(snapshot)
+            old_ids = {original.current_membership(pid).household_id for pid in separated
+                       if pid in original._persons_by_id}
+            affected.update(merged.current_membership(p.person_id).household_id
+                            for p in original.persons
+                            if original.current_membership(p.person_id).household_id in old_ids
+                            and p.person_id in merged._persons_by_id)
+        if any(c.entity_kind == GROUPING_KIND for c in record.changes):
+            affected = None
+        if affected == set():
+            return candidate
+        return synchronize_household_sequences(snapshot, candidate, record, on, affected)
+
     if not groups:
-        return expanded
+        previous_candidate = candidate
+        candidate = synchronize(candidate)
+        synchronized = candidate.entities != previous_candidate.entities
+        finalized = _compose(snapshot, candidate, expanded) if synchronized else expanded
+        if separated or synchronized:
+            return replace(finalized, metadata=replace(finalized.metadata, decisions={
+                **expanded.metadata.decisions, MERGE_DECISION: {
+                    "effective_on": on.isoformat(), "households": {},
+                    "separated_person_ids": sorted(map(str, separated)),
+                }}))
+        return finalized
     candidate = import_candidate_snapshot(candidate,
         replace(record, changes=roster_audit_changes(roster, merged)))
     choices = record.metadata.decisions.get(REVIEW_DECISION, {})
@@ -189,11 +280,13 @@ def prepare_mobile_household_revision(snapshot, record):
                     current = roster_from_historical_snapshot(candidate)
                     continue
             raise MobileHouseholdConflict(key, on, candidate, groups)
+    candidate = synchronize(candidate)
     result = _compose(snapshot, candidate, expanded)
     return replace(result, metadata=replace(result.metadata, decisions={
         **result.metadata.decisions, MERGE_DECISION: {
             "effective_on": on.isoformat(),
             "households": {str(target): sorted(map(str, members)) for target, members in groups.items()},
+            "separated_person_ids": sorted(map(str, separated)),
         }}))
 
 

@@ -181,7 +181,7 @@ def test_mixed_driver_meals_and_homonymous_driver_ids_stay_separate():
     }
 
 
-def test_effective_routing_and_membership_and_ungrouped_people_are_dated():
+def test_routing_is_dated_but_household_links_are_current():
     first, second = person(1, "첫째"), person(2, "둘째")
     household = uid(50)
     old, new = Driver(uid(10), "이전"), Driver(uid(11), "새기사")
@@ -196,9 +196,9 @@ def test_effective_routing_and_membership_and_ungrouped_people_are_dated():
     before = build_driver_household_rows(snapshot, state, date(2026, 9, 30))
     active = build_driver_household_rows(snapshot, state, DAY)
 
-    assert {row.household_key for row in before} == {first.person_id, second.person_id}
+    assert {row.household_key for row in before} == {household, snapshot.current_membership(second.person_id).household_id}
     active_by_household = {row.household_key: row for row in active}
-    assert active_by_household[second.person_id].driver_id == old.driver_id
+    assert active_by_household[snapshot.current_membership(second.person_id).household_id].driver_id == old.driver_id
     assert active_by_household[household].driver_id == new.driver_id
 
 
@@ -222,7 +222,7 @@ def test_ambiguous_legacy_name_is_not_merged_with_registered_driver():
     assert {row.driver_id for row in rows} == {None, first_duplicate.driver_id}
 
 
-def test_included_meals_filters_inactive_and_excluded_people_and_address_splits():
+def test_included_meals_filters_members_before_aggregating_different_addresses():
     first, second = person(1, "첫째", address="성남 1"), person(2, "둘째", address="성남 2")
     household = uid(50)
     driver = Driver(uid(10), "김기사")
@@ -243,5 +243,5 @@ def test_included_meals_filters_inactive_and_excluded_people_and_address_splits(
     assert rows[0].meals == (Meal.LUNCH,)
 
     all_rows = build_driver_household_rows(snapshot, RoutingState((driver,)), DAY)
-    assert len(all_rows) == 2
-    assert {row.address for row in all_rows} == {"성남 1", "성남 2"}
+    assert len(all_rows) == 1
+    assert all_rows[0].address == "성남 1\n성남 2"

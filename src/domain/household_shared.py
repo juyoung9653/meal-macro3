@@ -369,7 +369,7 @@ def household_shared_rows(roster, column_key, on, *, snapshot=None, exceptions=N
     if exceptions is None:
         exceptions = shared_exceptions_from_state(snapshot.entity(HOUSEHOLD_SHARED_KIND, HOUSEHOLD_SHARED_ID) if snapshot else None)
     context = _ReadContext(snapshot) if snapshot is not None else None
-    for household in roster.households:
+    for household in roster.current_households:
         members = tuple(p for p in roster.household_members(household.household_id, on=on) if (p.person_id, column_key) not in exceptions)
         if not members:
             continue
@@ -554,28 +554,10 @@ def _address_pair(roster, person_id, on, routing, extra=()):
 
 
 def _shared_period(roster, source_id, target_id, household_id, on, requested):
-    periods = [requested]
     for pid in (source_id, target_id):
-        membership = next(
-            (
-                m
-                for m in roster.memberships
-                if m.person_id == pid
-                and m.household_id == household_id
-                and m.period.contains(on)
-            ),
-            None,
-        )
-        if membership is None:
+        if roster.current_membership(pid).household_id != household_id:
             return None
-        periods.append(membership.period)
-    starts = max(p.starts_on or date.min for p in periods)
-    ends = min(p.ends_on or date.max for p in periods)
-    if starts > ends:
-        return None
-    return InclusiveDateRange(
-        None if starts == date.min else starts, None if ends == date.max else ends
-    )
+    return requested
 
 
 def _subtract_periods(periods, removed):
@@ -764,20 +746,6 @@ def build_household_shared_revision(
                         if future:
                             ends_on = min(future) - timedelta(days=1)
                     period = InclusiveDateRange(effective_on, ends_on)
-                    membership = next(
-                        m
-                        for m in roster.memberships
-                        if m.person_id == pid
-                        and m.household_id == row.household_id
-                        and m.period.contains(effective_on)
-                    )
-                    if membership.period.ends_on is not None and (
-                        period.ends_on is None
-                        or period.ends_on > membership.period.ends_on
-                    ):
-                        period = InclusiveDateRange(
-                            effective_on, membership.period.ends_on
-                        )
                     previous = _values(
                         roster, column_key, pid, effective_on, context=context
                     )
@@ -904,21 +872,11 @@ def build_household_shared_revision(
 
 
 def row_add_comparison_days(roster, person_id, effective_on):
-    """Check the add date, delivery starts, and household membership boundaries."""
+    """Check the add date and delivery starts; household dates are audit only."""
     days = {effective_on}
-    households = {item.household_id for item in roster.memberships if item.person_id == person_id}
     for enrollment in roster.enrollments:
         if enrollment.person_id == person_id and enrollment.period.starts_on is not None:
             days.add(enrollment.period.starts_on)
-    for membership in roster.memberships:
-        if membership.household_id not in households:
-            continue
-        if membership.period.starts_on is not None:
-            days.add(membership.period.starts_on)
-        if membership.period.ends_on is not None:
-            days.add(membership.period.ends_on)
-            if membership.period.ends_on < date.max:
-                days.add(membership.period.ends_on + timedelta(days=1))
     return tuple(sorted(days))
 
 

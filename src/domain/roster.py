@@ -476,10 +476,36 @@ class RosterSnapshot:
     def household_for(self, person_id: UUID, *, on: date) -> Household | None:
         self.person(person_id)
         _validate_date(on, "조회일")
-        for membership in self._memberships_by_person.get(person_id, ()):
-            if membership.period.contains(on):
-                return self._households_by_id[membership.household_id]
-        return None
+        membership = self.current_membership(person_id)
+        return self._households_by_id.get(membership.household_id) or Household(membership.household_id)
+
+    def current_membership(self, person_id: UUID) -> HouseholdMembership:
+        """Return this revision's household without applying recorded date bounds.
+
+        For legacy links, the latest recorded period identifies the current
+        household. A missing link is a stable single-person household.
+        """
+        self.person(person_id)
+        recorded = self._memberships_by_person.get(person_id, ())
+        if recorded:
+            latest = max(recorded, key=lambda item: (
+                item.period.starts_on or date.min, item.period.ends_on or date.max,
+            ))
+            return HouseholdMembership(person_id, latest.household_id)
+        return HouseholdMembership(person_id, uuid5(
+            UUID("73d10822-ae71-495c-906d-031e8d573654"), str(person_id),
+        ))
+
+    @property
+    def current_memberships(self) -> tuple[HouseholdMembership, ...]:
+        return tuple(self.current_membership(person.person_id) for person in self.persons)
+
+    @property
+    def current_households(self) -> tuple[Household, ...]:
+        households = dict(self._households_by_id)
+        for membership in self.current_memberships:
+            households.setdefault(membership.household_id, Household(membership.household_id))
+        return tuple(households.values())
 
     def delivery_settings_for(self, person_id: UUID, *, on: date) -> tuple[HouseholdDeliverySetting, ...]:
         person = self.person(person_id)
@@ -495,13 +521,12 @@ class RosterSnapshot:
         *,
         on: date,
     ) -> tuple[Person, ...]:
-        _require_reference(household_id, self._households_by_id, "가구")
+        _require_reference(household_id, {h.household_id: h for h in self.current_households}, "가구")
         _validate_date(on, "조회일")
         member_ids = {
             membership.person_id
-            for membership in self.memberships
+            for membership in self.current_memberships
             if membership.household_id == household_id
-            and membership.period.contains(on)
         }
         return tuple(
             person for person in self.persons if person.person_id in member_ids

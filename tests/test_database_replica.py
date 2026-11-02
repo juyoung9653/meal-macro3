@@ -107,7 +107,8 @@ def test_restore_replay_failure_repairs_only_after_verified_copy(tmp_path, monke
         expected = session.database.snapshot(record.metadata.revision_id)
         replica = session._backup_service._replica
 
-        def reject_restore(candidate):
+        def reject_restore(candidate, *, replay=False):
+            assert replay
             assert "snapshot_restore_target" in candidate.metadata.decisions
             raise ValueError("복구 변경 내용이 선택한 변경번호의 전체 상태와 일치하지 않습니다.")
 

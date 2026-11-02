@@ -27,11 +27,12 @@ def synthetic(sizes=(1, 2, 3, 4, 5, 6)):
     labels = ("배송순서", "관할동", "이름", "상세주소", "신주소", "핸드폰", "비고2")
     rows = []
     for group, size in enumerate(sizes):
+        household = uuid4()
         for member in range(size):
             values = dict(zip(keys, (f"{group + 1}번", "가동" if group < 3 else "나동",
                                     f"합성{group}-{member}", "101호", "테스트로 12, 합성아파트 101동",
                                     f"010-0000-{group:04d}", "합성 메모입니다 문 앞에 놓아 주세요"), strict=True))
-            rows.append(SubstituteRow(uuid4(), uuid4(), "synthetic", "합성기사", values, 1, group == 1))
+            rows.append(SubstituteRow(uuid4(), household, "synthetic", "합성기사", values, 1, group == 1))
     return PreparedSubstituteData(date(2026, 8, 28), Meal.BREAKFAST, tuple(rows),
                                   tuple(SubstituteColumn(k, v) for k, v in zip(keys, labels, strict=True)), keys, {})
 
@@ -56,8 +57,9 @@ def realistic_typography(entitlements=1):
     return replace(data, rows=tuple(rows))
 
 
-def test_phone_groups_db_entitlements_and_hidden_columns():
+def test_household_groups_db_entitlements_independent_of_phone_and_hidden_columns():
     data = synthetic((1,) * 7)
+    data = replace(data, rows=(data.rows[0], replace(data.rows[1], household_id=data.rows[0].household_id), *data.rows[2:]))
     phones = ("010-0000-1234", "01000001234.0", "", "", "01000001234", "01000009999", "01000001234")
     data = replace(data, rows=tuple(replace(row, values={**row.values, "mobile_phone": phone}, entitlement_count=3)
                                     for row, phone in zip(data.rows, phones, strict=True)))
@@ -65,7 +67,7 @@ def test_phone_groups_db_entitlements_and_hidden_columns():
     assert [(g.source_start, g.source_end, g.meal_count) for g in layout.groups] == [(0, 1, 2), (2, 2, 1), (3, 3, 1), (4, 4, 1), (5, 5, 1), (6, 6, 1)]
     ws = wb.active
     assert [ws.cell(r, 1).value for r in range(3, 10)] == [row.values["name"] for row in data.rows]
-    assert ws["B3"].value == "1번" and "B3:B4" in {str(r) for r in ws.merged_cells.ranges}
+    assert ws["B3"].value == "1번\n2번" and "B3:B4" in {str(r) for r in ws.merged_cells.ranges}
     assert ws["C3"].value == 2
     assert ws["C3"].number_format == "General"
     assert ws["A3"].fill.fgColor.rgb.endswith("E6B8B7")

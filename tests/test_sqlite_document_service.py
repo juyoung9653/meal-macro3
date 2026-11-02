@@ -173,7 +173,7 @@ def _source_snapshot(*, include_school: bool = True, delivery_settings: tuple[Ho
 
 
 @pytest.mark.parametrize("case", ("missing", "outside"))
-def test_household_diagnostic_identifies_person_dates_and_recorded_fields(case):
+def test_monthly_documents_allow_missing_or_late_household_records(case):
     source = _source_snapshot()
     roster = roster_from_historical_snapshot(source)
     person = roster.persons[0]
@@ -191,38 +191,21 @@ def test_household_diagnostic_identifies_person_dates_and_recorded_fields(case):
     states.update(roster_entity_states(changed))
     invalid_source = HistoricalSnapshot(source.revision_id, states)
 
-    with pytest.raises(HouseholdServiceDatesError) as caught:
-        prepare_monthly_document_data(
-            invalid_source, date(2026, 8, 1), date(2026, 8, 31), (Meal.BREAKFAST,),
-        )
-
-    error = caught.value
-    assert isinstance(error, ValueError)
-    assert error.person_id == person.person_id
-    text = str(error)
-    assert "성명: 홍길동 / 생년월일: 2015-03-02 / 학교명: 푸른초" in text
-    assert "실제 서비스일:" in text
-    assert "가구 소속 / 적용 시작일 / 종료일" in text
-    assert "명단의 표시 칼럼이 아닙니다" in text
-    assert all(str(item) not in text for item in (
-        person.person_id, original.household_id, second_household.household_id,
-    ))
-    if case == "missing":
-        assert "가구 소속 기록이 없습니다" in text
-        assert "- 기록 없음" in text
-    elif case == "outside":
-        assert "실제 서비스일과 겹치지 않습니다" in text
-        assert "적용 시작일 2026-09-01, 종료일 없음" in text
+    prepared = prepare_monthly_document_data(
+        invalid_source, date(2026, 8, 1), date(2026, 8, 31), (Meal.BREAKFAST,),
+    )
+    baseline = prepare_monthly_document_data(source, date(2026, 8, 1), date(2026, 8, 31), (Meal.BREAKFAST,))
+    assert prepared.batch.deliveries[0].household_key == str(changed.current_membership(person.person_id).household_id)
+    assert prepared.entitlements == baseline.entitlements
+    assert prepared.billing == baseline.billing
 
 
-def test_household_diagnostic_lists_exact_dates_without_filling_service_gaps():
-    roster = roster_from_historical_snapshot(_source_snapshot())
-    roster = replace(roster, memberships=())
-    with pytest.raises(HouseholdServiceDatesError) as caught:
-        _household_for_document(roster, roster.persons[0].person_id, (
-            date(2026, 8, 7), date(2026, 8, 3), date(2026, 8, 4), date(2026, 8, 3),
-        ), effective_on=date(2026, 8, 31))
-    assert "실제 서비스일: 2026-08-03 ~ 2026-08-04, 2026-08-07\n" in str(caught.value)
+def test_missing_household_fallback_is_stable_across_service_days():
+    roster = replace(roster_from_historical_snapshot(_source_snapshot()), memberships=())
+    pid = roster.persons[0].person_id
+    expected = roster.current_membership(pid).household_id
+    for days in ((date(2026, 8, 7), date(2026, 8, 3)), (date(2026, 9, 1),)):
+        assert _household_for_document(roster, pid, days, effective_on=date(2026, 8, 31)) == expected
 
 
 def test_document_household_falls_back_to_a_known_service_day():
@@ -265,7 +248,7 @@ def test_calculates_shared_invoice_and_confirmation_facts_from_source_revision()
         "석식",
     )
     assert prepared.calculation_manifest["billing"]["total_amount"] == 267_000
-    assert prepared.calculation_manifest["calculation_contract_version"] == 6
+    assert prepared.calculation_manifest["calculation_contract_version"] == 7
     assert prepared.calculation_manifest["recurring_service_policy"]["version"] == 5
 
 

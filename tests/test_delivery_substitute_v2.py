@@ -101,14 +101,14 @@ def test_physical_breakfast_household_ids_hidden_fields_and_box():
     assert len(data.rows) == 4
     assert sum(row.entitlement_count for row in data.rows) == 12
     assert data.default_columns[-1] == f"custom:{CUSTOM}"
-    assert len({row.household_id for row in data.rows}) == 3  # DB household identities remain available; display grouping uses phones.
+    assert len({row.household_id for row in data.rows}) == 3  # Output grouping follows the saved household identities.
     assert sum(row.box for row in data.rows) == 2
     wb, _, _ = _build_sheet(data, replace(options(data), columns=("name",)))
     ws = wb.active
-    assert ws["B3"].value == 3
-    assert "B3:B5" in {str(r) for r in ws.merged_cells.ranges}
+    assert ws["B3"].value == 2
+    assert "B3:B4" in {str(r) for r in ws.merged_cells.ranges}
     assert ws["A3"].border.left.style == "thick"
-    assert ws["A5"].border.bottom.style == "thick"
+    assert ws["A4"].border.bottom.style == "thick"
     assert ws["A7"].value == ""
     assert ws["G10"].value == 4
     assert prepare_delivery_substitute_data(snapshot, date(2026, 8, 29), Meal.BREAKFAST).rows == ()

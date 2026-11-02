@@ -455,9 +455,8 @@ def _household_candidates(
     }
     household_ids = {
         membership.household_id
-        for membership in roster.memberships
+        for membership in roster.current_memberships
         if membership.person_id in person_ids
-        and membership.period.contains(effective_on)
     }
     return tuple(sorted(household_ids, key=str))
 

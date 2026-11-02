@@ -579,8 +579,8 @@ class MealStatusChangeDialog(QDialog):
                 on = _python_date(self._starts_on_by_meal[meal])
                 household_ids = {
                     m.household_id
-                    for m in self._roster.memberships
-                    if m.person_id == person_id and m.period.contains(on)
+                    for m in self._roster.current_memberships
+                    if m.person_id == person_id
                 }
                 for household_id in household_ids:
                     for member in self._roster.household_members(household_id, on=on):
@@ -693,10 +693,10 @@ class MealStatusChangeController:
             return MealStatusChangeOutcome(MealStatusChangeStatus.FAILED)
         seed_ids = {pid for pid, _ in targets} if targets else {person_id}
         households = {
-            m.household_id for m in roster.memberships if m.person_id in seed_ids
+            m.household_id for m in roster.current_memberships if m.person_id in seed_ids
         }
         related_ids = seed_ids | {
-            m.person_id for m in roster.memberships if m.household_id in households
+            m.person_id for m in roster.current_memberships if m.household_id in households
         }
         all_histories = {
             (pid, meal): self._session.database.status_history(pid, meal)

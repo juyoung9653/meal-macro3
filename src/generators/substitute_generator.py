@@ -18,7 +18,7 @@ from src.excel.publication import WorkbookPublicationResult, publish_workbook
 from src.excel.substitute_excel_metrics import apply_excel_metrics
 from src.excel.substitute_page_layout import SheetGroup, SheetLayout
 
-SUBSTITUTE_RENDER_CONTRACT_VERSION = 8
+SUBSTITUTE_RENDER_CONTRACT_VERSION = 9
 _LABELS = {"name": "이름", "road_address": "신주소", "note": "비고2"}
 _FILLS = {2: "E6B8B7", 3: "B8CCE4", 4: "D8E4BC", 5: "CCC0DA"}
 _THIN = Side(style="thin", color="000000")
@@ -42,8 +42,8 @@ def _put(ws, row, column, value, *, bold=False, heading=False):
     return cell
 
 
-def _phone(value: str) -> str:
-    return re.sub(r"\D", "", re.sub(r"\.0+$", "", value.strip()))
+def _distinct_values(values):
+    return tuple(dict.fromkeys(value.strip() for value in values if value and value.strip()))
 
 
 def _preprocess(value: str, *, address=False, note=False) -> str:
@@ -76,14 +76,13 @@ def _build_sheet(data: PreparedSubstituteData, options: SubstituteOptions):
     groups = []
     start = 0
     for index in range(1, len(rows) + 1):
-        previous_phone = _phone(_grouping_value(rows[index - 1], "mobile_phone", "grouping_phone"))
-        if index < len(rows) and previous_phone and previous_phone == _phone(_grouping_value(rows[index], "mobile_phone", "grouping_phone")):
+        if index < len(rows) and rows[index - 1].household_id == rows[index].household_id:
             continue
         members = rows[start:index]
         meal_count = (len(members) if data.meal is Meal.BREAKFAST else
                       sum(member.entitlement_count for member in members))
         groups.append(SheetGroup(start, index - 1, start + 3, index + 2,
-                                 _grouping_value(members[0], "jurisdiction", "grouping_jurisdiction"),
+                                 "\n".join(_distinct_values(_grouping_value(member, "jurisdiction", "grouping_jurisdiction") for member in members)),
                                  meal_count))
         start = index
     labels = {column.key: _LABELS.get(column.key, column.label) for column in data.columns}
@@ -117,6 +116,11 @@ def _build_sheet(data: PreparedSubstituteData, options: SubstituteOptions):
         if group.meal_count >= 2:
             for col, key in enumerate((*options.columns, "__summary"), 1):
                 if key != "name" and group.start_row < group.end_row:
+                    if key != "__summary":
+                        values = _distinct_values(item.values.get(key, "") for item in rows[group.source_start:group.source_end + 1])
+                        combined = "\n".join(_preprocess(value, address=key == "road_address",
+                            note=key == "note" or labels[key] == "비고2") for value in values)
+                        _put(ws, group.start_row, col, combined)
                     ws.merge_cells(start_row=group.start_row, end_row=group.end_row,
                                    start_column=col, end_column=col)
         color = _FILLS.get(group.source_end - group.source_start + 1)

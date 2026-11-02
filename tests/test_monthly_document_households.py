@@ -1,4 +1,4 @@
-"""Monthly output groups at the document date while retaining dated meal facts."""
+"""Monthly output uses current household links while retaining dated meal facts."""
 from dataclasses import replace
 from datetime import date
 from uuid import uuid4
@@ -39,7 +39,7 @@ def test_midmonth_household_change_preserves_meals_prices_and_old_source(end_day
     start, end = date(2026, 8, 1), date(2026, 8, end_day)
     baseline = prepare_monthly_document_data(source, start, end, tuple(Meal))
     current = prepare_monthly_document_data(changed, start, end, tuple(Meal))
-    expected = original.household_id if end_day < 16 or (returns_to_original and end_day > 16) else other.household_id
+    expected = future.household_id
     assert current.batch.deliveries[0].household_key == str(expected)
     before, after = baseline.batch.deliveries[0], current.batch.deliveries[0]
     assert after.roster.extra == before.roster.extra
@@ -85,7 +85,7 @@ def test_month_end_household_wins_even_after_last_meal_and_confirmation_merges(t
     assert created[0]["count_2"] == 1
 
 
-def test_month_end_gap_uses_latest_included_service_household_not_future():
+def test_recorded_gap_does_not_override_current_household():
     source = _source_snapshot()
     roster = roster_from_historical_snapshot(source)
     original = roster.memberships[0]
@@ -100,7 +100,7 @@ def test_month_end_gap_uses_latest_included_service_household_not_future():
     prepared = prepare_monthly_document_data(_with_roster(source, changed),
                                              date(2026, 8, 1), date(2026, 8, 31), (Meal.DINNER,))
     baseline = prepare_monthly_document_data(source, date(2026, 8, 1), date(2026, 8, 31), (Meal.DINNER,))
-    assert prepared.batch.deliveries[0].household_key == str(other.household_id)
+    assert prepared.batch.deliveries[0].household_key == str(future.household_id)
     assert prepared.entitlements == baseline.entitlements
     assert prepared.billing == baseline.billing
 
@@ -117,11 +117,11 @@ def test_bundled_next_month_service_does_not_override_document_date_household():
     prepared = prepare_monthly_document_data(_with_roster(source, changed),
                                              date(2026, 10, 1), date(2026, 10, 31), (Meal.BREAKFAST,))
     assert any(e.service_on == date(2026, 11, 1) for e in prepared.entitlements)
-    assert prepared.batch.deliveries[0].household_key == str(original.household_id)
+    assert prepared.batch.deliveries[0].household_key == str(other.household_id)
 
 
 
-def test_document_grouping_does_not_replace_historical_household_weekdays():
+def test_legacy_household_defaults_use_current_link_for_every_service_day():
     from src.domain.roster import HouseholdDeliverySetting
 
     source = _source_snapshot(delivery_settings=(HouseholdDeliverySetting(Meal.DINNER, (0,)),))
@@ -135,9 +135,9 @@ def test_document_grouping_does_not_replace_historical_household_weekdays():
     prepared = prepare_monthly_document_data(
         _with_roster(source, changed), date(2026, 8, 1), date(2026, 8, 31), (Meal.DINNER,),
     )
-    # The old household provided Mondays, the new one Tuesdays; Aug 10 was paused.
+    # Current household defaults apply throughout; the meal pause still applies.
     assert tuple(e.service_on for e in prepared.entitlements) == (
-        date(2026, 8, 3), date(2026, 8, 18), date(2026, 8, 25),
+        date(2026, 8, 4), date(2026, 8, 18), date(2026, 8, 25),
     )
     assert prepared.billing.total_amount == 30_000
     assert prepared.batch.deliveries[0].household_key == str(tuesdays.household_id)

@@ -59,8 +59,8 @@ def test_edit_merges_even_without_shared_mobile_and_keeps_history(tmp_path, keys
         session.append_revision(edit(before))
         after = session.database.current_roster()
         assert household(after, 10) == household(after, 11) == TARGET
-        assert household(after, 11, DAY-timedelta(days=1)) == SOURCE
-        assert household(after, 11, DAY+timedelta(days=3)) == SOURCE
+        assert household(after, 11, DAY-timedelta(days=1)) == TARGET
+        assert household(after, 11, DAY+timedelta(days=3)) == TARGET
         assert household(session.database.roster_snapshot(before.revision_id), 11) == SOURCE
         assert MERGE_DECISION in session.database.latest_revision().metadata.decisions
         assert session.last_committed_roster == after

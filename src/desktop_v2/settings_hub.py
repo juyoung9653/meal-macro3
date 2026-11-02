@@ -39,7 +39,6 @@ class SettingsAction(StrEnum):
     SUBSTITUTE_COLUMNS = "substitute_columns"
     SEQUENCE_MODE = "sequence_mode"
     INITIAL_ROSTER_DATE = "initial_roster_date"
-    MISSING_HOUSEHOLD_REPAIR = "missing_household_repair"
     DOCUMENT_DIRECTORY = "document_directory"
     OUTPUT_RETENTION = "output_retention"
     DATABASE_LOCATION = "database_location"
@@ -84,11 +83,6 @@ _SETTINGS_COPY = {
     ),
     SettingsAction.INVOICE_SETTINGS: (
         "식수·청구서 설정", "다음 달 식수 포함 여부와 템플릿에서 식종 이력을 넣을 칼럼을 정합니다.", "변경 이력에 기록",
-    ),
-    SettingsAction.MISSING_HOUSEHOLD_REPAIR: (
-        "가구 소속 기록 복구",
-        "과거 명단 행 추가·방학 중식 불러오기에서 빠진 가구 소속을 확인하고 복구합니다.",
-        "변경 이력에 기록",
     ),
     SettingsAction.INITIAL_ROSTER_DATE: (
         "초기 명단 적용일",
@@ -161,7 +155,6 @@ _SETTINGS_STAMPS = {
     SettingsAction.OLD_ADDRESS: "주소",
     SettingsAction.JUSO_KEY: "키",
     SettingsAction.INVOICE_SETTINGS: "식수",
-    SettingsAction.MISSING_HOUSEHOLD_REPAIR: "가구",
     SettingsAction.INITIAL_ROSTER_DATE: "시작",
     SettingsAction.PROVIDER: "기관",
     SettingsAction.EXPORT_PASSWORD: "잠금",
@@ -194,7 +187,7 @@ _SETTINGS_GROUPS = (
         SettingsAction.DATABASE_LOCATION, SettingsAction.BACKUP_DIRECTORY,
         SettingsAction.DATABASE_PASSWORD, SettingsAction.OLD_ADDRESS,
         SettingsAction.JUSO_KEY, SettingsAction.INITIAL_ROSTER_DATE,
-        SettingsAction.HOUSEHOLD_GROUPING, SettingsAction.MISSING_HOUSEHOLD_REPAIR,
+        SettingsAction.HOUSEHOLD_GROUPING,
     )),
 )
 

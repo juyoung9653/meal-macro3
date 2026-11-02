@@ -149,8 +149,8 @@ def test_back_and_failed_save_retain_same_dialogs(setup, monkeypatch):
     (InclusiveDateRange(None, date(2026, 9, 30)), DAY),
 ])
 def test_membership_boundaries_cannot_bypass_ui_or_database_guard(tmp_path, period, starts_on):
-    old = Person(uuid4(), PersonProfile("기존", note="공용 메모"))
-    person = Person(uuid4(), PersonProfile("신규", note="입력 메모"))
+    old = Person(uuid4(), PersonProfile("기존", mobile_phone="010-1234-5678", note="공용 메모"))
+    person = Person(uuid4(), PersonProfile("신규", mobile_phone="010-1234-5678", note="입력 메모"))
     hid = uuid4()
     roster = RosterSnapshot(uuid4(), persons=(old,), households=(Household(hid),),
         memberships=(HouseholdMembership(old.person_id, hid, period),))

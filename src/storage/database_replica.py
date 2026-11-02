@@ -180,7 +180,7 @@ class DatabaseReplicaService:
         for (revision_id,) in tuple(origin.execute("SELECT revision_id FROM revision WHERE sequence>? ORDER BY sequence", (sequence,))):
             record = source.revision(UUID(revision_id))
             try:
-                replica.append_revision(replace(record, metadata=replace(record.metadata, display_code=None)))
+                replica.append_revision(replace(record, metadata=replace(record.metadata, display_code=None)), replay=True)
             except ValueError as error:
                 if "snapshot_restore_target" in record.metadata.decisions:
                     raise _RestoreReplayError() from error

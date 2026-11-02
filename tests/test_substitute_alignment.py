@@ -99,6 +99,6 @@ def test_selected_alignment_reaches_saved_workbook_after_excel_overwrites_it(
     assert ws["B3"].alignment.vertical == "top"
     assert ws["A1"].alignment.horizontal is None
     assert ws.cell(len(data.rows) + 3, 1).alignment.horizontal is None
-    assert "A3:A5" in {str(merged) for merged in ws.merged_cells.ranges}
+    assert "A3:A4" in {str(merged) for merged in ws.merged_cells.ranges}
     actual.close()
     dialog.reject()

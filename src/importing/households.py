@@ -407,13 +407,11 @@ def stage_household_grouping(
     allocated: set[UUID] = set()
     reserved_household_ids = {
         household.household_id
-        for household in (() if roster is None else roster.households)
+        for household in (() if roster is None else roster.current_households)
     }
     existing_by_key: defaultdict[tuple[str, ...], set[UUID]] = defaultdict(set)
     if roster is not None:
-        for membership in roster.memberships:
-            if not membership.period.contains(effective_on):
-                continue
+        for membership in roster.current_memberships:
             profile = roster.person(membership.person_id).profile
             key = tuple(
                 _profile_criterion_key(profile, criterion)
@@ -550,6 +548,9 @@ def apply_household_grouping(
         for proposal in plan.existing_proposals
         for household_id in proposal.candidate_household_ids
     }
+    virtual_candidates = tuple(h for h in result.snapshot.current_households
+                               if h.household_id in existing_candidate_ids and h.household_id not in used_household_ids)
+    used_household_ids.update(h.household_id for h in virtual_candidates)
     if not existing_candidate_ids <= used_household_ids:
         raise ValueError("가구 plan의 기존 household 후보가 현재 roster에 없습니다.")
     planned_new_household_ids = set(plan.separate_household_ids.values()) | {
@@ -557,7 +558,7 @@ def apply_household_grouping(
     }
     if planned_new_household_ids & used_household_ids:
         raise ValueError("새 가구 plan의 household ID가 기존 가구 ID와 겹칩니다.")
-    households = list(result.snapshot.households)
+    households = [*result.snapshot.households, *virtual_candidates]
     memberships = list(result.snapshot.memberships)
     applied_manifest: dict[str, object] = {}
     for observation_id, person_id in result.person_ids_by_observation.items():
@@ -716,9 +717,8 @@ def match_existing_household_id(
 
     matches = {
         membership.household_id
-        for membership in roster.memberships
-        if membership.period.contains(effective_on)
-        and row_key(roster.person(membership.person_id).profile) == key
+        for membership in roster.current_memberships
+        if row_key(roster.person(membership.person_id).profile) == key
     }
     # The save pipeline merges all matching households and reviews shared values.
     return min(matches, key=str) if matches else None

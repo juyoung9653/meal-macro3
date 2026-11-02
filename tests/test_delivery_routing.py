@@ -216,7 +216,7 @@ def test_routing_builder_rejects_unknown_driver_and_invalid_move():
         build_routing_revision(roster, RoutingState(), driver_ids={}, **kwargs)
 
 
-def test_whole_household_move_uses_effective_date_membership_and_one_revision():
+def test_whole_household_move_ignores_membership_dates_in_one_revision():
     selected = Person(uuid4(), PersonProfile("선택", road_address="이전 주소"))
     current_member = Person(uuid4(), PersonProfile("현재 구성원", road_address="이전 주소"))
     former_member = Person(uuid4(), PersonProfile("과거 구성원", road_address="이전 주소"))
@@ -251,35 +251,31 @@ def test_whole_household_move_uses_effective_date_membership_and_one_revision():
         jurisdiction="  야탑동 ",
         whole_household=True,
         event_id=uuid4(),
-        event_id_factory=lambda: second_event_id,
+        event_id_factory=uuid4,
         **args(),
     )
 
     assert record.metadata.parent_revision_id == roster.revision_id
-    assert len(record.changes) == 2
+    assert len(record.changes) == 3
     after = tuple(change.after for change in record.changes)
     assert tuple(item["person_id"] for item in after) == (
         str(selected.person_id),
         str(current_member.person_id),
+        str(former_member.person_id),
     )
-    assert tuple(item["position"] for item in after) == (1, 2)
+    assert tuple(item["position"] for item in after) == (1, 2, 3)
     assert {item["jurisdiction"] for item in after} == {"야탑동"}
 
 
-def test_whole_household_move_requires_membership_on_effective_date():
+def test_whole_household_move_allows_missing_membership():
     roster = base_roster()
-    with pytest.raises(ValueError, match="가구 소속"):
-        build_routing_revision(
-            roster,
-            RoutingState(),
-            person_id=roster.persons[0].person_id,
-            effective_on=DAY,
-            driver_ids={},
-            road_address="새 주소",
-            whole_household=True,
-            event_id=uuid4(),
-            **args(),
-        )
+    record = build_routing_revision(
+        roster, RoutingState(), person_id=roster.persons[0].person_id,
+        effective_on=DAY, driver_ids={}, road_address="새 주소",
+        whole_household=True, event_id=uuid4(), **args(),
+    )
+    assert len(record.changes) == 1
+    assert record.changes[0].after["person_id"] == str(roster.persons[0].person_id)
 
 
 def test_registry_move_and_meal_change_survive_reopen_and_keep_old_history(tmp_path):

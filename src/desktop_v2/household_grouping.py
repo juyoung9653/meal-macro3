@@ -2,12 +2,11 @@
 from datetime import UTC, date, datetime
 from uuid import uuid4
 
-from PySide6.QtCore import QDate, Qt
-from PySide6.QtWidgets import QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QLabel, QMessageBox, QScrollArea, QVBoxLayout, QWidget
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QCheckBox, QDialog, QDialogButtonBox, QLabel, QMessageBox, QScrollArea, QVBoxLayout, QWidget
 
 from src.domain.household_grouping import build_grouping_revision, grouping_columns, grouping_options
-from src.domain.mobile_household_merge import merge_mobile_households
-from .date_edit import WheelSafeDateEdit
+from src.domain.mobile_household_merge import merge_mobile_households, split_households_by_criteria
 from .dialog_workflow import DialogRequest, dialog_workflow, invoke
 from .import_controller import current_windows_actor
 from .mobile_household_merge import review_mobile_household_merge
@@ -23,7 +22,7 @@ class HouseholdGroupingDialog(QDialog):
         self.setStyleSheet(application_stylesheet())
         self.setWindowTitle("가구 묶기 기준")
         self.resize(600, 620)
-        self._roster, self._snapshot = roster, snapshot
+        self._roster, self._snapshot, self._recorded_on = roster, snapshot, on
         root = QVBoxLayout(self)
         root.setContentsMargins(24, 22, 24, 20)
         title = QLabel("같은 가구로 묶을 칼럼")
@@ -55,18 +54,11 @@ class HouseholdGroupingDialog(QDialog):
         fields.addStretch()
         scroll.setWidget(content)
         root.addWidget(scroll, 1)
-        form = QFormLayout()
-        self.date_edit = WheelSafeDateEdit(QDate(on.year, on.month, on.day))
-        self.date_edit.setDisplayFormat("yyyy-MM-dd")
-        self.date_edit.setCalendarPopup(True)
-        self.date_edit.dateChanged.connect(self._refresh)
-        form.addRow("기존 가구를 합칠 적용일", self.date_edit)
-        root.addLayout(form)
         self.summary = QLabel()
         self.summary.setWordWrap(True)
         self.summary.setTextFormat(Qt.TextFormat.PlainText)
         root.addWidget(self.summary)
-        note = QLabel("저장하면 전체 명단의 일치하는 가구를 적용일부터 합칩니다. 이후 불러오기·행 추가·정보 수정에도 이 기준을 사용합니다. 이미 묶인 가구를 자동으로 나누지는 않으며, 적용일 이전 소속과 이후 예약 소속은 유지합니다. 가구 공용 값이 다르면 저장 전에 확인합니다.")
+        note = QLabel("저장하면 전체 명단에서 기준값이 같은 사람을 합치고 다른 사람은 별도 가구로 나눕니다. 가구 연결일과 관계없이 즉시 적용하며, 이전 구성은 변경 이력에 보존합니다. 이후 불러오기·행 추가·정보 수정에도 이 기준을 사용합니다. 가구 공용 값이 다르면 저장 전에 확인합니다. 기사·식종별 가구 순서를 1부터 다시 매겨 명단 배송순서에도 함께 저장합니다.")
         note.setWordWrap(True)
         root.addWidget(note)
         self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
@@ -82,7 +74,7 @@ class HouseholdGroupingDialog(QDialog):
         return tuple(key for key, check in self.checks.items() if check.isChecked())
 
     def selected_date(self):
-        return self.date_edit.date().toPython()
+        return self._recorded_on
 
     def _refresh(self):
         if not hasattr(self, "buttons"):
@@ -93,8 +85,9 @@ class HouseholdGroupingDialog(QDialog):
         if not valid:
             self.summary.setText("사용할 수 있는 칼럼을 하나 이상 선택해주세요.")
             return
-        _, groups = merge_mobile_households(self._roster, self.selected_date(), columns=selected, snapshot=self._snapshot)
-        self.summary.setText(f"합칠 대상: 기존 {sum(len(members) for members in groups.values())}가구 → {len(groups)}가구" if groups else "현재 기준으로 새로 합칠 가구가 없습니다. 기준만 저장합니다.")
+        split, separated = split_households_by_criteria(self._roster, self.selected_date(), columns=selected, snapshot=self._snapshot)
+        _, groups = merge_mobile_households(split, self.selected_date(), columns=selected, snapshot=self._snapshot)
+        self.summary.setText((f"별도 가구로 나눌 대상: {len(separated)}명 · " if separated else "") + (f"합칠 대상: 기존 {sum(len(members) for members in groups.values())}가구 → {len(groups)}가구" if groups else "현재 기준으로 새로 합칠 가구가 없습니다."))
 
 
 class HouseholdGroupingController:
@@ -119,7 +112,7 @@ class HouseholdGroupingController:
             if record is None:
                 return None
             if all(change.before == change.after for change in record.changes):
-                self.messages.information(parent, "변경 없음", "가구 묶기 기준과 가구 소속이 현재와 같습니다.")
+                self.messages.information(parent, "변경 없음", "가구 묶기 기준·가구 소속·배송순서가 현재와 같습니다.")
                 return None
             backup = save_revision(self.session, record, parent=parent)
         except Exception as error:

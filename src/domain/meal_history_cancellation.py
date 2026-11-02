@@ -290,8 +290,6 @@ def _validate_shared_status(current, before, after, after_entities, person_id, m
             for pid, items in events.items()
         })
     for roster in (before, after):
-        for membership in roster.memberships:
-            _add_boundaries(days, membership.period)
         for enrollment in roster.enrollments:
             if enrollment.meal is meal:
                 _add_boundaries(days, enrollment.period)

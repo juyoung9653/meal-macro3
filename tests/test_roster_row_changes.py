@@ -61,7 +61,7 @@ def test_add_start_date_persists_through_revision_reload(tmp_path, household_id)
         roster_audit_changes(None, original),
     )
     added = build_roster_row_revision(original, add_person=person, enroll_meals=(Meal.LUNCH,), delivery_starts_on=date(2026, 10, 5), household_id=household_id, **ARGS)
-    expected_household = added.snapshot.household_for(person.person_id, on=date(2026, 10, 5))
+    # Blank grouping keys remain distinct, even when an old caller supplies a household.
     with EncryptedDatabase.create(tmp_path / "rows.db", b"k" * 32) as database:
         database.append_revision(initial)
         database.append_revision(added.record)
@@ -69,8 +69,9 @@ def test_add_start_date_persists_through_revision_reload(tmp_path, household_id)
         assert restored is not None
         for day, expected in ((date(2026, 10, 4), ()), (date(2026, 10, 5), (Meal.LUNCH,)), (date(2026, 10, 6), (Meal.LUNCH,))):
             assert restored.meals_for(person.person_id, on=day) == expected
+        expected_household = restored.household_for(person.person_id, on=date(2026, 10, 5))
         assert restored.household_for(person.person_id, on=date(2026, 9, 1)) == expected_household
-        assert restored.memberships == added.snapshot.memberships
+        assert len(restored.household_members(expected_household.household_id, on=date(2026, 9, 1))) == 1
     with EncryptedDatabase.open(tmp_path / "rows.db", b"k" * 32) as database:
         restored = database.current_roster()
         for day in (date.min, date(2026, 9, 1), date(2026, 10, 4)):
@@ -123,7 +124,7 @@ def test_add_full_row_persists_distinct_registered_drivers_sequences_and_status(
         assert restored.person(person.person_id).profile == person.profile
         assert restored.resolve_assignment(person.person_id, Meal.DINNER).sequence == "001"
         assert restored.resolve_assignment(person.person_id, Meal.LUNCH).sequence == "013"
-        assert any(item.person_id == person.person_id and item.household_id == HOUSEHOLD for item in restored.memberships)
+        assert restored.current_membership(person.person_id).household_id != HOUSEHOLD
         state = routing_state_from_snapshot(database.snapshot(NEW))
         assert state.resolve(restored, person.person_id, date(2026, 10, 4)).driver_ids[Meal.DINNER] is None
         assert state.resolve(restored, person.person_id, date(2026, 10, 5)).driver_ids == {Meal.DINNER: second.driver_id, Meal.BREAKFAST: None, Meal.LUNCH: None}

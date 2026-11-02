@@ -46,20 +46,13 @@ class PreparedPersonProfileRevision:
 
 
 def profile_household_members(roster: RosterSnapshot, person_id: UUID, on: date) -> tuple[Person, ...]:
-    """Resolve stored household membership on the edit date, including the subject."""
-    person = roster.person(person_id)
-    for membership in roster.memberships:
-        if membership.person_id == person_id and membership.period.contains(on):
-            return roster.household_members(membership.household_id, on=on)
-    return (person,)
+    """Resolve this revision's household, including the subject."""
+    household = roster.household_for(person_id, on=on)
+    return roster.household_members(household.household_id, on=on)
 
 
 def profile_household_id(roster: RosterSnapshot, person_id: UUID, on: date) -> UUID | None:
-    roster.person(person_id)
-    for membership in roster.memberships:
-        if membership.person_id == person_id and membership.period.contains(on):
-            return membership.household_id
-    return None
+    return roster.household_for(person_id, on=on).household_id
 
 
 def build_person_profile_revision(

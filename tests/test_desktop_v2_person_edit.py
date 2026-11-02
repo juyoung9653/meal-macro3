@@ -476,7 +476,7 @@ def test_delivery_controller_changes_one_person_and_accepted_noop_skips_revision
     assert outcome.roster.person(person.person_id).delivery_settings == (setting,)
 
 
-def test_delivery_controller_copies_to_selected_day_household_when_membership_changed(app):
+def test_delivery_controller_copies_to_current_household_on_past_selected_day(app):
     from types import SimpleNamespace
     from unittest.mock import Mock
     from uuid import uuid4
@@ -540,6 +540,6 @@ def test_delivery_controller_copies_to_selected_day_household_when_membership_ch
     assert len(records) == 1
     assert records[0].metadata.effective_on == selected_day
     assert outcome.roster.delivery_settings_for(person.person_id, on=selected_day) == (setting,)
-    assert outcome.roster.delivery_settings_for(old_sibling.person_id, on=selected_day) == (setting,)
-    assert outcome.roster.delivery_settings_for(new_sibling.person_id, on=selected_day) == ()
-    assert outcome.roster.person(new_sibling.person_id).delivery_settings is None
+    assert outcome.roster.delivery_settings_for(old_sibling.person_id, on=selected_day) == ()
+    assert outcome.roster.delivery_settings_for(new_sibling.person_id, on=selected_day) == (setting,)
+    assert outcome.roster.person(old_sibling.person_id).delivery_settings is None

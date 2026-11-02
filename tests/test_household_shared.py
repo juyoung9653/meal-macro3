@@ -382,7 +382,7 @@ def test_delivery_components_are_typed_and_sync():
     assert final.person(second.person_id).delivery_settings == new.delivery_settings
 
 
-def test_status_change_clips_receiver_to_shared_membership_and_preserves_outside():
+def test_status_change_does_not_clip_to_recorded_membership_end():
     r = roster()
     first, second, outside = r.persons
     r = replace(
@@ -410,7 +410,7 @@ def test_status_change_clips_receiver_to_shared_membership_and_preserves_outside
     events = [c.after for c in expanded.changes if c.entity_kind == "status.event"]
     assert len(events) == 2
     child = next(e for e in events if e["person_id"] == str(second.person_id))
-    assert child["ends_on"] == "2026-10-20"
+    assert child["ends_on"] is None
     assert all(e["person_id"] != str(outside.person_id) for e in events)
 
 
@@ -553,7 +553,7 @@ def test_enrollment_removal_syncs_and_keeps_future_period():
     assert Meal.DINNER in saved.meals_for(second.person_id, on=date(2026, 11, 2))
 
 
-def test_encrypted_commit_roundtrip_rollback_and_default_off_fast_path(
+def test_encrypted_regroup_roundtrip_and_default_off_fast_path(
     tmp_path, monkeypatch
 ):
     r = roster()
@@ -589,7 +589,7 @@ def test_encrypted_commit_roundtrip_rollback_and_default_off_fast_path(
         session.append_revision(prepared.record)
         assert (
             session.last_committed_roster.person(second.person_id).profile.mobile_phone
-            == "new"
+            == "shared"
         )
         parent = session.database.current_roster()
         after = replace(
@@ -600,9 +600,9 @@ def test_encrypted_commit_roundtrip_rollback_and_default_off_fast_path(
                 for i, p in enumerate(parent.persons)
             ),
         )
-        with pytest.raises(ValueError, match="충돌"):
-            session.append_revision(record_for(parent, after))
-        assert session.database.current_roster() == parent
+        session.append_revision(record_for(parent, after))
+        parent = session.database.current_roster()
+        assert len({m.household_id for m in parent.current_memberships}) == len(parent.persons)
         last_id = parent.revision_id
     with DatabaseSession.open(path, "password") as session:
         assert session.database.current_roster().revision_id == last_id
@@ -610,7 +610,7 @@ def test_encrypted_commit_roundtrip_rollback_and_default_off_fast_path(
             session.database.current_roster()
             .person(second.person_id)
             .profile.mobile_phone
-            == "new"
+            == after.person(second.person_id).profile.mobile_phone
         )
         assert shared_columns_from_state(
             session.database.snapshot(last_id).entity(
@@ -865,7 +865,9 @@ def test_cell_controller_returns_committed_expanded_roster_and_failed_save_is_un
         )
         saved = controller.save(first.person_id, "mobile", "010-2345-6789")
         assert saved.completed and not warnings
-        assert saved.roster.person(second.person_id).profile.mobile_phone == "010-2345-6789"
+        assert saved.roster.person(first.person_id).profile.mobile_phone == "010-2345-6789"
+        assert saved.roster.person(second.person_id).profile.mobile_phone == "shared"
+        assert saved.roster.current_membership(first.person_id).household_id != saved.roster.current_membership(second.person_id).household_id
         previous = session.database.current_roster()
         failed = controller.save(first.person_id, "birth_date", "invalid")
         assert not failed.completed and failures

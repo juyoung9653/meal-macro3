@@ -201,7 +201,7 @@ def test_row_add_matching_selects_stable_target_for_automatic_merge():
     ) == EXISTING_HOUSEHOLD_1
 
 
-def test_row_add_matching_ignores_membership_inactive_on_start_date():
+def test_row_add_matching_ignores_recorded_membership_dates():
     roster = _existing_roster(
         first_membership_period=InclusiveDateRange(None, EFFECTIVE_ON)
     )
@@ -216,7 +216,7 @@ def test_row_add_matching_ignores_membership_inactive_on_start_date():
         None,
         roster,
         effective_on=EFFECTIVE_ON.replace(day=EFFECTIVE_ON.day + 1),
-    ) is None
+    ) == roster.current_membership(roster.persons[0].person_id).household_id
 
 
 def test_default_mobile_rule_normalizes_phone_and_proposes_one_household():
@@ -424,7 +424,7 @@ def test_applying_group_keeps_people_distinct_and_split_is_reversible_decision()
     assert grouped.snapshot.household_members(
         household_id,
         on=date(2026, 8, 25),
-    ) == ()
+    ) == grouped.snapshot.household_members(household_id, on=EFFECTIVE_ON)
 
     split_household_id = grouping_plan.separate_household_ids[OBSERVATION_2]
     split = apply_household_grouping(
@@ -620,7 +620,7 @@ def test_multiple_matching_existing_households_default_without_choice():
     assert membership.household_id == EXISTING_HOUSEHOLD_2
 
 
-def test_household_membership_inactive_on_import_date_is_not_a_candidate():
+def test_import_candidates_ignore_recorded_membership_dates():
     roster = _existing_roster(
         first_membership_period=InclusiveDateRange(None, date(2026, 8, 25))
     )
@@ -641,10 +641,8 @@ def test_household_membership_inactive_on_import_date_is_not_a_candidate():
         ),
     )
 
-    assert plan.existing_proposals == ()
-    assert plan.default_household_ids[OBSERVATION_1] == plan.separate_household_ids[
-        OBSERVATION_1
-    ]
+    assert len(plan.existing_proposals) == 1
+    assert plan.default_household_ids[OBSERVATION_1] == roster.current_membership(roster.persons[0].person_id).household_id
 
 
 def test_rule_manifest_and_audit_snapshot_round_trip():

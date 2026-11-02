@@ -86,8 +86,8 @@ def test_mapping_uses_original_sources_and_keeps_grouping_and_sorting():
     assert data.rows[0].values["name"] == "=문자 그대로"
     wb, _, _ = _build_sheet(data, replace(options(data), columns=("name", "mobile_phone", "road_address")))
     assert wb.active["A3"].data_type == "s"
-    assert "B3:B5" in {str(item) for item in wb.active.merged_cells.ranges}
-    assert wb.active["D3"].value == 3
+    assert "B3:B4" in {str(item) for item in wb.active.merged_cells.ranges}
+    assert wb.active["D3"].value == 2
     assert wb.active["C2"].value == "주소"
     wb.close()
 

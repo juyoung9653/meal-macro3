@@ -75,7 +75,6 @@ from .ledger_reader import load_revision_chain
 from src.services.monthly_meal_history import build_monthly_meal_history
 from .delivery_defaults import DeliveryDefaultsController
 from .initial_roster_date import InitialRosterDateController
-from .missing_household_repair import MissingHouseholdRepairController
 from .roster_window import RosterWindow
 from .sequence_edit import SequenceEditController, SequenceSaveStatus
 from .sequence_settings import SequenceModeController
@@ -151,7 +150,6 @@ class DesktopStartupController:
         provider_settings_controller_type=ProviderSettingsController,
         delivery_defaults_controller_type=DeliveryDefaultsController,
         initial_roster_date_controller_type=InitialRosterDateController,
-        missing_household_repair_controller_type=MissingHouseholdRepairController,
         sequence_mode_controller_type=SequenceModeController,
         household_shared_column_controller_type=HouseholdSharedColumnController,
         household_shared_exceptions_controller_type=HouseholdSharedExceptionsController,
@@ -198,7 +196,6 @@ class DesktopStartupController:
         self._provider_settings_controller_type = provider_settings_controller_type
         self._delivery_defaults_controller_type = delivery_defaults_controller_type
         self._initial_roster_date_controller_type = initial_roster_date_controller_type
-        self._missing_household_repair_controller_type = missing_household_repair_controller_type
         self._sequence_mode_controller_type = sequence_mode_controller_type
         self._household_shared_column_controller_type = household_shared_column_controller_type
         self._household_shared_exceptions_controller_type = household_shared_exceptions_controller_type
@@ -1140,11 +1137,6 @@ class DesktopStartupController:
             if roster is not None:
                 self._replace_roster_if_changed(session, window, roster)
             return
-        if hub.selected_action is SettingsAction.MISSING_HOUSEHOLD_REPAIR:
-            outcome = (yield from invoke(self._missing_household_repair_controller_type(session).run, parent=window))
-            if outcome.completed and outcome.roster is not None:
-                self._replace_roster_if_changed(session, window, outcome.roster)
-            return
         if hub.selected_action is SettingsAction.DELIVERY_DEFAULTS:
             outcome = (yield from invoke(self._delivery_defaults_controller_type(session).run, parent=window))
             if outcome.completed and outcome.roster is not None:
@@ -1507,6 +1499,9 @@ class DesktopStartupController:
         selection_restorer = getattr(window, "restore_person_cell", None)
         if selected_cell is not None and callable(selection_restorer):
             selection_restorer(selected_cell)
+        refresh_routes = getattr(window, "refresh_driver_household_dialogs", None)
+        if callable(refresh_routes):
+            refresh_routes()
         return True
 
     @staticmethod

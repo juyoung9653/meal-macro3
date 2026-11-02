@@ -1,4 +1,4 @@
-"""Household failures retain their identity through the worker and visible roster."""
+"""Legacy household dates never block the document worker or publication."""
 from __future__ import annotations
 
 import os
@@ -92,54 +92,25 @@ class _Parent(QWidget):
     ("missing", "no_parent", None),
     ("missing", "plain_parent", None),
 ))
-def test_real_worker_household_failure_reports_truthful_location_and_publishes_nothing(
-    app, tmp_path, case, location, row,
-):
-    outputs, backups = tmp_path / "outputs", tmp_path / "backups"
+def test_real_worker_publishes_without_household_date_repair(app, tmp_path, case, location, row):
+    outputs = tmp_path / "outputs"
     outputs.mkdir()
-    backups.mkdir()
-    with DatabaseSession.create(tmp_path / "documents.sqlite3", "password", backup_directory=backups) as session:
+    with DatabaseSession.create(tmp_path / "documents.sqlite3", "password", backup_directory=tmp_path / "backups") as session:
         session.append_revision(_invalid_revision(case))
         roster = session.database.current_roster()
         selection = selection_for(session, outputs, DocumentAction.INVOICE)
-        backups_before = set(backups.iterdir())
-        revisions_before = session.database.revision_summaries()
+        revisions = session.database.revision_summaries()
         messages = Messages(app)
-        if location == "no_parent":
-            parent = None
-        elif location == "plain_parent":
-            parent = QWidget()
-        else:
-            parent = _Parent(roster, location)
-
-        def unexpected_writer(*args, **kwargs):
-            pytest.fail("household failure must happen before publication")
-
+        parent = None if location == "no_parent" else QWidget() if location == "plain_parent" else _Parent(roster, location)
         outcome = generation.DocumentGenerationController(
             session, message_box=messages, template_controller_type=configured_template,
-            invoice_writer=unexpected_writer,
         ).run(selection, parent)
-
-        assert outcome.status is generation.DocumentGenerationStatus.FAILED
-        assert len(messages.errors) == 1 and not messages.warnings
-        text = messages.errors[0][-1]
-        assert "성명: 홍길동 / 생년월일: 2015-03-02 / 학교명: 푸른초" in text
-        assert f"문서 원본 변경번호: {selection.document.period.source.display_code}" in text
-        assert "문서 기간: 2026-06-01 ~ 2026-06-30" in text
-        assert "원본 Excel 행·열 번호는 저장된 자료에서 확인할 수 없습니다" in text
-        assert "확인할 저장 항목: 가구 소속 / 적용 시작일 / 종료일" in text
-        assert str(PERSON_ID) not in text
-        if row is None:
-            assert "현재 화면 명단 행: 확인할 수 없습니다" in text
-            assert "현재 화면 명단:" not in text
-        else:
-            assert f"현재 화면 명단: {row}행 (현재 검색·필터·정렬 기준)" in text
-            assert parent.table_model.person_at(row - 1).person_id == PERSON_ID
-            assert parent.table_model.headerData(row - 1, Qt.Orientation.Vertical) == row
-        assert not list(outputs.iterdir())
-        assert session.database.document_runs() == ()
-        assert session.database.revision_summaries() == revisions_before
-        assert set(backups.iterdir()) == backups_before
+        assert outcome.completed
+        assert not messages.errors and not messages.warnings
+        assert outcome.result.output_path.exists()
+        assert len(session.database.document_runs()) == 1
+        assert session.database.current_roster() == roster
+        assert session.database.revision_summaries() == revisions
         if parent is not None:
             parent.close()
 

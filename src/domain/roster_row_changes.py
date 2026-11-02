@@ -86,12 +86,14 @@ def build_roster_row_revision(
             )
         persons = (*current_roster.persons, add_person)
         enrollments = (*current_roster.enrollments, *(MealEnrollment(add_person.person_id, meal, InclusiveDateRange(starts_on=starts_by_meal[meal])) for meal in enroll_meals))
-        if household_id is not None and household_id not in {item.household_id for item in current_roster.households}:
+        if household_id is not None and household_id not in {item.household_id for item in current_roster.current_households}:
             raise ValueError("선택한 가구가 현재 명단에 없습니다.")
         # An unmatched row is its own household, as it is in the Excel import.
         # Never infer a later join from mutable contact fields.
         selected_household_id = household_id or uuid4()
         households = current_roster.households if household_id is not None else (*current_roster.households, Household(selected_household_id))
+        if household_id is not None and household_id not in {item.household_id for item in households}:
+            households = (*households, Household(household_id))
         # Household identity is available before delivery begins; only meal
         # enrollments and delivery events are bounded by the delivery start.
         memberships = (*current_roster.memberships, HouseholdMembership(add_person.person_id, selected_household_id))

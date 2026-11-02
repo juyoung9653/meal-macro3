@@ -115,7 +115,7 @@ def test_dialog_selects_multiple_meals_and_current_household_members(app: QAppli
     expired = ComplaintDialog(
         roster.person(PERSON), roster=roster, household_day=date(2026, 9, 10), received_at=NOW
     )
-    assert not expired._same_household.isEnabled()
+    assert expired._same_household.isEnabled()
 
 
 class _AcceptedDialog:

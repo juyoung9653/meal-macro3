@@ -141,13 +141,13 @@ def test_document_period_end_routing_changes_presentation_only(tmp_path):
     assert delivery.roster.extra["관할동"] == "수내동"
     assert delivery.roster.extra["동"] == "수내동"
     assert delivery.roster.extra["주소"] == "변경 도로"
-    assert routed.calculation_manifest["calculation_contract_version"] == 6
+    assert routed.calculation_manifest["calculation_contract_version"] == 7
     assert routed.calculation_manifest["document_presentation"] == {
-        "policy_version": 2,
+        "policy_version": 3,
         "effective_on": "2026-08-20",
         "routing_basis": "document_period_end",
-        "household_basis": "document_period_end",
-        "household_fallback": "latest_service_day_with_membership",
+        "household_basis": "source_revision_current_household",
+        "household_fallback": "stable_single_person_household",
     }
 
     template = "assets/급식/급식_확인서템플릿.xlsx"

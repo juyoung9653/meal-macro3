@@ -382,16 +382,7 @@ def build_routing_revision(
 
     target_ids = (person_id,)
     if whole_household:
-        membership = next(
-            (
-                item
-                for item in roster.memberships
-                if item.person_id == person_id and item.period.contains(effective_on)
-            ),
-            None,
-        )
-        if membership is None:
-            raise ValueError("적용일 기준 가구 소속이 없어 가구 전체 이사를 할 수 없습니다.")
+        membership = roster.current_membership(person_id)
         target_ids = (person_id,) + tuple(
             person.person_id
             for person in roster.household_members(membership.household_id, on=effective_on)

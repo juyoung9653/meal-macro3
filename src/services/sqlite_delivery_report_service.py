@@ -58,8 +58,8 @@ from src.services.meal_service_availability import (
 )
 
 
-DELIVERY_REPORT_CALCULATION_CONTRACT_VERSION = 5
-DELIVERY_REPORT_GROUPING_POLICY_VERSION = 2
+DELIVERY_REPORT_CALCULATION_CONTRACT_VERSION = 6
+DELIVERY_REPORT_GROUPING_POLICY_VERSION = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -470,6 +470,7 @@ def _prepare_delivery_data(
             "household_grouping": {
                 "policy_version": DELIVERY_REPORT_GROUPING_POLICY_VERSION,
                 "key": "stable_household_id",
+                "basis": "source_revision_current_household",
                 "max_supported_size": 5,
                 "form_breakdown": "staff_memo_households_and_entitlements",
             },

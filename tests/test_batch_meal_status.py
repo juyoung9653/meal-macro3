@@ -79,15 +79,15 @@ def dialog(roster, **kwargs):
     )
 
 
-def test_household_scope_counts_targets_and_changes_with_start_date(app, roster):
+def test_household_scope_uses_current_members_for_every_start_date(app, roster):
     view = dialog(roster)
     try:
         assert len(view.selected_targets()) == 1
         view._same_household.setChecked(True)
         assert set(view.selected_targets()) == {
-            (p.person_id, Meal.DINNER) for p in roster.persons[:2]
+            (p.person_id, Meal.DINNER) for p in roster.persons[:1]
         }
-        assert "총 2개 적용" in view._summary_text.text()
+        assert "총 1개 적용" in view._summary_text.text()
         view._starts_on.setDate(QDate(2026, 9, 10))
         view._ends_on.setDate(QDate(2026, 9, 10))
         assert view.selected_targets() == ((roster.persons[0].person_id, Meal.DINNER),)
@@ -134,7 +134,6 @@ def test_household_expansion_uses_each_meals_own_start_date(app, roster):
         view._same_household.setChecked(True)
         assert set(view.selected_targets()) == {
             (roster.persons[0].person_id, Meal.DINNER),
-            (roster.persons[1].person_id, Meal.DINNER),
             (roster.persons[0].person_id, Meal.BREAKFAST),
         }
         assert view.selected_periods()[Meal.DINNER].starts_on == DAY

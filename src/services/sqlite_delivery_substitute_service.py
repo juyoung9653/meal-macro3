@@ -114,8 +114,8 @@ def prepare_delivery_substitute_data(
     for shipment in physical.shipments:
         person = roster.person(shipment.person_id)
         profile = person.profile
-        # An indivisible shipment may cover several service dates. Reject an
-        # ambiguous household transition instead of merging unrelated homes.
+        # Group using this source revision's household, independently of
+        # recorded membership dates and mapped output column values.
         household_id = require_delivery_household(roster, person.person_id, shipment.service_dates)
         view = routing.resolve(roster, person.person_id, day)
         driver = view.drivers[meal]
@@ -155,11 +155,11 @@ def prepare_delivery_substitute_data(
                                   _text(profile.mobile_phone), view.jurisdiction or ""))
     rows.sort(key=lambda row: sort_keys[row.person_id])
     return PreparedSubstituteData(day, meal, tuple(rows), columns, defaults, {
-        "substitute_calculation_contract_version": 3,
+        "substitute_calculation_contract_version": 4,
         "column_mapping": manifest,
         "source_revision_id": str(snapshot.revision_id),
         "delivery_day": day.isoformat(), "meal": meal.value,
         "physical_delivery": physical.calculation_manifest,
-        "household_grouping": "consecutive_normalized_db_mobile_phone_within_selected_driver",
+        "household_grouping": "source_revision_current_household_within_selected_driver",
         "routing_basis": "physical_delivery_day", "meal_count_basis": "service_date_entitlements",
     })

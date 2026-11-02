@@ -251,14 +251,14 @@ def test_roster_indexes_preserve_boundaries_gaps_and_rebuild_after_replace():
         ),
     )
     for day in (date(2026, 12, 31), date(2027, 1, 1), date(2027, 1, 2)):
-        expected_household = next((m.household_id for m in snapshot.memberships if m.period.contains(day)), None)
+        expected_household = second
         actual_household = snapshot.household_for(PERSON_ID, on=day)
         assert (actual_household.household_id if actual_household else None) == expected_household
         active = {e.meal for e in snapshot.enrollments if e.period.contains(day)}
         assert snapshot.meals_for(PERSON_ID, on=day) == tuple(m for m in Meal if m in active)
     changed = replace(snapshot, memberships=(), enrollments=())
     assert changed.meals_for(PERSON_ID, on=date(2027, 1, 2)) == ()
-    assert changed.household_for(PERSON_ID, on=date(2027, 1, 2)) is None
+    assert changed.household_for(PERSON_ID, on=date(2027, 1, 2)).household_id == changed.current_membership(PERSON_ID).household_id
     assert snapshot.meals_for(PERSON_ID, on=date(2027, 1, 2)) == (Meal.BREAKFAST, Meal.LUNCH)
     with pytest.raises(KeyError):
         changed.meals_for(UUID(int=999), on=date(2027, 1, 2))

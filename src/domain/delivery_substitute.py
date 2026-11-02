@@ -130,4 +130,9 @@ class PreparedSubstituteData:
         rows = tuple(row for row in self.rows if row.driver_key == options.driver_key)
         if not rows:
             raise ValueError("선택한 날짜·식종·배송담당에 실제 배송할 대상이 없습니다.")
-        return rows
+        # Keep the first route position of each household and bring its other
+        # members alongside it, regardless of their displayed column values.
+        households = {}
+        for row in rows:
+            households.setdefault(row.household_id, []).append(row)
+        return tuple(row for members in households.values() for row in members)

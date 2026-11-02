@@ -36,7 +36,7 @@ def review_mobile_household_merge(session, record, parent=None, *, dialog_type=N
         dialog.setWindowTitle("가구 자동 합치기 · 공용 값 확인 · " + label)
         dialog.enabled.setEnabled(False)
         dialog.note.setText(
-            f"가구 묶기 기준이 일치하는 가구를 {on:%Y-%m-%d}부터 합칩니다. "
+            "가구 묶기 기준이 일치하는 가구를 합칩니다. 연결일과 관계없이 즉시 적용합니다. "
             "왼쪽 값 셀을 선택하거나 오른쪽에 공용 값을 입력해주세요. "
             "모든 칼럼을 확인한 뒤 함께 저장하며 중간에 취소하면 아무것도 저장하지 않습니다."
         )

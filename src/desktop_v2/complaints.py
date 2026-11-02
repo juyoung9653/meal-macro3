@@ -160,9 +160,8 @@ class ComplaintDialog(QDialog):
             return (self._person_id,)
         household_ids = {
             membership.household_id
-            for membership in self._roster.memberships
+            for membership in self._roster.current_memberships
             if membership.person_id == self._person_id
-            and membership.period.contains(self._household_day)
         }
         people = {self._person_id}
         for household_id in household_ids:

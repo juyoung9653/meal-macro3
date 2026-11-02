@@ -27,8 +27,8 @@ def test_apply_default_merges_existing_equal_numbers_and_restore_keeps_original(
         session.append_revision(setting(session, ('mobile',)))
         after = session.database.current_roster()
         assert household(after, 10) == household(after, 11)
-        assert household(after, 11, DAY-timedelta(days=1)) == SOURCE
-        assert household(after, 11, DAY+timedelta(days=3)) == SOURCE
+        assert household(after, 11, DAY-timedelta(days=1)) == household(after, 10)
+        assert household(after, 11, DAY+timedelta(days=3)) == household(after, 10)
         assert grouping_columns(session.database.snapshot(after.revision_id)) == ('mobile',)
         restore_revision(session, before.revision_id, after.revision_id, ACTOR)
         assert household(session.database.current_roster(), 11) == SOURCE
@@ -99,7 +99,7 @@ def test_settings_dialog_default_validation_and_existing_merge_preview(tmp_path)
         assert session.database.latest_revision_id() == roster.revision_id
         class Accept(HouseholdGroupingDialog):
             def exec(self):
-                self.date_edit.setDate(DAY)
+                assert not hasattr(self, "date_edit")
                 return QDialog.DialogCode.Accepted
         result = HouseholdGroupingController(session, dialog_type=Accept, actor_provider=lambda: ACTOR).run()
         assert household(result, 10) == household(result, 11)

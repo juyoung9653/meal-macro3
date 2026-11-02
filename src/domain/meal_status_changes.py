@@ -187,7 +187,8 @@ def build_meal_status_revision(
         source=RevisionSource.UI,
         decisions=decisions,
         rule_versions={
-            "meal_status_change_policy_version": MEAL_STATUS_CHANGE_POLICY_VERSION
+            "meal_status_change_policy_version": MEAL_STATUS_CHANGE_POLICY_VERSION,
+            "meal_status_sequence_policy_version": 1,
         },
     )
     return PreparedMealStatusRevision(
@@ -350,7 +351,8 @@ def build_batch_meal_status_revision(
         source=RevisionSource.UI,
         decisions=decisions,
         rule_versions={
-            "meal_status_change_policy_version": MEAL_STATUS_CHANGE_POLICY_VERSION
+            "meal_status_change_policy_version": MEAL_STATUS_CHANGE_POLICY_VERSION,
+            "meal_status_sequence_policy_version": 1,
         },
     )
     return PreparedBatchMealStatusRevision(

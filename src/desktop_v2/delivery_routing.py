@@ -489,9 +489,8 @@ class RoutingChangeDialog(QDialog):
             membership = next(
                 (
                     item
-                    for item in self._roster.memberships
+                    for item in self._roster.current_memberships
                     if item.person_id == self._person_id
-                    and item.period.contains(request.effective_on)
                 ),
                 None,
             )
@@ -530,8 +529,8 @@ class RoutingChangeDialog(QDialog):
         membership = next(
             (
                 item
-                for item in self._roster.memberships
-                if item.person_id == self._person_id and item.period.contains(effective_on)
+                for item in self._roster.current_memberships
+                if item.person_id == self._person_id
             ),
             None,
         )
@@ -543,7 +542,7 @@ class RoutingChangeDialog(QDialog):
         members = self._roster.household_members(membership.household_id, on=effective_on)
         names = ", ".join(person.profile.name for person in members)
         self.whole_household.setEnabled(True)
-        self.household_targets.setText(f"적용일 기준 함께 이사할 대상: {names}")
+        self.household_targets.setText(f"현재 가구에서 함께 이사할 대상: {names}")
 
     def request(self):
         if self._request is None:
