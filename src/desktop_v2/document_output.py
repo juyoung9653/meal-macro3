@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .user_messages import user_error
+
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
@@ -435,7 +437,7 @@ class DocumentOutputDialog(QDialog):
                 message="선택한 문서 폴더에 연결하는 중입니다.", parent=self,
             )
         except (ValueError, OSError) as error:
-            self._error.setText(str(error))
+            self._error.setText(user_error(error))
             self._error.show()
             return
         if not exists:
@@ -481,7 +483,7 @@ class DocumentOutputDialog(QDialog):
                 message="저장 폴더와 사용할 수 있는 파일명을 확인하는 중입니다.", parent=self,
             )
         except (ValueError, OSError) as error:
-            self._error.setText(str(error))
+            self._error.setText(user_error(error))
             self._error.show()
             self._save_button.setEnabled(False)
             return
@@ -579,7 +581,7 @@ class DocumentOutputDialog(QDialog):
         try:
             selection = self.selection()
         except (TypeError, ValueError, OSError) as error:
-            self._error.setText(str(error))
+            self._error.setText(user_error(error))
             self._error.show()
             return
         self._accepted_selection = selection
@@ -716,7 +718,7 @@ class DefaultDocumentDirectoryDialog(QDialog):
                 message="선택한 문서 폴더에 연결하는 중입니다.", parent=self,
             )
         except (ValueError, OSError) as error:
-            self._error.setText(str(error))
+            self._error.setText(user_error(error))
             self._error.show()
             return
         if not exists:
@@ -768,7 +770,7 @@ class DefaultDocumentDirectoryDialog(QDialog):
         try:
             self.selected_directory
         except (ValueError, OSError) as error:
-            self._error.setText(str(error))
+            self._error.setText(user_error(error))
             self._error.show()
             return
         self.accept()

@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from .user_messages import user_error
+
 from .dialog_workflow import DialogRequest, dialog_workflow, invoke
 
 from .startup_loading import save_revision
+from .mobile_household_merge import review_mobile_household_merge
 
 from src.storage.database_session import committed_roster_after_save
 
@@ -201,7 +204,7 @@ class PersonProfileEditDialog(QDialog):
             "주소·관할동을 여기서 수정하면 이전 날짜에도 반영됩니다. "
             "특정 날짜부터 변경하려면 이사 등록을 이용해주세요. 미래 이사 예약은 유지됩니다.\n"
             "이 화면에서 비운 값은 저장된 명단에서도 삭제됩니다. "
-            "Excel 가져오기의 빈칸은 기존 값을 유지합니다."
+            "Excel 불러오기의 빈칸은 기존 값을 유지합니다."
         )
         help_text.setObjectName("workspaceSubtitle")
         help_text.setWordWrap(True)
@@ -630,7 +633,7 @@ class PersonProfileEditDialog(QDialog):
             candidate = self._candidate_profile()
             delivery_settings = self._candidate_delivery_settings()
         except (TypeError, ValueError) as error:
-            self._form_error.setText(str(error))
+            self._form_error.setText(user_error(error))
             self._form_error.show()
             self._save_button.setEnabled(False)
             return
@@ -656,7 +659,7 @@ class PersonProfileEditDialog(QDialog):
             candidate = self._candidate_profile()
             delivery_settings = self._candidate_delivery_settings()
         except (TypeError, ValueError) as error:
-            self._form_error.setText(str(error))
+            self._form_error.setText(user_error(error))
             self._form_error.show()
             return
         if (candidate == self._original and not self._household_phone_changed(candidate)
@@ -769,7 +772,7 @@ class PersonProfileEditController:
             self._message_box.critical(
                 parent,
                 "사람 정보를 수정하지 못했습니다",
-                "현재 명단이 없습니다. 기존 명단 가져오기를 먼저 완료해주세요.",
+                "현재 명단이 없습니다. 기존 명단 불러오기를 먼저 완료해주세요.",
             )
             return PersonProfileEditOutcome(PersonProfileEditStatus.FAILED)
         try:
@@ -778,7 +781,7 @@ class PersonProfileEditController:
             self._message_box.critical(
                 parent,
                 "사람 정보를 수정하지 못했습니다",
-                str(error),
+                user_error(error),
             )
             return PersonProfileEditOutcome(PersonProfileEditStatus.FAILED)
         effective_on = service_day if delivery_only and service_day is not None else self._effective_date_provider()
@@ -787,7 +790,7 @@ class PersonProfileEditController:
             snapshot = snapshot_reader(roster.revision_id) if snapshot_reader is not None else None
             editing_person = replace(person, profile=profile_with_shared_routing(roster, person_id, effective_on, snapshot))
         except Exception as error:
-            self._message_box.critical(parent, "사람 정보를 수정하지 못했습니다", str(error))
+            self._message_box.critical(parent, "사람 정보를 수정하지 못했습니다", user_error(error))
             return PersonProfileEditOutcome(PersonProfileEditStatus.FAILED)
         household_members = profile_household_members(roster, person_id, effective_on)
         effective_delivery_settings = roster.delivery_settings_for(person_id, on=effective_on)
@@ -847,22 +850,25 @@ class PersonProfileEditController:
                 delivery_settings_to_household=copy_delivery,
                 revision_id=self._revision_id_factory(),
             )
-            backup_result = save_revision(self._session, prepared.record, parent=parent)
+            record = yield from invoke(review_mobile_household_merge, self._session, prepared.record, parent)
+            if record is None:
+                return PersonProfileEditOutcome(PersonProfileEditStatus.CANCELLED)
+            backup_result = save_revision(self._session, record, parent=parent)
         except Exception as error:
             self._message_box.critical(
                 parent,
                 "사람 정보를 저장하지 못했습니다",
                 "운영 데이터에는 반영하지 않았습니다. 내용을 확인한 뒤 다시 시도해주세요.\n\n"
-                + str(error),
+                + user_error(error),
             )
             return PersonProfileEditOutcome(PersonProfileEditStatus.FAILED)
-        if backup_result.error is not None:
+        if backup_result.warning_required:
             self._message_box.warning(
                 parent,
                 "사람 정보는 저장됐지만 자동 백업에 실패했습니다",
                 "변경 내용과 이력은 운영 데이터에 정상 저장되었습니다. "
                 "백업 폴더 연결을 확인한 뒤 백업을 다시 실행해주세요.\n\n"
-                + str(backup_result.error),
+                + user_error(backup_result.error),
             )
         return PersonProfileEditOutcome(
             PersonProfileEditStatus.COMPLETED,

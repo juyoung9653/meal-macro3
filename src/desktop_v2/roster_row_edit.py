@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from .dialog_workflow import DialogRequest, dialog_workflow
+from .user_messages import user_error
+
+from .dialog_workflow import DialogRequest, dialog_workflow, invoke
 
 from .startup_loading import save_revision
 
@@ -31,7 +33,7 @@ from src.domain.row_household_conflicts import row_household_conflicts
 from src.domain.revisions import RevisionActor
 from src.domain.status import MealStatus
 from src.domain.intake import IntakeChannel
-from src.importing.households import household_matching_rules_from_snapshot, match_existing_household_id
+from src.importing.households import match_existing_household_id
 from src.storage.database_session import (
     AutomaticBackupResult,
     DatabaseSession,
@@ -277,7 +279,7 @@ class RosterRowCreateDialog(QDialog):
                 if self._household_matcher is not None else None
             )
         except (TypeError, ValueError, KeyError) as error:
-            self._error.setText(str(error))
+            self._error.setText(user_error(error))
             self._error.show()
             return
         self._profile, self._meals = profile, meals
@@ -366,7 +368,6 @@ class RosterRowEditController:
         if roster is None:
             return self._failure(parent, ValueError("현재 명단이 없습니다."))
         snapshot = None
-        household_rule = None
         if self._dialog_type is RosterRowCreateDialog:
             on = service_day or date.today()
             try:
@@ -374,12 +375,6 @@ class RosterRowEditController:
                     self._session.database.snapshot(roster.revision_id)
                     if hasattr(self._session.database, "snapshot") else None
                 )
-                household_rules = household_matching_rules_from_snapshot(snapshot)
-                if len(household_rules) > 1:
-                    raise ValueError(
-                        "활성 가구 묶기 규칙이 둘 이상이라 대상자를 추가할 수 없습니다."
-                    )
-                household_rule = household_rules[0].rule if household_rules else None
             except Exception as error:
                 return self._failure(parent, error)
             dialog = self._dialog_type(
@@ -395,7 +390,7 @@ class RosterRowEditController:
                 input_rules=load_rules(snapshot),
                 delivery_defaults=roster.delivery_defaults,
                 household_matcher=lambda profile, starts_on: match_existing_household_id(
-                    profile, household_rule, roster, effective_on=starts_on,
+                    profile, None, roster, effective_on=starts_on,
                 ),
             )
         else:
@@ -414,21 +409,15 @@ class RosterRowEditController:
                 if self._session.database.current_roster().revision_id != roster.revision_id:
                     raise ValueError("명단이 변경되었습니다. 입력값을 복사한 뒤 창을 다시 열어주세요.")
                 validate_new_profile(request.profile, load_rules(snapshot))
-                household_rules = household_matching_rules_from_snapshot(snapshot)
-                if len(household_rules) > 1:
-                    raise ValueError("활성 가구 묶기 규칙이 둘 이상이라 대상자를 추가할 수 없습니다.")
-                household_rule = household_rules[0].rule if household_rules else None
-                household_id = request.household_id
                 starts_by_meal = request.meal_starts_on or {
                     meal: request.starts_on for meal in request.meals
                 }
-                if household_id is None:
-                    household_id = match_existing_household_id(
-                        request.profile,
-                        household_rule,
-                        roster,
-                        effective_on=min(starts_by_meal.values()),
-                    )
+                from src.domain.household_grouping import GROUPING_KIND, GROUPING_ID
+                explicit_grouping = snapshot is not None and snapshot.entity(GROUPING_KIND, GROUPING_ID) is not None
+                # Explicit criteria are applied after the full draft has been built.
+                household_id = None if explicit_grouping else match_existing_household_id(
+                    request.profile, None, roster, effective_on=min(starts_by_meal.values()),
+                )
                 state = routing_state_from_snapshot(snapshot) if snapshot is not None and request.assignments else RoutingState()
                 meal_assignments = []
                 driver_ids = {}
@@ -461,11 +450,11 @@ class RosterRowEditController:
                     while True:
                         if (yield DialogRequest(conflict_dialog, self._session)) != QDialog.DialogCode.Accepted:
                             break
-                        outcome = self._save_prepared(parent, conflict_dialog.resolved)
+                        outcome = yield from invoke(self._save_prepared, parent, conflict_dialog.resolved)
                         if outcome.completed:
                             return outcome
                     continue
-                outcome = self._save_prepared(parent, prepared)
+                outcome = yield from invoke(self._save_prepared, parent, prepared)
                 if outcome.completed or not isinstance(dialog, RosterRowCreateDialog):
                     return outcome
             except Exception as error:
@@ -502,15 +491,20 @@ class RosterRowEditController:
             return self._failure(parent, error)
         return self._save_prepared(parent, prepared)
 
+    @dialog_workflow
     def _save_prepared(self, parent, prepared):
+        from .mobile_household_merge import review_mobile_household_merge
         try:
-            backup = save_revision(self._session, prepared.record, parent=parent)
+            record = yield from invoke(review_mobile_household_merge, self._session, prepared.record, parent)
+            if record is None:
+                return RosterRowEditOutcome(RosterRowEditStatus.CANCELLED)
+            backup = save_revision(self._session, record, parent=parent)
         except Exception as error:
             return self._failure(parent, error)
-        if backup.error is not None:
-            self._message_box.warning(parent, "명단은 저장됐지만 자동 백업에 실패했습니다", str(backup.error))
+        if backup.warning_required:
+            self._message_box.warning(parent, "명단은 저장됐지만 자동 백업에 실패했습니다", user_error(backup.error))
         return RosterRowEditOutcome(RosterRowEditStatus.COMPLETED, committed_roster_after_save(self._session, prepared.snapshot), backup)
 
     def _failure(self, parent: QWidget | None, error: Exception) -> RosterRowEditOutcome:
-        self._message_box.critical(parent, "명단 행을 저장하지 못했습니다", "운영 데이터에는 반영하지 않았습니다.\n\n" + str(error))
+        self._message_box.critical(parent, "명단 행을 저장하지 못했습니다", "운영 데이터에는 반영하지 않았습니다.\n\n" + user_error(error))
         return RosterRowEditOutcome(RosterRowEditStatus.FAILED)

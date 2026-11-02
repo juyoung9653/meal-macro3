@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .user_messages import user_error
+
 from .dialog_workflow import DialogRequest, dialog_workflow, invoke, launch
 
 from .startup_loading import run_progress_task, save_revision
@@ -15,6 +17,7 @@ from uuid import UUID, uuid4
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QButtonGroup,
+    QCheckBox,
     QDialog,
     QDialogButtonBox,
     QFrame,
@@ -89,8 +92,8 @@ class DocumentTemplateDialog(QDialog):
         self.setObjectName("documentTemplateDialog")
         self.setWindowTitle("설정 · 문서 양식")
         self.setModal(True)
-        self.resize(850, 620)
-        self.setMinimumSize(790, 590)
+        self.resize(850, 650)
+        self.setMinimumSize(790, 630)
         self.setStyleSheet(application_stylesheet())
         self._build_ui()
         self._refresh_delivery_status()
@@ -106,7 +109,10 @@ class DocumentTemplateDialog(QDialog):
         for (profile, action), label in self._delivery_status.items():
             path = (DeliveryTemplateStore(self._database_id, profile=profile).selected(action)
                     if self._database_id is not None else None)
-            status = "연결된 양식" if path else "기본 양식" if profile is DocumentTemplateProfile.SCHOOL_MEAL else "미설정"
+            status = "연결된 양식" if path else "기본 양식"
+            if profile is DocumentTemplateProfile.HAPPY_LUNCHBOX and action is DocumentAction.DELIVERY_REPORT:
+                lunch = DeliveryTemplateStore(self._database_id, profile=profile).selected(action, meal="중식") if self._database_id else None
+                status = "조식·석식: " + status + " / 중식: " + ("연결된 양식" if lunch else "기본 양식")
             label.setText(f"{profile.value} · {action.label}: {status}")
 
     @dialog_workflow
@@ -114,6 +120,14 @@ class DocumentTemplateDialog(QDialog):
         dialog = self._delivery_dialog_type(action, self._database_id, self, profile=profile)
         (yield DialogRequest(dialog))
         self._refresh_delivery_status()
+
+    @property
+    def confirmation_single_meal_first(self) -> bool:
+        return self.confirmation_order.isChecked()
+
+    @property
+    def confirmation_include_next_month_weekend(self) -> bool:
+        return self.confirmation_next_weekend.isChecked()
 
     @property
     def selected_profile(self) -> DocumentTemplateProfile:
@@ -137,7 +151,7 @@ class DocumentTemplateDialog(QDialog):
         title = QLabel("문서 양식 선택")
         title.setObjectName("workspaceTitle")
         subtitle = QLabel(
-            "청구서·확인서·일일식수·배송대타에 사용할 양식을 선택합니다. 현재 연결된 배송 기본 양식은 급식입니다."
+            "청구서·확인서·일일식수·배송목록에 사용할 양식을 선택합니다. 급식·행복도시락 기본 양식을 제공하며 행복도시락 일일식수는 중식·석식 양식이 따로 있습니다."
         )
         subtitle.setObjectName("workspaceSubtitle")
         subtitle.setWordWrap(True)
@@ -194,8 +208,21 @@ class DocumentTemplateDialog(QDialog):
             cards.addWidget(card, 1)
         root.addLayout(cards, 1)
 
+        self.confirmation_order = QCheckBox("확인서: 1식짜리 먼저, 2식·3식 순으로 배치")
+        self.confirmation_order.setChecked(bool(self._current and self._current.confirmation_single_meal_first))
+        self.confirmation_order.setToolTip("관할동별 시트 안에서 1식·2식·3식 순으로 배치합니다. 해제하면 기존 출력 순서를 유지합니다.")
+        root.addWidget(self.confirmation_order)
+
+        self.confirmation_next_weekend = QCheckBox("확인서: 다음 달로 넘어가는 토·일요일을 마지막 주 날짜에 포함")
+        self.confirmation_next_weekend.setChecked(bool(self._current and self._current.confirmation_include_next_month_weekend))
+        self.confirmation_next_weekend.setToolTip(
+            "월말이 금요일·토요일이면 다음 달 일요일까지 표시합니다. 예: 07.27~08.02 또는 10.26~11.01. "
+            "날짜 표시만 바뀌며 식수는 식수·청구서 설정의 다음 달 식수 포함 여부를 따릅니다."
+        )
+        root.addWidget(self.confirmation_next_weekend)
+
         note = QLabel(
-            "급식/행복도시락 선택은 ‘이 양식 사용’을 눌러 운영 파일에 저장합니다. 배송 양식 파일 연결은 각 편집창에서 별도로 저장하며 이 PC에서 기억합니다."
+            "양식 선택과 확인서 옵션은 ‘이 양식 사용’을 눌러 운영 파일에 저장합니다. 배송 양식 파일 연결은 각 편집창에서 별도로 저장하며 이 PC에서 기억합니다."
         )
         note.setObjectName("settingsHubNote")
         note.setWordWrap(True)
@@ -237,7 +264,7 @@ class DocumentTemplateDialog(QDialog):
         try:
             self.selected_profile
         except ValueError as error:
-            self._error.setText(str(error))
+            self._error.setText(user_error(error))
             self._error.show()
             return
         self.accept()
@@ -313,7 +340,7 @@ class DocumentTemplateController:
         def load():
             roster = self._session.database.current_roster()
             if roster is None:
-                raise ValueError("현재 명단이 없습니다. 기존 명단 가져오기를 먼저 완료해주세요.")
+                raise ValueError("현재 명단이 없습니다. 기존 명단 불러오기를 먼저 완료해주세요.")
             snapshot = self._session.database.snapshot(roster.revision_id)
             state = snapshot.entity(DOCUMENT_TEMPLATE_SETTING_KIND, DOCUMENT_TEMPLATE_SETTING_ID)
             return roster, state, document_template_setting_from_state(state)
@@ -324,7 +351,7 @@ class DocumentTemplateController:
                 message="문서 생성에 사용할 저장된 설정을 확인하는 중입니다.", parent=parent,
             )
         except Exception as error:
-            self._message_box.critical(parent, "문서 양식 설정을 읽지 못했습니다", str(error))
+            self._message_box.critical(parent, "문서 양식 설정을 읽지 못했습니다", user_error(error))
             return None, None, None
 
     @dialog_workflow
@@ -340,7 +367,13 @@ class DocumentTemplateController:
                 current,
             )
         profile = dialog.selected_profile
-        if current is not None and current.profile is profile:
+        single_first = getattr(dialog, "confirmation_single_meal_first",
+                               current.confirmation_single_meal_first if current else False)
+        include_weekend = getattr(dialog, "confirmation_include_next_month_weekend",
+                                 current.confirmation_include_next_month_weekend if current else False)
+        if (current is not None and current.profile is profile
+                and current.confirmation_single_meal_first == single_first
+                and current.confirmation_include_next_month_weekend == include_weekend):
             return DocumentTemplateChangeOutcome(
                 DocumentTemplateChangeStatus.COMPLETED,
                 roster,
@@ -352,6 +385,8 @@ class DocumentTemplateController:
                 roster.revision_id,
                 state,
                 profile,
+                confirmation_single_meal_first=single_first,
+                confirmation_include_next_month_weekend=include_weekend,
                 actor=self._actor_provider(),
                 recorded_at=self._recorded_at_provider(),
                 revision_id=self._revision_id_factory(),
@@ -374,15 +409,15 @@ class DocumentTemplateController:
                 parent,
                 "문서 양식을 저장하지 못했습니다",
                 "양식과 변경 이력은 저장하지 않았습니다. 다시 시도해주세요.\n\n"
-                + str(error),
+                + user_error(error),
             )
             return DocumentTemplateChangeOutcome(DocumentTemplateChangeStatus.FAILED)
-        if backup_result.error is not None:
+        if backup_result.warning_required:
             self._message_box.warning(
                 parent,
                 "문서 양식은 저장됐지만 자동 백업에 실패했습니다",
                 "양식 선택은 운영 데이터에 저장되었습니다. 백업 폴더를 확인해주세요.\n\n"
-                + str(backup_result.error),
+                + user_error(backup_result.error),
             )
         return DocumentTemplateChangeOutcome(
             DocumentTemplateChangeStatus.COMPLETED,

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .user_messages import user_error
+
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
@@ -183,7 +185,7 @@ class MonthlyMealHistoryDialog(QDialog):
             if (result.year, result.month) != (self.year.value(), self.month.currentData()):
                 raise ValueError("조회한 달과 결과의 달이 다릅니다.")
         except Exception as error:
-            self.error.setText("월별 식종 변경 이력을 불러오지 못했습니다. 다시 조회해주세요.\n" + str(error))
+            self.error.setText("월별 식종 변경 이력을 불러오지 못했습니다. 다시 조회해주세요.\n" + user_error(error))
             self.error.show()
             return
         self.error.hide()

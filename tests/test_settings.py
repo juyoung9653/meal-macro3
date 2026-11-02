@@ -33,6 +33,15 @@ class TestTemplateProfiles:
 class TestTypedAccessors:
     """Tests for typed accessors with logic beyond simple get."""
 
+    @pytest.mark.parametrize("old_path", (
+        "assets/report_template.xlsx", "assets/일일식수/급식/일일식수템플릿.xlsx",
+    ))
+    def test_previous_builtin_report_path_resolves_to_existing_asset(self, old_path):
+        sm = make_settings_manager()
+        sm.set("templates", "report_path", value=old_path)
+        assert sm.get_report_template_path() == "assets/급식/일일식수템플릿.xlsx"
+        assert Path(sm.get_report_template_path()).is_file()
+
     def test_get_app_window_size(self):
         sm = make_settings_manager()
         w, h = sm.get_app_window_size()
@@ -90,7 +99,7 @@ class TestTypedAccessors:
             tmp_path / "assets" / key / f"{key}_확인서템플릿.xlsx"
         )
         assert sm.get_report_template_path() == str(
-            tmp_path / "assets" / "report_template.xlsx"
+            tmp_path / "assets" / "급식" / "일일식수템플릿.xlsx"
         )
 
 

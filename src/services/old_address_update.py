@@ -1,6 +1,7 @@
 """Prepare one atomic roster revision from manual Juso lookups."""
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from uuid import uuid4
 
@@ -12,6 +13,7 @@ from src.domain.roster import CustomFieldDefinition, CustomFieldType
 from .juso_api import AddressLookupError
 
 NEW_COLUMN = "new:old_address"
+SEARCH_REGION = "경기도 성남시"
 
 
 def source_options(roster):
@@ -45,7 +47,8 @@ class AddressUpdateResult:
 
 
 def prepare_address_update(roster, snapshot, client, *, source, target, only_empty,
-                           service_day, actor, recorded_at):
+                           service_day, actor, recorded_at,
+                           on_progress: Callable[[int, int], None] | None = None):
     validate_columns(roster, source, target)
     definition = None
     if target == NEW_COLUMN:
@@ -64,18 +67,26 @@ def prepare_address_update(roster, snapshot, client, *, source, target, only_emp
     updated = unchanged = skipped = 0
     # Cache failures too, without carrying addresses across manual runs.
     lookups = {}
-    for person in roster.persons:
+    total = len(roster.persons)
+    for completed, person in enumerate(roster.persons):
+        # Previous rows are complete, including skipped and failed lookups.
+        if on_progress is not None:
+            on_progress(completed, total)
         old = profile_value(person.profile, target_key)
         if only_empty and old.strip():
             persons.append(person)
             skipped += 1
             continue
         profile = profile_with_shared_routing(roster, person.person_id, service_day, snapshot)
-        address = profile_value(profile, source).strip()
+        address = " ".join(profile_value(profile, source).split())
         if not address:
             persons.append(person)
             skipped += 1
             continue
+        # Add the default region once, without changing the source cell.
+        if address != SEARCH_REGION and not address.startswith(SEARCH_REGION + " "):
+            address = ("경기도 " + address if address == "성남시" or address.startswith("성남시 ")
+                       else SEARCH_REGION + " " + address)
         try:
             if address not in lookups:
                 try:
@@ -100,6 +111,8 @@ def prepare_address_update(roster, snapshot, client, *, source, target, only_emp
         values[definition.definition_id] = value
         persons.append(replace(person, profile=replace(person.profile, custom_values=values)))
         updated += 1
+    if on_progress is not None:
+        on_progress(total, total)
     if not updated:
         return AddressUpdateResult(roster, None, 0, unchanged, skipped, tuple(failures))
     revision_id = uuid4()
@@ -109,7 +122,7 @@ def prepare_address_update(roster, snapshot, client, *, source, target, only_emp
         revision_id=revision_id, parent_revision_id=roster.revision_id,
         actor=actor, recorded_at=recorded_at, effective_on=service_day,
         reason="구주소 업데이트", source=RevisionSource.UI,
-        decisions={"old_address_update": {"source": source, "target": target_key,
+        decisions={"old_address_update": {"source": source, "search_region": SEARCH_REGION, "target": target_key,
                    "only_empty": only_empty, "updated": updated, "failed": len(failures)}},
     )
     return AddressUpdateResult(result, RevisionRecord(metadata, roster_audit_changes(roster, result)),

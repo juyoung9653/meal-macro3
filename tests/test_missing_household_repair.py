@@ -17,7 +17,7 @@ from src.domain.projections import roster_audit_changes
 from src.domain.revisions import ImportBatch, RevisionActor, RevisionMetadata, RevisionRecord, RevisionSource
 from src.domain.roster import Household, HouseholdMembership, InclusiveDateRange, Meal, MealEnrollment, Person, PersonProfile, RosterSnapshot
 from src.services.missing_household_repair import load_missing_household_context, plan_missing_household_repair
-from src.services.sqlite_document_service import HouseholdServiceDatesError, _household_for_service_dates, prepare_monthly_document_data
+from src.services.sqlite_document_service import HouseholdServiceDatesError, _household_for_document, prepare_monthly_document_data
 from src.storage.database_session import AutomaticBackupResult, DatabaseSession
 
 ACTOR = RevisionActor("tester", "test")
@@ -89,7 +89,7 @@ def test_preview_cancel_commit_invoice_and_repeat(tmp_path):
         saved = MissingHouseholdRepairController(session, dialog_type=dialog_type(True), message_box=messages,
                                                  actor_provider=lambda: ACTOR).run()
         assert saved.completed and saved.roster is not None
-        assert _household_for_service_dates(saved.roster, PERSON, (START,)) == saved.roster.memberships[0].household_id
+        assert _household_for_document(saved.roster, PERSON, (START,), effective_on=START) == saved.roster.memberships[0].household_id
         assert saved.roster.memberships[0].period.starts_on == START
         assert session.database.current_roster() == saved.roster
         invoice = prepare_monthly_document_data(session.database.snapshot(saved.roster.revision_id),
@@ -163,7 +163,7 @@ def test_old_vacation_lunch_new_person_can_be_repaired(tmp_path):
         saved = MissingHouseholdRepairController(session, dialog_type=dialog_type(True),
                                                  actor_provider=lambda: ACTOR).run()
         assert saved.completed and saved.roster is not None
-        assert _household_for_service_dates(saved.roster, new_id, (START,)) == saved.roster.memberships[-1].household_id
+        assert _household_for_document(saved.roster, new_id, (START,), effective_on=START) == saved.roster.memberships[-1].household_id
         assert saved.roster.memberships[0] == baseline.memberships[0]
         assert session.database.snapshot(old_lunch.revision_id).entities == old_entities
 
@@ -201,7 +201,7 @@ def test_backup_failure_reports_committed_repair(tmp_path, monkeypatch):
         outcome = MissingHouseholdRepairController(session, dialog_type=dialog_type(True),
                                                    message_box=messages, actor_provider=lambda: ACTOR).run()
         assert outcome.completed
-        assert len(messages.warnings) == 1
+        assert not messages.warnings
         assert session.database.current_roster().memberships
 
 

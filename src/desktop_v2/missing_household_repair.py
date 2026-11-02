@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .user_messages import user_error
+
 from .dialog_workflow import DialogRequest, dialog_workflow
 
 from dataclasses import dataclass, replace
@@ -108,7 +110,7 @@ class MissingHouseholdRepairController:
             context = run_progress_task(lambda: load_missing_household_context(self._session.database),
                                         message="누락된 가구 소속 기록을 확인하는 중입니다.", parent=parent)
         except Exception as error:
-            self._message_box.critical(parent, "가구 소속 기록을 확인하지 못했습니다", str(error))
+            self._message_box.critical(parent, "가구 소속 기록을 확인하지 못했습니다", user_error(error))
             return MissingHouseholdRepairOutcome()
         dialog = self._dialog_type(context, parent)
         if (yield DialogRequest(dialog, self._session)) != QDialog.DialogCode.Accepted or not context.candidates:
@@ -124,10 +126,10 @@ class MissingHouseholdRepairController:
                 return MissingHouseholdRepairOutcome()
             backup = save_revision(self._session, record, parent=parent)
         except Exception as error:
-            text = "확인하는 동안 명단이 변경됐습니다. 설정을 다시 열어 확인해주세요." if isinstance(error, RevisionConflictError) else str(error)
+            text = "확인하는 동안 명단이 변경됐습니다. 설정을 다시 열어 확인해주세요." if isinstance(error, RevisionConflictError) else user_error(error)
             self._message_box.critical(parent, "가구 소속 기록을 저장하지 못했습니다", text)
             return MissingHouseholdRepairOutcome()
-        if backup.error is not None:
-            self._message_box.warning(parent, "복구는 저장됐지만 자동 백업에 실패했습니다", str(backup.error))
+        if backup.warning_required:
+            self._message_box.warning(parent, "복구는 저장됐지만 자동 백업에 실패했습니다", user_error(backup.error))
         roster = committed_roster_after_save(self._session, replace(plan.roster, revision_id=record.metadata.revision_id))
         return MissingHouseholdRepairOutcome(True, roster)

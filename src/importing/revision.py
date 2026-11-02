@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from enum import StrEnum
 from uuid import UUID, uuid4
@@ -11,6 +11,7 @@ from uuid import UUID, uuid4
 from src.domain.projections import roster_audit_changes, status_event_audit_change
 from src.domain.revisions import (
     ImportBatch,
+    EntityRef, HistoricalSnapshot,
     RevisionActor,
     RevisionMetadata,
     RevisionRecord,
@@ -73,6 +74,8 @@ def build_import_revision(
     lunch_status_events: tuple[StatusEvent, ...] = (),
     lunch_value_choices: Mapping | None = None,
     value_choices: Mapping | None = None,
+    household_grouping_columns: tuple[str, ...] = ("mobile",),
+    household_grouping_snapshot: HistoricalSnapshot | None = None,
 ) -> PreparedImportRevision:
     """Apply reviewed identities, households, and rules in the same commit."""
 
@@ -94,6 +97,8 @@ def build_import_revision(
         raise TypeError("revision ID와 batch ID는 UUID여야 합니다.")
     if not isinstance(purpose, ImportPurpose):
         raise TypeError("가져오기 목적이 올바르지 않습니다.")
+    if preview.profile.row_filter is not None and purpose is not ImportPurpose.VACATION_LUNCH:
+        raise ValueError("가져올 행 조건은 중식 명단 갱신에서만 사용할 수 있습니다.")
     if purpose is ImportPurpose.VACATION_LUNCH:
         if current_roster is None:
             raise ValueError("방학 중식 명단은 기존 운영 명단이 있어야 적용할 수 있습니다.")
@@ -165,6 +170,22 @@ def build_import_revision(
         preview.header_fingerprint,
     )
     profile_change = _profile_change(existing_profile, stored_profile)
+    from src.domain.mobile_household_merge import merge_mobile_households
+    grouping_snapshot = household_grouping_snapshot
+    if grouping_snapshot is not None:
+        if current_roster is None or grouping_snapshot.revision_id != current_roster.revision_id:
+            raise ValueError("가구 기준의 명단이 변경되었습니다. 다시 불러와주세요.")
+        entities = dict(grouping_snapshot.entities)
+        for change in roster_audit_changes(current_roster, result.snapshot):
+            ref = EntityRef(change.entity_kind, change.entity_id)
+            if change.after is None:
+                entities.pop(ref, None)
+            else:
+                entities[ref] = change.after
+        grouping_snapshot = HistoricalSnapshot(result.snapshot.revision_id, entities)
+    merged, _ = merge_mobile_households(result.snapshot, plan.effective_on,
+        columns=household_grouping_columns, snapshot=grouping_snapshot)
+    result = replace(result, snapshot=merged)
     changes = roster_audit_changes(current_roster, result.snapshot)
     changes = (*changes, *(status_event_audit_change(event) for event in lunch_events))
     if profile_change is not None:
@@ -193,6 +214,8 @@ def build_import_revision(
             )],
         } if purpose is ImportPurpose.VACATION_LUNCH else None,
         "observation_sources": observation_sources,
+        "filtered_source_rows": list(preview.filtered_rows),
+        "excluded_source_rows": list(preview.excluded_rows),
         "source_notices": [
             {
                 "row": issue.row_number,
@@ -280,6 +303,8 @@ def _apply_vacation_lunch(
     recorded_at: datetime,
     historical_events: tuple[StatusEvent, ...],
     value_choices: Mapping | None = None,
+    household_grouping_columns: tuple[str, ...] = ("mobile",),
+    household_grouping_snapshot: HistoricalSnapshot | None = None,
 ) -> tuple[ReconciliationResult, tuple[StatusEvent, ...]]:
     if result.ignored_observation_ids:
         raise ValueError("방학 중식 명단에서는 행 제외를 허용하지 않습니다.")

@@ -1,5 +1,7 @@
 """Revision-backed delivery-sequence input mode settings."""
 
+from src.storage.database_session import AutomaticBackupResult
+
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from uuid import UUID, uuid4
@@ -128,7 +130,7 @@ def test_dialog_and_controller_cancel_noop_and_save(app):
 
     session = SimpleNamespace(
         database=Database(),
-        append_revision=lambda record: saved.append(record) or SimpleNamespace(error=None),
+        append_revision=lambda record: saved.append(record) or AutomaticBackupResult(error=None),
     )
     controller = SequenceModeController(
         session,

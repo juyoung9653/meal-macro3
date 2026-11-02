@@ -42,7 +42,7 @@ from src.domain.service_adjustments import (
     service_adjustment_schedule_state,
 )
 from src.domain.status import StatusEvent, StatusHistory, resolve_status_history
-from src.services.delivery_report_remarks import build_status_remarks, build_additional_remarks, report_remark_columns
+from src.services.delivery_report_remarks import build_additional_remarks, report_remark_columns
 from src.domain.daily_report_choices import ReportRemarkOptions
 from src.services.delivery_service import (
     DeliveryReport,
@@ -50,6 +50,7 @@ from src.services.delivery_service import (
     DeliveryReportTotals,
 )
 from src.services.delivery_households import require_delivery_household
+from src.services.daily_report_mapping import DailyReportMapping
 from src.services.meal_service_availability import (
     RECURRING_MEAL_SERVICE_POLICY_VERSION,
     physical_delivery_on,
@@ -119,6 +120,7 @@ def prepare_delivery_report_data(
     staff_sort: Mapping[Meal | str, Sequence[str]] | None = None,
     delivery_forms: Sequence[str | None] | None = None,
     remark_options: ReportRemarkOptions = ReportRemarkOptions(),
+    mapping_snapshot: HistoricalSnapshot | None = None,
 ) -> PreparedDeliveryReportData:
     """Build report rows from entitlement service dates and physical shipments.
 
@@ -130,6 +132,7 @@ def prepare_delivery_report_data(
     return _prepare_delivery_data(
         snapshot, period_start, period_end, meals, staff_sort=staff_sort,
         build_reports=True, delivery_forms=delivery_forms, remark_options=remark_options,
+        mapping_snapshot=mapping_snapshot,
     )
 
 
@@ -183,6 +186,7 @@ def _prepare_delivery_data(
     remark_options: ReportRemarkOptions = ReportRemarkOptions(),
     missing_lunch_schedule_as_zero: bool = False,
     include_service_period: bool = False,
+    mapping_snapshot: HistoricalSnapshot | None = None,
 ) -> PreparedDeliveryReportData:
     if not isinstance(snapshot, HistoricalSnapshot):
         raise TypeError("snapshot은 HistoricalSnapshot이어야 합니다.")
@@ -208,6 +212,9 @@ def _prepare_delivery_data(
         if unknown:
             raise ValueError("선택한 원본의 배송 설정에 없는 배송 형태가 있습니다.")
     routing = routing_state_from_snapshot(snapshot)
+    report_mapping = DailyReportMapping(
+        snapshot, snapshot if mapping_snapshot is None else mapping_snapshot, "급식",
+    ) if build_reports else None
     if staff_sort is None:
         orders = daily_driver_orders(snapshot, routing)
         normalized_staff_sort = _normalize_staff_sort({
@@ -364,6 +371,7 @@ def _prepare_delivery_data(
             tuple(item for item in coalesced_shipments
                   if (item.delivery_on, item.meal) in target_key_set),
             routing,
+            report_mapping=report_mapping,
         )
         aggregates = {
             key: _aggregate_presences(
@@ -378,7 +386,7 @@ def _prepare_delivery_data(
             if key in target_key_set:
                 continue
             try:
-                previous_presences = _shipment_presences(roster, tuple(shipments_by_key[key]), routing)
+                previous_presences = _shipment_presences(roster, tuple(shipments_by_key[key]), routing, report_mapping=report_mapping)
             except _MissingDeliveryDriverError:
                 # An incomplete earlier day is unknown, never an empty or partial
                 # delivery count. Suppress its deltas without blocking this period.
@@ -395,11 +403,9 @@ def _prepare_delivery_data(
                 aggregates[(day, meal)],
                 previous_aggregates.get(previous_by_key.get((day, meal)), _empty_aggregate()),
                 normalized_staff_sort.get(meal, ()),
-                build_status_remarks(
-                    roster, routing, histories, day, meal,
-                    coalesced_shipments, allowed_forms,
-                ),
-                build_additional_remarks(roster, routing, histories, day, meal,
+                report_mapping.remarks_for(histories, day, meal, coalesced_shipments, allowed_forms,
+                                           presences.get((day, meal), ())),
+                build_additional_remarks(roster, report_mapping.for_meal(meal), histories, day, meal,
                                          presences.get((day, meal), ()), remark_options,
                                          form_shipments=remark_shipments if remark_forms else None),
                 remark_options.position,
@@ -421,6 +427,7 @@ def _prepare_delivery_data(
             "source_revision_id": str(snapshot.revision_id),
             "selected_meals": tuple(meal.value for meal in selected_meals),
             **({"selected_delivery_forms": selected_forms} if build_reports else {}),
+            **({"column_mapping": report_mapping.manifest()} if build_reports else {}),
             **({"remark_options": remark_options.manifest()}
                if build_reports and remark_options != ReportRemarkOptions() else {}),
             "report_period": {
@@ -580,6 +587,7 @@ def _shipment_presences(
     roster: RosterSnapshot,
     shipments: tuple[PhysicalShipment, ...],
     routing: RoutingState,
+    *, report_mapping: DailyReportMapping | None = None,
 ) -> Mapping[tuple[date, Meal], tuple[_ShipmentPresence, ...]]:
     by_key: defaultdict[tuple[date, Meal], list[_ShipmentPresence]] = defaultdict(list)
     for shipment in shipments:
@@ -588,11 +596,13 @@ def _shipment_presences(
             roster, shipment.person_id, shipment.service_dates,
         )
         assignment = roster.resolve_assignment(shipment.person_id, shipment.meal)
-        delivery_view = routing.resolve(
+        delivery_view = (report_mapping.for_meal(shipment.meal) if report_mapping else routing).resolve(
             roster, shipment.person_id, shipment.delivery_on
         )
         driver = delivery_view.drivers[shipment.meal].strip()
-        if not driver:
+        if not driver and (report_mapping is None or (
+            report_mapping.mapping["driver"] == "배송담당" and not report_mapping.fallbacks.get("driver")
+        )):
             raise _MissingDeliveryDriverError(
                 f"{shipment.delivery_on:%Y.%m.%d} {shipment.meal.value} 배송 대상 "
                 f"{person.profile.name}님의 배송담당이 비어 있습니다."
@@ -892,10 +902,6 @@ def _days(starts_on: date, ends_on: date):
     while current <= ends_on:
         yield current
         current += timedelta(days=1)
-
-
-def _contains(starts_on: date, ends_on: date, day: date) -> bool:
-    return starts_on <= day <= ends_on
 
 
 def _validate_date(value: object, label: str) -> None:

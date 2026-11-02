@@ -331,6 +331,8 @@ class WorkbookImportPreview:
     corrected_cells: tuple[tuple[int, str], ...] = ()
     automatic_source_resolutions: tuple[AutomaticSourceResolution, ...] = ()
     custom_fields: tuple[CustomFieldDefinition, ...] = ()
+    filtered_rows: tuple[int, ...] = ()
+    excluded_rows: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.profile, ImportMappingProfile):
@@ -349,6 +351,8 @@ class WorkbookImportPreview:
         if any(not isinstance(item, CustomFieldDefinition) for item in custom_fields):
             raise TypeError("custom_fields에는 CustomFieldDefinition만 허용됩니다.")
         object.__setattr__(self, "custom_fields", custom_fields)
+        object.__setattr__(self, "filtered_rows", tuple(self.filtered_rows))
+        object.__setattr__(self, "excluded_rows", tuple(sorted(_normalize_excluded_rows(self.excluded_rows))))
 
     @property
     def can_continue(self) -> bool:
@@ -470,6 +474,7 @@ def parse_workbook(
     password: str | None = None,
     sample_limit: int = 8,
     cell_overrides: Mapping[tuple[int, str], object] | None = None,
+    excluded_rows: Sequence[int] = (),
     table_name: str | None = None,
     identity_by_mobile: bool = False,
     existing_custom_fields: Sequence[CustomFieldDefinition] = (),
@@ -479,10 +484,12 @@ def parse_workbook(
     if not isinstance(profile, ImportMappingProfile):
         raise TypeError("profile은 ImportMappingProfile이어야 합니다.")
     overrides = _normalize_cell_overrides(cell_overrides)
+    excluded = _normalize_excluded_rows(excluded_rows)
     source_path = _source_path(path)
     digest, byte_size = _file_identity(source_path)
     issues: list[ImportIssue] = []
     automatic_source_resolutions: list[AutomaticSourceResolution] = []
+    filtered_rows: list[int] = []
     with _open_workbook(source_path, password or "") as workbook:
         selected_table = (
             _select_table(_workbook_tables(workbook), table_name)
@@ -527,6 +534,10 @@ def parse_workbook(
                     )
         else:
             columns = _read_columns(worksheet, profile.header_row, header_row_count=profile.header_row_count)
+        last_data_row = selected_table.data_end_row if selected_table else (worksheet.max_row or 0)
+        if any(row < profile.data_start_row or row > last_data_row for row in excluded):
+            raise WorkbookStructureError("선택한 데이터 범위 밖 행은 제외할 수 없습니다.")
+        overrides = {key: value for key, value in overrides.items() if key[0] not in excluded}
         fingerprint = _header_fingerprint(profile.header_row, columns, header_row_count=profile.header_row_count)
         column_indexes = _resolve_profile_columns(profile, columns)
         names = custom_column_names(columns)
@@ -560,6 +571,8 @@ def parse_workbook(
             issues,
             overrides,
             end_row=selected_table.data_end_row if selected_table else None,
+            filtered_rows=filtered_rows,
+            excluded_rows=excluded,
         )
     from .custom_values import import_custom_value
     invalid_custom_cells = set()
@@ -600,7 +613,7 @@ def parse_workbook(
                     str(error), current_value=value or "",
                 ))
     if not observations and not issues:
-        issues.append(ImportIssue(None, None, "가져올 데이터 행이 없습니다."))
+        issues.append(ImportIssue(None, None, "선택한 조건에 맞는 데이터 행이 없습니다." if filtered_rows else "가져올 데이터 행이 없습니다."))
     return WorkbookImportPreview(
         source_filename=source_path.name,
         sha256=digest,
@@ -610,10 +623,12 @@ def parse_workbook(
         profile=profile,
         observations=observations,
         issues=tuple(issues),
-        sample_rows=sample_rows,
+        sample_rows=tuple(row for row in sample_rows if row.row_number not in excluded),
         corrected_cells=tuple(sorted(overrides)),
         automatic_source_resolutions=tuple(automatic_source_resolutions),
         custom_fields=custom_fields,
+        filtered_rows=tuple(filtered_rows),
+        excluded_rows=tuple(sorted(excluded)),
     )
 
 
@@ -967,6 +982,13 @@ def _preview_rows(
     return tuple(result)
 
 
+def _normalize_excluded_rows(rows):
+    values = tuple(rows)
+    if any(type(row) is not int or row < 1 for row in values):
+        raise ValueError("제외할 원본 행 번호는 1 이상의 정수여야 합니다.")
+    return frozenset(values)
+
+
 def _normalize_cell_overrides(
     overrides: Mapping[tuple[int, str], object] | None,
 ) -> Mapping[tuple[int, str], object]:
@@ -1040,6 +1062,7 @@ def _resolve_profile_columns(
         profile.driver_column,
         profile.sequence_column,
         profile.source_reference_column,
+        profile.row_filter.column if profile.row_filter is not None else None,
     ):
         if optional is not None:
             tokens.add(optional)
@@ -1078,6 +1101,8 @@ def _read_observations(
     overrides: Mapping[tuple[int, str], object],
     *,
     end_row: int | None = None,
+    filtered_rows: list[int] | None = None,
+    excluded_rows: frozenset[int] = frozenset(),
 ) -> list[_RawObservation]:
     mapped_indexes = tuple(sorted(set(indexes.values())))
     max_column = max(mapped_indexes)
@@ -1094,6 +1119,10 @@ def _read_observations(
         max_col=max_column,
     )
     for row_number, source_cells in enumerate(rows, start=first_row):
+        if row_number in excluded_rows:
+            saw_data = True
+            blank_run = 0
+            continue
         cells = _cell_inputs(source_cells, row_number, overrides)
         if all(_is_blank(cells[index - 1].value) for index in mapped_indexes):
             blank_run += 1
@@ -1102,6 +1131,16 @@ def _read_observations(
             continue
         saw_data = True
         blank_run = 0
+        if profile.row_filter is not None:
+            index = indexes[profile.row_filter.column]
+            cell = cells[index - 1]
+            value = _safe_cell_value(cell, row_number, get_column_letter(index), issues)
+            if value is _INVALID:
+                continue
+            if not profile.row_filter.matches(_literal_cell_text(cell)):
+                if filtered_rows is not None:
+                    filtered_rows.append(row_number)
+                continue
         before_issue_count = len(issues)
         raw = _parse_row(
             row_number,
@@ -1579,6 +1618,8 @@ def _merge_observations(
             for field in _SCHOOL_FIELDS
         )
         preferred_school_row = _preferred_school_row(grouped_rows)
+        from .lunch_values import preferred_school_name
+        preferred_name = preferred_school_name(*(row.profile_values.get(ProfileField.SCHOOL_NAME) for row in grouped_rows))
         school_auto = True
         if identity_by_mobile and school_values_differ:
             from .lunch_values import preferred_school
@@ -1607,6 +1648,9 @@ def _merge_observations(
                     " / ".join(_display_value(value) for value in nonblank)
                     or None
                 )
+                continue
+            if field is ProfileField.SCHOOL_NAME and preferred_name is not None:
+                merged_values[field] = preferred_name
                 continue
             if field in _SCHOOL_FIELDS and school_values_differ and school_auto:
                 merged_values[field] = preferred_school_row.profile_values.get(field)
@@ -1933,25 +1977,9 @@ def _preferred_school_row(rows: Sequence[_RawObservation]) -> _RawObservation:
 
 
 def _school_row_rank(row: _RawObservation) -> tuple[int, int, int]:
-    school_text = " ".join(
-        str(row.profile_values.get(field) or "")
-        for field in (ProfileField.SCHOOL_TYPE, ProfileField.SCHOOL_NAME)
-    )
-    compact = "".join(school_text.split()).casefold()
-    stage = -1
-    for keyword, value in (
-        ("대학", 5),
-        ("고등", 4),
-        ("중학", 3),
-        ("중등", 3),
-        ("초등", 2),
-        ("유치", 1),
-        ("어린이", 1),
-        ("미취학", 0),
-    ):
-        if keyword in compact:
-            stage = value
-            break
+    from .lunch_values import school_stage
+    stage = school_stage(row.profile_values.get(ProfileField.SCHOOL_TYPE), row.profile_values.get(ProfileField.SCHOOL_NAME))
+    stage = -1 if stage is None else stage
     grade = _grade_rank(row.profile_values.get(ProfileField.GRADE))
     return stage, grade, row.row_number
 

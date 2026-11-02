@@ -9,7 +9,6 @@ from uuid import UUID
 from src.domain.revisions import (
     AuditChange,
     ChangeOperation,
-    EntityRef,
     HistoricalSnapshot,
     JsonValue,
 )
@@ -126,13 +125,3 @@ def import_profiles_from_snapshot(
             key=lambda item: (item.profile.name.casefold(), str(item.profile_id)),
         )
     )
-
-
-def import_profile_state_at(
-    snapshot: HistoricalSnapshot,
-    profile_id: UUID,
-) -> StoredImportProfile | None:
-    state = snapshot.entity(IMPORT_PROFILE_KIND, profile_id)
-    if state is None:
-        return None
-    return stored_import_profile_from_state(profile_id, state)

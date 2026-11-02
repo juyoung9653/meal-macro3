@@ -1,5 +1,7 @@
 """DB-backed choice of same-month automatic pause conversion."""
 
+from .user_messages import user_error
+
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -81,11 +83,11 @@ class PauseConversionController:
                         return None
                     backup = save_revision(self.session, record, parent=parent)
                 except Exception as error:
-                    QMessageBox.critical(dialog, "일시중지 자동변환 설정을 저장하지 못했습니다", str(error))
+                    QMessageBox.critical(dialog, "일시중지 자동변환 설정을 저장하지 못했습니다", user_error(error))
                     continue
-                if backup.error is not None:
-                    QMessageBox.warning(parent, "설정은 저장됐지만 자동 백업에 실패했습니다", str(backup.error))
+                if backup.warning_required:
+                    QMessageBox.warning(parent, "설정은 저장됐지만 자동 백업에 실패했습니다", user_error(backup.error))
                 return self.session.database.current_roster()
         except Exception as error:
-            QMessageBox.critical(parent, "일시중지 자동변환 설정을 열지 못했습니다", str(error))
+            QMessageBox.critical(parent, "일시중지 자동변환 설정을 열지 못했습니다", user_error(error))
         return None

@@ -154,11 +154,6 @@ def apply_page_breaks_by_groups(
     return list(plan.next_page_start_rows)
 
 
-def ord_groups(vals: list[str]) -> list[tuple[int, int]]:
-    """레거시 API: 연속된 동일 값 그룹의 inclusive tuple 범위를 반환한다."""
-    return [(group.start_index, group.end_index) for group in _groups_from_values(vals)]
-
-
 def _groups_from_values(vals: Iterable[str]) -> list[DeliveryGroup]:
     values = list(vals)
     groups: list[DeliveryGroup] = []

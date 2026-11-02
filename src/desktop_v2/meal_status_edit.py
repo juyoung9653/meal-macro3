@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .user_messages import user_error
+
 from .dialog_workflow import DialogRequest, dialog_workflow, invoke
 
 from .startup_loading import save_revision
@@ -482,7 +484,7 @@ class MealStatusChangeDialog(QDialog):
         try:
             periods = self.selected_periods()
         except ValueError as error:
-            return str(error)
+            return user_error(error)
         for meal, period in periods.items():
             try:
                 validate_actual_delivery_date(
@@ -499,12 +501,12 @@ class MealStatusChangeDialog(QDialog):
                         field_name="종료일",
                     )
             except (TypeError, ValueError) as error:
-                return str(error)
+                return user_error(error)
         try:
             validate_meal_status_transition(self._roster, self._all_histories,
                 self.selected_targets(), status, periods)
         except ValueError as error:
-            return str(error)
+            return user_error(error)
         if status is MealStatus.DELIVERY:
             return None if self.selected_targets() else "적용할 항목을 선택해주세요."
         targets = self.selected_targets()
@@ -677,7 +679,7 @@ class MealStatusChangeController:
             self._message_box.critical(
                 parent,
                 "배송 상태를 변경하지 못했습니다",
-                "현재 명단이 없습니다. 기존 명단 가져오기를 먼저 완료해주세요.",
+                "현재 명단이 없습니다. 기존 명단 불러오기를 먼저 완료해주세요.",
             )
             return MealStatusChangeOutcome(MealStatusChangeStatus.FAILED)
         try:
@@ -686,7 +688,7 @@ class MealStatusChangeController:
             self._message_box.critical(
                 parent,
                 "배송 상태를 변경하지 못했습니다",
-                str(error),
+                user_error(error),
             )
             return MealStatusChangeOutcome(MealStatusChangeStatus.FAILED)
         seed_ids = {pid for pid, _ in targets} if targets else {person_id}
@@ -779,16 +781,16 @@ class MealStatusChangeController:
                 parent,
                 "배송 상태를 저장하지 못했습니다",
                 "저장된 명단에는 반영하지 않았습니다. "
-                "내용을 확인한 뒤 다시 시도해주세요.\n\n" + str(error),
+                "내용을 확인한 뒤 다시 시도해주세요.\n\n" + user_error(error),
             )
             return MealStatusChangeOutcome(MealStatusChangeStatus.FAILED)
-        if backup_result.error is not None:
+        if backup_result.warning_required:
             self._message_box.warning(
                 parent,
                 "배송 상태는 저장됐지만 자동 백업에 실패했습니다",
                 "변경 내용과 이력은 운영 데이터에 정상 저장되었습니다. "
                 "백업 폴더 연결을 확인한 뒤 백업을 다시 실행해주세요.\n\n"
-                + str(backup_result.error),
+                + user_error(backup_result.error),
             )
         return MealStatusChangeOutcome(
             MealStatusChangeStatus.COMPLETED,

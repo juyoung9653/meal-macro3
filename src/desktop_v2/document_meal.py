@@ -29,6 +29,10 @@ from PySide6.QtWidgets import (
 from src.domain.daily_report_choices import ReportRemarkOptions, DailyReportChoices, build_daily_report_choices_revision, daily_report_choices_from_snapshot
 from src.domain.revisions import format_revision_timestamp
 from src.domain.roster import Meal
+from src.domain.document_templates import (
+    DocumentTemplateProfile,
+    document_template_setting_from_snapshot,
+)
 from src.domain.delivery_substitute import SubstituteOptions
 
 from .dialog_workflow import DialogRequest, dialog_workflow, launch
@@ -43,6 +47,8 @@ def suggest_document_meals(
     action: DocumentAction,
     anchor_meal: Meal,
     starts_on: date | None = None,
+    *,
+    profile: DocumentTemplateProfile | None = None,
 ) -> tuple[Meal, ...]:
     """Use the delivery date for delivery documents and all meals for billing."""
 
@@ -50,6 +56,9 @@ def suggest_document_meals(
         raise TypeError("문서 작업은 DocumentAction이어야 합니다.")
     if not isinstance(anchor_meal, Meal):
         raise TypeError("문서 기본 식종은 Meal이어야 합니다.")
+    if (action is DocumentAction.DELIVERY_REPORT
+            and profile is DocumentTemplateProfile.HAPPY_LUNCHBOX):
+        return (Meal.BREAKFAST, Meal.DINNER)
     if action in (DocumentAction.DELIVERY_SUBSTITUTE, DocumentAction.DELIVERY_REPORT):
         day = starts_on or date.today()
         if day.weekday() < 4:
@@ -162,10 +171,18 @@ class DocumentMealDialog(QDialog):
             if self._buttons_by_meal[meal].isChecked()
         )
 
-    def set_report_choices(self, choices: DailyReportChoices) -> None:
+    def set_report_choices(
+        self, choices: DailyReportChoices, *,
+        profile: DocumentTemplateProfile | None = None,
+    ) -> None:
         if self._period.action is not DocumentAction.DELIVERY_REPORT:
             return
-        # Stored form exclusions survive; each document starts with its date-based meal.
+        # Keep exclusions, but start each new document with its profile's defaults.
+        self._defaults = suggest_document_meals(
+            self._period.action, self._period.anchor_meal, self._period.starts_on,
+            profile=profile,
+        )
+        self._meal_help.setText(_meal_instruction(self._period, profile=profile))
         self._excluded_forms = set(choices.excluded_forms)
         self._remark_options = choices.remarks
         self._refresh_remark_summary()
@@ -275,10 +292,10 @@ class DocumentMealDialog(QDialog):
             heading.addWidget(clear_all)
         section_layout.addLayout(heading)
 
-        help_text = QLabel(_meal_instruction(self._period))
-        help_text.setObjectName("muted")
-        help_text.setWordWrap(True)
-        section_layout.addWidget(help_text)
+        self._meal_help = QLabel(_meal_instruction(self._period))
+        self._meal_help.setObjectName("muted")
+        self._meal_help.setWordWrap(True)
+        section_layout.addWidget(self._meal_help)
 
         cards = QHBoxLayout()
         cards.setSpacing(10)
@@ -498,10 +515,15 @@ _MEAL_COPY = {
 }
 
 
-def _meal_instruction(period: DocumentPeriodSelection) -> str:
+def _meal_instruction(
+    period: DocumentPeriodSelection, *,
+    profile: DocumentTemplateProfile | None = None,
+) -> str:
     if period.action is DocumentAction.DELIVERY_SUBSTITUTE:
         return "배송대타는 담당자 한 명의 배송표를 만들기 때문에 식종 하나만 선택합니다."
     if period.action is DocumentAction.DELIVERY_REPORT:
+        if profile is DocumentTemplateProfile.HAPPY_LUNCHBOX:
+            return "행복도시락 일일식수는 석식·조식을 기본 선택합니다. 중식도 필요하면 체크하세요. 식종은 변경할 수 있으며, 제외한 배송 형태는 저장된 설정을 사용합니다."
         return "기간 시작일 기준 월~목은 석식, 금요일은 조식을 기본 선택합니다. 식종은 변경할 수 있으며, 제외한 배송 형태는 저장된 설정을 사용합니다."
     return "누락을 막기 위해 조식·중식·석식을 모두 선택했습니다. 필요 없는 식종만 해제하세요."
 
@@ -519,10 +541,17 @@ def _period_text(period: DocumentPeriodSelection) -> str:
 
 
 def load_daily_report_choices(session):
+    return load_daily_report_setup(session)[0]
+
+
+def load_daily_report_setup(session):
+    """Read choices and the current output profile from the same DB snapshot."""
     roster = session.database.current_roster()
     if roster is None:
         raise ValueError("현재 명단이 없습니다.")
-    return daily_report_choices_from_snapshot(session.database.snapshot(roster.revision_id))
+    snapshot = session.database.snapshot(roster.revision_id)
+    setting = document_template_setting_from_snapshot(snapshot)
+    return daily_report_choices_from_snapshot(snapshot), setting.profile if setting else None
 
 
 def save_daily_report_choices(session, choices, *, parent=None):

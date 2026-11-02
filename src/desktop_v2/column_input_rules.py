@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .user_messages import user_error
+
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -159,9 +161,9 @@ class ColumnInputRuleController:
             if prepared is None:
                 return False
             backup = save_revision(self._session, prepared, parent=parent)
-            if backup.error is not None:
-                self._message_box.warning(parent, "입력 제한은 저장됐지만 자동 백업에 실패했습니다", str(backup.error))
+            if backup.warning_required:
+                self._message_box.warning(parent, "입력 제한은 저장됐지만 자동 백업에 실패했습니다", user_error(backup.error))
             return True
         except Exception as error:
-            self._message_box.critical(parent, "입력 제한을 저장하지 못했습니다", str(error))
+            self._message_box.critical(parent, "입력 제한을 저장하지 못했습니다", user_error(error))
             return False

@@ -1,5 +1,7 @@
 """Monthly counting and invoice history destinations selected from real templates."""
 
+from .user_messages import user_error
+
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -45,7 +47,7 @@ class InvoiceSettingsDialog(QDialog):
             form.addRow(f"{profile} 양식 · 이력 넣을 칼럼", combo)
             self.history_columns[profile] = combo
         layout.addLayout(form)
-        note = QLabel("선택한 칼럼의 기본값을 식종 변경 이력으로 정합니다.\n청구서·확인서 항목 설정에서 따로 연결한 칼럼은 해당 연결을 우선 사용합니다.\n예: 석식: 10/23~10/29 일시중지")
+        note = QLabel("선택한 칼럼의 기본값을 식종 변경 이력으로 정합니다.\n문서 항목 설정에서 따로 연결한 칼럼은 해당 연결을 우선 사용합니다.\n예: 석식: 10/23~10/29 일시중지")
         note.setWordWrap(True)
         layout.addWidget(note)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
@@ -96,11 +98,11 @@ class InvoiceSettingsController:
                         return None
                     backup = save_revision(self.session, record, parent=parent)
                 except Exception as error:
-                    QMessageBox.critical(dialog, "식수·청구서 설정을 저장하지 못했습니다", str(error))
+                    QMessageBox.critical(dialog, "식수·청구서 설정을 저장하지 못했습니다", user_error(error))
                     continue
-                if backup.error is not None:
-                    QMessageBox.warning(parent, "설정은 저장됐지만 자동 백업에 실패했습니다", str(backup.error))
+                if backup.warning_required:
+                    QMessageBox.warning(parent, "설정은 저장됐지만 자동 백업에 실패했습니다", user_error(backup.error))
                 return self.session.database.current_roster()
         except Exception as error:
-            QMessageBox.critical(parent, "식수·청구서 설정을 저장하지 못했습니다", str(error))
+            QMessageBox.critical(parent, "식수·청구서 설정을 저장하지 못했습니다", user_error(error))
         return None

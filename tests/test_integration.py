@@ -472,8 +472,8 @@ def test_real_annual_xlsx_to_invoice_and_confirm_end_to_end(
     ) == ("성남대로 1", "101호")
     assert result.batch.deliveries[0].delivery_staff == "기사A"
     assert result.batch.deliveries[0].delivery_sequence == "003"
-    assert result.batch.deliveries[0].weekly[0].breakfast_count == 1
-    assert result.batch.deliveries[0].weekly[1].breakfast_count == 1
+    assert result.batch.deliveries[0].weekly[0].breakfast_count == 2
+    assert result.batch.deliveries[0].weekly[1].breakfast_count == 0
 
     invoice_wb = openpyxl.load_workbook(invoice_path, data_only=False)
     try:
@@ -502,8 +502,8 @@ def test_real_annual_xlsx_to_invoice_and_confirm_end_to_end(
         assert confirm_ws["F3"].value == "성남대로 1"
         assert confirm_ws["C6"].value == "홍보호"
         assert confirm_ws["K3"].value == "기사A"
-        assert confirm_ws["G6"].value == 1
-        assert confirm_ws["G7"].value == 1
+        assert confirm_ws["G6"].value == 2
+        assert confirm_ws["G7"].value is None
         assert all(
             "None" not in cell.value
             for row in confirm_ws.iter_rows()

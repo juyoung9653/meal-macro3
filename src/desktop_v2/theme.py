@@ -608,8 +608,8 @@ def application_stylesheet() -> str:
         background: {ROUTE};
         border: none;
         border-radius: 4px;
-        font-size: 13px;
-        font-weight: 800;
+        font-size: 28px;
+        font-weight: bold;
     }}
     QLabel#documentSettlementStamp {{ background: {PAUSED}; }}
     QLabel#documentCardTitle {{ color: {INK}; font-size: 17px; font-weight: 800; }}

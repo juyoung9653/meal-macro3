@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .user_messages import user_error
+
 from .dialog_workflow import DialogRequest, dialog_workflow
 
 from .startup_loading import save_revision
@@ -291,7 +293,7 @@ class ServiceAdjustmentHubDialog(QDialog):
             self._visible_candidates = ()
             self._candidate_error.setText(
                 "공휴일 후보를 불러오지 못했습니다. 직접 휴무 추가는 계속 "
-                f"사용할 수 있습니다.\n\n{error}"
+                f"사용할 수 있습니다.\n\n{user_error(error)}"
             )
             self._candidate_error.show()
         self._fill_candidate_table()
@@ -467,11 +469,6 @@ class PublicHolidayBatchDialog(QDialog):
         self.setStyleSheet(application_stylesheet())
         self._build_ui()
         self._refresh_state()
-
-    def selected_public_holidays(
-        self,
-    ) -> tuple[PublicHolidayCandidate, ...]:
-        return self._public_holidays
 
     def selected_meals(self) -> tuple[Meal, ...]:
         return tuple(
@@ -1489,7 +1486,7 @@ class ServiceAdjustmentController:
             self._message_box.critical(
                 parent,
                 "휴무 일정을 저장하지 못했습니다",
-                "현재 명단이 없습니다. 기존 명단 가져오기를 먼저 완료해주세요.",
+                "현재 명단이 없습니다. 기존 명단 불러오기를 먼저 완료해주세요.",
             )
             return ServiceAdjustmentOutcome(ServiceAdjustmentStatus.FAILED)
         source = self._session.database.snapshot(roster.revision_id)
@@ -1503,7 +1500,7 @@ class ServiceAdjustmentController:
             self._message_box.critical(
                 parent,
                 "휴무·대체식 이력을 읽지 못했습니다",
-                str(error),
+                user_error(error),
             )
             return ServiceAdjustmentOutcome(ServiceAdjustmentStatus.FAILED)
         anchor_day = self._today_provider()
@@ -1573,7 +1570,7 @@ class ServiceAdjustmentController:
                 parent,
                 "휴무·대체식을 저장하지 못했습니다",
                 "일정과 변경 이력은 저장하지 않았습니다. 내용을 확인한 뒤 다시 시도해주세요.\n\n"
-                + str(error),
+                + user_error(error),
             )
             return ServiceAdjustmentOutcome(ServiceAdjustmentStatus.FAILED)
         if updated_roster is None:
@@ -1583,13 +1580,13 @@ class ServiceAdjustmentController:
                 "일정은 저장됐지만 현재 명단을 다시 읽지 못했습니다. 프로그램을 다시 열어주세요.",
             )
             return ServiceAdjustmentOutcome(ServiceAdjustmentStatus.FAILED)
-        if backup_result.error is not None:
+        if backup_result.warning_required:
             self._message_box.warning(
                 parent,
                 "일정은 저장됐지만 자동 백업에 실패했습니다",
                 "휴무·대체식 일정과 이력은 운영 데이터에 정상 저장되었습니다. "
                 "백업 폴더 연결을 확인한 뒤 백업을 다시 실행해주세요.\n\n"
-                + str(backup_result.error),
+                + user_error(backup_result.error),
             )
         return ServiceAdjustmentOutcome(
             ServiceAdjustmentStatus.COMPLETED,

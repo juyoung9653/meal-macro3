@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .user_messages import user_error
+
 from .dialog_workflow import DialogRequest, dialog_workflow
 
 from .startup_loading import save_revision
@@ -152,9 +154,9 @@ class SchoolCalendarEditDialog(QDialog):
         root.addWidget(self._error)
 
         actions = QHBoxLayout()
-        self._import = QPushButton("Excel에서 새로 가져오기")
+        self._import = QPushButton("Excel에서 새로 불러오기")
         self._import.setObjectName("quietAction")
-        self._import.setToolTip("현재 편집 화면을 닫고 학교 일정 Excel 가져오기를 시작합니다")
+        self._import.setToolTip("현재 편집 화면을 닫고 학교 일정 Excel 불러오기를 시작합니다")
         self._import.clicked.connect(self._request_import)
         actions.addWidget(self._import)
         actions.addStretch(1)
@@ -475,7 +477,7 @@ class SchoolCalendarEditDialog(QDialog):
                     rule,
                 )
         except (TypeError, ValueError) as error:
-            self._show_error(str(error))
+            self._show_error(user_error(error))
             return
         key = schedule.normalized_school_name
         self._edited[key] = updated
@@ -601,7 +603,7 @@ class SchoolCalendarEditController:
             self._message_box.critical(
                 parent,
                 "학교 일정을 열 수 없습니다",
-                "현재 명단과 기준 변경 이력이 없습니다. Excel 명단 가져오기를 먼저 완료해주세요.",
+                "현재 명단과 기준 변경 이력이 없습니다. Excel 명단 불러오기를 먼저 완료해주세요.",
             )
             return SchoolCalendarEditOutcome(SchoolCalendarEditStatus.FAILED)
         try:
@@ -611,7 +613,7 @@ class SchoolCalendarEditController:
             self._message_box.critical(
                 parent,
                 "저장된 학교 일정을 읽지 못했습니다",
-                str(error),
+                user_error(error),
             )
             return SchoolCalendarEditOutcome(SchoolCalendarEditStatus.FAILED)
         if not calendar.schedules:
@@ -646,7 +648,7 @@ class SchoolCalendarEditController:
                 parent,
                 "학교 일정을 저장하지 못했습니다",
                 "운영 데이터에는 반영하지 않았습니다. 수정 날짜와 O/X를 확인한 뒤 다시 시도해주세요.\n\n"
-                + str(error),
+                + user_error(error),
             )
             return SchoolCalendarEditOutcome(SchoolCalendarEditStatus.FAILED)
         if updated_roster is None:
@@ -656,13 +658,13 @@ class SchoolCalendarEditController:
                 "일정은 저장됐지만 현재 화면을 다시 읽지 못했습니다. 프로그램을 다시 열어주세요.",
             )
             return SchoolCalendarEditOutcome(SchoolCalendarEditStatus.FAILED)
-        if backup_result.error is not None:
+        if backup_result.warning_required:
             self._message_box.warning(
                 parent,
                 "학교 일정은 저장됐지만 자동 백업에 실패했습니다",
                 "학교 일정과 변경 이력은 운영 데이터에 정상 저장되었습니다. "
                 "백업 폴더 연결을 확인한 뒤 백업을 다시 실행해주세요.\n\n"
-                + str(backup_result.error),
+                + user_error(backup_result.error),
             )
         return SchoolCalendarEditOutcome(
             SchoolCalendarEditStatus.COMPLETED,

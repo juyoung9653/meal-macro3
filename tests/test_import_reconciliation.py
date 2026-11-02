@@ -276,7 +276,7 @@ def test_identity_and_profile_comparison_ignore_whitespace():
     assert staged.profile_differences == ()
 
 
-def test_same_name_different_birth_requires_review_instead_of_false_new():
+def test_same_name_mobile_matches_despite_different_birth():
     observation = _observation(birth_date=date(2016, 3, 2))
 
     staged = stage_reconciliation(
@@ -285,12 +285,12 @@ def test_same_name_different_birth_requires_review_instead_of_false_new():
         effective_on=EFFECTIVE_ON,
     ).staged_people[0]
 
-    assert staged.disposition is ReconciliationDisposition.REVIEW
-    assert staged.candidate_person_ids == (PERSON_ID,)
-    assert staged.review_reasons == (ReviewReason.NAME_COLLISION,)
+    assert staged.disposition is ReconciliationDisposition.MATCHED
+    assert staged.matched_person_id == PERSON_ID
+    assert staged.review_reasons == ()
 
 
-def test_missing_birth_and_duplicate_source_identity_are_never_auto_matched():
+def test_missing_birth_matches_but_duplicate_source_still_requires_review():
     missing_birth = _observation(birth_date=None)
     duplicate_first = _observation()
     duplicate_second = _observation(SECOND_OBSERVATION_ID)
@@ -306,11 +306,8 @@ def test_missing_birth_and_duplicate_source_identity_are_never_auto_matched():
         effective_on=EFFECTIVE_ON,
     ).staged_people
 
-    assert missing.disposition is ReconciliationDisposition.REVIEW
-    assert missing.review_reasons == (
-        ReviewReason.MISSING_BIRTH_DATE,
-        ReviewReason.NAME_COLLISION,
-    )
+    assert missing.disposition is ReconciliationDisposition.MATCHED
+    assert missing.review_reasons == ()
     assert all(
         item.review_reasons == (ReviewReason.DUPLICATE_SOURCE_IDENTITY,)
         for item in duplicates

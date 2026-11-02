@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .user_messages import user_error
+
 import hashlib
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -30,6 +32,8 @@ from src.excel.publication import WorkbookPublicationResult
 from src.generators.confirm_generator import make_confirm_publication
 from src.generators.invoice_generator import make_invoice_publication
 from src.generators.report_generator import make_report_publication
+from src.generators.happy_delivery_report import make_happy_report_publication, HAPPY_REPORT_RENDER_VERSION
+from src.services.happy_delivery_report import prepare_happy_report_data
 from src.generators.substitute_generator import make_substitute_publication, SUBSTITUTE_RENDER_CONTRACT_VERSION
 from src.services.sqlite_delivery_substitute_service import prepare_delivery_substitute_data
 from src.domain.delivery_substitute import SubstituteColumn
@@ -119,6 +123,7 @@ class DocumentGenerationController:
         invoice_writer=make_invoice_publication,
         confirmation_writer=make_confirm_publication,
         report_writer=make_report_publication,
+        happy_report_writer=make_happy_report_publication,
         substitute_writer=make_substitute_publication,
     ) -> None:
         if not isinstance(session, DatabaseSession):
@@ -133,6 +138,7 @@ class DocumentGenerationController:
         self._invoice_writer = invoice_writer
         self._confirmation_writer = confirmation_writer
         self._report_writer = report_writer
+        self._happy_report_writer = happy_report_writer
         self._substitute_writer = substitute_writer
 
     def run(
@@ -177,7 +183,7 @@ class DocumentGenerationController:
                 parent=parent,
             )
         except _DocumentGenerationError as error:
-            detail = str(error)
+            detail = user_error(error)
             if error.person_id is not None:
                 period = selection.document.period
                 model = getattr(parent, "table_model", None)
@@ -202,11 +208,11 @@ class DocumentGenerationController:
                 "파일과 문서 이력을 완료하지 않았습니다. 입력 자료와 설정을 확인해주세요.\n\n" + detail,
             )
             return DocumentGenerationOutcome(DocumentGenerationStatus.FAILED, roster=error.roster)
-        if outcome.backup_result.error is not None:
+        if outcome.backup_result.warning_required:
             self._message_box.warning(
                 parent, f"{action.label}는 만들었지만 자동 백업에 실패했습니다",
                 "파일과 문서 생성 이력은 정상 저장되었습니다. 백업 폴더를 확인해주세요.\n\n"
-                + str(outcome.backup_result.error),
+                + user_error(outcome.backup_result.error),
             )
         return outcome
 
@@ -234,6 +240,8 @@ class DocumentGenerationController:
                 else document_template_setting_from_snapshot(current_snapshot)
             )
 
+            happy_report = (action is DocumentAction.DELIVERY_REPORT and template_setting is not None
+                            and template_setting.profile is DocumentTemplateProfile.HAPPY_LUNCHBOX)
             period = selection.document.period
             source_snapshot = self._session.database.snapshot(
                 period.source.revision_id
@@ -250,13 +258,15 @@ class DocumentGenerationController:
                 )
                 prepared.selected_rows(selection.document.substitute_options)
             elif action is DocumentAction.DELIVERY_REPORT:
-                prepared = prepare_delivery_report_data(
+                prepare_report = prepare_happy_report_data if happy_report else prepare_delivery_report_data
+                prepared = prepare_report(
                     source_snapshot,
                     period.starts_on,
                     period.ends_on,
                     selection.document.meals,
                     delivery_forms=selection.document.delivery_forms,
                     remark_options=selection.document.remark_options,
+                    mapping_snapshot=current_snapshot,
                 )
                 if not prepared.reports:
                     raise ValueError(
@@ -287,9 +297,7 @@ class DocumentGenerationController:
                 from src.excel.delivery_templates import validate_delivery_template
                 delivery_profile = template_setting.profile if template_setting is not None else DocumentTemplateProfile.SCHOOL_MEAL
                 custom_delivery_template = DeliveryTemplateStore(str(self._session.credentials.database_id), profile=delivery_profile).selected(action)
-                if custom_delivery_template is None and delivery_profile is DocumentTemplateProfile.HAPPY_LUNCHBOX:
-                    raise ValueError(f"행복도시락 {action.label} 양식이 미설정입니다. 설정 → 문서 양식에서 행복도시락 양식 파일을 선택해주세요.")
-                if custom_delivery_template is not None:
+                if custom_delivery_template is not None and not happy_report:
                     validate_delivery_template(custom_delivery_template, action.value)
                     template_path = custom_delivery_template
             if template_path is not None and not template_path.is_file():
@@ -298,7 +306,27 @@ class DocumentGenerationController:
                 )
             source_template_path = template_path
             template_bytes = None
-            if action in (DocumentAction.DELIVERY_REPORT, DocumentAction.DELIVERY_SUBSTITUTE):
+            happy_templates = {}
+            happy_template_manifest = {}
+            if happy_report:
+                template_temp = TemporaryDirectory(prefix="happy-templates-")
+                store = DeliveryTemplateStore(str(self._session.credentials.database_id), profile=delivery_profile)
+                variants = []
+                if any(report.show_term or report.breakfast_total or report.dinner_total for report in prepared.reports):
+                    variants.append(("dinner", "석식"))
+                if any(report.lunch_total for report in prepared.reports):
+                    variants.append(("lunch", "중식"))
+                for variant, meal in variants:
+                    source = store.selected(action, meal=meal) or Path(self._settings.get_happy_report_template_path(meal))
+                    contents = source.read_bytes()
+                    frozen = Path(template_temp.name) / (variant + ".xlsx")
+                    frozen.write_bytes(contents)
+                    validate_delivery_template(frozen, "happy_report_" + variant)
+                    happy_templates[variant] = frozen
+                    happy_template_manifest[variant] = {"filename": source.name, "sha256": hashlib.sha256(contents).hexdigest(), "byte_size": len(contents)}
+                    if template_bytes is None:
+                        template_bytes, template_path, source_template_path = contents, frozen, source
+            elif action in (DocumentAction.DELIVERY_REPORT, DocumentAction.DELIVERY_SUBSTITUTE):
                 template_bytes = template_path.read_bytes()
                 template_temp = TemporaryDirectory(prefix="delivery-template-")
                 template_path = Path(template_temp.name) / source_template_path.name
@@ -364,6 +392,8 @@ class DocumentGenerationController:
                     meal_type=profile_key,
                     output_password=password_setting.password,
                     overwrite=False,
+                    single_meal_first=template_setting.confirmation_single_meal_first,
+                    include_next_month_weekend=template_setting.confirmation_include_next_month_weekend,
                     **({"column_fallbacks": column_fallbacks} if column_fallbacks else {}),
                 )
                 kind = DocumentKind.CONFIRMATION
@@ -381,6 +411,14 @@ class DocumentGenerationController:
                 )
                 kind = DocumentKind.DELIVERY_SUBSTITUTE
                 writer_name = "substitute_generator.make_substitute_publication"
+            elif happy_report:
+                applied = prepared.calculation_manifest["column_mapping"]
+                column_mapping, column_fallbacks = applied["mapping"], applied["fallbacks"]
+                mapping_setting = mapping_setting_from_snapshot(current_snapshot, "행복도시락", "daily_report")
+                publication = self._happy_report_writer(prepared.reports, refreshed.output_path,
+                    happy_templates, output_password=None, overwrite=False)
+                kind = DocumentKind.DELIVERY_REPORT
+                writer_name = "happy_delivery_report.make_happy_report_publication"
             else:
                 column_mapping = {}
                 column_fallbacks = {}
@@ -408,12 +446,18 @@ class DocumentGenerationController:
                 "column_mapping": dict(sorted(column_mapping.items())),
                 "column_fallbacks": dict(sorted(column_fallbacks.items())),
                 **({"history_note_column": history_column} if action is DocumentAction.INVOICE else {}),
+                **({"single_meal_first": template_setting.confirmation_single_meal_first,
+                    "include_next_month_weekend": template_setting.confirmation_include_next_month_weekend}
+                   if action is DocumentAction.CONFIRMATION else {}),
                 "content_sha256": publication.content_sha256,
                 "export_password": (
                     password_setting.public_manifest()
                     if password_setting is not None else {"protected": False}
                 ),
             }
+            if happy_report:
+                template_manifest["happy_report_render_contract_version"] = HAPPY_REPORT_RENDER_VERSION
+                template_manifest["templates"] = happy_template_manifest
             if action is DocumentAction.DELIVERY_SUBSTITUTE:
                 template_manifest["substitute_render_contract_version"] = SUBSTITUTE_RENDER_CONTRACT_VERSION
                 template_manifest["substitute_options"] = selection.document.substitute_options.manifest()
@@ -478,7 +522,7 @@ class DocumentGenerationController:
                     )
             detail = (
                 "같은 이름의 파일이 새로 생겨 덮어쓰지 않았습니다. 다시 만들면 다른 파일명을 사용합니다."
-                if isinstance(error, FileExistsError) else str(error)
+                if isinstance(error, FileExistsError) else user_error(error)
             )
             raise _DocumentGenerationError(
                 detail + orphan_warning, current_roster,
@@ -501,8 +545,10 @@ class DocumentGenerationController:
         action: DocumentAction,
     ) -> Path:
         if action is DocumentAction.DELIVERY_SUBSTITUTE:
-            return Path(self._settings.get_substitute_template_path()).resolve()
+            return Path(self._settings.get_substitute_template_path(setting.profile.value if setting else "급식")).resolve()
         if action is DocumentAction.DELIVERY_REPORT:
+            if setting is not None and setting.profile is DocumentTemplateProfile.HAPPY_LUNCHBOX:
+                return Path(self._settings.get_happy_report_template_path()).resolve()
             return Path(self._settings.get_report_template_path()).resolve()
         if setting is None:
             raise ValueError("청구서·확인서 문서 양식 설정이 없습니다.")

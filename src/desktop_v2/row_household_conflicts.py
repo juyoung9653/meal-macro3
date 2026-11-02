@@ -1,5 +1,7 @@
 """Keep row creation intact while resolving differing shared household fields."""
 
+from .user_messages import user_error
+
 from PySide6.QtWidgets import QCheckBox, QComboBox, QDialog, QFormLayout, QHBoxLayout, QLabel, QPushButton, QScrollArea, QVBoxLayout, QWidget
 
 from src.domain.column_input_rules import load_rules
@@ -90,6 +92,6 @@ class RowHouseholdConflictDialog(QDialog):
         try:
             self.resolved = resolve_row_household_conflicts(self._snapshot, self._prepared, corrections, exceptions)
         except (ValueError, TypeError) as error:
-            self.error.setText(str(error))
+            self.error.setText(user_error(error))
             return
         self.accept()

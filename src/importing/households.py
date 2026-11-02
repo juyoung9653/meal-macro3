@@ -272,7 +272,7 @@ class HouseholdGroupingPlan:
             candidates = proposal.candidate_household_ids
             expected_default = (
                 candidates[0]
-                if len(candidates) == 1
+                if len(candidates) == 1 or self.rule.criteria == (HouseholdMatchCriterion.MOBILE_PHONE,)
                 else separate[proposal.observation_id]
             )
             if defaults[proposal.observation_id] != expected_default:
@@ -328,6 +328,8 @@ class HouseholdGroupingPlan:
 
     @property
     def required_decision_ids(self) -> tuple[UUID, ...]:
+        if self.rule.criteria == (HouseholdMatchCriterion.MOBILE_PHONE,):
+            return ()
         return tuple(
             sorted(
                 (
@@ -368,6 +370,7 @@ def stage_household_grouping(
     effective_on: date,
     roster: RosterSnapshot | None = None,
     household_id_factory: Callable[[], UUID] = uuid4,
+    separate_only: bool = False,
 ) -> HouseholdGroupingPlan:
     """Compare imports with each other and active existing household members."""
 
@@ -386,6 +389,9 @@ def stage_household_grouping(
     grouped: defaultdict[tuple[str, ...], list[PersonObservation]] = defaultdict(list)
     ungrouped: list[PersonObservation] = []
     for observation in observations:
+        if separate_only:
+            ungrouped.append(observation)
+            continue
         key = tuple(
             _criterion_key(observation, criterion) for criterion in rule.criteria
         )
@@ -437,7 +443,7 @@ def stage_household_grouping(
                 separate_ids[item.observation_id] = separate_id
                 default_ids[item.observation_id] = (
                     existing_household_ids[0]
-                    if len(existing_household_ids) == 1
+                    if len(existing_household_ids) == 1 or rule.criteria == (HouseholdMatchCriterion.MOBILE_PHONE,)
                     else separate_id
                 )
                 existing_proposals.append(
@@ -680,11 +686,10 @@ def match_existing_household_id(
     *,
     effective_on: date,
 ) -> UUID | None:
-    """Return the one active household matching the saved import rule.
+    """Choose a stable active mobile match; the save pipeline merges all matches.
 
-    A missing rule keeps the established mobile-phone default. Blank criteria do
-    not match, and multiple household matches require the caller to stop rather
-    than selecting an arbitrary household.
+    The rule argument remains compatible with saved profiles but no longer
+    changes the mobile-only criterion. Blank numbers do not match.
     """
 
     if not isinstance(profile, PersonProfile):
@@ -694,11 +699,7 @@ def match_existing_household_id(
     if not isinstance(roster, RosterSnapshot):
         raise TypeError("roster는 RosterSnapshot이어야 합니다.")
     _validate_date(effective_on, "가구 연결 적용일")
-    criteria = (
-        (HouseholdMatchCriterion.MOBILE_PHONE,)
-        if rule is None
-        else rule.criteria
-    )
+    criteria = (HouseholdMatchCriterion.MOBILE_PHONE,)
     def row_key(candidate: PersonProfile) -> tuple[str, ...]:
         # Row creation has one address field, like the roster. Match it to
         # imported profiles whose displayed address still has two stored parts.
@@ -719,12 +720,9 @@ def match_existing_household_id(
         if membership.period.contains(effective_on)
         and row_key(roster.person(membership.person_id).profile) == key
     }
-    if len(matches) > 1:
-        raise ValueError(
-            "입력한 정보와 일치하는 기존 가구가 둘 이상입니다. "
-            "연락처와 주소를 확인한 뒤 다시 시도해주세요."
-        )
-    return next(iter(matches), None)
+    # The save pipeline merges all matching households and reviews shared values.
+    return min(matches, key=str) if matches else None
+
 
 
 def _criterion_key(

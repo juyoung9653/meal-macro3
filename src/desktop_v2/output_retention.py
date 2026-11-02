@@ -1,4 +1,6 @@
 """Output retention controls and automatic cleanup while the app is running."""
+
+from .user_messages import user_error
 from concurrent.futures import ThreadPoolExecutor
 import logging
 from PySide6.QtCore import QObject, QTimer
@@ -55,7 +57,7 @@ class OutputRetentionDialog(QDialog):
         try:
             self._settings.save_output_retention_months(self.months.value())
         except (OSError, ValueError) as error:
-            self.error.setText(str(error))
+            self.error.setText(user_error(error))
             self.error.show()
             return
         self.accept()

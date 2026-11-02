@@ -130,8 +130,3 @@ def _read_template_columns(template_path: str, sheet_name: str, mtime_ns: int, s
 
 
 read_template_columns.cache_clear = _read_template_columns.cache_clear
-
-
-def col_name_to_index(template_columns: list[str]) -> dict[str, int]:
-    """컬럼명 → 1-based 컬럼 인덱스 dict (한 번만 계산)."""
-    return {name: i + 1 for i, name in enumerate(template_columns)}

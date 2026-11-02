@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .user_messages import user_error
+
 from .dialog_workflow import DialogRequest, dialog_workflow, invoke
 
 from .startup_loading import save_revision
@@ -283,7 +285,7 @@ class DriverRegistryDialog(QDialog):
                     "같은 이름과 전화번호의 기사가 이미 등록되어 있습니다."
                 )
         except (TypeError, ValueError) as error:
-            self.error.setText(str(error))
+            self.error.setText(user_error(error))
             return
         if edit and driver == self._state._drivers_by_id[driver_id] and not self._order_pending():
             self.error.setText("변경된 기사 정보가 없습니다.")
@@ -450,7 +452,7 @@ class RoutingChangeDialog(QDialog):
                 or (self._meal is not None and self.meal_checks[selected].isChecked())
             }
         except ValueError as error:
-            self.error.setText(str(error))
+            self.error.setText(user_error(error))
             return
         request = RoutingRequest(
             effective_on=self.day.date().toPython(),
@@ -600,7 +602,7 @@ class BatchRoutingChangeDialog(QDialog):
         try:
             driver_id = _chosen_driver(self.driver)
         except ValueError as error:
-            self.error.setText(str(error))
+            self.error.setText(user_error(error))
             self.error.show()
             return
         self._request = BatchAssignmentRequest(self.day.date().toPython(), driver_id)
@@ -716,7 +718,7 @@ class DriverReplacementDialog(QDialog):
         try:
             targets = self._preview(request)
         except (TypeError, ValueError) as error:
-            self.summary.setText(str(error))
+            self.summary.setText(user_error(error))
             return
         count = sum(len(target.meals) for target in targets)
         self.summary.setText(f"변경 대상 {len(targets):,}명 · 식종 배정 {count:,}건")
@@ -737,7 +739,7 @@ class DriverReplacementDialog(QDialog):
             if not self._preview(request):
                 raise ValueError("변경할 배정이 없습니다.")
         except (TypeError, ValueError) as error:
-            self.summary.setText(str(error))
+            self.summary.setText(user_error(error))
             return
         self._request = request
         self.accept()
@@ -790,11 +792,11 @@ class DeliveryRoutingController:
 
     def _commit(self, record, parent):
         backup = save_revision(self._session, record, parent=parent)
-        if backup.error is not None:
+        if backup.warning_required:
             self._message_box.warning(
                 parent,
                 "변경 내용은 저장됐지만 자동 백업에 실패했습니다",
-                str(backup.error),
+                user_error(backup.error),
             )
         roster, state = self._load()
         return DeliveryRoutingOutcome(roster, state)
@@ -857,7 +859,7 @@ class DeliveryRoutingController:
                     "다른 창에서 운영 자료가 변경되어 저장하지 않았습니다. "
                     "입력한 내용과 순서는 이 창에 남아 있습니다. 필요한 내용을 확인한 뒤 "
                     "창을 닫고 변경 내용을 버린 다음, 기사 관리를 다시 열어 최신 자료에서 수정해주세요."
-                    if isinstance(error, RevisionConflictError) else str(error)
+                    if isinstance(error, RevisionConflictError) else user_error(error)
                 )
                 self._message_box.critical(
                     parent, "배송기사를 저장하지 못했습니다", message
@@ -894,7 +896,7 @@ class DeliveryRoutingController:
                 message = (
                     "다른 창에서 운영 자료가 변경되어 저장하지 않았습니다. "
                     "변경한 순서는 이 창에 남아 있습니다. 창을 닫고 변경 내용을 버린 뒤 다시 열어주세요."
-                    if isinstance(error, RevisionConflictError) else str(error)
+                    if isinstance(error, RevisionConflictError) else user_error(error)
                 )
                 self._message_box.critical(parent, "일일식수 기사 순서를 저장하지 못했습니다", message)
                 if dialog is None or not hasattr(dialog, "error"):
@@ -920,7 +922,7 @@ class DeliveryRoutingController:
             )
             return self._commit(record, parent)
         except Exception as error:  # noqa: BLE001 - report storage failures at the UI boundary
-            self._message_box.critical(parent, "배송기사를 교체하지 못했습니다", str(error))
+            self._message_box.critical(parent, "배송기사를 교체하지 못했습니다", user_error(error))
             return DeliveryRoutingOutcome()
 
     @dialog_workflow
@@ -945,7 +947,7 @@ class DeliveryRoutingController:
             )
             return self._commit(record, parent) if record is not None else DeliveryRoutingOutcome()
         except Exception as error:
-            self._message_box.critical(parent, "배송담당을 저장하지 못했습니다", str(error))
+            self._message_box.critical(parent, "배송담당을 저장하지 못했습니다", user_error(error))
             return DeliveryRoutingOutcome()
 
     @dialog_workflow
@@ -980,6 +982,6 @@ class DeliveryRoutingController:
             return self._commit(record, parent)
         except Exception as error:  # noqa: BLE001 - report storage failures at the UI boundary
             self._message_box.critical(
-                parent, "주소·배송담당을 저장하지 못했습니다", str(error)
+                parent, "주소·배송담당을 저장하지 못했습니다", user_error(error)
             )
             return DeliveryRoutingOutcome()

@@ -587,7 +587,7 @@ def test_physical_delivery_preparation_skips_report_only_requirements(people, in
         assert physical.shipments == report.shipments
         assert physical.calculation_manifest == {
             k: v for k, v in report.calculation_manifest.items()
-            if k not in {'household_grouping', 'staff_order', 'report_count', 'selected_delivery_forms'}
+            if k not in {'household_grouping', 'staff_order', 'report_count', 'selected_delivery_forms', 'column_mapping'}
         }
     else:
         with pytest.raises(ValueError):

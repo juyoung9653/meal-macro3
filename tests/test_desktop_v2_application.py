@@ -1,6 +1,7 @@
 """Mandatory first-import and startup-gating controller tests."""
 
 from __future__ import annotations
+from tests.import_wizard_helpers import advance_wizard
 
 import hashlib
 import os
@@ -486,9 +487,9 @@ def test_real_wizard_direct_import_persists_once_and_skips_unchanged_source(
             self.accepted.connect(lambda: accepted.append(True))
             self.path_edit.setText(str(path))
             assert self._inspect_source()
-            self._go_next()
+            advance_wizard(self)
             self.effective_date_edit.setDate(QDate(2026, 8, 17))
-            self._go_next()
+            advance_wizard(self)
             if needs_correction:
                 assert self.result() != QDialog.DialogCode.Accepted
                 assert self.page_stack.currentIndex() == 2
@@ -497,7 +498,7 @@ def test_real_wizard_direct_import_persists_once_and_skips_unchanged_source(
             else:
                 assert self.page_stack.currentIndex() == 1
                 assert self.person_preview_table.rowCount() == 0
-            self._go_next()
+            advance_wizard(self)
             self._apply_error_corrections()
             assert accepted == [True]
             return self.result()
@@ -543,7 +544,8 @@ def test_direct_import_commit_failure_leaves_no_revision(app, tmp_path, monkeypa
         assert session.database.latest_revision() is None
         assert session.database.current_roster() is None
         assert len(_Messages.critical_calls) == 1
-        assert "synthetic write failure" in _Messages.critical_calls[0][-1]
+        assert "synthetic write failure" not in _Messages.critical_calls[0][-1]
+        assert "다시 시도" in _Messages.critical_calls[0][-1]
 
 
 def test_later_import_joins_existing_household_and_backup_restores_it(
@@ -854,7 +856,7 @@ def test_startup_cancel_does_not_construct_or_show_blank_roster(
 
     def run_startup_task(task, *, message, parent=None):
         assert parent is None
-        assert "명단" in message
+        assert "명단" in message or "백업" in message
         startup_order.append("loading")
         result = task()
         startup_order.append("loading_closed")
@@ -874,7 +876,7 @@ def test_startup_cancel_does_not_construct_or_show_blank_roster(
             assert opened_session is session
 
         def run(self, parent=None):
-            assert startup_order == ["loading", "loading_closed"]
+            assert startup_order == ["loading", "loading_closed"] * 2
             startup_order.append("import")
             return GuidedImportOutcome(GuidedImportStatus.CANCELLED)
 
@@ -895,7 +897,7 @@ def test_startup_cancel_does_not_construct_or_show_blank_roster(
     outcome = controller.start()
 
     assert outcome.status is StartupStatus.ONBOARDING_PENDING
-    assert startup_order == ["loading", "loading_closed", "import"]
+    assert startup_order == ["loading", "loading_closed"] * 2 + ["import"]
     assert outcome.session is None
     with pytest.raises(RuntimeError, match="닫혔습니다"):
         _ = session.database
@@ -1652,7 +1654,7 @@ def test_document_period_controls_optional_revision_choice_and_cancellation(
         assert events == ["period:1"]
         assert snapshot_revisions == [latest.revision_id]
         assert not emitted
-        assert errors[0][1:] == ("배송 형태를 읽지 못했습니다", "snapshot unavailable")
+        assert errors[0][1:] == ("배송 형태를 읽지 못했습니다", "작업을 완료하지 못했습니다. 다시 시도해주세요.")
     else:
         assert events == ["period:1", "archive", "source", "period:2", "forms"]
         assert len(emitted) == 1
@@ -1796,4 +1798,45 @@ def test_refresh_read_failure_keeps_roster_and_routing_unchanged(app):
     controller._apply_routing_outcome(None, window, SimpleNamespace(roster=saved, routing_state=object()))
     assert not writes
     assert window.roster is old
-    assert len(errors) == 1 and "refresh unavailable" in errors[0][-1]
+    assert len(errors) == 1 and "refresh unavailable" not in errors[0][-1]
+    assert "저장된 내용은 유지" in errors[0][-1]
+
+
+@pytest.mark.parametrize("previous_failure", [False, True])
+def test_startup_warns_only_after_a_persisted_backup_failure(app, tmp_path, monkeypatch, previous_failure):
+    _Messages.reset()
+    session = _session(tmp_path)
+    log = tmp_path / "logs" / "backup.jsonl"
+    result = AutomaticBackupResult(error=OSError("test share offline"),
+                                   notify_failure=previous_failure, log_path=log)
+    calls = []
+    def retry():
+        calls.append("retry")
+        return result
+    monkeypatch.setattr(session, "retry_backup_on_open", retry)
+    class Access:
+        backup_result = AutomaticBackupResult()
+        def __init__(self):
+            self.session = session
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+    class CancelGuided:
+        def __init__(self, opened_session):
+            assert opened_session is session
+        def run(self, parent=None):
+            return GuidedImportOutcome(GuidedImportStatus.CANCELLED)
+    controller = DesktopStartupController(
+        settings=SimpleNamespace(database_path=None, backup_directory=tmp_path / "backups"),
+        create_dialog_type=lambda **kwargs: Access(),
+        guided_controller_type=CancelGuided,
+        message_box=_Messages,
+        startup_task_runner=lambda task, **kwargs: task(),
+    )
+    outcome = controller.start()
+    assert outcome.status is StartupStatus.ONBOARDING_PENDING
+    assert calls == ["retry"]
+    assert len(_Messages.warning_calls) == int(previous_failure)
+    if previous_failure:
+        assert "test share offline" not in _Messages.warning_calls[0][2]
+        assert str(log) not in _Messages.warning_calls[0][2]
+        assert "재시작 후에도" in _Messages.warning_calls[0][2]

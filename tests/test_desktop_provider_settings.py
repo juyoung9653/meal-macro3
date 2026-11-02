@@ -1,3 +1,5 @@
+
+from src.storage.database_session import AutomaticBackupResult
 from uuid import UUID
 
 import pytest
@@ -87,7 +89,7 @@ def test_controller_cancel_legacy_migration_and_save_failures(mode):
         if mode == "save_error":
             raise OSError("저장 실패")
         saved.append(record)
-        return SimpleNamespace(
+        return AutomaticBackupResult(
             error=OSError("백업 실패") if mode == "backup_error" else None
         )
 
@@ -119,7 +121,7 @@ def test_controller_cancel_legacy_migration_and_save_failures(mode):
     assert outcome.completed == (mode in ("legacy_same", "backup_error"))
     assert len(saved) == int(outcome.completed)
     assert len(errors) == int(mode == "save_error")
-    assert len(warnings) == int(mode == "backup_error")
+    assert not warnings
     if saved:
         assert saved[0].changes[0].after == {"provider": "센터"}
         assert saved[0].changes[0].before is None

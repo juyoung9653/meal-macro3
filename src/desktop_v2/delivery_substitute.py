@@ -1,6 +1,8 @@
 """Driver, output columns and paper controls for substitute delivery sheets."""
 from __future__ import annotations
 
+from .user_messages import user_error
+
 from dataclasses import replace
 import json
 
@@ -404,7 +406,7 @@ class DeliverySubstituteDialog(QDialog):
         try:
             self.selection()
         except ValueError as error:
-            self.error.setText(str(error))
+            self.error.setText(user_error(error))
             self.accept_button.setEnabled(False)
         else:
             self.error.clear()

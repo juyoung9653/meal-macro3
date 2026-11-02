@@ -86,23 +86,23 @@ def test_general_controller_cancel_keeps_database_and_confirmed_choice_survives_
     incoming = replace(original, profile_values={**original.profile_values,
         ProfileField.SCHOOL_NAME: "가상중학교", ProfileField.GRADE: "3", ProfileField.NOTE: "새 메모"})
     next_selection = replace(selection, preview=replace(selection.preview, sha256="b"*64, observations=(incoming,)))
-    class Review:
+    class Review(ImportValueReviewDialog):
         accept_next = False
-        use_incoming_note = False
-        def __init__(self, current, result, plan, parent):
-            self.rows = import_value_rows(current, result, plan)
         def exec(self):
-            return QDialog.DialogCode.Accepted if self.accept_next else QDialog.DialogCode.Rejected
-        def choices(self):
-            return {row.key: row.incoming if self.use_incoming_note and row.field == "note" else row.before
-                    for row in self.rows if not row.automatic}
+            assert {row.field for row in self.rows} == {"note"}
+            assert self.group_table.rowCount() == 1
+            assert self.detail_panel.isHidden()
+            if not self.accept_next:
+                return QDialog.DialogCode.Rejected
+            self._use_all_values(3)
+            self.accept()
+            return self.result()
     _Messages.reset()
     with _session(tmp_path) as session:
         initial = GuidedRosterImportController(session, wizard_type=_wizard_type(selection),
             review_type=_AcceptedReview, message_box=_Messages).run()
         assert initial.completed, _Messages.critical_calls
         initial_id = session.database.latest_revision().metadata.revision_id
-        backup_paths = tuple(sorted((tmp_path / "backups").iterdir()))
         from src.importing.profile_history import import_profiles_from_snapshot
         from src.importing.households import household_matching_rules_from_snapshot
         snapshot = session.database.snapshot(initial_id)
@@ -114,14 +114,7 @@ def test_general_controller_cancel_keeps_database_and_confirmed_choice_survives_
         cancelled = controller.run()
         assert cancelled.status is GuidedImportStatus.CANCELLED
         assert session.database.latest_revision().metadata.revision_id == initial_id
-        assert tuple(sorted((tmp_path / "backups").iterdir())) == backup_paths
         Review.accept_next = True
-        outcome = controller.run()
-        assert outcome.completed, _Messages.critical_calls
-        assert outcome.backup_result is None
-        assert session.database.latest_revision().metadata.revision_id == initial_id
-        assert tuple(sorted((tmp_path / "backups").iterdir())) == backup_paths
-        Review.use_incoming_note = True
         outcome = controller.run()
         assert outcome.completed, _Messages.critical_calls
         assert outcome.backup_result.succeeded
@@ -213,3 +206,14 @@ def test_choosing_existing_custom_text_keeps_exact_whitespace():
         assert dialog.choices()[PERSON_ID, "custom:" + str(definition.definition_id)] == original
     finally:
         dialog.close()
+
+
+def test_conflict_list_omits_new_blank_and_automatic_values():
+    from src.importing.values import conflicting_value_rows
+    current, plan, result = scenario(
+        PersonProfile("가상 학생", mobile_phone=PHONE, school_name="가상고등학교", grade="2",
+                      note="기존 메모", road_address="기존 주소"),
+        {"school_name": "가상중학교", "grade": "3", "note": "새 메모", "road_address": None,
+         "telephone": "031-111-1111"})
+    rows = import_value_rows(current, result, plan)
+    assert {row.field for row in conflicting_value_rows(rows)} == {"note"}

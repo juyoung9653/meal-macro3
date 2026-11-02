@@ -10,7 +10,7 @@ import calendar as month_calendar
 import re
 import unicodedata
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from enum import StrEnum
 from hashlib import sha256
@@ -33,7 +33,6 @@ from src.domain.revisions import (
     RevisionMetadata,
     RevisionRecord,
     RevisionSource,
-    plain_json,
 )
 from src.domain.roster import InclusiveDateRange
 from src.domain.school_calendar import (
@@ -53,8 +52,6 @@ from src.domain.school_calendar import (
 from .workbook import (
     ImportIssue,
     SourceColumn,
-    WorkbookImportPasswordError,
-    WorkbookImportPasswordRequiredError,
     WorkbookPreviewRow,
     _file_identity,
     _open_workbook,

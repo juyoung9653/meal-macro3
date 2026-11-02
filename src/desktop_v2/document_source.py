@@ -27,7 +27,7 @@ from .theme import application_stylesheet, register_application_fonts
 
 _SOURCE_LABELS = {
     RevisionSource.UI: "직접 변경",
-    RevisionSource.IMPORT: "Excel 가져오기",
+    RevisionSource.IMPORT: "Excel 불러오기",
     RevisionSource.SYSTEM: "시스템",
 }
 

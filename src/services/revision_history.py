@@ -30,6 +30,7 @@ from src.domain.projections import (
 )
 from src.domain.provider_settings import PROVIDER_SETTING_KIND
 from src.domain.sequence_settings import SEQUENCE_MODE_SETTING_KIND
+from src.domain.household_grouping import GROUPING_KIND
 from src.domain.household_shared import HOUSEHOLD_SHARED_KIND, shared_columns_from_state, shared_exceptions_from_state
 from src.domain.revisions import (
     AuditChange,
@@ -61,6 +62,7 @@ _KIND_LABELS = {
     PROVIDER_SETTING_KIND: "공통 제공기관",
     SEQUENCE_MODE_SETTING_KIND: "배송순서 입력 방식",
     HOUSEHOLD_SHARED_KIND: "가구 공용 칼럼",
+    GROUPING_KIND: "가구 묶기 기준",
     EXPORT_PASSWORD_SETTING_KIND: "엑셀 비밀번호",
     MAPPING_ENTITY_KIND: "출력 칼럼 연결",
     DOCUMENT_TEMPLATE_SETTING_KIND: "문서 양식",
@@ -70,7 +72,7 @@ _KIND_LABELS = {
     UNIT_PRICE_SCHEDULE_KIND: "급식 단가",
     SERVICE_ADJUSTMENT_SCHEDULE_KIND: "휴무·대체식",
     SCHOOL_LUNCH_SCHEDULE_KIND: "학교 급식 일정",
-    IMPORT_PROFILE_KIND: "엑셀 가져오기 설정",
+    IMPORT_PROFILE_KIND: "엑셀 불러오기 설정",
     HOUSEHOLD_MATCHING_RULE_KIND: "가구 묶기 기준",
 }
 
@@ -84,6 +86,8 @@ _FIELD_LABELS = {
     "same_month": "같은 달 안에서 자동변환",
     "excluded_forms": "일일식수 제외 배송 형태",
     "include_next_month": "다음 달 식수 포함",
+    "confirmation_single_meal_first": "확인서 1식 우선 배치",
+    "confirmation_include_next_month_weekend": "확인서 다음 달 주말 표시",
     "school_history_column": "급식 청구서 이력 칼럼",
     "lunchbox_history_column": "행복도시락 청구서 이력 칼럼",
     "remarks": "비고 표시 설정",
@@ -152,6 +156,8 @@ _FIELD_LABELS = {
     "delivery_weekdays": "배송 요일",
     "rule": "가구 묶기 규칙",
     "criteria": "묶기 기준",
+    "row_filter": "가져올 행 조건",
+    "column": "조건 칼럼",
     "address": "주소",
     "match_mode": "기준 적용 방식",
     "blank_values_match": "빈 값 일치 허용",
@@ -254,6 +260,12 @@ def build_revision_change_rows(
                 target = "\n".join(members)
         meals = grouped_meals.get(index, (_meal_text(change),))
         meal_text = " · ".join(meal for meal in meals if meal)
+        if change.entity_kind == GROUPING_KIND:
+            def labels(state):
+                return " / ".join(_shared_column_label(key, snapshot, previous_snapshot, column_labels)
+                                  for key in (state or {}).get("columns", ("mobile",)))
+            rows.append(("전체 명단", "", "가구 묶기 기준", f"이전: {labels(change.before)}\n이후: {labels(change.after)}\n선택한 칼럼 모두 일치"))
+            continue
         if change.entity_kind == HOUSEHOLD_SHARED_KIND:
             shared_rows = _shared_change_rows(change, snapshot, previous_snapshot, column_labels)
             if shared_rows:
@@ -770,7 +782,8 @@ _VALUE_LABELS = {
     "document_kind": {"invoice": "청구서", "confirmation": "확인서", "substitute": "배송대타"},
     "date_normalization": {"auto": "자동 인식", "yyyymmdd": "연월일 숫자 8자리"},
     "phone_normalization": {"korean": "전화번호 형식 정리", "digits": "숫자만 사용", "preserve": "원문 유지"},
-    "mode": {"separate": "식종별로 따로 입력", "unified": "한 번 입력해 모든 식종에 적용"},
+    "mode": {"separate": "식종별로 따로 입력", "unified": "한 번 입력해 모든 식종에 적용",
+             "nonempty": "값이 있는 행", "equals": "특정 값인 행"},
     "match_mode": {"all": "모든 기준 일치", "any": "하나 이상의 기준 일치"},
     "position": {"above": "기존 비고 위", "below": "기존 비고 아래"},
     "treatment": {"normal": "정상 제공", "not_provided": "미제공 · 청구 제외", "replacement": "대체식 제공 · 청구 포함"},
@@ -812,7 +825,7 @@ def _source_column_text(token):
 
 def history_reason(reason):
     # Keep operator-entered prose intact; translate legacy generated titles only.
-    return {"Excel 명단 가져오기": "엑셀 명단 가져오기"}.get(reason, reason)
+    return {"Excel 명단 가져오기": "엑셀 명단 불러오기", "Excel 명단 불러오기": "엑셀 명단 불러오기"}.get(reason, reason)
 
 
 def _value_text(

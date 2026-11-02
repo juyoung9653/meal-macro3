@@ -1,6 +1,7 @@
 """Guided first-run workbook route tests."""
 
 from __future__ import annotations
+from tests.import_wizard_helpers import advance_wizard
 
 import os
 from contextlib import contextmanager
@@ -68,12 +69,12 @@ def test_vacation_lunch_wizard_accepts_source_without_meal_column(app, tmp_path)
     )
     wizard.path_edit.setText(str(path))
     assert wizard._inspect_source(), wizard.error_label.text()
-    wizard._go_next()
-    wizard._go_next()
+    advance_wizard(wizard)
+    advance_wizard(wizard)
     assert wizard.preview is not None and wizard.preview.can_continue, wizard.error_label.text()
     assert wizard.preview.observations[0].meals == (Meal.LUNCH,)
     assert wizard.preview.profile.default_meals == (Meal.LUNCH,)
-    wizard._go_next()
+    advance_wizard(wizard)
     assert wizard.selection().purpose is ImportPurpose.VACATION_LUNCH
     wizard.close()
 
@@ -272,8 +273,8 @@ def test_wizard_lists_tables_across_sheets_and_clears_corrections_on_switch(app,
     assert wizard.table_combo.currentText() == "명단"
     assert wizard.raw_table.rowCount() == 1
     assert wizard.raw_table.item(0, 0).text() == "둘째 아동"
-    wizard._go_next()
-    wizard._go_next()
+    advance_wizard(wizard)
+    advance_wizard(wizard)
     assert wizard.preview is not None and wizard.preview.can_continue
     wizard._go_back()
     wizard._go_back()
@@ -316,7 +317,7 @@ def test_wizard_can_select_valid_table_after_unsupported_default(app, tmp_path, 
     wizard.path_edit.setText(str(path))
     assert not wizard._inspect_source()
     assert open_count == 1
-    assert "머리글이 없습니다" in wizard.error_label.text()
+    assert "헤더가 없습니다" in wizard.error_label.text()
     assert wizard.table_combo.count() == 2
     wizard.table_combo.setCurrentIndex(wizard.table_combo.findData("다른표"))
     assert wizard.inspection is not None
@@ -342,7 +343,7 @@ def test_wizard_keeps_named_default_selected_when_its_layout_is_unsupported(app,
     wizard.path_edit.setText(str(path))
     assert not wizard._inspect_source()
     assert wizard.table_combo.currentData() == "명단"
-    assert "머리글이 없습니다" in wizard.error_label.text()
+    assert "헤더가 없습니다" in wizard.error_label.text()
     wizard.table_combo.setCurrentIndex(wizard.table_combo.findData("다른표"))
     assert wizard.inspection is not None and wizard.inspection.selected_table == "다른표"
     wizard.close()
@@ -365,34 +366,24 @@ def test_clean_import_validates_and_accepts_without_preview(
     assert ProfileField.PROVIDER not in wizard._mapping_combos
     assert wizard.meal_mode_combo.currentData() == "combined"
     assert wizard.combined_meal_combo.currentData() == "C"
-    assert wizard._household_criterion_checkboxes[
-        HouseholdMatchCriterion.MOBILE_PHONE
-    ].isChecked()
-    assert sum(
-        checkbox.isChecked()
-        for checkbox in wizard._household_criterion_checkboxes.values()
-    ) == 1
-    selected_household_button = wizard._household_criterion_checkboxes[
-        HouseholdMatchCriterion.MOBILE_PHONE
-    ]
-    assert selected_household_button.text() == "핸드폰"
-    assert not selected_household_button.icon().isNull()
+    assert wizard._build_household_rule().criteria == (HouseholdMatchCriterion.MOBILE_PHONE,)
+    assert not hasattr(wizard, "_household_criterion_checkboxes")
 
-    wizard._go_next()
+    advance_wizard(wizard)
     assert wizard.page_stack.currentIndex() == 1
     assert not hasattr(wizard, "provider_edit")
     wizard.password_edit.setText("temporary-only")
     wizard.effective_date_edit.setDate(QDate(2026, 8, 17))
-    assert wizard.next_button.text() == "가져오기"
+    assert wizard.next_button.text() == "열 연결 확인"
     assert wizard.page_stack.widget(1).isAncestorOf(wizard.effective_date_edit)
-    wizard._go_next()
+    advance_wizard(wizard)
 
     assert wizard.page_stack.currentIndex() == 1
     assert wizard.password_edit.text() == ""
     assert wizard.preview is not None and wizard.preview.can_continue
     assert wizard.person_preview_table.rowCount() == 0
     accepted_selection = wizard.selection()
-    wizard._go_next()
+    advance_wizard(wizard)
     assert wizard.selection() is accepted_selection
 
     assert wizard.result() == QDialog.DialogCode.Accepted
@@ -419,8 +410,8 @@ def test_preview_error_can_be_fixed_and_rechecked_inside_the_wizard(
     wizard = RosterImportWizard()
     wizard.path_edit.setText(str(path))
     assert wizard._inspect_source(), wizard.error_label.text()
-    wizard._go_next()
-    wizard._go_next()
+    advance_wizard(wizard)
+    advance_wizard(wizard)
 
     assert wizard.page_stack.currentIndex() == 2
     assert wizard.preview is not None and not wizard.preview.can_continue
@@ -469,8 +460,8 @@ def test_correction_dialog_fits_a_compact_screen_without_clipping_actions(
     wizard.path_edit.setText(str(path))
 
     assert wizard._inspect_source(), wizard.error_label.text()
-    wizard._go_next()
-    wizard._go_next()
+    advance_wizard(wizard)
+    advance_wizard(wizard)
     app.processEvents()
 
     assert wizard.navigation_rail.isHidden()
@@ -512,8 +503,8 @@ def test_correction_value_column_expands_for_long_values(
     wizard.path_edit.setText(str(path))
 
     assert wizard._inspect_source(), wizard.error_label.text()
-    wizard._go_next()
-    wizard._go_next()
+    advance_wizard(wizard)
+    advance_wizard(wizard)
     app.processEvents()
 
     assert wizard.preview is not None and not wizard.preview.can_continue
@@ -541,8 +532,8 @@ def test_unmapped_optional_birth_date_does_not_show_preview(
 
     assert wizard._inspect_source(), wizard.error_label.text()
     assert wizard._mapping_combos[ProfileField.BIRTH_DATE].currentData() is None
-    wizard._go_next()
-    wizard._go_next()
+    advance_wizard(wizard)
+    advance_wizard(wizard)
 
     assert wizard.page_stack.currentIndex() == 1
     assert wizard.preview is not None and wizard.preview.can_continue
@@ -616,13 +607,15 @@ def test_excluded_blank_name_blocks_only_vacation_until_corrected(
     wizard.path_edit.setText(str(path))
 
     assert wizard._inspect_source(), wizard.error_label.text()
-    wizard._go_next()
-    wizard._go_next()
+    advance_wizard(wizard)
+    advance_wizard(wizard)
 
     assert wizard.preview is not None and wizard.preview.can_continue
     if purpose is ImportPurpose.DATABASE:
+        assert wizard.correction_dialog.isVisible()
+        assert wizard.page_stack.currentIndex() == 2
+        advance_wizard(wizard)
         assert wizard.result() == QDialog.DialogCode.Accepted
-        assert wizard.page_stack.currentIndex() == 1
         assert len(wizard.selection().preview.observations) == 1
         wizard.close()
         return
@@ -654,9 +647,11 @@ def test_government_headers_get_reviewable_defaults_and_private_columns_ignored(
 
     assert wizard._inspect_source(), wizard.error_label.text()
     assert wizard._build_profile().source_kind == "survey-xlsx"
-    assert wizard.profile_name_edit.text() == "정부 조사표"
+    assert wizard._build_profile().name == Path(wizard._inspection.source_filename).stem
     assert wizard._mapping_combos[ProfileField.ROAD_ADDRESS].currentData() == "N"
-    assert wizard.address_fallback_combo.currentData() == "M"
+    assert not hasattr(wizard, "address_fallback_combo")
+    assert wizard._build_profile().fallback_profile_columns == {}
+    assert "M" in wizard._build_profile().ignored_columns
     assert wizard.breakfast_combo.currentData() == "S"
     assert wizard.lunch_combo.currentData() == "V"
     assert wizard.dinner_combo.currentData() == "T"
@@ -794,14 +789,14 @@ def test_back_from_preview_reuses_password_for_the_same_workbook(
     wizard.password_edit.setText(password)
 
     assert wizard._inspect_source(), wizard.error_label.text()
-    wizard._go_next()
-    wizard._go_next()
+    advance_wizard(wizard)
+    advance_wizard(wizard)
     assert wizard.page_stack.currentIndex() == 2
     assert wizard.password_edit.text() == ""
 
     wizard._go_back()
     assert wizard.page_stack.currentIndex() == 1
-    wizard._go_next()
+    advance_wizard(wizard)
 
     assert wizard.page_stack.currentIndex() == 2
     assert parse_passwords == [password, password]
@@ -834,14 +829,14 @@ def test_editing_a_proposed_profile_creates_next_version(
     wizard.path_edit.setText(str(path))
     assert wizard._inspect_source(), wizard.error_label.text()
 
-    assert wizard.profile_name_edit.text() == "저장된 설정"
+    assert wizard._build_profile().name == "저장된 설정"
     assert wizard._build_profile().version == 4
-    wizard.profile_name_edit.setText("저장된 설정 수정")
+    wizard.destination_table.assign_source("D", "ignore")
     assert wizard._build_profile().version == 5
     wizard.close()
 
 
-def test_household_criteria_are_multi_select_and_existing_rule_is_versioned(
+def test_import_households_use_mobile_and_version_older_rules(
     app: QApplication,
 ):
     stored = StoredHouseholdMatchingRule(
@@ -856,29 +851,17 @@ def test_household_criteria_are_multi_select_and_existing_rule_is_versioned(
     )
     wizard = RosterImportWizard(existing_household_rule=stored)
 
-    assert wizard._build_household_rule() == stored.rule
-    wizard._household_criterion_checkboxes[
-        HouseholdMatchCriterion.ADDRESS
-    ].setChecked(True)
     changed = wizard._build_household_rule()
-
     assert changed.rule_id == stored.rule_id
     assert changed.version == 4
-    assert changed.criteria == (
-        HouseholdMatchCriterion.MOBILE_PHONE,
-        HouseholdMatchCriterion.HOUSEHOLD_HEAD_NAME,
-        HouseholdMatchCriterion.ADDRESS,
-    )
+    assert changed.criteria == (HouseholdMatchCriterion.MOBILE_PHONE,)
     wizard.close()
 
 
-def test_at_least_one_household_criterion_is_required(app: QApplication):
+def test_household_mobile_rule_is_fixed(app: QApplication):
     wizard = RosterImportWizard()
-    for checkbox in wizard._household_criterion_checkboxes.values():
-        checkbox.setChecked(False)
-
-    with pytest.raises(ValueError, match="하나 이상"):
-        wizard._build_household_rule()
+    assert wizard._build_household_rule().criteria == (HouseholdMatchCriterion.MOBILE_PHONE,)
+    assert not hasattr(wizard, "_household_criterion_checkboxes")
     wizard.close()
 
 
@@ -957,7 +940,7 @@ def test_preview_loading_uses_its_own_clear_busy_message(
     wizard = RosterImportWizard()
     wizard.path_edit.setText(str(path))
     assert wizard._inspect_source(), wizard.error_label.text()
-    wizard._go_next()
+    advance_wizard(wizard)
     assert wizard.page_stack.currentIndex() == 1
 
     started = Event()
@@ -985,7 +968,7 @@ def test_preview_loading_uses_its_own_clear_busy_message(
         release.set()
 
     QTimer.singleShot(50, observe_and_release)
-    wizard._go_next()
+    advance_wizard(wizard)
 
     assert observed == [(True, True, "가져올 명단을 만드는 중입니다", False)]
     assert wizard.page_stack.currentIndex() == 1
@@ -997,7 +980,7 @@ def test_preview_loading_uses_its_own_clear_busy_message(
 
 def test_closed_dropdown_does_not_change_with_the_mouse_wheel(app: QApplication):
     wizard = RosterImportWizard()
-    combo = wizard.date_normalization_combo
+    combo = wizard.meal_mode_combo
     combo.setCurrentIndex(0)
     wheel = QWheelEvent(
         QPointF(5, 5),
@@ -1014,4 +997,56 @@ def test_closed_dropdown_does_not_change_with_the_mouse_wheel(app: QApplication)
 
     assert combo.currentIndex() == 0
     assert wheel.isAccepted()
+    wizard.close()
+
+
+def test_legacy_address_fallback_returns_to_unmapped_pool(app, tmp_path):
+    from dataclasses import replace
+    path = _survey(tmp_path / "legacy-address.xlsx")
+    original = RosterImportWizard()
+    original.path_edit.setText(str(path))
+    assert original._inspect_source()
+    base = original._build_profile()
+    stored_profile = replace(base, version=2,
+        fallback_profile_columns={ProfileField.ROAD_ADDRESS: ("M",)},
+        ignored_columns=tuple(column for column in base.ignored_columns if column != "M"))
+    saved = StoredImportProfile(stored_profile, original.inspection.header_fingerprint)
+    original.close()
+    wizard = RosterImportWizard(existing_profiles=(saved,))
+    wizard.path_edit.setText(str(path))
+    assert wizard._inspect_source()
+    current = wizard._build_profile()
+    assert current.profile_columns[ProfileField.ROAD_ADDRESS] == "N"
+    assert current.fallback_profile_columns == {}
+    assert "M" in current.ignored_columns
+    assert current.version == 3
+    assert "address_fallback" not in dict(wizard._destination_options())
+    assert wizard.destination_table.source_tiles["M"].parentWidget() is wizard.destination_table.pool
+    wizard.close()
+
+
+@pytest.mark.parametrize("multiple_errors", [False, True])
+def test_correction_editors_fit_equal_height_rows(app, tmp_path, multiple_errors):
+    from tests.test_import_row_exclusions import source
+    wizard = RosterImportWizard()
+    wizard.path_edit.setText(str(source(tmp_path / "row-height.xlsx", multiple_errors=multiple_errors)))
+    assert wizard._inspect_source()
+    advance_wizard(wizard)
+    advance_wizard(wizard)
+    app.processEvents()
+    table = wizard.correction_table
+    assert table.rowCount() == (2 if multiple_errors else 1)
+    for width, height in ((752, 700), (720, 500)):
+        wizard.correction_dialog.resize(width, height)
+        wizard._resize_correction_columns()
+        app.processEvents()
+        assert len({table.rowHeight(row) for row in range(table.rowCount())}) == 1
+        editor_heights = []
+        for row in range(table.rowCount()):
+            editor = table.cellWidget(row, 5)
+            cell_rect = table.visualRect(table.model().index(row, 5))
+            assert cell_rect.contains(editor.geometry()), (cell_rect, editor.geometry())
+            assert editor.height() >= editor.minimumSizeHint().height()
+            editor_heights.append(editor.height())
+        assert len(set(editor_heights)) == 1
     wizard.close()

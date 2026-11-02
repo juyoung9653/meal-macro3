@@ -49,7 +49,7 @@ def test_first_nonblank_value_zero_and_multiple_forms_leave_counts_unchanged(pos
     assert result.calculation_manifest["remark_options"]["columns"] == (first, "note", "mobile")
     from src.generators.report_generator import make_report_publication
     output = tmp_path / "report.xlsx"
-    make_report_publication(result.reports, output, "assets/report_template.xlsx")
+    make_report_publication(result.reports, output, "assets/급식/일일식수템플릿.xlsx")
     book = load_workbook(output, rich_text=True)
     assert any(str(cell.value) == memo for row in book.active for cell in row)
     book.close()

@@ -36,7 +36,7 @@ class Client:
 
     def lookup(self, address):
         self.calls.append(address)
-        if address == "없는로 1":
+        if address == "경기도 성남시 없는로 1":
             raise AddressNotFoundError("검색 결과가 없습니다")
         return SimpleNamespace(jibun_address="구주소 " + address)
 
@@ -57,7 +57,7 @@ def test_empty_only_preserves_filled_failed_and_source_and_deduplicates(roster):
     client = Client()
     result = prepare(roster, client)
     assert (result.updated, result.skipped, len(result.failures)) == (2, 2, 1)
-    assert client.calls == ["가상로 1", "없는로 1"]
+    assert client.calls == ["경기도 성남시 가상로 1", "경기도 성남시 없는로 1"]
     for before, after in zip(roster.persons, result.roster.persons):
         assert before.profile.road_address == after.profile.road_address
         assert after.profile.detail_address == "101호"
@@ -72,7 +72,7 @@ def test_all_replaces_filled_but_failure_keeps_existing(roster):
     roster = replace(roster, persons=(*roster.persons[:-1], last))
     result = prepare(roster, only_empty=False)
     assert result.updated == 3
-    assert result.roster.persons[1].profile.custom_values[field] == "구주소 가상로 2"
+    assert result.roster.persons[1].profile.custom_values[field] == "구주소 경기도 성남시 가상로 2"
     assert result.roster.persons[-1] == last
     again = prepare(result.roster, only_empty=False)
     assert again.record is None
@@ -155,7 +155,10 @@ class Vault:
         return self.record
 
     def CredWrite(self, record, flags):
-        self.record = record
+        # Match pywin32: writes require text; reads return UTF-16 bytes.
+        if not isinstance(record["CredentialBlob"], str):
+            raise TypeError("CredentialBlob must be Unicode")
+        self.record = {**record, "CredentialBlob": record["CredentialBlob"].encode("utf-16-le")}
 
     def CredDelete(self, target, kind, flags):
         self.record = None
@@ -225,7 +228,6 @@ def test_controller_commits_once_refreshes_before_report_and_cancel_does_not_wri
     from PySide6.QtWidgets import QDialog
     from src.desktop_v2 import old_address
     from src.desktop_v2.roster_window import RosterTableModel
-    monkeypatch.setattr(old_address, "run_progress_task", lambda work, **kwargs: work())
     monkeypatch.setattr(old_address, "save_revision", lambda session, record, **kwargs: session.append_revision(record))
     store = SimpleNamespace(get_api_key=lambda: "synthetic-key")
     with DatabaseSession.create(tmp_path / "controller.sqlite3", "password") as session:
@@ -248,3 +250,147 @@ def test_controller_commits_once_refreshes_before_report_and_cancel_does_not_wri
         with pytest.raises(StopIteration):
             steps.send(QDialog.Accepted)
         assert session.database.current_roster().revision_id == saved.revision_id
+
+
+@pytest.mark.parametrize("only_empty", [True, False])
+def test_progress_counts_cached_skipped_failed_and_unchanged_rows(roster, only_empty):
+    progress = []
+    client = Client()
+    result = prepare(roster, client, only_empty=only_empty,
+                     on_progress=lambda done, total: progress.append((done, total)))
+    assert progress == [(done, 5) for done in range(6)]
+    assert result.updated + result.unchanged + result.skipped + len(result.failures) == 5
+    assert len(client.calls) == (2 if only_empty else 3)
+    progress.clear()
+    repeated = prepare(result.roster, only_empty=only_empty,
+                       on_progress=lambda done, total: progress.append((done, total)))
+    assert repeated.record is None
+    assert progress == [(done, 5) for done in range(6)]
+
+
+def test_empty_progress_and_fatal_error_do_not_claim_incomplete_work_finished(roster):
+    progress = []
+    prepare(replace(roster, persons=()), on_progress=lambda done, total: progress.append((done, total)))
+    assert progress == [(0, 0)]
+    progress.clear()
+
+    class FailingClient(Client):
+        def lookup(self, address):
+            if self.calls:
+                raise JusoServiceError("합성 오류")
+            return super().lookup(address)
+
+    with pytest.raises(JusoServiceError):
+        prepare(roster, FailingClient(), only_empty=False,
+                on_progress=lambda done, total: progress.append((done, total)))
+    assert progress == [(0, 5), (1, 5)]
+    assert not roster.persons[0].profile.custom_values
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_address_progress_updates_on_ui_thread_and_restores_parent(app, fail):
+    from threading import Event, get_ident
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QDialog
+    from src.desktop_v2.old_address import AddressUpdateProgressDialog, run_address_update
+
+    released = Event()
+    ui_thread = get_ident()
+    observed = []
+    parent = QDialog()
+    parent.show()
+
+    def task(progress):
+        assert get_ident() != ui_thread
+        progress(0, 5)
+        progress(2, 5)
+        assert released.wait(5), "Progress UI did not respond"
+        if fail:
+            raise RuntimeError("synthetic lookup failure")
+        progress(5, 5)
+        return "converted"
+
+    def inspect():
+        if released.is_set():
+            return
+        dialog = next((w for w in app.topLevelWidgets()
+                       if isinstance(w, AddressUpdateProgressDialog) and w.isVisible()), None)
+        if dialog is None or dialog.progress.value() != 2:
+            return
+        observed.append((dialog.progress.text(), parent.isEnabled(), get_ident()))
+        dialog.reject()
+        assert not dialog.close()
+        assert dialog.isVisible()
+        released.set()
+
+    timer = QTimer()
+    timer.timeout.connect(inspect)
+    timer.start(10)
+    try:
+        if fail:
+            with pytest.raises(RuntimeError, match="synthetic lookup failure"):
+                run_address_update(task, total=5, parent=parent)
+        else:
+            assert run_address_update(task, total=5, parent=parent) == "converted"
+        assert observed == [("처리 2 / 5명 · 40%", False, ui_thread)]
+        assert parent.isEnabled()
+        assert not any(isinstance(w, AddressUpdateProgressDialog) and w.isVisible()
+                       for w in app.topLevelWidgets())
+    finally:
+        timer.stop()
+        released.set()
+        parent.close()
+
+
+@pytest.mark.parametrize("road,expected", [
+    ("  분당구 가상로 1  ", "경기도 성남시 분당구 가상로 1"),
+    ("경기도 성남시 분당구 가상로 1", "경기도 성남시 분당구 가상로 1"),
+    ("성남시 분당구 가상로 1", "경기도 성남시 분당구 가상로 1"),
+    ("경기도   성남시  가상로 1", "경기도 성남시 가상로 1"),
+    ("  ", None),
+    (None, None),
+])
+def test_single_source_adds_region_once_ignores_jurisdiction_and_skips_empty(roster, road, expected):
+    person = replace(roster.persons[0], profile=replace(roster.persons[0].profile,
+                     jurisdiction="가상동", road_address=road))
+    roster = replace(roster, persons=(person,))
+    client = Client()
+    result = prepare(roster, client)
+    assert client.calls == ([] if expected is None else [expected])
+    assert (result.updated, result.skipped) == ((0, 1) if expected is None else (1, 0))
+    if expected is not None:
+        assert result.roster.persons[0].profile.custom_values[roster.custom_fields[0].definition_id] == "구주소 " + expected
+        decision = result.record.metadata.decisions["old_address_update"]
+        assert (decision["source"], decision["search_region"]) == ("address", "경기도 성남시")
+    assert result.roster.persons[0].profile.jurisdiction == person.profile.jurisdiction
+    assert result.roster.persons[0].profile.road_address == person.profile.road_address
+    assert roster.persons[0] is person
+
+
+def test_region_cache_reuses_equivalent_queries_and_supports_custom_source(roster):
+    persons = tuple(replace(p, profile=replace(p.profile, jurisdiction=district,
+                    road_address=road, custom_values={}))
+                    for p, district, road in zip(roster.persons,
+                        ["가상동", "다른동", "가상동"],
+                        ["가상로 1", "경기도 성남시 가상로 1", "성남시 가상로 1"]))
+    client = Client()
+    result = prepare(replace(roster, persons=persons), client)
+    assert client.calls == ["경기도 성남시 가상로 1"]
+    assert result.updated == 3
+    client = Client()
+    prepare(replace(roster, persons=(roster.persons[1],)), client,
+            source=f"custom:{roster.custom_fields[0].definition_id}", target=NEW_COLUMN)
+    assert client.calls == ["경기도 성남시 기존 주소"]
+
+
+def test_dialog_has_one_source_and_explains_region(app, roster):
+    from PySide6.QtWidgets import QComboBox, QDialog, QLabel
+    from src.desktop_v2.old_address import OldAddressDialog
+    from src.desktop_v2.roster_window import RosterTableModel
+
+    dialog = OldAddressDialog(roster, RosterTableModel(roster).columns, DAY)
+    assert len(dialog.findChildren(QComboBox)) == 2  # One input and one output.
+    assert dialog.source_combo.currentData() == "address"
+    assert any("경기도 성남시" in label.text() for label in dialog.findChildren(QLabel))
+    dialog.accept()
+    assert dialog.result() == QDialog.Accepted

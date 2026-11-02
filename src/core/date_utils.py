@@ -23,10 +23,10 @@ def to_bool(val) -> bool:
 
 
 def get_week_ranges(year: int, month: int) -> list[tuple[int, date, date]]:
-    """해당 월을 일(요일)~토(요일) 주차 단위로 분할.
+    """해당 월을 월(요일)~일(요일) 주차 단위로 분할.
 
     6주가 되는 달은 확인서의 5주 형식에 맞게 보정한다.
-    금요일 시작 → 마지막 2주 병합, 토요일 시작 → 처음 2주 병합.
+    토요일 시작 → 마지막 2주 병합, 일요일 시작 → 처음 2주 병합.
     """
     last_day = _cal.monthrange(year, month)[1]
     first_wday = date(year, month, 1).weekday()
@@ -35,22 +35,22 @@ def get_week_ranges(year: int, month: int) -> list[tuple[int, date, date]]:
 
     for day in range(1, last_day + 1):
         d = date(year, month, day)
-        if d.weekday() == SUN:
+        if d.weekday() == MON:
             week_start = d
         if week_start is None:
             week_start = date(year, month, 1)
 
-        if d.weekday() == SAT or day == last_day:
+        if d.weekday() == SUN or day == last_day:
             weeks.append((len(weeks) + 1, week_start, d))
             week_start = None
 
     # ── 6주가 되는 달을 확인서의 5주 형식으로 보정 ──
     if len(weeks) == 6:
-        if first_wday == FRI:
+        if first_wday == SAT:
             w5 = weeks[-2]
             w6 = weeks[-1]
             weeks = weeks[:-2] + [(w5[0], w5[1], w6[2])]
-        elif first_wday == SAT:
+        elif first_wday == SUN:
             w1 = weeks[0]
             w2 = weeks[1]
             weeks = [(w1[0], w1[1], w2[2])] + weeks[2:]

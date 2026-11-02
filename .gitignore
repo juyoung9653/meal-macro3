@@ -47,3 +47,7 @@ main.exe
 
 # Local temporary files
 /tmp/
+
+# Local tool cache and legacy agent verification output
+.ruff_cache/
+/.ato/

@@ -66,12 +66,15 @@ def test_actual_dialog_controller_saves_profile_household_and_dated_drivers_atom
     custom = CustomFieldDefinition(uuid4(), "핸드폰2", CustomFieldType.TEXT, 0)
     roster = RosterSnapshot(revision_id, persons=(existing,), households=(household,), memberships=(HouseholdMembership(existing.person_id, household.household_id),), custom_fields=(custom,))
     drivers = (Driver(uuid4(), "기사 가"), Driver(uuid4(), "기사 나"))
+    from src.domain.household_grouping import GROUPING_KIND, GROUPING_ID
     rule = StoredHouseholdMatchingRule(HouseholdMatchingRule(uuid4(), 1, (HouseholdMatchCriterion.ADDRESS,)))
     actor = RevisionActor("tester", "synthetic")
     recorded = datetime(2026, 10, 15, tzinfo=UTC)
     initial = RevisionRecord(
         RevisionMetadata(revision_id, None, recorded, None, actor, "테스트 명단", RevisionSource.UI),
         (*roster_audit_changes(None, roster), household_matching_rule_audit_change(None, rule),
+         AuditChange(GROUPING_KIND, GROUPING_ID, ChangeOperation.INSERT, None,
+                     {"columns": ["address", "detail_address"], "match_mode": "all"}),
          *(AuditChange(DRIVER_KIND, driver.driver_id, ChangeOperation.INSERT, None, {"name": driver.name, "telephone": driver.telephone}) for driver in drivers)),
     )
     starts_on = date(2026, 11, 1)
@@ -114,7 +117,7 @@ def test_actual_dialog_controller_saves_profile_household_and_dated_drivers_atom
             assert profile.road_address == "가상로 1"
             assert profile.detail_address == "101호"
             assert profile.custom_values[custom.definition_id] == "010-2222-2222"
-            assert updated.household_for(new_person, on=starts_on).household_id == household.household_id
+            assert updated.household_for(new_person, on=starts_on).household_id == updated.household_for(existing.person_id, on=starts_on).household_id
             state = routing_state_from_snapshot(session.database.snapshot(updated.revision_id))
             assert all(value is None for value in state.resolve(updated, new_person, date(2026, 10, 31)).driver_ids.values())
             assert state.resolve(updated, new_person, starts_on).driver_ids == {meal: None for meal in Meal}

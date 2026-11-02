@@ -47,8 +47,14 @@ class DocumentTemplateSetting:
     version: int
     profile: DocumentTemplateProfile
     changed_in_revision_id: UUID
+    confirmation_single_meal_first: bool = False
+    confirmation_include_next_month_weekend: bool = False
 
     def __post_init__(self) -> None:
+        if type(self.confirmation_include_next_month_weekend) is not bool:
+            raise TypeError("확인서 다음 달 주말 표시 여부는 bool이어야 합니다.")
+        if type(self.confirmation_single_meal_first) is not bool:
+            raise TypeError("확인서 1식 우선 배치 여부는 bool이어야 합니다.")
         if isinstance(self.version, bool) or not isinstance(self.version, int):
             raise TypeError("문서 양식 version은 정수여야 합니다.")
         if self.version < 1:
@@ -64,6 +70,8 @@ class DocumentTemplateSetting:
                 "policy_version": DOCUMENT_TEMPLATE_POLICY_VERSION,
                 "version": self.version,
                 "profile": self.profile.value,
+                "confirmation_single_meal_first": self.confirmation_single_meal_first,
+                "confirmation_include_next_month_weekend": self.confirmation_include_next_month_weekend,
                 "setting_revision_id": str(self.changed_in_revision_id),
             }
         )
@@ -84,6 +92,8 @@ def build_document_template_revision(
     recorded_at: datetime,
     revision_id: UUID,
     reason: str = "문서 양식 변경",
+    confirmation_single_meal_first: bool | None = None,
+    confirmation_include_next_month_weekend: bool | None = None,
 ) -> PreparedDocumentTemplateRevision:
     if not isinstance(current_revision_id, UUID):
         raise TypeError("현재 revision ID는 UUID여야 합니다.")
@@ -97,12 +107,24 @@ def build_document_template_revision(
         raise TypeError("actor는 RevisionActor여야 합니다.")
     _validate_datetime(recorded_at)
     current = document_template_setting_from_state(stored_state)
-    if current is not None and current.profile is profile:
+    if confirmation_single_meal_first is None:
+        confirmation_single_meal_first = current.confirmation_single_meal_first if current else False
+    if type(confirmation_single_meal_first) is not bool:
+        raise TypeError("확인서 1식 우선 배치 여부는 bool이어야 합니다.")
+    if confirmation_include_next_month_weekend is None:
+        confirmation_include_next_month_weekend = current.confirmation_include_next_month_weekend if current else False
+    if type(confirmation_include_next_month_weekend) is not bool:
+        raise TypeError("확인서 다음 달 주말 표시 여부는 bool이어야 합니다.")
+    if (current is not None and current.profile is profile
+            and current.confirmation_single_meal_first == confirmation_single_meal_first
+            and current.confirmation_include_next_month_weekend == confirmation_include_next_month_weekend):
         raise ValueError("현재 사용 중인 문서 양식과 같습니다.")
     setting = DocumentTemplateSetting(
         1 if current is None else current.version + 1,
         profile,
         revision_id,
+        confirmation_single_meal_first,
+        confirmation_include_next_month_weekend,
     )
     after = document_template_setting_state(setting)
     change = AuditChange(
@@ -124,6 +146,8 @@ def build_document_template_revision(
             "document_template_change": {
                 "profile": profile.value,
                 "version": setting.version,
+                "confirmation_single_meal_first": confirmation_single_meal_first,
+                "confirmation_include_next_month_weekend": confirmation_include_next_month_weekend,
             }
         },
         rule_versions={
@@ -145,6 +169,8 @@ def document_template_setting_state(
         "policy_version": DOCUMENT_TEMPLATE_POLICY_VERSION,
         "version": setting.version,
         "profile": setting.profile.value,
+        "confirmation_single_meal_first": setting.confirmation_single_meal_first,
+        "confirmation_include_next_month_weekend": setting.confirmation_include_next_month_weekend,
         "changed_in_revision_id": str(setting.changed_in_revision_id),
     }
 
@@ -169,6 +195,8 @@ def document_template_setting_from_state(
         version=version,  # type: ignore[arg-type]
         profile=DocumentTemplateProfile(profile),
         changed_in_revision_id=UUID(revision_id),
+        confirmation_single_meal_first=state.get("confirmation_single_meal_first", False),
+        confirmation_include_next_month_weekend=state.get("confirmation_include_next_month_weekend", False),
     )
 
 

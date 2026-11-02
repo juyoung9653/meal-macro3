@@ -38,12 +38,13 @@ def preferences(tmp_path, monkeypatch):
     return factory
 
 
-def template_file(tmp_path, action):
+def template_file(tmp_path, action, profile=Profile.SCHOOL_MEAL):
+    tmp_path.mkdir(parents=True, exist_ok=True)
     path = tmp_path / (action.value + ".xlsx")
     if action is DocumentAction.DELIVERY_SUBSTITUTE:
         create_substitute_template(path)
     else:
-        copyfile("assets/report_template.xlsx", path)
+        copyfile("assets/행복도시락/석식일일식수템플릿.xlsx" if profile is Profile.HAPPY_LUNCHBOX else "assets/급식/일일식수템플릿.xlsx", path)
     return path
 
 
@@ -56,10 +57,11 @@ def test_legacy_override_belongs_only_to_school_and_reset_masks_it(tmp_path, act
     prefs.setValue(school.legacy_key + action.value, str(old))
     assert school.selected(action) == old
     assert happy.selected(action) is None
-    happy.save(action, old)
+    happy_file = template_file(tmp_path / "happy", action, Profile.HAPPY_LUNCHBOX)
+    happy.save(action, happy_file)
     school.save(action, None)
     assert school.selected(action) is None
-    assert happy.selected(action) == old
+    assert happy.selected(action) == happy_file
     assert prefs.value(school.legacy_key + action.value) == str(old)
     assert DeliveryTemplateStore("db", settings=prefs).selected(action) is None
 
@@ -80,7 +82,7 @@ def test_settings_cards_open_correct_profile_without_switching_selection(app, pr
         app.processEvents()
     with pytest.raises(ValueError):
         _ = dialog.selected_profile
-    assert all("미설정" in label.text() for (profile, _), label in dialog._delivery_status.items() if profile is Profile.HAPPY_LUNCHBOX)
+    assert all("기본 양식" in label.text() for (profile, _), label in dialog._delivery_status.items() if profile is Profile.HAPPY_LUNCHBOX)
 
 
 def test_unsaved_radio_cancel_keeps_operating_profile_and_scope(app, session, preferences):
@@ -107,13 +109,13 @@ def test_output_screen_has_no_template_edit_entry(app, session, tmp_path):
     assert not hasattr(dialog, "set_template_scope")
 
 
-def test_happy_unconfigured_manager_does_not_clone_school(tmp_path, app, preferences):
+def test_happy_default_list_is_separate_identical_template(tmp_path, app, preferences):
     store = preferences("db", profile=Profile.HAPPY_LUNCHBOX)
     dialog = DeliveryTemplateDialog(DocumentAction.DELIVERY_SUBSTITUTE, "db", store=store)
-    assert "미설정" in dialog.path_label.text()
-    with pytest.raises(ValueError, match="설정 → 문서 양식"):
-        store.create(DocumentAction.DELIVERY_SUBSTITUTE)
-    assert not store.root.exists()
+    assert "기본 양식" in dialog.path_label.text()
+    path = store.create(DocumentAction.DELIVERY_SUBSTITUTE)
+    assert path.read_bytes() == Path("assets/급식/배송목록템플릿.xlsx").read_bytes()
+    assert path.parent == store.root
 
 
 def set_profile(session, profile):
@@ -123,13 +125,76 @@ def set_profile(session, profile):
     session.append_revision(prepared.record)
 
 
+def test_happy_default_report_publishes_actual_workbook_and_seals_template_hash(app, session, preferences, tmp_path):
+    set_profile(session, Profile.HAPPY_LUNCHBOX)
+    selected = selection_for(session, tmp_path)
+    document = replace(selected.document,
+        period=replace(selected.document.period, action=DocumentAction.DELIVERY_REPORT), substitute_options=None)
+    selected = next_available_document_output(document, tmp_path, selected.mode)
+    messages = Messages()
+    outcome = DocumentGenerationController(session, message_box=messages).run(selected)
+    assert outcome.completed, messages.errors
+    workbook = openpyxl.load_workbook(outcome.result.output_path)
+    # SQLite snapshot iteration can change which region is encountered first.
+    assert {workbook.active[f"C{row}"].value: workbook.active[f"D{row}"].value
+            for row in (4, 5)} == {"가동": 9, "나동": 3}
+    workbook.close()
+    manifest = session.database.document_runs()[0].template_manifest
+    assert manifest["writer"] == "happy_delivery_report.make_happy_report_publication"
+    assert set(manifest["templates"]) == {"dinner"}
+    assert manifest["column_mapping"]["driver"] == "배송담당"
+    assert manifest["templates"]["dinner"]["sha256"] == manifest["template_sha256"]
+
+
+def test_both_happy_templates_are_frozen_and_recorded_in_one_run(app, preferences, tmp_path):
+    from datetime import date
+    from src.desktop_v2.document_meal import DocumentMealSelection
+    from src.desktop_v2.document_period import DocumentPeriodSelection
+    from src.desktop_v2.document_output import DocumentOutputMode
+    from src.domain.roster import Meal
+    from src.storage.database_session import DatabaseSession
+    from src.generators.happy_delivery_report import make_happy_report_publication
+    from tests.test_sqlite_delivery_report_service import _snapshot
+    from tests.test_delivery_substitute_v2 import initial_record
+    day = date(2026, 8, 17)
+    backup = tmp_path / "both-backups"
+    backup.mkdir()
+    with DatabaseSession.create(tmp_path / "both.sqlite3", "synthetic-password", backup_directory=backup) as opened:
+        snapshot, _ = _snapshot(meals=(Meal.DINNER, Meal.LUNCH))
+        opened.append_revision(initial_record(snapshot))
+        set_profile(opened, Profile.HAPPY_LUNCHBOX)
+        store = preferences(str(opened.credentials.database_id), profile=Profile.HAPPY_LUNCHBOX)
+        dinner, lunch = store.create(DocumentAction.DELIVERY_REPORT), store.create(DocumentAction.DELIVERY_REPORT, meal="중식")
+        store.save(DocumentAction.DELIVERY_REPORT, dinner)
+        store.save(DocumentAction.DELIVERY_REPORT, lunch, meal="중식")
+        expected = {"dinner": sha256(dinner.read_bytes()).hexdigest(), "lunch": sha256(lunch.read_bytes()).hexdigest()}
+        frozen_paths = []
+        def writer(reports, output, paths, **kwargs):
+            frozen_paths.extend(paths.values())
+            assert {key: sha256(path.read_bytes()).hexdigest() for key, path in paths.items()} == expected
+            # External editing after calculation must not change this publication.
+            lunch.write_bytes(b"changed after capture")
+            return make_happy_report_publication(reports, output, paths, **kwargs)
+        period = DocumentPeriodSelection(DocumentAction.DELIVERY_REPORT, opened.database.revision_summaries()[0], day, Meal.DINNER, day, day)
+        selected = next_available_document_output(DocumentMealSelection(period, (Meal.DINNER, Meal.LUNCH)), tmp_path, DocumentOutputMode.SAVED_DEFAULT)
+        messages = Messages()
+        result = DocumentGenerationController(opened, message_box=messages, happy_report_writer=writer).run(selected)
+        assert result.completed, messages.errors
+        book = openpyxl.load_workbook(result.result.output_path)
+        assert book.sheetnames == ["26.08.17", "중식_26.08.17"]
+        book.close()
+        manifest = opened.database.document_runs()[0].template_manifest
+        assert {key: item["sha256"] for key, item in manifest["templates"].items()} == expected
+        assert all(not path.exists() for path in frozen_paths)
+
+
 @pytest.mark.parametrize("action", [DocumentAction.DELIVERY_REPORT, DocumentAction.DELIVERY_SUBSTITUTE])
 @pytest.mark.parametrize("profile", [None, Profile.SCHOOL_MEAL, Profile.HAPPY_LUNCHBOX])
 def test_saved_profile_routes_frozen_template_and_manifest(app, session, preferences, tmp_path, action, profile):
     if profile is not None:
         set_profile(session, profile)
     selected_profile = profile or Profile.SCHOOL_MEAL
-    chosen = template_file(tmp_path, action)
+    chosen = template_file(tmp_path, action, selected_profile)
     preferences(str(session.credentials.database_id), profile=selected_profile).save(action, chosen)
     before = session.database.current_roster().revision_id
     selection = selection_for(session, tmp_path)
@@ -140,12 +205,14 @@ def test_saved_profile_routes_frozen_template_and_manifest(app, session, prefere
     def writer(*args, **kwargs):
         output = args[1] if action is DocumentAction.DELIVERY_REPORT else args[2]
         template = args[2] if action is DocumentAction.DELIVERY_REPORT else kwargs["template_path"]
+        if isinstance(template, dict):
+            template = template["dinner"]
         received.append(Path(template).read_bytes())
         wb = openpyxl.Workbook()
         wb.active["A1"] = "synthetic"
         return publish_workbook(wb, output, password=kwargs["output_password"], overwrite=False)
     messages = Messages()
-    outcome = DocumentGenerationController(session, message_box=messages, report_writer=writer, substitute_writer=writer).run(selection)
+    outcome = DocumentGenerationController(session, message_box=messages, report_writer=writer, happy_report_writer=writer, substitute_writer=writer).run(selection)
     assert outcome.completed, messages.errors
     assert received == [chosen.read_bytes()]
     manifest = session.database.document_runs()[0].template_manifest
@@ -160,7 +227,11 @@ def test_saved_profile_routes_frozen_template_and_manifest(app, session, prefere
 @pytest.mark.parametrize("action", [DocumentAction.DELIVERY_REPORT, DocumentAction.DELIVERY_SUBSTITUTE])
 def test_happy_missing_file_blocks_without_school_fallback(app, session, preferences, tmp_path, action):
     set_profile(session, Profile.HAPPY_LUNCHBOX)
-    # Even a legacy school binding must never satisfy a happy request.
+    happy = preferences(str(session.credentials.database_id), profile=Profile.HAPPY_LUNCHBOX)
+    broken = template_file(tmp_path / "broken", action, Profile.HAPPY_LUNCHBOX)
+    happy.save(action, broken)
+    broken.unlink()
+    # Even a legacy school binding must never satisfy a broken happy request.
     school = preferences(str(session.credentials.database_id))
     school.settings.setValue(school.legacy_key + action.value, str(template_file(tmp_path, action)))
     selection = selection_for(session, tmp_path)
@@ -170,9 +241,9 @@ def test_happy_missing_file_blocks_without_school_fallback(app, session, prefere
     def unexpected(*args, **kwargs):
         raise AssertionError("writer must not run")
     messages = Messages()
-    outcome = DocumentGenerationController(session, message_box=messages, report_writer=unexpected, substitute_writer=unexpected).run(selection)
+    outcome = DocumentGenerationController(session, message_box=messages, report_writer=unexpected, happy_report_writer=unexpected, substitute_writer=unexpected).run(selection)
     assert not outcome.completed
-    assert "설정 → 문서 양식" in str(messages.errors)
+    assert messages.errors
     assert not selection.output_path.exists()
     assert session.database.document_runs() == ()
 

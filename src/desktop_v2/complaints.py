@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .user_messages import user_error
+
 from .dialog_workflow import DialogRequest, dialog_workflow
 
 from .startup_loading import save_revision
@@ -255,7 +257,7 @@ class ComplaintController:
         try:
             person = roster.person(person_id)
         except KeyError as error:
-            self._message_box.critical(parent, "민원을 접수하지 못했습니다", str(error))
+            self._message_box.critical(parent, "민원을 접수하지 못했습니다", user_error(error))
             return ComplaintOutcome(ComplaintStatus.FAILED)
         received_at = self._now_provider()
         if received_at.tzinfo is None or received_at.utcoffset() is None:
@@ -295,11 +297,11 @@ class ComplaintController:
             )
             backup = save_revision(self._session, record, parent=parent)
         except Exception as error:  # noqa: BLE001 - report save failures at UI boundary
-            self._message_box.critical(parent, "민원을 접수하지 못했습니다", str(error))
+            self._message_box.critical(parent, "민원을 접수하지 못했습니다", user_error(error))
             return ComplaintOutcome(ComplaintStatus.FAILED)
-        if backup.error is not None:
+        if backup.warning_required:
             self._message_box.warning(
-                parent, "민원은 저장됐지만 자동 백업에 실패했습니다", str(backup.error)
+                parent, "민원은 저장됐지만 자동 백업에 실패했습니다", user_error(backup.error)
             )
         return ComplaintOutcome(
             ComplaintStatus.COMPLETED, self._session.database.current_roster() or roster

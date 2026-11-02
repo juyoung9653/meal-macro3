@@ -35,10 +35,11 @@ def test_settings_hub_has_db_and_computer_local_jobs(app):
 
     assert tuple(dialog._cards) == tuple(SettingsAction)
     assert [action.label for action in dialog._cards] == [
+        "가구 묶기 기준",
         "공통 제공기관",
         "생성 Excel 비밀번호",
         "문서 양식",
-        "청구서·확인서 항목 설정",
+        "문서 항목 설정",
         "식수·청구서 설정",
         "식종별 배송 기본값",
         "중지 표시 기간",
@@ -54,7 +55,7 @@ def test_settings_hub_has_db_and_computer_local_jobs(app):
         "운영 파일 비밀번호 변경",
         "구주소 업데이트",
         "주소 API 키",
-        "다른 사용자 화면 설정 가져오기",
+        "다른 사용자 화면 설정 불러오기",
     ]
     assert not any("조식 배송 규칙" in action.label for action in SettingsAction)
     assert "공통 설정" in SettingsAction.DOCUMENT_DIRECTORY.scope_label
@@ -202,7 +203,7 @@ def test_user_view_layout_action_runs_import_instead_of_directory_settings(accep
         settings=SimpleNamespace(document_output_directory=None),
         settings_hub_dialog_type=Hub,
         document_directory_dialog_type=lambda *_args, **_kwargs: pytest.fail(
-            "화면 설정 가져오기에서 문서 저장 폴더 설정을 열면 안 됩니다"
+            "화면 설정 불러오기에서 문서 저장 폴더 설정을 열면 안 됩니다"
         ),
     )
 

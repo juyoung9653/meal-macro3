@@ -1,5 +1,7 @@
 """Choose and publish the current database's roster and history workbook."""
 
+from .user_messages import user_error
+
 from .dialog_workflow import DialogRequest, dialog_workflow
 from dataclasses import dataclass
 from datetime import date
@@ -230,7 +232,7 @@ class DatabaseExportController:
             run_worker_with_delayed_progress(worker, progress)
             result = take_worker_result(worker)
         except Exception as error:  # noqa: BLE001 - report output failures at the UI boundary
-            self._messages.critical(parent, "Excel을 내보내지 못했습니다", str(error))
+            self._messages.critical(parent, "Excel을 내보내지 못했습니다", user_error(error))
             return None
         self._messages.information(parent, "Excel 내보내기 완료", f"저장했습니다: {result.output_path}")
         return result

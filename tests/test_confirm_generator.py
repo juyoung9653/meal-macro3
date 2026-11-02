@@ -455,49 +455,46 @@ def test_renders_five_person_household_without_omission(
         wb.close()
 
 
-def test_happy_lunch_delivery_phone_placeholder_is_explicitly_blank(tmp_path: Path):
-    template = "assets/행복도시락/행복도시락_확인서템플릿.xlsx"
-    if not os.path.exists(template):
-        pytest.skip("행복도시락 확인서 템플릿 없음")
+@pytest.mark.parametrize("phone_token", [None, "{d_phone}", "{phone1}"])
+def test_confirmation_can_omit_phone_output(tmp_path: Path, phone_token):
+    # Users can remove phone placeholders or explicitly leave them unmapped.
+    template = tmp_path / "confirmation.xlsx"
+    workbook = openpyxl.Workbook()
+    workbook.remove(workbook.active)
+    for size in range(1, 6):
+        sheet = workbook.create_sheet(f"{size}명")
+        sheet["A1"] = "{title}"
+        sheet["A2"] = "{child1}"
+        sheet["A3"] = "{delivery}"
+        if phone_token is not None:
+            sheet["B2"] = phone_token
+    workbook.save(template)
+    workbook.close()
 
-    person = MonthlyDelivery(
-        roster=RosterEntry(
-            2,
-            {
-                "성명": "홍길동",
-                "세대주 성명": "홍보호",
-                "핸드폰": "010-1111-1111",
-                "관할동": "정자동",
-                "도로명주소": "성남시 분당구 1",
-            },
-        ),
-        note="",
-        delivery_staff="기사A",
-        delivery_sequence="",
-        breakfast_count=0,
-        lunch_count=1,
-        dinner_count=0,
-        weekly=_weekly_counts(lunch=1),
-    )
-
-    created, _publication = make_confirm_publication(
+    person = _typed_delivery("합성 이름", "household", "합성 주소")
+    output = tmp_path / "confirmation-output.xlsx"
+    created, _ = make_confirm_publication(
         batch=MonthlyDeliveryBatch(
             2026, 6, MealPrices(9500, 9500, 9500), False, (person,)
         ),
-        col_mapping={},
-        output_path=tmp_path / "확인서_202606.xlsx",
-        template_path=template,
+        col_mapping={"{phone1}": ""},
+        output_path=output,
+        template_path=str(template),
         meal_type="행복도시락",
     )
 
-    placeholder = scan_placeholders(template, ["1명"])["1명"]["d_phone"][0]
-    wb = openpyxl.load_workbook(tmp_path / created[0]["file"], data_only=False)
+    workbook = openpyxl.load_workbook(output)
     try:
-        ws = wb[created[0]["sheet_name"]]
-        assert ws.cell(*placeholder).value is None
-        assert ws["K3"].value == "기사A"
+        sheet = workbook[created[0]["sheet_name"]]
+        assert sheet["A2"].value == "합성 이름"
+        assert sheet["A3"].value == "기사A"
+        assert sheet["B2"].value is None
+        assert all(
+            cell.value != person.roster.extra["핸드폰"]
+            for row in sheet for cell in row
+        )
     finally:
-        wb.close()
+        workbook.close()
 
 
 @pytest.mark.parametrize("profile", ["급식", "행복도시락"])

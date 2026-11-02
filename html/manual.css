@@ -14,3 +14,6 @@ figure{margin:28px 0 32px;background:#f7fafb;border:1px solid var(--line);paddin
 @media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
 @media print{@page{size:A4;margin:15mm}body{font-size:11pt;color:#000;line-height:1.65}.layout{display:block}.sidebar,.tools,.page-toc,.pager,footer,.skip,#image-viewer,figcaption span{display:none!important}main{padding:0;max-width:none}.page-header{padding-bottom:12px}h1{font-size:22pt}h2{font-size:16pt;break-after:avoid}section{margin-bottom:26px;break-before:auto}section+section{padding-top:18px}.route,.note,table{font-size:10pt}.steps li{break-inside:avoid}figure{break-inside:avoid;padding:5px;margin:15px 0}.shot img{max-height:180mm;width:auto;max-width:100%}figcaption{font-size:9pt}a{color:#000;text-decoration:none}th,td{font-size:10pt;padding:7px}tr{break-inside:avoid}.quick-links{grid-template-columns:1fr 1fr}}
 
+
+/* Give task questions enough room in the user-guide index. */
+#questions th:first-child,#questions td:first-child{width:66%}

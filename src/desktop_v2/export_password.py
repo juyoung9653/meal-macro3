@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .user_messages import user_error
+
 from .dialog_workflow import DialogRequest, dialog_workflow, invoke
 
 from .startup_loading import run_progress_task, save_revision
@@ -320,7 +322,7 @@ class ExportPasswordController:
         def load():
             roster = self._session.database.current_roster()
             if roster is None:
-                raise ValueError("현재 명단이 없습니다. 기존 명단 가져오기를 먼저 완료해주세요.")
+                raise ValueError("현재 명단이 없습니다. 기존 명단 불러오기를 먼저 완료해주세요.")
             snapshot = self._session.database.snapshot(roster.revision_id)
             stored_state = snapshot.entity(EXPORT_PASSWORD_SETTING_KIND, EXPORT_PASSWORD_SETTING_ID)
             return roster, stored_state, export_password_setting_from_state(stored_state)
@@ -331,7 +333,7 @@ class ExportPasswordController:
                 message="문서 생성에 사용할 저장된 설정을 확인하는 중입니다.", parent=parent,
             )
         except Exception as error:
-            self._message_box.critical(parent, "Excel 비밀번호 설정을 읽지 못했습니다", str(error))
+            self._message_box.critical(parent, "Excel 비밀번호 설정을 읽지 못했습니다", user_error(error))
             return None, None, None
 
     @dialog_workflow
@@ -365,7 +367,7 @@ class ExportPasswordController:
                 parent,
                 "Excel 비밀번호를 저장하지 못했습니다",
                 "비밀번호와 변경 이력은 저장하지 않았습니다. 내용을 확인한 뒤 다시 시도해주세요.\n\n"
-                + str(error),
+                + user_error(error),
             )
             return ExportPasswordChangeOutcome(ExportPasswordChangeStatus.FAILED)
         if updated_roster is None:
@@ -375,12 +377,12 @@ class ExportPasswordController:
                 "비밀번호는 저장됐지만 현재 상태를 다시 읽지 못했습니다. 프로그램을 다시 열어주세요.",
             )
             return ExportPasswordChangeOutcome(ExportPasswordChangeStatus.FAILED)
-        if backup_result.error is not None:
+        if backup_result.warning_required:
             self._message_box.warning(
                 parent,
                 "비밀번호는 저장됐지만 자동 백업에 실패했습니다",
                 "Excel 비밀번호와 이력은 운영 데이터에 정상 저장되었습니다. 백업 폴더 연결을 확인한 뒤 백업을 다시 실행해주세요.\n\n"
-                + str(backup_result.error),
+                + user_error(backup_result.error),
             )
         return ExportPasswordChangeOutcome(
             ExportPasswordChangeStatus.COMPLETED,

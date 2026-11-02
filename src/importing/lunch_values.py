@@ -42,6 +42,30 @@ def grade_rank(value):
     return int(match[1]) if match else None
 
 
+def preferred_school_name(*names):
+    """Prefer an existing full spelling only when the school stems are equal."""
+    values = [name for name in names if name and name.strip()]
+    if len(values) < 2:
+        return None
+    identities = []
+    full_names = []
+    for name in values:
+        compact = re.sub(r"\s+", "", name)
+        for suffix, stage, full in (("초등학교", 2, True), ("중학교", 3, True),
+                                    ("고등학교", 4, True), ("초", 2, False),
+                                    ("중", 3, False), ("고", 4, False)):
+            if compact.endswith(suffix) and len(compact) > len(suffix):
+                identities.append((compact[:-len(suffix)], stage))
+                if full:
+                    full_names.append(name)
+                break
+        else:
+            identities.append((compact, None))
+    if len(set(identities)) != 1:
+        return None
+    return full_names[0] if full_names else values[0]
+
+
 def preferred_school(before, incoming):
     """Return old/new, or None when the pair needs a person's decision."""
     old_stage = school_stage(before.school_type, before.school_name)
@@ -57,7 +81,7 @@ def preferred_school(before, incoming):
     if old_stage != new_stage:
         return "new" if new_stage > old_stage else "old"
     if before.school_name and incoming.school_name and (
-        re.sub(r"\s+", "", before.school_name) != re.sub(r"\s+", "", incoming.school_name)
+        preferred_school_name(before.school_name, incoming.school_name) is None
     ):
         return None
     old_grade, new_grade = grade_rank(before.grade), grade_rank(incoming.grade)
@@ -120,6 +144,7 @@ def lunch_value_rows(current, result, plan, *, include_assignments=True):
         if not any(field in obs.profile_values for field in (ProfileField.SCHOOL_NAME, ProfileField.SCHOOL_TYPE)):
             raw = replace(raw, school_name=old.school_name, school_type=old.school_type)
         school_choice = preferred_school(old, raw)
+        school_name = preferred_school_name(old.school_name, raw.school_name)
         source = f"{obs.source.sheet_name} {', '.join(map(str, obs.source.row_numbers))}행"
 
         def add(field, before, incoming, proposed, automatic=False, definition=None):
@@ -147,6 +172,8 @@ def lunch_value_rows(current, result, plan, *, include_assignments=True):
                 proposed = before if school_choice == "old" else incoming
                 if incoming is None and school_stage(old.school_type, old.school_name) == school_stage(raw.school_type, raw.school_name):
                     proposed = before
+            if key == "school_name" and school_name is not None:
+                proposed, automatic = school_name, True
             add(key, before, incoming, proposed, automatic)
         # Move school and grade as a pair; do not retain an elementary grade
         # when the incoming school is secondary but the grade is absent.

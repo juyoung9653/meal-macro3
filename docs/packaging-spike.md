@@ -181,3 +181,37 @@ $spikePython = Join-Path $spikeEnv 'Scripts\python.exe'
 - 과거 행 추가에서 가구 소속 시작일이 식종 가입일보다 늦었던 대상자는 `설정 → 가구 소속 기록 복구`에서 확인 후 정정할 수 있다. 운영 파일을 자동으로 수정하지 않는다.
 - 관련 통합 테스트 92개와 애플리케이션 문서 흐름 5개가 통과했다. 독립 검토와 화면 확인을 마쳤으며 `dist/meal_delivery.exe` 파일 버전 0.1.4 및 `--packaging-smoke` 종료 코드 0을 확인했다.
 - 검증 로그·스크린샷·실행파일 해시는 `artifacts/release-0.1.4/`에 보관한다. 전체 테스트 성공을 뜻하지 않으며 기존 애플리케이션 날짜 기대값 실패와 이 환경의 Excel COM 렌더링 오류는 별도로 남아 있다.
+
+## 0.2.0 재빌드·사용 설명서 갱신 (2026-10-29)
+
+- 사용자 요청으로 현재 작업 중인 소스를 포함해 `sqlite_v2.spec`으로 `dist/meal_delivery.exe`를 재빌드했다. 앱 버전은 기존 `0.2.0`을 유지했다.
+- 실행 파일 크기: 76,580,233 bytes. Windows 파일 버전: `0.2.0`. SHA-256: `d56a80da633c08a99c7572affde6ff6931cd75786640e3b3d666e055714e1ada`.
+- 실행 파일 `--packaging-smoke` 종료 코드 0. 빌드 명령은 `python -m PyInstaller --noconfirm --workpath artifacts/build-20261029/work sqlite_v2.spec`이다. 운영 DB를 열어 GUI 전체를 검증한 결과는 아니다.
+- `QT_QPA_PLATFORM=offscreen`에서 `python -m pytest -q tests -m "not excel"` 실행: 2,544 passed, 8 failed, 23 deselected, 5 warnings. Excel 연동 검사는 제외했다. 전체 회귀 검사가 통과한 빌드는 아니다.
+- 실패는 한국어 오류 안내로 바뀐 뒤 영문 문자열을 기대하는 검사 3건, `warning_required` 없는 백업 대역 객체를 쓰는 검사 4건(배송순서 갱신 확인 포함), 확인서의 식수 0을 빈 셀 대신 숫자 0으로 기대하는 검사 1건이다. 이번 빌드·설명서 작업에서는 앱 코드와 테스트를 변경하지 않았다. 실패 상세와 전체 로그는 `artifacts/build-20261029/tests.log`에 보관했다.
+- HTML 8개 페이지의 절차·메뉴·설정 안내와 설정 화면 2장을 갱신했다. 설정 20개와 더보기 메뉴 12개를 대조했으며 417개 파일·앵커 링크 검사를 통과했다. 브라우저에서 주요 페이지의 이미지·가로 넘침·확대 보기와 Esc 닫기를 확인했다.
+- `AI_사용설명서.txt`는 67개 본문 항목과 132개 상황별 질문을 담은 단일 사용자 설명서다. 코드 없이 챗봇에 첨부하는 용도이며, HTML 원본과 `docs/manual-intents.json`으로부터 `python scripts/export_ai_manual.py`로 재생성한다.
+- 배포 폴더에 실행 파일과 `AI_사용설명서.txt`, `설명서.html`, `html/`을 함께 둔다. HTML 설명서는 `설명서.html`과 `html/`을 함께 전달한다. 챗봇에는 AI용 텍스트 한 파일만 첨부한다.
+- 빌드 로그·해시·화면 검증·설명서 검증 결과: `artifacts/build-20261029/`.
+
+## 0.2.0 월중 가구 변경 출력 수정 재빌드 (2026-10-29)
+
+- 사용자 요청으로 현재 소스를 재빌드했다. 월중 가구 변경 시 청구서·확인서를 차단하지 않고 문서 종료일 소속으로 묶는다. 기준일 소속이 없으면 포함된 식사일 중 마지막으로 확인되는 가구를 사용하며 날짜별 식수·금액·과거 소속 기록을 유지한다.
+- 앱·Windows 파일·제품 버전은 기존 `0.2.0`을 유지했다.
+- 결과: `dist/meal_delivery.exe`, 76,598,866 bytes. SHA-256: `f4aba23cf0d7e8d7ef75b6395e9d84c97dc13ff537a558e1a2fb6e115391adef`.
+- 빌드 명령: `python -m PyInstaller --noconfirm --workpath artifacts/rebuild-monthly-household-20261029/work sqlite_v2.spec`.
+- 소스 및 실행 파일 `--packaging-smoke` 종료 코드 모두 0. 운영 DB를 열거나 전체 GUI·Excel 기능을 검증한 결과는 아니다.
+- 직전 소스 변경 검증: 관련 52건 통과. 전체 회귀 검사는 2,616 passed, 5 failed, 23 deselected(Excel 연동 제외)였다. 실패 5건은 수정 전 월간 문서 계산 코드에서도 재현했으며 상세는 `artifacts/monthly-household-output/validation-summary.json`에 있다. 이번 재빌드에서는 전체 검사를 반복하지 않았다.
+- 배포 HTML·AI 설명서 63개 파일이 원본과 동일함을 확인했다. 운영 데이터와 공통 설정은 변경하지 않았다.
+- 이전 실행 파일, 빌드 로그, 검사 결과·해시는 `artifacts/rebuild-monthly-household-20261029/`에 보관한다.
+
+
+## 0.2.0 확인서 다음 달 주말 표시 옵션 재빌드 (2026-10-29)
+
+- 사용자 요청으로 현재 소스를 재빌드했다. 확인서 마지막 주에 다음 달 토·일요일을 표시하는 선택 옵션을 포함하며, 월~일 주차와 기존 식수 계산 기준을 유지한다.
+- 앱·Windows 파일·제품 버전은 기존 0.2.0을 유지했다.
+- 결과: dist/meal_delivery.exe, 76,600,270 bytes. SHA-256: 87743b5379a90ca64e201e554d41c4e0a4b9c03e232dd8f2bd1d1bddc1501238.
+- 빌드 명령: python -m PyInstaller --noconfirm --workpath artifacts/build-confirmation-weekend-20261029/work sqlite_v2.spec.
+- 소스와 실행 파일의 --packaging-smoke 종료 코드 모두 0. 전체 GUI·Excel 기능 검증을 대신하지 않는다.
+- 직전 변경 검증에서 관련 테스트 97개가 통과했다. 이번 빌드에서는 전체 회귀 검사를 반복하지 않았다.
+- 배포 HTML·AI 설명서 63개 파일이 원본과 일치했다. 이전 실행 파일·빌드 로그·해시·검사 결과는 artifacts/build-confirmation-weekend-20261029/에 보관한다.

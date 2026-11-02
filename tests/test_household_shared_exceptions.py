@@ -1,4 +1,6 @@
 """Per-person exemption behavior at the revision and UI boundaries."""
+
+from src.storage.database_session import AutomaticBackupResult
 import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from dataclasses import replace
@@ -197,7 +199,7 @@ def test_controller_save_boundaries(mode):
     def append(record):
         calls.append(record)
         if mode=="failed": raise RuntimeError("save failed")
-        return SimpleNamespace(error=None)
+        return AutomaticBackupResult(error=None)
     session=SimpleNamespace(database=db,append_revision=append,last_committed_roster=None)
     messages=SimpleNamespace(critical=lambda *args:errors.append(args),warning=lambda *args:None)
     outcome=HouseholdSharedExceptionsController(session,dialog_type=Dialog,message_box=messages,actor_provider=lambda:ACTOR,recorded_at_provider=lambda:NOW).run(DAY)

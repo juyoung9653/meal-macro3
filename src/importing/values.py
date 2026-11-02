@@ -54,6 +54,13 @@ def import_value_rows(current, result, plan):
     return tuple(rows)
 
 
+def conflicting_value_rows(rows):
+    """Only overwrites that need a choice, excluding automatic or unchanged values."""
+    return tuple(row for row in rows
+                 if not row.automatic and row.before not in (None, "")
+                 and row.proposed != row.before)
+
+
 def apply_import_values(current, result, plan, choices):
     rows = import_value_rows(current, result, plan)
     supplied = dict(choices or {})

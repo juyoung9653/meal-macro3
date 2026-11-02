@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .user_messages import user_error
+
 from .dialog_workflow import DialogRequest, dialog_workflow
 
 from .startup_loading import save_revision
@@ -343,7 +345,7 @@ class UnitPriceChangeController:
             self._message_box.critical(
                 parent,
                 "단가를 변경하지 못했습니다",
-                "현재 명단이 없습니다. 기존 명단 가져오기를 먼저 완료해주세요.",
+                "현재 명단이 없습니다. 기존 명단 불러오기를 먼저 완료해주세요.",
             )
             return UnitPriceChangeOutcome(UnitPriceChangeStatus.FAILED)
         source = self._session.database.snapshot(roster.revision_id)
@@ -357,7 +359,7 @@ class UnitPriceChangeController:
             self._message_box.critical(
                 parent,
                 "단가 이력을 읽지 못했습니다",
-                str(error),
+                user_error(error),
             )
             return UnitPriceChangeOutcome(UnitPriceChangeStatus.FAILED)
         dialog = self._dialog_type(schedule, self._today_provider(), parent)
@@ -382,7 +384,7 @@ class UnitPriceChangeController:
                 parent,
                 "단가를 저장하지 못했습니다",
                 "단가와 변경 이력은 저장하지 않았습니다. 내용을 확인한 뒤 다시 시도해주세요.\n\n"
-                + str(error),
+                + user_error(error),
             )
             return UnitPriceChangeOutcome(UnitPriceChangeStatus.FAILED)
         if updated_roster is None:
@@ -392,12 +394,12 @@ class UnitPriceChangeController:
                 "단가는 저장됐지만 현재 명단을 다시 읽지 못했습니다. 프로그램을 다시 열어주세요.",
             )
             return UnitPriceChangeOutcome(UnitPriceChangeStatus.FAILED)
-        if backup_result.error is not None:
+        if backup_result.warning_required:
             self._message_box.warning(
                 parent,
                 "단가는 저장됐지만 자동 백업에 실패했습니다",
                 "단가와 이력은 운영 데이터에 정상 저장되었습니다. 백업 폴더 연결을 확인한 뒤 백업을 다시 실행해주세요.\n\n"
-                + str(backup_result.error),
+                + user_error(backup_result.error),
             )
         return UnitPriceChangeOutcome(
             UnitPriceChangeStatus.COMPLETED,

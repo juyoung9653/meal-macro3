@@ -1,5 +1,7 @@
 """Whole-file complaint browsing is searchable, read-only, and responsive."""
 
+from src.storage.database_session import AutomaticBackupResult
+
 from dataclasses import replace
 from datetime import UTC, date, datetime
 from types import SimpleNamespace
@@ -95,7 +97,7 @@ def test_entire_file_ignores_roster_filters_keeps_deleted_names_and_newest_first
         assert [row[1] for row in dialog.model.rows] == ["합성 나래", "합성 이전 대상자", "합성 가람"]
         assert dialog.model.rows[0][0] == date(2026, 10, 3)
         assert dialog.model.headings == (
-            "접수일", "성명", "식종", "채널", "내용", "변경자", "변경번호", "기록 시각(KST)",
+            "접수일", "성명", "핸드폰", "식종", "채널", "내용", "변경자", "변경번호", "기록 시각(KST)",
         )
         assert all("UUID" not in heading and "ID" not in heading for heading in dialog.model.headings)
         assert database.calls == ["current_roster", "snapshot", "revision"]
@@ -135,8 +137,8 @@ def test_full_details_change_with_selection_and_no_matches_clears_details(app):
     try:
         assert database.complaints[1].content in dialog.details.toPlainText()
         assert dialog.table.textElideMode() == Qt.TextElideMode.ElideNone
-        assert "\n" not in dialog.proxy.data(dialog.proxy.index(0, 4))
-        assert dialog.proxy.data(dialog.proxy.index(0, 4), Qt.ItemDataRole.ToolTipRole) == database.complaints[1].content
+        assert "\n" not in dialog.proxy.data(dialog.proxy.index(0, 5))
+        assert dialog.proxy.data(dialog.proxy.index(0, 5), Qt.ItemDataRole.ToolTipRole) == database.complaints[1].content
         assert "기록 시각(KST): 2026-10-04 10:00" in dialog.details.toPlainText()
         assert "변경자: 합성 담당자" in dialog.details.toPlainText()
         assert "00000000-" not in dialog.details.toPlainText()
@@ -173,7 +175,7 @@ def test_startup_wires_complaints_signal_to_read_only_dialog(app):
         current_roster=lambda: roster,
         snapshot=lambda revision_id: HistoricalSnapshot(revision_id, {}),
     )
-    session = SimpleNamespace(database=database, credentials=SimpleNamespace(database_id=UUID(int=5)))
+    session = SimpleNamespace(database=database, retry_backup_on_open=lambda: AutomaticBackupResult(), credentials=SimpleNamespace(database_id=UUID(int=5)))
 
     class Window(QWidget):
         complaint_history_requested = Signal()
@@ -272,19 +274,19 @@ def test_header_filters_sort_and_export_preserve_full_values(app, tmp_path):
         assert dialog.proxy.rowCount() == 1
         dialog._set_column_search("content", "끝까지")
         rows = dialog.export_rows()
-        assert len(rows) == 1 and "\n" in rows[0][4]
-        book = build_complaints_workbook(dialog.model.headings[:7], rows)
+        assert len(rows) == 1 and "\n" in rows[0][5]
+        book = build_complaints_workbook(dialog.model.headings[:-1], rows)
         target = tmp_path / "complaints.xlsx"
         book.save(target)
         book.close()
         saved = openpyxl.load_workbook(target)
         try:
             sheet = saved.active
-            assert sheet["E2"].value == rows[0][4]
-            assert sheet["F2"].value == "합성 담당자"
-            assert sheet["G2"].value == rows[0][6]
+            assert sheet["F2"].value == rows[0][5]
+            assert sheet["G2"].value == "합성 담당자"
+            assert sheet["H2"].value == rows[0][7]
             assert sheet["A2"].number_format == "yyyy-mm-dd"
-            assert sheet.auto_filter.ref == "A1:G2"
+            assert sheet.auto_filter.ref == "A1:H2"
         finally:
             saved.close()
         dialog._set_column_values("channel", frozenset())
@@ -334,7 +336,7 @@ def test_export_button_encrypts_filtered_rows_and_cancel_does_not_write(app, tmp
         try:
             assert book.active.max_row == 2
             assert book.active["B2"].value == "합성 나래"
-            assert "끝까지 보이는 내용" in book.active["E2"].value
+            assert "끝까지 보이는 내용" in book.active["F2"].value
         finally:
             book.close()
             plain.close()
@@ -356,10 +358,10 @@ def test_revision_sort_uses_numeric_suffix_and_header_picker_applies(app):
     try:
         rows = list(dialog.model.rows)
         dialog.model.beginResetModel()
-        dialog.model.rows = tuple((*row[:6], code, row[7]) for row, code in zip(rows, ("20261004-10", "20261004-2", "20261004-1")))
+        dialog.model.rows = tuple((*row[:7], code, row[8]) for row, code in zip(rows, ("20261004-10", "20261004-2", "20261004-1")))
         dialog.model.endResetModel()
-        dialog._cycle_sort(6)
-        assert [row[6] for row in dialog.export_rows()] == ["20261004-1", "20261004-2", "20261004-10"]
+        dialog._cycle_sort(7)
+        assert [row[7] for row in dialog.export_rows()] == ["20261004-1", "20261004-2", "20261004-10"]
         dialog.header.open_value_filter("name")
         picker = dialog.header._menu.findChild(ColumnValuePicker)
         picker.applied.emit("나래", None)
@@ -367,3 +369,39 @@ def test_revision_sort_uses_numeric_suffix_and_header_picker_applies(app):
         assert dialog.export_rows()[0][1] == "합성 나래"
     finally:
         dialog.close()
+
+
+def test_household_columns_follow_saved_multiple_criteria_in_search_filter_and_export(app):
+    from src.domain.household_grouping import GROUPING_ID, GROUPING_KIND
+    from src.domain.roster import CustomFieldDefinition, CustomFieldType
+    database = SyntheticComplaintDatabase()
+    custom_id = UUID(int=902)
+    field = CustomFieldDefinition(custom_id, "가구 확인값", CustomFieldType.TEXT, 0)
+    database.roster = replace(database.roster, custom_fields=(field,), persons=tuple(
+        replace(person, profile=replace(person.profile, household_head_name="합성 세대주",
+            custom_values={custom_id: "기준 A" if index == 0 else "기준 B"}))
+        for index, person in enumerate(database.roster.persons)))
+    database.state = HistoricalSnapshot(database.state.revision_id, {
+        **database.state.entities,
+        EntityRef(GROUPING_KIND, GROUPING_ID): {"match_mode": "all", "columns": ["household_head_name", f"custom:{custom_id}"]},
+    })
+    dialog = ComplaintsHistoryDialog(database)
+    try:
+        assert dialog.model.headings[:5] == ("접수일", "성명", "세대주 성명", "가구 확인값", "식종")
+        assert dialog.model.rows[1][2:4] == ("", "")  # deleted person's values are unknown
+        dialog.search.setText("기준 A")
+        assert dialog.proxy.rowCount() == 1
+        assert dialog.export_rows()[0][1:4] == ("합성 가람", "합성 세대주", "기준 A")
+        dialog.search.clear()
+        dialog._set_column_values(f"household:custom:{custom_id}", frozenset({"기준 B"}))
+        assert dialog.export_rows()[0][1] == "합성 나래"
+        assert dialog.column_filter_values("household:household_head_name") == ("", "합성 세대주")
+    finally:
+        dialog.close()
+    database.state = HistoricalSnapshot(database.state.revision_id, {
+        **database.state.entities,
+        EntityRef(GROUPING_KIND, GROUPING_ID): {"match_mode": "all", "columns": ["name", "mobile"]},
+    })
+    reopened = ComplaintsHistoryDialog(database)
+    assert reopened.model.headings[:4] == ("접수일", "성명", "핸드폰", "식종")
+    reopened.close()

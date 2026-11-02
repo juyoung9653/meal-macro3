@@ -48,7 +48,7 @@ from src.domain.unit_pricing import (
 )
 from src.services.sqlite_document_service import (
     HouseholdServiceDatesError,
-    _household_for_service_dates,
+    _household_for_document,
     prepare_monthly_document_data,
 )
 
@@ -172,7 +172,7 @@ def _source_snapshot(*, include_school: bool = True, delivery_settings: tuple[Ho
     return HistoricalSnapshot(revision_id, states)
 
 
-@pytest.mark.parametrize("case", ("missing", "outside", "multiple"))
+@pytest.mark.parametrize("case", ("missing", "outside"))
 def test_household_diagnostic_identifies_person_dates_and_recorded_fields(case):
     source = _source_snapshot()
     roster = roster_from_historical_snapshot(source)
@@ -183,11 +183,6 @@ def test_household_diagnostic_identifies_person_dates_and_recorded_fields(case):
         "missing": (),
         "outside": (
             replace(original, period=InclusiveDateRange(date(2026, 9, 1), None)),
-        ),
-        "multiple": (
-            replace(original, period=InclusiveDateRange(None, date(2026, 8, 15))),
-            HouseholdMembership(person.person_id, second_household.household_id,
-                                InclusiveDateRange(date(2026, 8, 16), None)),
         ),
     }[case]
     changed = replace(roster, memberships=memberships,
@@ -218,31 +213,27 @@ def test_household_diagnostic_identifies_person_dates_and_recorded_fields(case):
     elif case == "outside":
         assert "실제 서비스일과 겹치지 않습니다" in text
         assert "적용 시작일 2026-09-01, 종료일 없음" in text
-    else:
-        assert "가구 소속이 2개" in text
-        assert "가구 1: 적용 시작일 제한 없음, 종료일 2026-08-15" in text
-        assert "가구 2: 적용 시작일 2026-08-16, 종료일 없음" in text
 
 
 def test_household_diagnostic_lists_exact_dates_without_filling_service_gaps():
     roster = roster_from_historical_snapshot(_source_snapshot())
     roster = replace(roster, memberships=())
     with pytest.raises(HouseholdServiceDatesError) as caught:
-        _household_for_service_dates(roster, roster.persons[0].person_id, (
+        _household_for_document(roster, roster.persons[0].person_id, (
             date(2026, 8, 7), date(2026, 8, 3), date(2026, 8, 4), date(2026, 8, 3),
-        ))
+        ), effective_on=date(2026, 8, 31))
     assert "실제 서비스일: 2026-08-03 ~ 2026-08-04, 2026-08-07\n" in str(caught.value)
 
 
-def test_household_resolution_still_accepts_any_intersection_with_service_dates():
+def test_document_household_falls_back_to_a_known_service_day():
     roster = roster_from_historical_snapshot(_source_snapshot())
     membership = roster.memberships[0]
     roster = replace(roster, memberships=(replace(
         membership, period=InclusiveDateRange(date(2026, 8, 4), date(2026, 8, 4)),
     ),))
-    assert _household_for_service_dates(roster, roster.persons[0].person_id, (
+    assert _household_for_document(roster, roster.persons[0].person_id, (
         date(2026, 8, 3), date(2026, 8, 4), date(2026, 8, 7),
-    )) == membership.household_id
+    ), effective_on=date(2026, 8, 31)) == membership.household_id
 
 
 def test_calculates_shared_invoice_and_confirmation_facts_from_source_revision():
@@ -274,7 +265,7 @@ def test_calculates_shared_invoice_and_confirmation_facts_from_source_revision()
         "석식",
     )
     assert prepared.calculation_manifest["billing"]["total_amount"] == 267_000
-    assert prepared.calculation_manifest["calculation_contract_version"] == 5
+    assert prepared.calculation_manifest["calculation_contract_version"] == 6
     assert prepared.calculation_manifest["recurring_service_policy"]["version"] == 5
 
 

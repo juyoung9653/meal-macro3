@@ -27,6 +27,7 @@ from .theme import application_stylesheet, register_application_fonts
 class SettingsAction(StrEnum):
     """The settings jobs recognizable to center staff."""
 
+    HOUSEHOLD_GROUPING = "household_grouping"
     PROVIDER = "provider"
     EXPORT_PASSWORD = "export_password"
     DOCUMENT_TEMPLATE = "document_template"
@@ -62,9 +63,10 @@ class SettingsAction(StrEnum):
 
 
 _SETTINGS_COPY = {
+    SettingsAction.HOUSEHOLD_GROUPING: ("가구 묶기 기준", "같은 가구로 묶을 칼럼을 선택하고 기존 명단에도 적용합니다.", "변경 이력에 기록"),
     SettingsAction.OUTPUT_RETENTION: ("출력 파일 보관기간", "output 폴더의 파일을 자동 삭제할 보관기간을 정합니다. 기본은 1개월입니다.", "공통 설정으로 저장"),
     SettingsAction.USER_VIEW_LAYOUT: (
-        "다른 사용자 화면 설정 가져오기",
+        "다른 사용자 화면 설정 불러오기",
         "같은 DB를 사용하는 다른 사용자의 시트 배치와 칼럼 설정을 가져옵니다.",
         "이 PC의 화면 설정에 적용",
     ),
@@ -85,7 +87,7 @@ _SETTINGS_COPY = {
     ),
     SettingsAction.MISSING_HOUSEHOLD_REPAIR: (
         "가구 소속 기록 복구",
-        "과거 명단 행 추가·방학 중식 가져오기에서 빠진 가구 소속을 확인하고 복구합니다.",
+        "과거 명단 행 추가·방학 중식 불러오기에서 빠진 가구 소속을 확인하고 복구합니다.",
         "변경 이력에 기록",
     ),
     SettingsAction.INITIAL_ROSTER_DATE: (
@@ -119,8 +121,8 @@ _SETTINGS_COPY = {
         "변경 이력에 기록",
     ),
     SettingsAction.DOCUMENT_COLUMN_MAPPING: (
-        "청구서·확인서 항목 설정",
-        "청구서·확인서 양식에 넣을 값과 비어 있을 때 대신 넣을 값을 지정합니다.",
+        "문서 항목 설정",
+        "청구서·확인서와 행복도시락 일일식수에 넣을 값과 비어 있을 때 대신 넣을 값을 지정합니다.",
         "변경 이력에 기록",
     ),
     SettingsAction.DOCUMENT_DIRECTORY: (
@@ -145,12 +147,13 @@ _SETTINGS_COPY = {
     ),
     SettingsAction.DOCUMENT_TEMPLATE: (
         "문서 양식",
-        "청구서·확인서·일일식수·배송대타의 급식 또는 행복도시락 양식을 선택합니다.",
+        "문서 양식과 확인서의 1식·2식·3식 배치 순서를 선택합니다.",
         "변경 이력에 기록",
     ),
 }
 
 _SETTINGS_STAMPS = {
+    SettingsAction.HOUSEHOLD_GROUPING: "가구",
     SettingsAction.OUTPUT_RETENTION: "보관",
     SettingsAction.USER_VIEW_LAYOUT: "화면",
     SettingsAction.SUBSTITUTE_COLUMNS: "칼럼",
@@ -191,7 +194,7 @@ _SETTINGS_GROUPS = (
         SettingsAction.DATABASE_LOCATION, SettingsAction.BACKUP_DIRECTORY,
         SettingsAction.DATABASE_PASSWORD, SettingsAction.OLD_ADDRESS,
         SettingsAction.JUSO_KEY, SettingsAction.INITIAL_ROSTER_DATE,
-        SettingsAction.MISSING_HOUSEHOLD_REPAIR,
+        SettingsAction.HOUSEHOLD_GROUPING, SettingsAction.MISSING_HOUSEHOLD_REPAIR,
     )),
 )
 

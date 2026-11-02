@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from .dialog_workflow import DialogRequest, dialog_workflow
+from .user_messages import user_error
+
+from .dialog_workflow import DialogRequest, dialog_workflow, invoke
 
 from .startup_loading import save_revision
 
@@ -16,7 +18,6 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from io import StringIO
-from pathlib import Path
 from uuid import UUID, uuid4
 
 from PySide6.QtWidgets import QDialog, QDialogButtonBox, QMessageBox, QWidget
@@ -122,6 +123,13 @@ class GuidedRosterImportController:
             model = getattr(parent, "table_model", None)
             labels = {column.key: column.label for column in getattr(model, "columns", ())}
             wizard.set_database_columns(current_roster, labels)
+        if hasattr(wizard, "set_document_targets"):
+            latest = self._session.database.latest_revision()
+            if latest is not None:
+                from src.services.import_column_priority import document_import_targets
+                targets, unavailable = document_import_targets(
+                    self._session.database.snapshot(latest.metadata.revision_id), current_roster)
+                wizard.set_document_targets(targets, unavailable)
         if current_roster is None and hasattr(wizard, "set_initial_import_defaults"):
             wizard.set_initial_import_defaults()
         if (yield DialogRequest(wizard, self._session)) != QDialog.DialogCode.Accepted:
@@ -160,11 +168,15 @@ class GuidedRosterImportController:
             selection.preview.observations,
             effective_on=selection.effective_on,
         )
+        from src.domain.household_grouping import GROUPING_KIND, GROUPING_ID, grouping_columns
+        grouping_snapshot = self._session.database.snapshot(current_roster.revision_id) if current_roster is not None else None
+        explicit_grouping = grouping_snapshot is not None and grouping_snapshot.entity(GROUPING_KIND, GROUPING_ID) is not None
         household_plan = None if purpose is ImportPurpose.VACATION_LUNCH else stage_household_grouping(
             selection.preview.observations,
             selection.household_rule,
             effective_on=selection.effective_on,
             roster=current_roster,
+            separate_only=explicit_grouping,
         )
         review = None
         if import_decision_rows(plan, household_plan):
@@ -195,12 +207,17 @@ class GuidedRosterImportController:
                 )
                 lunch = purpose is ImportPurpose.VACATION_LUNCH
                 rows = (lunch_value_rows if lunch else import_value_rows)(current_roster, candidate, plan)
-                if any(not row.automatic for row in rows):
+                from src.importing.values import conflicting_value_rows
+                value_choices = {row.key: row.proposed for row in rows if not row.automatic}
+                if conflicting_value_rows(rows):
                     dialog_type = self._value_review_type if lunch else self._import_value_review_type
                     value_review = dialog_type(current_roster, candidate, plan, parent)
+                    if hasattr(value_review, "export_requested"):
+                        value_review.export_requested.connect(
+                            lambda snapshot, dialog=value_review: self._export_value_conflicts(dialog, snapshot))
                     if (yield DialogRequest(value_review, self._session)) != QDialog.DialogCode.Accepted:
                         return GuidedImportOutcome(GuidedImportStatus.CANCELLED)
-                    value_choices = value_review.choices()
+                    value_choices.update(value_review.choices())
             prepared = build_import_revision(
                 current_roster,
                 selection.preview,
@@ -212,6 +229,8 @@ class GuidedRosterImportController:
                 batch_id=uuid4(),
                 existing_profile=selection.existing_profile,
                 household_plan=household_plan,
+                household_grouping_columns=grouping_columns(grouping_snapshot),
+                household_grouping_snapshot=grouping_snapshot,
                 household_decisions=(
                     None if household_plan is None
                     else household_plan.default_decisions() if review is None
@@ -227,6 +246,10 @@ class GuidedRosterImportController:
                 record = yield from self._review_shared_values(prepared.record, current_roster, parent)
                 if record is None:
                     return GuidedImportOutcome(GuidedImportStatus.CANCELLED)
+                from .mobile_household_merge import review_mobile_household_merge
+                record = yield from invoke(review_mobile_household_merge, self._session, record, parent)
+                if record is None:
+                    return GuidedImportOutcome(GuidedImportStatus.CANCELLED)
                 prepared = replace(prepared, record=record)
             backup_result = save_revision(self._session, prepared.record, parent=parent)
         except NoImportChanges:
@@ -237,16 +260,16 @@ class GuidedRosterImportController:
                 parent,
                 "명단을 저장하지 못했습니다",
                 "운영 데이터에는 반영하지 않았습니다. 내용을 확인한 뒤 다시 시도해주세요.\n\n"
-                + str(error),
+                + user_error(error),
             )
             return GuidedImportOutcome(GuidedImportStatus.FAILED)
-        if backup_result.error is not None:
+        if backup_result.warning_required:
             self._message_box.warning(
                 parent,
                 "명단은 저장됐지만 자동 백업에 실패했습니다",
                 "명단과 변경 이력은 운영 데이터에 정상 저장되었습니다. "
                 "백업 폴더 연결을 확인한 뒤 프로그램에서 백업을 다시 실행해주세요.\n\n"
-                + str(backup_result.error),
+                + user_error(backup_result.error),
             )
         if purpose is ImportPurpose.VACATION_LUNCH and current_roster is not None:
             lunch = prepared.record.metadata.decisions["vacation_lunch"]
@@ -264,6 +287,29 @@ class GuidedRosterImportController:
             committed_roster_after_save(self._session, prepared.result.snapshot),
             backup_result,
         )
+
+    def _export_value_conflicts(self, parent, snapshot):
+        from src.domain.export_security import require_export_password_setting
+        from .current_sheet_export import CurrentSheetExportController
+        from .import_conflict_export import build_conflict_workbook
+        from .startup_loading import run_progress_task
+
+        def password():
+            current = self._session.database.current_roster()
+            return require_export_password_setting(
+                self._session.database.snapshot(current.revision_id)).password
+
+        parent.export_button.setEnabled(False)
+        try:
+            shared_password = run_progress_task(password, parent=parent,
+                title="Excel 설정 확인", message="공통 Excel 비밀번호를 확인합니다.")
+            CurrentSheetExportController(workbook_builder=build_conflict_workbook,
+                message_box=self._message_box).run(snapshot, shared_password, parent,
+                    directory=self._session.path.parent)
+        except Exception as error:
+            self._message_box.critical(parent, "불일치를 내보내지 못했습니다", user_error(error))
+        finally:
+            parent.export_button.setEnabled(bool(parent.rows))
 
     def _review_shared_values(self, record, current_roster, parent):
         from src.domain.household_shared import (
@@ -296,7 +342,7 @@ class GuidedRosterImportController:
                       "status:breakfast": "조식", "status:lunch": "중식", "status:dinner": "석식"}
                      .get(key, components[0].label))
             dialog = self._shared_review_type(label, True, components, conflicts or rows, on, parent)
-            dialog.setWindowTitle("명단 가져오기 · 공용 값 확인 · " + label)
+            dialog.setWindowTitle("명단 불러오기 · 공용 값 확인 · " + label)
             dialog.enabled.setEnabled(False)
             dialog.note.setText(
                 f"가져올 명단의 {on:%Y-%m-%d} 기준 공용 값을 확인해주세요. "
@@ -326,7 +372,7 @@ class GuidedRosterImportController:
         snapshot = self._session.database.snapshot(latest.metadata.revision_id)
         household_rules = household_matching_rules_from_snapshot(snapshot)
         if len(household_rules) > 1:
-            raise ValueError("활성 가구 묶기 rule이 둘 이상이라 가져오기를 시작할 수 없습니다.")
+            raise ValueError("활성 가구 묶기 rule이 둘 이상이라 불러오기를 시작할 수 없습니다.")
         return (
             import_profiles_from_snapshot(snapshot),
             household_rules[0] if household_rules else None,
@@ -338,7 +384,7 @@ class GuidedInitialImportController(GuidedRosterImportController):
 
     def run(self, parent: QWidget | None = None) -> GuidedImportOutcome:
         if self._session.database.current_roster() is not None:
-            raise ValueError("처음 명단 가져오기는 저장된 명단이 없을 때만 할 수 있습니다.")
+            raise ValueError("처음 명단 불러오기는 저장된 명단이 없을 때만 할 수 있습니다.")
         return super().run(parent)
 
 

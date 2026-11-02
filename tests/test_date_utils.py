@@ -1,6 +1,7 @@
 """Tests for src.core.date_utils — 날짜 범위, 요일 상수, 주차 계산, to_bool."""
 
-from datetime import date
+import calendar
+from datetime import date, timedelta
 
 import pytest
 
@@ -45,26 +46,52 @@ class TestWeekRanges:
         """2026년 6월: 1일 월요일, 30일 화요일 → 5주."""
         weeks = get_week_ranges(2026, 6)
         assert len(weeks) == 5
-        # 1주차: 6/1(월) ~ 6/6(토)
+        # 1주차: 6/1(월) ~ 6/7(일)
         assert weeks[0][0] == 1
         assert weeks[0][1] == date(2026, 6, 1)
-        assert weeks[0][2] == date(2026, 6, 6)
+        assert weeks[0][2] == date(2026, 6, 7)
         assert [number for number, _, _ in weeks] == [1, 2, 3, 4, 5]
 
     def test_31day_6weeks_merge(self):
-        """31일 월 + 금요일 시작 → 마지막 2주 병합."""
-        # 2026년 5월: 1일 금요일, 31일 일요일 → 6주 → 병합
-        weeks = get_week_ranges(2026, 5)
+        """31일 월 + 토요일 시작 → 마지막 2주 병합."""
+        weeks = get_week_ranges(2026, 8)
         assert len(weeks) == 5  # 6주였던 것이 5주로 병합됨
+        assert weeks[0] == (1, date(2026, 8, 1), date(2026, 8, 2))
+        assert weeks[-1] == (5, date(2026, 8, 24), date(2026, 8, 31))
 
-    def test_30day_saturday_start_merges_first_weeks(self):
-        """30일 월 + 토요일 시작도 처음 2주를 병합해 5주로 제한."""
-        # 2025년 11월: 1일 토요일, 30일 일요일
-        weeks = get_week_ranges(2025, 11)
+    def test_30day_sunday_start_merges_first_weeks(self):
+        """30일 월 + 일요일 시작도 처음 2주를 병합해 5주로 제한."""
+        weeks = get_week_ranges(2026, 11)
 
         assert len(weeks) == 5
-        assert weeks[0] == (1, date(2025, 11, 1), date(2025, 11, 8))
-        assert weeks[-1] == (5, date(2025, 11, 30), date(2025, 11, 30))
+        assert weeks[0] == (1, date(2026, 11, 1), date(2026, 11, 8))
+        assert weeks[-1] == (5, date(2026, 11, 30), date(2026, 11, 30))
+
+    def test_october_2026_keeps_friday_through_sunday_together(self):
+        assert get_week_ranges(2026, 10) == [
+            (1, date(2026, 10, 1), date(2026, 10, 4)),
+            (2, date(2026, 10, 5), date(2026, 10, 11)),
+            (3, date(2026, 10, 12), date(2026, 10, 18)),
+            (4, date(2026, 10, 19), date(2026, 10, 25)),
+            (5, date(2026, 10, 26), date(2026, 10, 31)),
+        ]
+
+    @pytest.mark.parametrize("year", range(2024, 2031))
+    def test_covers_every_day_once_with_at_most_five_weeks(self, year):
+        for month in range(1, 13):
+            weeks = get_week_ranges(year, month)
+            assert 4 <= len(weeks) <= 5
+            assert [number for number, _, _ in weeks] == list(range(1, len(weeks) + 1))
+            actual_days = [
+                start + timedelta(days=offset)
+                for _, start, end in weeks
+                for offset in range((end - start).days + 1)
+            ]
+            assert actual_days == [
+                date(year, month, day)
+                for day in range(1, calendar.monthrange(year, month)[1] + 1)
+            ]
+            assert all(end.weekday() == SUN for _, _, end in weeks[:-1])
 
     def test_feb_2026(self):
         """2026년 2월: 28일."""

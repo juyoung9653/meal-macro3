@@ -53,7 +53,7 @@ DEFAULTS: dict[str, Any] = {
     "templates": {
         "invoice_path": "assets/급식/급식_청구서템플릿.xlsx",
         "confirm_path": "assets/급식/급식_확인서템플릿.xlsx",
-        "report_path": "assets/report_template.xlsx",
+        "report_path": "assets/급식/일일식수템플릿.xlsx",
         "sheet_name": "학기_총괄",
         "data_start_row": 4,
         "confirm_sheet_names": ["1명", "2명", "3명", "4명", "5명"],
@@ -226,16 +226,25 @@ class SettingsManager:
             self.get_template_profile(meal_type).confirm_template_path
         )
 
-    def get_substitute_template_path(self) -> str:
+    def get_substitute_template_path(self, profile: str = "급식") -> str:
         """배송대타의 편집용 기본 Excel 양식 경로."""
-        return self._resource_path("assets/substitute_template.xlsx")
+        profile = get_template_profile(profile).key
+        return self._resource_path(f"assets/{profile}/배송목록템플릿.xlsx")
 
     def get_report_template_path(self) -> str:
         """배송리포트 템플릿의 실행 환경별 실제 경로를 반환한다."""
         configured = self.get(
-            "templates", "report_path", default="assets/report_template.xlsx"
+            "templates", "report_path", default="assets/급식/일일식수템플릿.xlsx"
         )
+        if str(configured).replace("\\", "/") in ("assets/report_template.xlsx", "assets/일일식수/급식/일일식수템플릿.xlsx"):
+            configured = "assets/급식/일일식수템플릿.xlsx"
         return self._resource_path(str(configured))
+
+    def get_happy_report_template_path(self, meal: str = "석식") -> str:
+        if meal not in ("조식", "석식", "중식"):
+            raise ValueError("일일식수 식종을 확인해주세요.")
+        variant = "중식" if meal == "중식" else "석식"
+        return self._resource_path(f"assets/행복도시락/{variant}일일식수템플릿.xlsx")
 
     def set_meal_type(self, meal_type: str):
         self.set("app", "meal_type", value=get_template_profile(meal_type).key)
@@ -249,25 +258,6 @@ class SettingsManager:
         Example: ``s.get_delivery_config("max_rows")`` → ``18``
         """
         return self.get("delivery_substitute", key)
-
-    def get_delivery_settings(self) -> dict:
-        """delivery 설정 전체 dict 반환."""
-        return self.get("delivery", default={})
-
-    def set_delivery_settings(
-        self,
-        order: list[str] | None = None,
-        enabled: dict[str, bool] | None = None,
-        orientation: str = "세로",
-        split_mode: str = "동기준",
-    ) -> None:
-        """delivery 설정을 일괄 갱신."""
-        if order is not None:
-            self.set("delivery", "cols", "order", value=order)
-        if enabled is not None:
-            self.set("delivery", "cols", "enabled", value=enabled)
-        self.set("delivery", "orientation", value=orientation)
-        self.set("delivery", "split_mode", value=split_mode)
 
 
 def get_settings() -> SettingsManager:

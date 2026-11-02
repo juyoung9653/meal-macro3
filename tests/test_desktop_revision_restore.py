@@ -150,7 +150,7 @@ def test_restore_backup_failure_still_reports_committed_restore_and_restarts():
     instance.run(uuid4())
     assert calls[0][0] == "restore"
     assert not saved and restarts == [True]
-    assert any(event[0] == "warning" for event in messages.events)
+    assert not any(event[0] == "warning" for event in messages.events)
     assert messages.events[-1][0] == "information"
 
 
@@ -270,7 +270,7 @@ def test_committed_branch_or_restore_backup_failure_still_restarts(branch):
     )
     instance.run(uuid4())
     assert restarts == [True] and not saved
-    assert [kind for kind, _ in messages.events] == ["question", "warning", "information"]
+    assert [kind for kind, _ in messages.events] == ["question", "information"]
 
 
 def test_checkout_no_change_never_restarts():

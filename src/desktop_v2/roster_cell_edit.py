@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+from .user_messages import user_error
+
 from .startup_loading import save_revision
+from .dialog_workflow import dialog_workflow, invoke
+from .mobile_household_merge import review_mobile_household_merge
 
 from src.storage.database_session import committed_roster_after_save
 
@@ -17,7 +21,6 @@ from PySide6.QtWidgets import (
     QAbstractItemDelegate,
     QApplication,
     QComboBox,
-    QLineEdit,
     QMessageBox,
     QPlainTextEdit,
     QStyledItemDelegate,
@@ -288,6 +291,7 @@ class RosterCellEditController:
         self._effective_date_provider = effective_date_provider
         self._revision_id_factory = revision_id_factory
 
+    @dialog_workflow
     def save(
         self,
         person_id: UUID,
@@ -378,22 +382,25 @@ class RosterCellEditController:
                 if forced_routing_fields and str(error) == "변경된 사람 정보가 없습니다.":
                     return RosterCellEditOutcome(RosterCellEditStatus.CANCELLED)
                 raise
-            backup_result = save_revision(self._session, prepared.record, parent=parent)
+            record = yield from invoke(review_mobile_household_merge, self._session, prepared.record, parent)
+            if record is None:
+                return RosterCellEditOutcome(RosterCellEditStatus.CANCELLED)
+            backup_result = save_revision(self._session, record, parent=parent)
         except Exception as error:
             self._message_box.critical(
                 parent,
                 "명단 셀을 저장하지 못했습니다",
                 "운영 데이터에는 반영하지 않았습니다. 내용을 확인한 뒤 다시 시도해주세요.\n\n"
-                + str(error),
+                + user_error(error),
             )
             return RosterCellEditOutcome(RosterCellEditStatus.FAILED)
-        if backup_result.error is not None:
+        if backup_result.warning_required:
             self._message_box.warning(
                 parent,
                 "명단 셀은 저장됐지만 자동 백업에 실패했습니다",
                 "변경 내용과 이력은 운영 데이터에 정상 저장되었습니다. "
                 "백업 폴더 연결을 확인한 뒤 백업을 다시 실행해주세요.\n\n"
-                + str(backup_result.error),
+                + user_error(backup_result.error),
             )
         return RosterCellEditOutcome(
             RosterCellEditStatus.COMPLETED,

@@ -11,6 +11,7 @@ import pytest
 from PySide6.QtCore import QSettings, Qt
 from PySide6.QtWidgets import QApplication, QLineEdit
 
+from src.storage.database_session import AutomaticBackupResult
 from src.desktop_v2.column_search import ALL_SEQUENCES_EMPTY, SequenceValuePicker, sequence_pair_token
 from src.desktop_v2.driver_households import DriverHouseholdsDialog
 from src.desktop_v2.roster_window import RosterTableModel, RosterWindow
@@ -142,11 +143,11 @@ def test_save_value_atomic_noop_invalid_failure_and_backup_warning(tmp_path):
         def backup_warning(record):
             appends.append(record)
             original(record)
-            return SimpleNamespace(error=OSError("백업 폴더 오류"))
+            return AutomaticBackupResult(error=OSError("백업 폴더 오류"))
         session.append_revision = backup_warning
         outcome = controller.save_value(targets, "003")
-        assert outcome.status is SequenceSaveStatus.SAVED and outcome.backup_warning
-        assert "저장됐지만" in outcome.message and len(appends) == 3
+        assert outcome.status is SequenceSaveStatus.SAVED and not outcome.backup_warning
+        assert outcome.message == "배송순서를 저장했습니다." and len(appends) == 3
         assert outcome.roster.revision_id == session.database.current_roster().revision_id
     with DatabaseSession.open(tmp_path / "inline.sqlite3", "password") as session:
         assert session.database.current_roster().resolve_assignment(*targets[1]).sequence == "003"
@@ -190,7 +191,7 @@ def test_application_drag_refreshes_preserves_filters_and_failure_display(app, s
         def warning(record):
             appends.append(record)
             append(record)
-            return SimpleNamespace(error=OSError("백업 실패"))
+            return AutomaticBackupResult(error=OSError("백업 실패"))
         session.append_revision = warning
         manifest.table.move_row(1, 0)
         assert len(appends) == 1
@@ -200,7 +201,7 @@ def test_application_drag_refreshes_preserves_filters_and_failure_display(app, s
         assert manifest._column_searches["members"] == "하나"
         assert manifest.meal_combo.currentData() == Meal.DINNER.value
         assert manifest.source_revision_id == window.roster.revision_id
-        assert "저장됐지만" in manifest.sequence_status.text()
+        assert "저장됐지만" not in manifest.sequence_status.text()
         manifest.close()
         window.close()
 

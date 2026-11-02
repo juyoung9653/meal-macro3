@@ -59,7 +59,7 @@ from src.services.meal_service_availability import (
     RECURRING_MEAL_SERVICE_POLICY_VERSION,
 )
 
-MONTHLY_DOCUMENT_CALCULATION_CONTRACT_VERSION = 5
+MONTHLY_DOCUMENT_CALCULATION_CONTRACT_VERSION = 6
 
 
 class HouseholdServiceDatesError(ValueError):
@@ -176,9 +176,11 @@ def prepare_monthly_document_data(
         {
             "calculation_contract_version": MONTHLY_DOCUMENT_CALCULATION_CONTRACT_VERSION,
             "document_presentation": {
-                "policy_version": 1,
+                "policy_version": 2,
                 "effective_on": period_end.isoformat(),
                 "routing_basis": "document_period_end",
+                "household_basis": "document_period_end",
+                "household_fallback": "latest_service_day_with_membership",
             },
             "source_revision_id": str(snapshot.revision_id),
             "period_basis": "physical_delivery_day" if policy.include_next_month else "service_day",
@@ -269,8 +271,11 @@ def _monthly_batch(
                     delivery_dates=delivery_dates,
                 ),
                 billing_amount=summary.total_amount,
+                billing_amounts={meal: summary.amount_for(meal) for meal in Meal},
                 household_key=str(
-                    _household_for_service_dates(roster, person.person_id, service_dates)
+                    _household_for_document(
+                        roster, person.person_id, service_dates, effective_on=period_end,
+                    )
                 ),
             )
         )
@@ -387,63 +392,67 @@ def _weekly_deliveries(
     return tuple(result)
 
 
-def _household_for_service_dates(
+def _household_for_document(
     roster: RosterSnapshot,
     person_id: UUID,
     service_dates: tuple[date, ...],
+    *,
+    effective_on: date,
 ) -> UUID:
+    """Group the document at period end without rewriting dated service facts.
+
+    If membership ended before the document date, use the latest included
+    service day with a known household. All lookups use the selected source
+    snapshot, not the current live roster.
+    """
+    household = roster.household_for(person_id, on=effective_on)
+    if household is not None:
+        return household.household_id
+    for day in sorted(set(service_dates), reverse=True):
+        household = roster.household_for(person_id, on=day)
+        if household is not None:
+            return household.household_id
     memberships = tuple(
         item for item in roster.memberships if item.person_id == person_id
     )
-    household_ids = {
-        membership.household_id
-        for membership in memberships
-        if any(membership.period.contains(day) for day in service_dates)
-    }
-    if len(household_ids) != 1:
-        person = roster.person(person_id)
-        profile = person.profile
-        identity = [f"성명: {profile.name}"]
-        if profile.birth_date is not None:
-            identity.append(f"생년월일: {profile.birth_date.isoformat()}")
-        if profile.school_name:
-            identity.append(f"학교명: {profile.school_name}")
-        if not memberships:
-            reason = "청구 대상자의 가구 소속 기록이 없습니다."
-        elif not household_ids:
-            reason = "청구 대상자의 가구 소속 기간이 실제 서비스일과 겹치지 않습니다."
-        else:
-            reason = (
-                f"실제 서비스일에 해당하는 가구 소속이 {len(household_ids)}개입니다. "
-                "한 문서 기간의 가구를 하나로 결정할 수 없어 문서를 만들 수 없습니다."
-            )
-        periods = ["저장된 가구 소속 기간:"]
-        household_numbers: dict[UUID, int] = {}
-        for membership in memberships:
-            number = household_numbers.setdefault(
-                membership.household_id, len(household_numbers) + 1
-            )
-            starts_on = membership.period.starts_on
-            ends_on = membership.period.ends_on
-            periods.append(
-                f"- 가구 {number}: 적용 시작일 {starts_on.isoformat() if starts_on else '제한 없음'}, "
-                f"종료일 {ends_on.isoformat() if ends_on else '없음'}"
-            )
-        if not memberships:
-            periods.append("- 기록 없음")
-            periods.append("과거에 추가된 대상자라면 설정 → 가구 소속 기록 복구에서 복구 가능 여부를 확인해주세요.")
-        raise HouseholdServiceDatesError(
-            "\n".join((
-                reason,
-                " / ".join(identity),
-                f"실제 서비스일: {_service_date_ranges(service_dates)}",
-                "확인할 저장 항목: 가구 소속 / 적용 시작일 / 종료일",
-                *periods,
-                "위 날짜와 가구 소속 기록을 확인해주세요. 이 항목은 명단의 표시 칼럼이 아닙니다.",
-            )),
-            person_id,
+    person = roster.person(person_id)
+    profile = person.profile
+    identity = [f"성명: {profile.name}"]
+    if profile.birth_date is not None:
+        identity.append(f"생년월일: {profile.birth_date.isoformat()}")
+    if profile.school_name:
+        identity.append(f"학교명: {profile.school_name}")
+    if not memberships:
+        reason = "청구 대상자의 가구 소속 기록이 없습니다."
+    else:
+        reason = "문서 기준일에 유효한 가구가 없고, 가구 소속 기간이 실제 서비스일과 겹치지 않습니다."
+    periods = ["저장된 가구 소속 기간:"]
+    household_numbers: dict[UUID, int] = {}
+    for membership in memberships:
+        number = household_numbers.setdefault(
+            membership.household_id, len(household_numbers) + 1
         )
-    return next(iter(household_ids))
+        starts_on = membership.period.starts_on
+        ends_on = membership.period.ends_on
+        periods.append(
+            f"- 가구 {number}: 적용 시작일 {starts_on.isoformat() if starts_on else '제한 없음'}, "
+            f"종료일 {ends_on.isoformat() if ends_on else '없음'}"
+        )
+    if not memberships:
+        periods.append("- 기록 없음")
+        periods.append("과거에 추가된 대상자라면 설정 → 가구 소속 기록 복구에서 복구 가능 여부를 확인해주세요.")
+    raise HouseholdServiceDatesError(
+        "\n".join((
+            reason,
+            " / ".join(identity),
+            f"문서 가구 기준일: {effective_on.isoformat()}",
+            f"실제 서비스일: {_service_date_ranges(service_dates)}",
+            "확인할 저장 항목: 가구 소속 / 적용 시작일 / 종료일",
+            *periods,
+            "위 날짜와 가구 소속 기록을 확인해주세요. 이 항목은 명단의 표시 칼럼이 아닙니다.",
+        )),
+        person_id,
+    )
 
 
 def _service_date_ranges(service_dates: tuple[date, ...]) -> str:

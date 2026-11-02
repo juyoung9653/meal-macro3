@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from uuid import UUID
 
+from src.domain.revision_visibility import effective_history_revisions
 from src.domain.meal_history_cancellation import MealHistoryTarget, cancelled_meal_history_targets
 from src.domain.projections import ENROLLMENT_KIND, STATUS_EVENT_KIND, enrollments_from_state, status_event_from_state
 from src.domain.revisions import ChangeOperation, RevisionRecord, RevisionSource, format_revision_timestamp
@@ -53,6 +54,7 @@ def build_meal_history_rows_by_person(revisions):
 
 def build_meal_history_entries_by_person(revisions):
     """Keep stable audit identities separate from user-facing table values."""
+    revisions = effective_history_revisions(revisions)
     rows = defaultdict(list)
     cancelled = cancelled_meal_history_targets(revisions)
     for record in sorted(revisions, key=lambda item: item.metadata.recorded_at):

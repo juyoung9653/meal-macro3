@@ -105,8 +105,7 @@ def test_controller_save_failure_and_backup_only_failure(app, tmp_path, monkeypa
             return AutomaticBackupResult(error=OSError('backup failed'))
         monkeypatch.setattr(session, 'append_revision', backup_failure)
         assert controller.run().completed
-        assert len(messages.warnings) == 1
-        assert '저장됐지만' in messages.warnings[0][0]
+        assert not messages.warnings
     finally:
         session.close()
 

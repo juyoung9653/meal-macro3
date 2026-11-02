@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .user_messages import user_error
+
 from calendar import monthrange
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -322,7 +324,7 @@ class DocumentPeriodDialog(QDialog):
             selection = self.selected_period()
         except (TypeError, ValueError) as error:
             self._summary.clear()
-            self._error.setText(str(error))
+            self._error.setText(user_error(error))
             self._error.show()
             if hasattr(self, "_save_button"):
                 self._save_button.setEnabled(False)

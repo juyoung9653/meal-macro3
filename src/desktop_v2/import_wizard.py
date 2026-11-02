@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .user_messages import user_error
+
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date
@@ -9,15 +11,10 @@ from pathlib import Path
 from typing import Callable, TypeVar
 from uuid import UUID, uuid4, uuid5
 
-from PySide6.QtCore import QDate, QEvent, QEventLoop, QPointF, QSize, QTimer, Qt
+from PySide6.QtCore import QDate, QEvent, QEventLoop, QSize, QTimer, Qt
 from PySide6.QtGui import (
     QColor,
     QFontMetrics,
-    QIcon,
-    QPainter,
-    QPainterPath,
-    QPen,
-    QPixmap,
     QResizeEvent,
 )
 from PySide6.QtWidgets import (
@@ -62,6 +59,7 @@ from src.importing.workbook import (
 from src.importing.contracts import (
     DateNormalization,
     ImportMappingProfile,
+    ImportRowFilter,
     PhoneNormalization,
     ProfileField,
 )
@@ -73,7 +71,7 @@ from src.importing.households import (
 from src.importing.revision import ImportPurpose
 from src.importing.profile_history import StoredImportProfile
 
-from .import_columns import ImportColumnsTable
+from .import_columns import ImportColumnMappingDialog, ImportColumnsTable
 from .date_edit import WheelSafeDateEdit
 from .theme import FOCUS, application_stylesheet, register_application_fonts
 from src.importing.workbook import custom_column_names, source_column_letter
@@ -88,7 +86,7 @@ _FIELD_LABELS = {
     ProfileField.HOUSEHOLD_HEAD_NAME: "세대주 성명",
     ProfileField.RELATIONSHIP_TO_CHILD: "아동과의 관계",
     ProfileField.JURISDICTION: "관할동",
-    ProfileField.ROAD_ADDRESS: "주소 1순위",
+    ProfileField.ROAD_ADDRESS: "도로명주소",
     ProfileField.DETAIL_ADDRESS: "상세주소",
     ProfileField.TELEPHONE: "전화번호",
     ProfileField.MOBILE_PHONE: "핸드폰",
@@ -118,12 +116,6 @@ _HEADER_ALIASES = {
 }
 _ROUTE_STOPS = ("파일 선택", "열 연결 · 적용일", "오류가 있을 때만 수정")
 _BLANK_TOKEN = "(빈칸)"
-_HOUSEHOLD_CRITERION_LABELS = {
-    HouseholdMatchCriterion.MOBILE_PHONE: "핸드폰",
-    HouseholdMatchCriterion.HOUSEHOLD_HEAD_NAME: "세대주 성명",
-    HouseholdMatchCriterion.ADDRESS: "주소",
-    HouseholdMatchCriterion.TELEPHONE: "전화번호",
-}
 _TaskResult = TypeVar("_TaskResult")
 
 
@@ -161,7 +153,7 @@ class RosterImportWizard(QDialog):
             )
         register_application_fonts()
         self.setObjectName("databaseAccessDialog")
-        self.setWindowTitle("기존 Excel 명단 가져오기")
+        self.setWindowTitle("명단 불러오기")
         self.setModal(True)
         self.setStyleSheet(application_stylesheet())
         _fit_dialog_to_available_screen(
@@ -190,11 +182,9 @@ class RosterImportWizard(QDialog):
         self._household_rule_id = uuid4()
         self._loading_structure = False
         self._mapping_initialized = False
+        self._confirmed_mapping_key = None
+        self._mapping_summary_text = ""
         self._mapping_combos: dict[ProfileField, QComboBox] = {}
-        self._household_criterion_checkboxes: dict[
-            HouseholdMatchCriterion,
-            QPushButton,
-        ] = {}
         self._route_labels: list[QLabel] = []
         self._busy = False
         self._owns_wait_cursor = False
@@ -202,6 +192,8 @@ class RosterImportWizard(QDialog):
         self._source_password: str | None = None
         self._meal_mapping_expanded = False
         self._cell_overrides: dict[tuple[int, str], object] = {}
+        self._excluded_rows: set[int] = set()
+        self._pending_excluded_rows: set[int] = set()
         self._correction_editors: dict[
             tuple[int, str],
             QLineEdit | QComboBox,
@@ -210,7 +202,6 @@ class RosterImportWizard(QDialog):
         self._build_ui()
         self.purpose_combo.currentIndexChanged.connect(self._meal_mode_changed)
         self._sync_navigation_rail()
-        self._apply_household_rule(existing_household_rule)
         self._meal_mode_changed()
         self._set_page(0)
 
@@ -234,7 +225,7 @@ class RosterImportWizard(QDialog):
 
     def selection(self) -> ImportWizardSelection:
         if self._selection is None:
-            raise ValueError("가져오기 미리보기가 아직 확정되지 않았습니다.")
+            raise ValueError("불러오기 미리보기가 아직 확정되지 않았습니다.")
         return self._selection
 
     def done(self, result: int) -> None:
@@ -243,6 +234,8 @@ class RosterImportWizard(QDialog):
         self.password_edit.clear()
         self._source_password = None
         self._cell_overrides.clear()
+        self._excluded_rows.clear()
+        self._pending_excluded_rows.clear()
         self._correction_editors.clear()
         self._correction_issues.clear()
         super().done(result)
@@ -326,7 +319,7 @@ class RosterImportWizard(QDialog):
         rail.setFixedWidth(230)
         layout = QVBoxLayout(rail)
         layout.setContentsMargins(24, 25, 22, 25)
-        product = QLabel("명단 가져오기")
+        product = QLabel("명단 불러오기")
         product.setObjectName("startupProduct")
         layout.addWidget(product)
         layout.addSpacing(14)
@@ -386,7 +379,7 @@ class RosterImportWizard(QDialog):
         layout.addLayout(
             self._page_heading(
                 "1. 기존 Excel 파일 선택",
-                "Excel 표 또는 두 줄 머리글 시트를 선택합니다. 파일은 수정하지 않습니다.",
+                "Excel 표 또는 2줄 헤더가 있는 시트를 선택합니다. 파일은 수정하지 않습니다.",
             )
         )
         form = QFormLayout()
@@ -398,7 +391,7 @@ class RosterImportWizard(QDialog):
         self.purpose_note.setStyleSheet("font-size: 12px;")
         self.purpose_note.setTextFormat(Qt.TextFormat.RichText)
         self.purpose_note.setWordWrap(True)
-        self.purpose_note.setAccessibleName("가져오기 방식 설명")
+        self.purpose_note.setAccessibleName("불러오기 방식 설명")
         self.purpose_note.setVisible(self._allow_vacation_lunch)
         if self._allow_vacation_lunch:
             self.purpose_combo.addItem("방학 중식 대상자 갱신", ImportPurpose.VACATION_LUNCH)
@@ -406,7 +399,7 @@ class RosterImportWizard(QDialog):
             purpose_fields.setSpacing(4)
             purpose_fields.addWidget(self.purpose_combo)
             purpose_fields.addWidget(self.purpose_note)
-            form.addRow("가져오기 방식 *", purpose_fields)
+            form.addRow("불러오기 방식 *", purpose_fields)
         path_row = QHBoxLayout()
         self.path_edit = QLineEdit()
         self.path_edit.setObjectName("importPathEdit")
@@ -429,16 +422,16 @@ class RosterImportWizard(QDialog):
 
         self.source_layout_combo = QComboBox()
         self.source_layout_combo.addItem("자동 · Excel 표 우선", "auto")
-        self.source_layout_combo.addItem("두 줄 머리글 시트", "two-row")
+        self.source_layout_combo.addItem("2줄 헤더", "two-row")
         self.source_layout_combo.currentIndexChanged.connect(self._source_layout_changed)
-        form.addRow("머리글 읽기", self.source_layout_combo)
+        form.addRow("헤더 읽기", self.source_layout_combo)
         self.header_row_spin = QSpinBox()
         self.header_row_spin.setRange(1, 1_048_575)
         self.header_row_spin.setValue(1)
         self.header_row_spin.setEnabled(False)
-        self.header_row_spin.setToolTip("두 줄 머리글 중 첫 번째 행입니다. 데이터는 두 번째 머리글 다음 행부터 읽습니다.")
+        self.header_row_spin.setToolTip("2줄 헤더의 첫 번째 행입니다. 데이터는 두 번째 헤더 다음 행부터 읽습니다.")
         self.header_row_spin.valueChanged.connect(self._header_row_changed)
-        form.addRow("머리글 시작 행", self.header_row_spin)
+        form.addRow("헤더 시작 행", self.header_row_spin)
         self.table_combo = QComboBox()
         self.table_combo.setEnabled(False)
         self.table_combo.currentIndexChanged.connect(self._table_changed)
@@ -471,11 +464,32 @@ class RosterImportWizard(QDialog):
                 "각 Excel 열을 현재 DB의 칼럼에 연결하세요. * 항목만 필수입니다.",
             )
         )
-        self.lunch_mode_note = QLabel("방학 중식 명단: 이름·핸드폰으로 기존 명단과 연결합니다. 학교·학년은 높은 값을 우선하고, 다른 변경 값은 비교·수정 후 반영합니다. 식종 열은 필요하지 않습니다.")
+        self.lunch_mode_note = QLabel("방학 중식 명단: 이름·핸드폰으로 기존 명단과 연결합니다. 학교·학년은 높은 값을 우선하고, 빈칸은 기존 값을 유지하고, 충돌하는 값만 항목별로 선택합니다. 식종 열은 필요하지 않습니다.")
         self.lunch_mode_note.setWordWrap(True)
         self.lunch_mode_note.setObjectName("sectionLabel")
         self.lunch_mode_note.setWordWrap(True)
         layout.addWidget(self.lunch_mode_note)
+        self.lunch_filter_panel = QWidget()
+        filter_form = QFormLayout(self.lunch_filter_panel)
+        filter_form.setContentsMargins(0, 0, 0, 0)
+        self.lunch_filter_mode = QComboBox()
+        self.lunch_filter_mode.addItem("전체 명단", "all")
+        self.lunch_filter_mode.addItem("선택한 칼럼에 값이 있는 행", "nonempty")
+        self.lunch_filter_mode.addItem("선택한 칼럼이 특정 값인 행", "equals")
+        self.lunch_filter_column = QComboBox()
+        self.lunch_filter_column.addItem("— 칼럼 선택 —", None)
+        self.lunch_filter_value = QLineEdit()
+        self.lunch_filter_value.setPlaceholderText("예: 1, 대상, O (앞뒤 공백을 제외하고 정확히 일치)")
+        filter_form.addRow("가져올 중식 명단", self.lunch_filter_mode)
+        filter_form.addRow("조건 칼럼", self.lunch_filter_column)
+        filter_form.addRow("일치할 값", self.lunch_filter_value)
+        filter_note = QLabel("조건에 맞는 행만 중식 배송으로 반영합니다. 조건에서 빠진 기존 중식 배송자는 중지됩니다. 저장 전 가져올 명단과 제외 건수를 확인합니다.")
+        filter_note.setWordWrap(True)
+        filter_form.addRow(filter_note)
+        self.lunch_filter_mode.currentIndexChanged.connect(self._lunch_filter_changed)
+        self.lunch_filter_column.currentIndexChanged.connect(self._mapping_changed)
+        self.lunch_filter_value.textChanged.connect(self._mapping_changed)
+        layout.addWidget(self.lunch_filter_panel)
         effective_row = QHBoxLayout()
         effective_row.addWidget(QLabel("이 명단을 적용할 날짜 (당일 포함) *"))
         self.effective_date_edit = WheelSafeDateEdit(QDate.currentDate())
@@ -489,7 +503,7 @@ class RosterImportWizard(QDialog):
         self.initial_date_note.setObjectName("muted")
         self.initial_date_note.hide()
         layout.addWidget(self.initial_date_note)
-        import_note = QLabel("가져오기를 누르면 오류와 기존 값의 불일치를 확인합니다. 선택이 필요한 항목을 해결한 뒤 저장합니다.")
+        import_note = QLabel("열 연결 확인 후 불러오기를 누르면 오류와 모호한 사람 연결을 확인합니다. DB와 충돌하는 값은 해당 항목만 선택합니다.")
         import_note.setObjectName("muted")
         import_note.setWordWrap(True)
         layout.addWidget(import_note)
@@ -498,14 +512,26 @@ class RosterImportWizard(QDialog):
         body = QWidget()
         body_layout = QVBoxLayout(body)
         body_layout.setContentsMargins(2, 2, 10, 2)
-        identity_form = QFormLayout()
-        self.profile_name_edit = QLineEdit("기존 Excel 명단")
-        identity_form.addRow("설정 이름 *", self.profile_name_edit)
-        body_layout.addLayout(identity_form)
+        self._profile_name = "기존 Excel 명단"
         body_layout.addWidget(self._section("엑셀 열 → DB 칼럼 연결"))
         self.destination_table = ImportColumnsTable()
         self.destination_table.destination_changed.connect(self._destination_changed)
-        body_layout.addWidget(self.destination_table)
+        self.mapping_dialog = ImportColumnMappingDialog(self.destination_table, self)
+        self.mapping_dialog.setStyleSheet(application_stylesheet())
+        self.finished.connect(self.mapping_dialog.close)
+        self.mapping_dialog.finished.connect(self._mapping_dialog_closed)
+        mapping_row = QHBoxLayout()
+        self.mapping_summary = QLabel("파일을 선택하면 자동으로 열을 연결합니다.")
+        self.mapping_summary.setWordWrap(True)
+        self.mapping_summary.setObjectName("muted")
+        self.destination_table.summary_changed.connect(self._set_mapping_summary)
+        mapping_row.addWidget(self.mapping_summary, 1)
+        self.mapping_open_button = QPushButton("열 연결 확인하기")
+        self.mapping_open_button.setObjectName("primaryAction")
+        self.mapping_open_button.setAutoDefault(False)
+        self.mapping_open_button.clicked.connect(self._open_mapping_dialog)
+        mapping_row.addWidget(self.mapping_open_button)
+        body_layout.addLayout(mapping_row)
         self._profile_mapping_state = QWidget(body)
         self._profile_mapping_state.hide()
         fields_form = QFormLayout(self._profile_mapping_state)
@@ -515,50 +541,17 @@ class RosterImportWizard(QDialog):
             combo.currentIndexChanged.connect(self._mapping_changed)
             self._mapping_combos[field] = combo
             fields_form.addRow(_FIELD_LABELS[field], combo)
-            if field is ProfileField.ROAD_ADDRESS:
-                self.address_fallback_combo = QComboBox()
-                self.address_fallback_combo.setObjectName("mapping_road_address_fallback")
-                self.address_fallback_combo.currentIndexChanged.connect(
-                    self._mapping_changed
-                )
-                fields_form.addRow("주소 2순위", self.address_fallback_combo)
         provider_note = QLabel("제공기관은 명단을 가져온 뒤 ‘설정 → 공통 제공기관’에서 설정합니다.")
         provider_note.setWordWrap(True)
         fields_form.addRow(provider_note)
 
-        body_layout.addWidget(self._section("가구 묶기 기준"))
-        household_copy = QLabel(
-            "체크한 값이 모두 입력되어 있고 모두 같으면 한 가구로 묶습니다. "
-            "빈칸끼리는 묶지 않으며, 기존 가구 후보가 여러 개일 때만 선택합니다."
-        )
-        household_copy.setObjectName("muted")
-        household_copy.setWordWrap(True)
-        body_layout.addWidget(household_copy)
-        household_options = QHBoxLayout()
-        household_options.setSpacing(18)
-        for criterion, label in _HOUSEHOLD_CRITERION_LABELS.items():
-            checkbox = QPushButton(label)
-            checkbox.setCheckable(True)
-            checkbox.setObjectName("householdCriterionCheck")
-            checkbox.setProperty("criterion", criterion.value)
-            checkbox.setIcon(_household_criterion_icon(False))
-            checkbox.setIconSize(QSize(18, 18))
-            checkbox.setAccessibleName(f"가구 묶기 기준 {label}")
-            checkbox.setToolTip(
-                f"{label} 값이 비어 있지 않고 다른 선택 기준과 함께 모두 같을 때만 묶습니다."
-            )
-            checkbox.toggled.connect(
-                lambda checked, control=checkbox: control.setIcon(
-                    _household_criterion_icon(checked)
-                )
-            )
-            self._household_criterion_checkboxes[criterion] = checkbox
-            household_options.addWidget(checkbox)
-        household_options.addStretch(1)
-        body_layout.addLayout(household_options)
+        household_note = QLabel("가구는 설정의 ‘가구 묶기 기준’으로 자동으로 묶습니다. 기본은 핸드폰이며, 선택한 모든 값이 같고 빈칸이 없을 때 묶습니다.")
+        household_note.setObjectName("muted")
+        household_note.setWordWrap(True)
+        body_layout.addWidget(household_note)
 
         body_layout.addWidget(self._section("식종과 배송 정보"))
-        meal_guide = QFrame()
+        meal_guide = self.meal_guide = QFrame()
         meal_guide.setObjectName("mealFormatGuide")
         meal_guide_layout = QVBoxLayout(meal_guide)
         meal_guide_layout.setContentsMargins(12, 9, 12, 10)
@@ -639,22 +632,10 @@ class RosterImportWizard(QDialog):
         self._meal_form = meal_form
         body_layout.addLayout(meal_form)
 
-        body_layout.addWidget(self._section("값 정리"))
-        normalization_form = QFormLayout()
-        self.date_normalization_combo = QComboBox()
-        self.date_normalization_combo.addItem(
-            "날짜 셀·6/8자리·주민번호 자동", DateNormalization.AUTO
-        )
-        self.date_normalization_combo.addItem(
-            "숫자 6/8자리·주민번호", DateNormalization.YYYYMMDD
-        )
-        self.phone_normalization_combo = QComboBox()
-        self.phone_normalization_combo.addItem("010-1234-5678 모양", PhoneNormalization.KOREAN)
-        self.phone_normalization_combo.addItem("숫자만", PhoneNormalization.DIGITS)
-        self.phone_normalization_combo.addItem("원본 모양 유지", PhoneNormalization.PRESERVE)
-        normalization_form.addRow("생년월일 정리", self.date_normalization_combo)
-        normalization_form.addRow("전화번호 정리", self.phone_normalization_combo)
-        body_layout.addLayout(normalization_form)
+        normalization_note = QLabel("생년월일과 전화번호는 자동으로 정리합니다. 처리할 수 없는 값은 오류 정정 창에서 확인합니다.")
+        normalization_note.setObjectName("muted")
+        normalization_note.setWordWrap(True)
+        body_layout.addWidget(normalization_note)
         self.ignored_columns_list = QListWidget(body)
         self.ignored_columns_list.hide()
         self.ignored_columns_list.itemChanged.connect(self._mapping_changed)
@@ -672,8 +653,8 @@ class RosterImportWizard(QDialog):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addLayout(
             self._page_heading(
-                "가져오기 오류 수정",
-                "오류를 수정한 뒤 가져옵니다. 선택 항목의 빈칸은 그대로 저장됩니다.",
+                "불러오기 오류 수정",
+                "오류를 수정하거나 해당 행을 제외한 뒤 가져옵니다. 선택 항목의 빈칸은 그대로 저장됩니다.",
             )
         )
         effective_row = QHBoxLayout()
@@ -720,7 +701,7 @@ class RosterImportWizard(QDialog):
         self.correction_applied_label = QLabel()
         self.correction_applied_label.setObjectName("importCorrectionAppliedText")
         applied_layout.addWidget(self.correction_applied_label, 1)
-        self.correction_reset_button = QPushButton("수정값 모두 취소")
+        self.correction_reset_button = QPushButton("수정·제외 모두 취소")
         self.correction_reset_button.setObjectName("quietAction")
         self.correction_reset_button.clicked.connect(
             self._reset_error_corrections
@@ -779,7 +760,7 @@ class RosterImportWizard(QDialog):
         self.correction_title = QLabel()
         self.correction_title.setObjectName("importCorrectionTitle")
         self.correction_help = QLabel(
-            "바꿀 값 칸을 모두 수정한 뒤 한 번만 다시 검사하세요. "
+            "값을 고치거나 왼쪽 체크로 원본 행 전체를 제외한 뒤 가져오세요. "
             "원본 Excel 파일은 바뀌지 않습니다."
         )
         self.correction_help.setObjectName("importCorrectionHelp")
@@ -792,7 +773,7 @@ class RosterImportWizard(QDialog):
         self.correction_table = QTableWidget(0, 6)
         self.correction_table.setObjectName("importCorrectionTable")
         self.correction_table.setHorizontalHeaderLabels(
-            ("처리", "원본 위치", "항목", "현재 값", "문제", "바꿀 값")
+            ("행 제외", "원본 위치", "항목", "현재 값", "문제", "바꿀 값")
         )
         self.correction_table.setEditTriggers(
             QAbstractItemView.EditTrigger.NoEditTriggers
@@ -815,6 +796,7 @@ class RosterImportWizard(QDialog):
         self.correction_table.setColumnWidth(2, 120)
         self.correction_table.setColumnWidth(3, 140)
         self.correction_table.setColumnWidth(5, 190)
+        self.correction_table.itemChanged.connect(self._exclude_error_row_changed)
         correction_layout.addWidget(self.correction_table, 1)
 
         correction_actions = QHBoxLayout()
@@ -831,7 +813,7 @@ class RosterImportWizard(QDialog):
         )
         correction_actions.addWidget(self.correction_mapping_button)
         correction_actions.addStretch(1)
-        self.correction_apply_button = QPushButton("수정값으로 가져오기")
+        self.correction_apply_button = QPushButton("수정·제외 적용 후 불러오기")
         self.correction_apply_button.setObjectName("primaryAction")
         self.correction_apply_button.clicked.connect(
             self._apply_error_corrections
@@ -881,6 +863,7 @@ class RosterImportWizard(QDialog):
 
     def _set_busy(self, title: str, detail: str) -> None:
         self._busy = True
+        self.mapping_dialog.close()
         self.busy_title.setText(title)
         self.busy_detail.setText(detail)
         self.busy_panel.show()
@@ -926,6 +909,8 @@ class RosterImportWizard(QDialog):
         self._inspection = None
         self._preview = None
         self._cell_overrides.clear()
+        self._excluded_rows.clear()
+        self._pending_excluded_rows.clear()
         self.raw_table.clear()
         self.raw_table.setRowCount(0)
         self.raw_table.setColumnCount(0)
@@ -956,14 +941,14 @@ class RosterImportWizard(QDialog):
             if isinstance(error, WorkbookImportPasswordError):
                 self.password_edit.selectAll()
             self.password_edit.setFocus()
-            self._show_error(str(error))
+            self._show_error(user_error(error))
             return False
         except Exception as error:
             self._password_retry_pending = False
             self.inspect_button.setText("표 미리보기")
             if isinstance(error, WorkbookStructureError):
                 self._populate_tables(error.tables, selected_table)
-            self._show_error(str(error))
+            self._show_error(user_error(error))
             return False
         self._password_retry_pending = False
         self._source_password = password
@@ -979,7 +964,7 @@ class RosterImportWizard(QDialog):
             self._populate_tables(inspection.tables, inspection.selected_table)
         self._render_raw_preview(inspection)
         source_name = inspection.selected_table or inspection.selected_sheet
-        header_note = " · 두 줄 머리글은 세분화된 제목 우선" if inspection.header_row_count == 2 else ""
+        header_note = " · 2줄 헤더는 세분화된 제목 우선" if inspection.header_row_count == 2 else ""
         self.file_status.setText(
             f"{source_name} · 헤더 {len(inspection.columns)}열{header_note} · "
             f"미리보기 {len(inspection.preview_rows)}행을 확인했습니다."
@@ -988,7 +973,7 @@ class RosterImportWizard(QDialog):
             self._prepare_mapping(inspection)
         except WorkbookStructureError as error:
             self._inspection = None
-            self._show_error(str(error))
+            self._show_error(user_error(error))
             self._refresh_actions()
             return False
         self._refresh_actions()
@@ -1036,6 +1021,8 @@ class RosterImportWizard(QDialog):
         self._inspection = None
         self._preview = None
         self._cell_overrides.clear()
+        self._excluded_rows.clear()
+        self._pending_excluded_rows.clear()
         self.raw_table.clear()
         self.raw_table.setRowCount(0)
         self.raw_table.setColumnCount(0)
@@ -1082,11 +1069,59 @@ class RosterImportWizard(QDialog):
         self.raw_table.verticalHeader().setVisible(True)
         self.raw_table.resizeColumnsToContents()
 
+    def _open_mapping_dialog(self):
+        if self._inspection is None or self._busy:
+            return
+        from .dialog_workflow import _show_work_dialog
+        self.mapping_dialog.setWindowModality(Qt.WindowModality.NonModal)
+        self.mapping_dialog.setWindowState(
+            (self.mapping_dialog.windowState() & ~Qt.WindowState.WindowMinimized)
+            | Qt.WindowState.WindowMaximized)
+        _show_work_dialog(self.mapping_dialog)
+        self.mapping_dialog.raise_()
+        self.mapping_dialog.activateWindow()
+
+    def _mapping_review_key(self):
+        if self._inspection is None:
+            return None
+        return (id(self._inspection), self.purpose_combo.currentData(),
+                tuple(sorted(self._destination_selection().items())))
+
+    def _mapping_review_complete(self):
+        return self._confirmed_mapping_key is not None and self._confirmed_mapping_key == self._mapping_review_key()
+
+    def _set_mapping_summary(self, text):
+        self._mapping_summary_text = text
+        self._refresh_mapping_review()
+
+    def _refresh_mapping_review(self):
+        complete = self._mapping_review_complete()
+        self.mapping_summary.setText(("확인 완료 · " if complete else "필수 확인 · ") + self._mapping_summary_text)
+        self.mapping_open_button.setText("열 연결 다시 보기" if complete else "열 연결 확인하기")
+        if self.page_stack.currentIndex() == 1:
+            self.next_button.setText("불러오기" if complete else "열 연결 확인")
+
+    def _mapping_dialog_closed(self, result):
+        if result == QDialog.DialogCode.Accepted:
+            self._confirmed_mapping_key = self._mapping_review_key()
+        self._refresh_mapping_review()
+        if self.isVisible() and self.page_stack.currentIndex() == 1:
+            self.raise_()
+            self.activateWindow()
+            self.mapping_open_button.setFocus(Qt.FocusReason.OtherFocusReason)
+
     def set_database_columns(self, roster, labels=None):
         """Use the opened roster's stable custom IDs and current display names."""
         self._database_columns = roster
         self._existing_custom_fields = () if roster is None else roster.custom_fields
         self._column_labels = dict(labels or {})
+
+    def set_document_targets(self, targets, unavailable=()):
+        self.destination_table.set_document_targets(targets)
+        if unavailable:
+            self.destination_table.priority_note.setText(
+                "·".join(unavailable) + " 양식을 읽을 수 없어 저장된 연결만 앞쪽에 표시합니다.")
+            self.destination_table.priority_note.show()
 
     def _profile_label(self, field):
         key = {ProfileField.SCHOOL_NAME: "school", ProfileField.MOBILE_PHONE: "mobile",
@@ -1099,7 +1134,7 @@ class RosterImportWizard(QDialog):
 
     def _destination_bindings(self, *, all_meals=False):
         bindings = {"profile:" + field.value: combo for field, combo in self._mapping_combos.items()}
-        bindings.update({"address_fallback": self.address_fallback_combo, "driver": self.driver_combo,
+        bindings.update({"driver": self.driver_combo,
                          "sequence": self.sequence_combo, "reference": self.source_reference_combo})
         if all_meals or self.purpose_combo.currentData() != ImportPurpose.VACATION_LUNCH:
             if all_meals or self.meal_mode_combo.currentData() == "combined":
@@ -1113,8 +1148,7 @@ class RosterImportWizard(QDialog):
         options = [("ignore", "가져오지 않음"), ("new", "새 칼럼 추가 (문자)")]
         options.extend(("profile:" + field.value, self._profile_label(field) + (" *" if field is ProfileField.NAME else ""))
                        for field in self._mapping_combos)
-        options.extend((("address_fallback", self._profile_label(ProfileField.ROAD_ADDRESS) + " · 빈칸 대체"),
-                        ("driver", "배송담당"), ("sequence", self._column_labels.get("sequence", "배송순서")),
+        options.extend((("driver", "배송담당"), ("sequence", self._column_labels.get("sequence", "배송순서")),
                         ("reference", "원본 연번")))
         options.extend((("meal:combined", "식종 (조식 / 중식 / 석식)"),
                         ("meal:breakfast", self._column_labels.get("status:breakfast", "조식") + " · 가입 여부"),
@@ -1191,6 +1225,7 @@ class RosterImportWizard(QDialog):
                     self._destination_changed(column.letter, matches[0])
 
     def _prepare_mapping(self, inspection: WorkbookInspection) -> None:
+        self._profile_name = Path(inspection.source_filename).stem or "기존 Excel 명단"
         self._mapping_initialized = False
         self._custom_destinations = {}
         self._new_destination_ids = {}
@@ -1207,7 +1242,6 @@ class RosterImportWizard(QDialog):
         )
         all_combos = (
             *self._mapping_combos.values(),
-            self.address_fallback_combo,
             self.breakfast_combo,
             self.lunch_combo,
             self.dinner_combo,
@@ -1223,6 +1257,14 @@ class RosterImportWizard(QDialog):
             for column in inspection.columns:
                 combo.addItem(column.label, column.letter)
             combo.blockSignals(False)
+        self.lunch_filter_column.blockSignals(True)
+        self.lunch_filter_column.clear()
+        self.lunch_filter_column.addItem("— 칼럼 선택 —", None)
+        for column in inspection.columns:
+            self.lunch_filter_column.addItem(column.label, column.letter)
+        self.lunch_filter_column.blockSignals(False)
+        self.lunch_filter_mode.setCurrentIndex(0)
+        self.lunch_filter_value.clear()
         self.ignored_columns_list.clear()
         for column in inspection.columns:
             item = QListWidgetItem(column.label)
@@ -1247,12 +1289,14 @@ class RosterImportWizard(QDialog):
         self._mapping_changed()
 
     def _apply_profile(self, profile: ImportMappingProfile) -> None:
-        self.profile_name_edit.setText(profile.name)
+        self._profile_name = profile.name
+        if profile.row_filter is not None:
+            self.lunch_filter_mode.setCurrentIndex(self.lunch_filter_mode.findData(profile.row_filter.mode))
+            self._set_combo(self.lunch_filter_column, profile.row_filter.column)
+            self.lunch_filter_value.setText(profile.row_filter.value)
         self._source_kind = profile.source_kind
         for field, combo in self._mapping_combos.items():
             self._set_combo(combo, profile.profile_columns.get(field))
-        fallbacks = profile.fallback_profile_columns.get(ProfileField.ROAD_ADDRESS, ())
-        self._set_combo(self.address_fallback_combo, fallbacks[0] if fallbacks else None)
         if profile.default_meals:
             self.meal_mode_combo.setCurrentIndex(self.meal_mode_combo.findData("combined"))
         elif profile.combined_meals_column is not None:
@@ -1270,12 +1314,6 @@ class RosterImportWizard(QDialog):
         self._set_combo(self.driver_combo, profile.driver_column)
         self._set_combo(self.sequence_combo, profile.sequence_column)
         self._set_combo(self.source_reference_combo, profile.source_reference_column)
-        self.date_normalization_combo.setCurrentIndex(
-            self.date_normalization_combo.findData(profile.date_normalization)
-        )
-        self.phone_normalization_combo.setCurrentIndex(
-            self.phone_normalization_combo.findData(profile.phone_normalization)
-        )
         custom_columns = {
             source_column_letter(token, self._inspection.columns)
             for token in profile.custom_field_columns.values()
@@ -1296,9 +1334,6 @@ class RosterImportWizard(QDialog):
     def _apply_guesses(self, inspection: WorkbookInspection) -> None:
         for field, combo in self._mapping_combos.items():
             self._set_combo(combo, _guess_column(field, inspection))
-        road_primary = self._mapping_combos[ProfileField.ROAD_ADDRESS].currentData()
-        fallback = _find_header(inspection, ("기존주소", "이전주소"), exclude=road_primary)
-        self._set_combo(self.address_fallback_combo, fallback)
         combined = _find_header(inspection, ("식종", "급식구분", "지원식종"))
         breakfast = _find_header_containing(inspection, "조식")
         lunch = _find_header_containing(inspection, "중식", exclude=("토", "공휴일"))
@@ -1326,7 +1361,6 @@ class RosterImportWizard(QDialog):
             _find_header(inspection, ("원본연번", "연번", "번호")),
         )
         if _find_header(inspection, ("변경주소",)) is not None:
-            self.profile_name_edit.setText("정부 조사표")
             self._source_kind = "survey-xlsx"
 
     def _set_combo(self, combo: QComboBox, value: object) -> None:
@@ -1341,12 +1375,6 @@ class RosterImportWizard(QDialog):
             for field, combo in self._mapping_combos.items()
             if combo.currentData() is not None
         }
-        fallback = self.address_fallback_combo.currentData()
-        fallback_columns = (
-            {}
-            if fallback is None
-            else {ProfileField.ROAD_ADDRESS: (str(fallback),)}
-        )
         meal_flags = {}
         combined = None
         vacation_lunch = self.purpose_combo.currentData() == ImportPurpose.VACATION_LUNCH
@@ -1419,7 +1447,7 @@ class RosterImportWizard(QDialog):
         values = dict(
             profile_id=profile_id,
             version=version,
-            name=self.profile_name_edit.text(),
+            name=self._profile_name,
             source_kind=self._source_kind,
             profile_columns=profile_columns,
             combined_meals_column=combined,
@@ -1436,19 +1464,16 @@ class RosterImportWizard(QDialog):
                 if self._inspection.selected_table is not None
                 else self._inspection.header_row + self._inspection.header_row_count
             ),
-            fallback_profile_columns=fallback_columns,
+            fallback_profile_columns={},
             meal_true_values=_parse_value_list(self.true_values_edit.text()),
             meal_false_values=_parse_value_list(self.false_values_edit.text()),
-            date_normalization=DateNormalization(
-                str(self.date_normalization_combo.currentData())
-            ),
-            phone_normalization=PhoneNormalization(
-                str(self.phone_normalization_combo.currentData())
-            ),
+            date_normalization=DateNormalization.AUTO,
+            phone_normalization=PhoneNormalization.KOREAN,
             ignored_columns=ignored,
             custom_field_columns=custom_columns,
             custom_field_names=custom_names,
             provider_value=None,
+            row_filter=self._selected_lunch_filter() if vacation_lunch else None,
         )
         profile = ImportMappingProfile(**values)
         if self._suggested_profile is not None and profile != self._suggested_profile.profile:
@@ -1456,26 +1481,8 @@ class RosterImportWizard(QDialog):
             profile = ImportMappingProfile(**values)
         return profile
 
-    def _apply_household_rule(
-        self,
-        stored: StoredHouseholdMatchingRule | None,
-    ) -> None:
-        selected = (
-            (HouseholdMatchCriterion.MOBILE_PHONE,)
-            if stored is None
-            else stored.rule.criteria
-        )
-        for criterion, checkbox in self._household_criterion_checkboxes.items():
-            checkbox.setChecked(criterion in selected)
-
     def _build_household_rule(self) -> HouseholdMatchingRule:
-        criteria = tuple(
-            criterion
-            for criterion, checkbox in self._household_criterion_checkboxes.items()
-            if checkbox.isChecked()
-        )
-        if not criteria:
-            raise ValueError("가구 묶기 기준을 하나 이상 선택해주세요.")
+        criteria = (HouseholdMatchCriterion.MOBILE_PHONE,)
         existing = self._existing_household_rule
         if existing is None:
             return HouseholdMatchingRule(self._household_rule_id, 1, criteria)
@@ -1514,7 +1521,7 @@ class RosterImportWizard(QDialog):
             if issue.row_number is not None and issue.column is not None:
                 continue
             item = QListWidgetItem(
-                f"제외 · {issue.location} · {issue.message}"
+                f"제외 · {issue.location} · {user_error(issue.message)}"
             )
             item.setForeground(QColor("#9A5B00"))
             self.issue_list.addItem(item)
@@ -1547,12 +1554,24 @@ class RosterImportWizard(QDialog):
         else:
             self.preview_summary.setText(f"가져올 사람 {len(preview.observations)}명 · 오류 없음")
 
+        if preview.excluded_rows:
+            self.preview_summary.setText(self.preview_summary.text() + f" · 직접 제외 {len(preview.excluded_rows)}행")
+        if preview.profile.row_filter is not None:
+            self.preview_summary.setText(self.preview_summary.text() + f" · 조건 제외 {len(preview.filtered_rows)}행")
+            self.issue_list.addItem("조건에서 빠진 기존 중식 배송자는 중지됩니다. 가져올 명단을 확인한 뒤 불러오기를 눌러주세요.")
+            self.notice_label.show()
+            self.issue_list.show()
+
     def _render_correction_panel(
         self,
         preview: WorkbookImportPreview,
     ) -> None:
         self._correction_editors.clear()
         self._correction_issues.clear()
+        self._pending_excluded_rows = set(self._excluded_rows)
+        self.correction_help.setText(
+            "값을 고치거나 왼쪽 체크로 원본 행 전체를 제외한 뒤 가져오세요. 원본 Excel은 바뀌지 않습니다."
+            + (" 제외된 기존 중식 배송자는 중지될 수 있습니다." if self.purpose_combo.currentData() == ImportPurpose.VACATION_LUNCH else ""))
         display_issues: list[ImportIssue] = []
         seen: set[tuple[object, ...]] = set()
         for issue in preview.issues:
@@ -1569,6 +1588,7 @@ class RosterImportWizard(QDialog):
             seen.add(marker)
             display_issues.append(issue)
 
+        self.correction_table.blockSignals(True)
         self.correction_table.clearContents()
         self.correction_table.setRowCount(len(display_issues))
         uneditable = False
@@ -1581,6 +1601,11 @@ class RosterImportWizard(QDialog):
                 if blocking
                 else QColor("#9A5B00")
             )
+            if issue.row_number is not None and issue.column is not None:
+                status_item.setFlags(status_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                status_item.setCheckState(Qt.CheckState.Unchecked)
+                status_item.setData(Qt.ItemDataRole.UserRole, issue.row_number)
+                status_item.setToolTip(f"체크하면 원본 {issue.row_number}행 전체를 가져오지 않습니다.")
             self.correction_table.setItem(row, 0, status_item)
             self.correction_table.setItem(
                 row,
@@ -1596,8 +1621,8 @@ class RosterImportWizard(QDialog):
             current_item = QTableWidgetItem(current_text or "(빈칸)")
             current_item.setToolTip(current_text)
             self.correction_table.setItem(row, 3, current_item)
-            message_item = QTableWidgetItem(issue.message)
-            message_item.setToolTip(issue.message)
+            message_item = QTableWidgetItem(user_error(issue.message))
+            message_item.setToolTip(user_error(issue.message))
             self.correction_table.setItem(row, 4, message_item)
 
             if issue.row_number is None or issue.column is None:
@@ -1612,6 +1637,7 @@ class RosterImportWizard(QDialog):
             self._correction_issues[key] = issue
             self.correction_table.setCellWidget(row, 5, editor)
 
+        self.correction_table.blockSignals(False)
         blocking_count = sum(issue.blocking for issue in display_issues)
         excluded_count = len(display_issues) - blocking_count
         title_parts = []
@@ -1633,16 +1659,40 @@ class RosterImportWizard(QDialog):
             self.correction_dialog.accept()
 
         correction_count = len(preview.corrected_cells)
-        if correction_count:
+        excluded_count = len(preview.excluded_rows)
+        if correction_count or excluded_count:
             outcome = " · 오류 검사 통과" if preview.can_continue else ""
             self.correction_applied_label.setText(
-                f"이 창에서 고친 값 {correction_count}개 적용 중{outcome}. "
+                f"고친 값 {correction_count}개 · 직접 제외 {excluded_count}행 적용 중{outcome}. "
                 "원본 Excel은 그대로입니다."
             )
-        self.correction_applied_panel.setVisible(correction_count > 0)
+        self.correction_applied_panel.setVisible(correction_count > 0 or excluded_count > 0)
+
+    def _exclude_error_row_changed(self, item):
+        if item.column() != 0:
+            return
+        source_row = item.data(Qt.ItemDataRole.UserRole)
+        if source_row is None:
+            return
+        excluded = item.checkState() == Qt.CheckState.Checked
+        if excluded:
+            self._pending_excluded_rows.add(source_row)
+        else:
+            self._pending_excluded_rows.discard(source_row)
+        self.correction_table.blockSignals(True)
+        try:
+            for row in range(self.correction_table.rowCount()):
+                other = self.correction_table.item(row, 0)
+                if other.data(Qt.ItemDataRole.UserRole) == source_row:
+                    other.setCheckState(item.checkState())
+                    editor = self.correction_table.cellWidget(row, 5)
+                    if editor is not None:
+                        editor.setEnabled(not excluded)
+        finally:
+            self.correction_table.blockSignals(False)
 
     def _open_correction_dialog(self) -> None:
-        if self.correction_table.rowCount() == 0:
+        if self.correction_table.rowCount() == 0 or self._selection is not None or self.page_stack.currentIndex() != 2:
             return
         self.correction_table.scrollToTop()
         self.correction_table.horizontalScrollBar().setValue(0)
@@ -1697,6 +1747,18 @@ class RosterImportWizard(QDialog):
                 *(metrics.horizontalAdvance(text) + padding for text in texts),
             )
         table.setColumnWidth(5, min(int(dialog_width * 0.38), editor_width))
+
+        # Styled editors can be taller than Qt's default 30px table rows.
+        # Fit every row to the same height so index widgets never overlap.
+        editor_height = max(32, metrics.height() + 18)
+        for editor in self._correction_editors.values():
+            editor.ensurePolished()
+            editor_height = max(editor_height, editor.minimumSizeHint().height(), editor.sizeHint().height())
+        row_height = editor_height + 1  # one pixel for the table grid line
+        table.verticalHeader().setMinimumSectionSize(row_height)
+        table.verticalHeader().setDefaultSectionSize(row_height)
+        for row in range(table.rowCount()):
+            table.setRowHeight(row, row_height)
 
     def _source_column_label(self, column: str | None) -> str:
         if column is None:
@@ -1813,6 +1875,8 @@ class RosterImportWizard(QDialog):
         self._clear_error()
         updates: dict[tuple[int, str], object] = {}
         for key, editor in self._correction_editors.items():
+            if key[0] in self._pending_excluded_rows:
+                continue
             issue = self._correction_issues[key]
             value = (
                 editor.currentText()
@@ -1822,16 +1886,17 @@ class RosterImportWizard(QDialog):
             if value == (issue.current_value or "").strip():
                 continue
             updates[key] = value or None
-        if not updates:
-            self._show_error("바꿀 값을 입력하거나 현재 값을 수정해주세요.")
+        if not updates and self._pending_excluded_rows == self._excluded_rows:
+            self._show_error("바꿀 값을 입력하거나 제외할 행을 체크해주세요.")
             return
         self._cell_overrides.update(updates)
+        self._excluded_rows = set(self._pending_excluded_rows)
         self.correction_dialog.setEnabled(False)
         try:
             loaded = self._load_preview(
                 self._preview.profile,
-                title="수정한 값을 다시 확인하는 중입니다",
-                detail="바꾼 셀을 적용해 명단 전체 오류를 다시 검사하고 있습니다.",
+                title="수정·제외 결과를 확인하는 중입니다",
+                detail="수정값과 제외할 행을 적용해 나머지 명단을 다시 검사하고 있습니다.",
             )
         finally:
             self.correction_dialog.setEnabled(True)
@@ -1839,16 +1904,18 @@ class RosterImportWizard(QDialog):
             self._finish_import_if_valid()
 
     def _reset_error_corrections(self) -> None:
-        if self._preview is None or not self._cell_overrides or self._busy:
+        if self._preview is None or not (self._cell_overrides or self._excluded_rows) or self._busy:
             return
         profile = self._preview.profile
         self._cell_overrides.clear()
+        self._excluded_rows.clear()
+        self._pending_excluded_rows.clear()
         loaded = self._load_preview(
             profile,
-            title="수정값을 취소하는 중입니다",
+            title="수정·제외를 취소하는 중입니다",
             detail="원본 Excel 값으로 명단을 다시 검사하고 있습니다.",
         )
-        if loaded and self._preview is not None and self._preview.blocking_issues:
+        if loaded and self._preview is not None and self._preview.issues:
             self._open_correction_dialog()
 
     def _go_next(self) -> None:
@@ -1862,6 +1929,9 @@ class RosterImportWizard(QDialog):
             self._set_page(1)
             return
         if page == 1:
+            if not self._mapping_review_complete():
+                self._open_mapping_dialog()
+                return
             if self._inspection is None:
                 self._set_page(0)
                 return
@@ -1869,10 +1939,12 @@ class RosterImportWizard(QDialog):
                 profile = self._build_profile()
                 self._build_household_rule()
             except Exception as error:
-                self._show_error(str(error))
+                self._show_error(user_error(error))
                 return
             if self._preview is None or self._preview.profile != profile:
                 self._cell_overrides.clear()
+                self._excluded_rows.clear()
+                self._pending_excluded_rows.clear()
             if not self._load_preview(
                 profile,
                 title="가져올 명단을 만드는 중입니다",
@@ -1882,13 +1954,24 @@ class RosterImportWizard(QDialog):
                 ),
             ):
                 return
+            if self._preview is not None and self._preview.issues:
+                self._render_preview(self._preview)
+                self._set_page(2)
+                self._open_correction_dialog()
+                return
+            if profile.row_filter is not None:
+                self._set_page(2)
+                if self._preview is not None and self._preview.blocking_issues:
+                    QTimer.singleShot(0, self._open_correction_dialog)
+                return
             if self._finish_import_if_valid():
                 return
             self._set_page(2)
             if self._preview is not None and self._preview.blocking_issues:
                 QTimer.singleShot(0, self._open_correction_dialog)
             return
-        self._finish_import_if_valid()
+        if not self._finish_import_if_valid():
+            self._open_correction_dialog()
 
     def _can_import(self) -> bool:
         return bool(
@@ -1901,9 +1984,13 @@ class RosterImportWizard(QDialog):
         )
 
     def _finish_import_if_valid(self) -> bool:
+        if not self._mapping_review_complete():
+            self._set_page(1)
+            self._open_mapping_dialog()
+            return False
         if not self._can_import():
             if self._preview is not None and self._preview.notices and self.purpose_combo.currentData() == ImportPurpose.VACATION_LUNCH:
-                self._show_error("방학 중식 명단에는 제외된 행이 없어야 합니다. 제외된 행을 수정한 뒤 가져와주세요.")
+                self._show_error("방학 중식 명단의 오류 행을 수정하거나 행 제외를 체크한 뒤 가져와주세요.")
             return False
         assert self._preview is not None
         effective_on = self.effective_date_edit.date().toPython()
@@ -1943,17 +2030,18 @@ class RosterImportWizard(QDialog):
                     sheet_name=selected_sheet,
                     password=password,
                     cell_overrides=self._cell_overrides,
+                    excluded_rows=tuple(sorted(self._excluded_rows)),
                     identity_by_mobile=self.purpose_combo.currentData() == ImportPurpose.VACATION_LUNCH,
                     existing_custom_fields=self._existing_custom_fields,
                 ),
             )
         except Exception as error:
-            self._show_error(str(error))
+            self._show_error(user_error(error))
             return False
         self.password_edit.clear()
         self._source_password = password
         self._preview = preview
-        if not self._can_import() or self.page_stack.currentIndex() == 2:
+        if profile.row_filter is not None or not self._can_import() or self.page_stack.currentIndex() == 2:
             self._render_preview(preview)
         self._refresh_actions()
         return True
@@ -1965,9 +2053,13 @@ class RosterImportWizard(QDialog):
 
     def _set_page(self, page: int) -> None:
         self.page_stack.setCurrentIndex(page)
+        if page != 1:
+            self.mapping_dialog.close()
+        if page != 2:
+            self.correction_dialog.close()
         self.back_button.setVisible(page > 0)
         self.next_button.setText(
-            ("열 연결 확인으로", "가져오기", "가져오기")[page]
+            ("열 연결 확인으로", "불러오기", "불러오기")[page]
         )
         for index, label in enumerate(self._route_labels):
             if index == min(page, 2):
@@ -1985,6 +2077,8 @@ class RosterImportWizard(QDialog):
             self.next_button.setEnabled(False)
             return
         page = self.page_stack.currentIndex()
+        if page == 1:
+            self._refresh_mapping_review()
         self.back_button.setEnabled(page > 0)
         if page == 0:
             self.next_button.setEnabled(self._inspection is not None)
@@ -2007,7 +2101,6 @@ class RosterImportWizard(QDialog):
             str(combo.currentData())
             for combo in (
                 *self._mapping_combos.values(),
-                self.address_fallback_combo,
                 *meal_combos,
                 self.driver_combo,
                 self.sequence_combo,
@@ -2037,11 +2130,28 @@ class RosterImportWizard(QDialog):
         self.destination_table.set_meal_targets_enabled(self.purpose_combo.currentData() != ImportPurpose.VACATION_LUNCH)
         self._sync_meal_mapping_visibility()
 
+    def _selected_lunch_filter(self):
+        mode = self.lunch_filter_mode.currentData()
+        if mode == "all":
+            return None
+        column = self.lunch_filter_column.currentData()
+        if column is None:
+            raise ValueError("가져올 중식 명단의 조건 칼럼을 선택해주세요.")
+        return ImportRowFilter(column, mode, self.lunch_filter_value.text() if mode == "equals" else "")
+
+    def _lunch_filter_changed(self, *_args):
+        mode = self.lunch_filter_mode.currentData()
+        self.lunch_filter_column.setEnabled(mode != "all")
+        self.lunch_filter_value.setEnabled(mode == "equals")
+        self._mapping_changed()
+
     def _meal_mode_changed(self, *_args) -> None:
+        self.lunch_filter_panel.setVisible(self.purpose_combo.currentData() == ImportPurpose.VACATION_LUNCH)
+        self._lunch_filter_changed()
         self.purpose_note.setText(
-            "파일에 있는 대상자는 중식 배송, <b>빠진 기존 중식 배송자는 중지</b>로 반영합니다."
+            "가져올 조건에 포함된 대상자는 중식 배송, <b>빠진 기존 중식 배송자는 중지</b>로 반영합니다."
             if self.purpose_combo.currentData() == ImportPurpose.VACATION_LUNCH else
-            "학교·학년은 높은 쪽을 유지하고, 기존 값과 다른 항목은 선택한 뒤 반영합니다."
+            "학교·학년은 높은 쪽을 유지하고 빈칸은 기존 값을 유지합니다. 충돌하는 값만 항목별로 선택합니다."
         )
         self.lunch_mode_note.setVisible(self.purpose_combo.currentData() == ImportPurpose.VACATION_LUNCH)
         self._sync_meal_mapping_visibility()
@@ -2056,7 +2166,7 @@ class RosterImportWizard(QDialog):
         combined = self.meal_mode_combo.currentData() == "combined"
         if vacation_lunch:
             selected = True
-            summary = "방학 중식 명단 · 모든 유효 행을 중식 배송 대상으로 처리"
+            summary = "방학 중식 명단 · 선택한 불러오기 조건으로 중식 배송 대상 결정"
             detail = "식종 열 없이 명단의 포함 여부로 중식 배송을 갱신합니다."
         elif combined:
             selected_column = self.combined_meal_combo.currentData()
@@ -2113,7 +2223,8 @@ class RosterImportWizard(QDialog):
                 label.setVisible(visible)
         self.meal_detection_status.setText(summary)
         self.meal_detection_status.setToolTip(detail)
-        self.meal_mapping_toggle.setVisible(selected)
+        self.meal_guide.setVisible(not vacation_lunch)
+        self.meal_mapping_toggle.setVisible(selected and not vacation_lunch)
         self.meal_mapping_toggle.setText(
             "자동 연결만 보기" if show_details else "열 연결 바꾸기"
         )
@@ -2136,6 +2247,8 @@ class RosterImportWizard(QDialog):
         self._inspection = None
         self._preview = None
         self._cell_overrides.clear()
+        self._excluded_rows.clear()
+        self._pending_excluded_rows.clear()
         if hasattr(self, "raw_table"):
             self.raw_table.clear()
             self.raw_table.setRowCount(0)
@@ -2284,32 +2397,6 @@ def _preview_missing_groups(
 def _combo_text(combo: QComboBox) -> str | None:
     value = combo.currentData()
     return None if value is None else str(value)
-
-
-def _household_criterion_icon(checked: bool) -> QIcon:
-    """Draw a high-contrast checkbox icon without relying on font glyphs."""
-
-    pixmap = QPixmap(18, 18)
-    pixmap.fill(Qt.GlobalColor.transparent)
-    painter = QPainter(pixmap)
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    color = QColor("#FFFFFF" if checked else "#49646E")
-    outline = QPen(color, 2.0)
-    outline.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-    painter.setPen(outline)
-    painter.setBrush(Qt.BrushStyle.NoBrush)
-    painter.drawRoundedRect(2, 2, 14, 14, 2, 2)
-    if checked:
-        check_pen = QPen(color, 3.0)
-        check_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        check_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-        painter.setPen(check_pen)
-        path = QPainterPath(QPointF(4.5, 9.0))
-        path.lineTo(QPointF(7.7, 12.2))
-        path.lineTo(QPointF(13.8, 5.6))
-        painter.drawPath(path)
-    painter.end()
-    return QIcon(pixmap)
 
 
 def _parse_value_list(text: str) -> tuple[str, ...]:

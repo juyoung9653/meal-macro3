@@ -345,6 +345,7 @@ def test_double_click_routes_special_columns_and_keeps_meals_read_only(app):
         next(action for action in menu.actions() if action.text() == "이사 등록").trigger()
     sequence_index = window.table_model.index(row, _column(window, "sequence"))
     window._table.doubleClicked.emit(sequence_index)
+    assert not (window.table_model.flags(sequence_index) & Qt.ItemFlag.ItemIsEditable)
     meal_index = window.table_model.index(row, _column(window, "status:lunch"))
     assert not (window.table_model.flags(meal_index) & Qt.ItemFlag.ItemIsEditable)
     window._table.doubleClicked.emit(meal_index)
@@ -360,7 +361,7 @@ def test_double_click_routes_special_columns_and_keeps_meals_read_only(app):
     )
     window._table.doubleClicked.emit(delivery_index)
     assert relocation == [PERSON_A, PERSON_A, PERSON_A]
-    assert sequence == [PERSON_A]
+    assert sequence == []
     assert delivery == [PERSON_A]
     window.close()
 

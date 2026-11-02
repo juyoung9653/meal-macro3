@@ -1,5 +1,7 @@
 """Revision-backed per-person exclusions from household column sharing."""
 
+from .user_messages import user_error
+
 from .dialog_workflow import DialogRequest, dialog_workflow
 
 from .startup_loading import run_progress_task, save_revision
@@ -204,15 +206,15 @@ class HouseholdSharedExceptionsController:
             )
         except Exception as error:
             self._message_box.critical(
-                parent, "가구 공용 예외를 저장하지 못했습니다", str(error),
+                parent, "가구 공용 예외를 저장하지 못했습니다", user_error(error),
             )
             return HouseholdSharedColumnOutcome()
         if backup is None:
             return HouseholdSharedColumnOutcome()
-        if backup.error is not None:
+        if backup.warning_required:
             self._message_box.warning(
                 parent, "가구 공용 예외는 저장됐지만 자동 백업에 실패했습니다",
-                str(backup.error),
+                user_error(backup.error),
             )
         return HouseholdSharedColumnOutcome(updated_roster)
 
@@ -239,9 +241,9 @@ class HouseholdSharedExceptionsController:
                 return HouseholdSharedColumnOutcome()
             backup = save_revision(self._session, record, parent=parent)
         except Exception as error:
-            self._message_box.critical(parent, "가구 공용 예외를 저장하지 못했습니다", str(error))
+            self._message_box.critical(parent, "가구 공용 예외를 저장하지 못했습니다", user_error(error))
             return HouseholdSharedColumnOutcome()
-        if backup.error is not None:
-            self._message_box.warning(parent, "가구 공용 예외는 저장됐지만 자동 백업에 실패했습니다", str(backup.error))
+        if backup.warning_required:
+            self._message_box.warning(parent, "가구 공용 예외는 저장됐지만 자동 백업에 실패했습니다", user_error(backup.error))
         return HouseholdSharedColumnOutcome(committed_roster_after_save(
             self._session, replace(roster, revision_id=record.metadata.revision_id)))

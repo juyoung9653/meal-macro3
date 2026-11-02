@@ -20,6 +20,10 @@ REPLICA_EXTENSION = ".mealreplica"
 logger = logging.getLogger(__name__)
 
 
+class _RestoreReplayError(Exception):
+    """A committed restore could not be replayed into the replica."""
+
+
 @dataclass(frozen=True)
 class ReplicaBackupRecord:
     path: Path
@@ -139,7 +143,20 @@ class DatabaseReplicaService:
                 replica = self._replica
                 if not replica._is_verified():
                     replica.check_integrity()
-                self._sync(database, replica)
+                try:
+                    self._sync(database, replica)
+                except _RestoreReplayError:
+                    # Restore records describe a complete historical state. If
+                    # replay rejects that diff, validate the source and stage an
+                    # exact encrypted copy instead of retrying the same diff.
+                    # Keep the existing file until the replacement is verified.
+                    self.clear_cache()
+                    with tempfile.TemporaryDirectory(prefix=".replica-repair-", dir=self.directory) as folder:
+                        staged = Path(folder) / path.name
+                        database.backup_to(staged, database_key)
+                        os.replace(staged, path)
+                    self._replica = EncryptedDatabase.open(path, database_key)
+                    logger.info("복구 이력의 증분 반영 대신 검증된 원본으로 백업 DB를 갱신했습니다.")
                 _write_manifest(path, database, credentials, database_key, timestamp)
                 _read_manifest(path, database_key)
                 self._file_identity = self._identity(path)
@@ -162,7 +179,12 @@ class DatabaseReplicaService:
             raise DatabaseIntegrityError("백업 DB와 원본의 변경 이력이 갈라졌습니다. 다른 백업 폴더를 선택해주세요.")
         for (revision_id,) in tuple(origin.execute("SELECT revision_id FROM revision WHERE sequence>? ORDER BY sequence", (sequence,))):
             record = source.revision(UUID(revision_id))
-            replica.append_revision(replace(record, metadata=replace(record.metadata, display_code=None)))
+            try:
+                replica.append_revision(replace(record, metadata=replace(record.metadata, display_code=None)))
+            except ValueError as error:
+                if "snapshot_restore_target" in record.metadata.decisions:
+                    raise _RestoreReplayError() from error
+                raise
             if replica.revision(record.metadata.revision_id) != record:
                 raise DatabaseIntegrityError("새 변경 기록이 백업 DB에 정확히 반영되지 않았습니다.")
         head = target.execute("SELECT sequence, run_id FROM document_run ORDER BY sequence DESC LIMIT 1").fetchone()

@@ -246,7 +246,7 @@ def test_controller_auto_links_one_household_using_saved_rule_in_same_revision(a
         initial_id,
         persons=(Person(existing_id, PersonProfile(
             "기존",
-            mobile_phone="010-9999-9999",
+            mobile_phone="010-0000-0000",
             household_head_name="홍 보호자",
             road_address="성남대로 1",
             detail_address="101호",
@@ -314,7 +314,7 @@ def test_controller_auto_links_one_household_using_saved_rule_in_same_revision(a
         )
 
 
-def test_controller_ambiguous_household_reports_error_without_saving(app):
+def test_controller_merges_multiple_matching_households(app, tmp_path):
     household_ids = (UUID(int=101), UUID(int=102))
     persons = (
         Person(UUID(int=201), PersonProfile("첫째", mobile_phone="010-1234-5678")),
@@ -343,19 +343,6 @@ def test_controller_ambiguous_household_reports_error_without_saving(app):
                 (Meal.LUNCH,), date(2026, 10, 5), {}, None, {},
             )
 
-    class Database:
-        def current_roster(self):
-            return roster
-
-        def snapshot(self, _revision_id):
-            return None
-
-    class Session:
-        database = Database()
-
-        def append_revision(self, _record):
-            raise AssertionError("모호한 가구 연결은 저장하면 안 됩니다.")
-
     errors = []
 
     class Messages:
@@ -363,11 +350,20 @@ def test_controller_ambiguous_household_reports_error_without_saving(app):
         def critical(_parent, title, message):
             errors.append((title, message))
 
-    outcome = RosterRowEditController(
-        Session(), dialog_type=AcceptCreate, message_box=Messages,
-    ).add(Meal.LUNCH, service_day=date(2026, 10, 5))
-    assert outcome.status is RosterRowEditStatus.FAILED
-    assert "기존 가구가 둘 이상" in errors[0][1]
+    with DatabaseSession.create(tmp_path / "merge.sqlite3", "password") as session:
+        session.append_revision(RevisionRecord(
+            RevisionMetadata(roster.revision_id, None, datetime.now(UTC), date(2026, 10, 5),
+                             RevisionActor("tester", "sid"), "initial", RevisionSource.UI),
+            roster_audit_changes(None, roster)))
+        outcome = RosterRowEditController(
+            session, dialog_type=AcceptCreate, message_box=Messages,
+            actor_provider=lambda: RevisionActor("tester", "sid"),
+            effective_date_provider=lambda: date(2026, 10, 5),
+        ).add(Meal.LUNCH, service_day=date(2026, 10, 5))
+        assert outcome.completed and not errors
+        after = session.database.current_roster()
+        assert len({after.household_for(p.person_id, on=date(2026, 10, 5)).household_id for p in after.persons}) == 1
+        assert len(session.database.revision_summaries()) == 2
 
 
 def test_controller_add_and_delete_commit_revisions_and_backups(app, tmp_path):

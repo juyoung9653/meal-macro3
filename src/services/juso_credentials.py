@@ -39,7 +39,7 @@ class CredentialStore:
         vault = self._vault()
         try:
             vault.CredWrite({"Type": vault.CRED_TYPE_GENERIC, "TargetName": SERVICE_NAME,
-                             "UserName": "juso-search-api-key", "CredentialBlob": value.encode("utf-16-le"),
+                             "UserName": "juso-search-api-key", "CredentialBlob": value,
                              "Persist": vault.CRED_PERSIST_LOCAL_MACHINE}, 0)
         except Exception:
             raise CredentialStoreError("API 키를 Windows에 저장하지 못했습니다.") from None

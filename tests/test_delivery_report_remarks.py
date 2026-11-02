@@ -160,7 +160,7 @@ def test_status_heading_keeps_red_emphasis_with_one_form_summary(tmp_path):
     historical, _, _ = source(count=1, starts={0: MONDAY}, forms={0: "박스"})
     prepared = prepare(historical)
     output = tmp_path / "report-colors.xlsx"
-    make_report_publication(prepared.reports, output, "assets/report_template.xlsx")
+    make_report_publication(prepared.reports, output, "assets/급식/일일식수템플릿.xlsx")
     workbook = openpyxl.load_workbook(output, rich_text=True)
     try:
         value = workbook.active["H4"].value
@@ -184,7 +184,7 @@ def test_area_name_sorting_and_wirye_address_grouping(tmp_path):
     expected = "신규 8/17~\n101동 202호(다), 1234-5678(가, 나), 정자동(라)"
     assert memo(prepared) == expected
     output = tmp_path / "report.xlsx"
-    make_report_publication(prepared.reports, output, "assets/report_template.xlsx")
+    make_report_publication(prepared.reports, output, "assets/급식/일일식수템플릿.xlsx")
     workbook = openpyxl.load_workbook(output)
     try:
         assert workbook.active["H4"].value == expected

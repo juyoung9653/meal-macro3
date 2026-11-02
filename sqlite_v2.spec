@@ -18,8 +18,11 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=[
-        ("assets/report_template.xlsx", "assets"),
-        ("assets/substitute_template.xlsx", "assets"),
+        ("assets/급식/일일식수템플릿.xlsx", "assets/급식"),
+        ("assets/행복도시락/석식일일식수템플릿.xlsx", "assets/행복도시락"),
+        ("assets/행복도시락/중식일일식수템플릿.xlsx", "assets/행복도시락"),
+        ("assets/급식/배송목록템플릿.xlsx", "assets/급식"),
+        ("assets/행복도시락/배송목록템플릿.xlsx", "assets/행복도시락"),
         ("assets/급식/급식_청구서템플릿.xlsx", "assets/급식"),
         ("assets/급식/급식_확인서템플릿.xlsx", "assets/급식"),
         ("assets/행복도시락/행복도시락_청구서템플릿.xlsx", "assets/행복도시락"),

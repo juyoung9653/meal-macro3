@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .user_messages import user_error
+
 import hashlib
 import re
 from collections.abc import Callable
@@ -276,7 +278,7 @@ class DocumentCompletionDialog(QDialog):
                 message="문서를 열기 전에 저장된 내용을 확인하는 중입니다.", parent=self,
             )
         except (TypeError, ValueError, OSError) as error:
-            self._show_status(str(error), outcome="error")
+            self._show_status(user_error(error), outcome="error")
             return
         self._request_open(
             path,

@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import date
 from uuid import UUID
 
+from src.domain.revision_visibility import effective_history_revisions
 from src.domain.meal_history_cancellation import MealHistoryTarget, cancelled_meal_history_targets
 from src.domain.projections import (
     ENROLLMENT_KIND, STATUS_EVENT_KIND, enrollments_from_state,
@@ -73,6 +74,7 @@ def build_monthly_meal_history(
     # for timestamp ties, as resolve_status_history does.
     for items in events.values():
         items.sort(key=lambda event: event.recorded_at)
+    revisions = effective_history_revisions(revisions)
     cancelled = cancelled_meal_history_targets(revisions)
     candidates = {}
     for record in revisions:

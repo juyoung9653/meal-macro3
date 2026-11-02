@@ -156,11 +156,11 @@ def test_deleted_cancelled_and_restore_synthetic_actions_are_excluded():
                                 ACTOR, "합성 취소", RevisionSource.UI, decisions={"meal_history_cancellation": {}})
     records.append(RevisionRecord(metadata, (AuditChange(CANCELLATION_KIND, marker_id, ChangeOperation.INSERT, None, target.state()),)))
     restored = _event(roster, records, states, MealStatus.PAUSED, date(2026, 10, 5), date(2026, 10, 6),
-                      decisions={"snapshot_restore_target": "synthetic"})
+                      decisions={"snapshot_restore_target": str(records[-1].metadata.revision_id)})
     assert _result(records, states, 2026, 10).entries == ()
     # Restoring cancellation markers changes visibility, without a synthetic restore action.
     metadata = replace(metadata, revision_id=uuid4(), parent_revision_id=records[-1].metadata.revision_id,
-                       recorded_at=STAMP + timedelta(hours=2), decisions={"snapshot_restore_target": "synthetic"})
+                       recorded_at=STAMP + timedelta(hours=2), decisions={"snapshot_restore_target": str(records[-1].metadata.revision_id)})
     records.append(RevisionRecord(metadata, (AuditChange(CANCELLATION_KIND, marker_id, ChangeOperation.DELETE, target.state(), None),)))
     states.pop(EntityRef(CANCELLATION_KIND, marker_id))
     rows = _result(records, states, 2026, 10).entries

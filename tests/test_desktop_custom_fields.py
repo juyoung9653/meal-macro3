@@ -1,3 +1,5 @@
+
+from src.storage.database_session import AutomaticBackupResult
 from datetime import UTC, date, datetime
 from types import SimpleNamespace
 from uuid import UUID
@@ -69,7 +71,7 @@ class _Session:
         if self.raises is not None:
             raise self.raises
         self.records.append(record)
-        return SimpleNamespace(error=self.error)
+        return AutomaticBackupResult(error=self.error)
 
 
 class _Dialog:
@@ -157,7 +159,7 @@ def test_controller_returns_latest_roster_after_multiple_commits_then_close():
     assert len(session.records) == 2
 
 
-def test_controller_warns_for_backup_error_but_returns_committed_snapshot():
+def test_controller_defers_backup_warning_and_returns_committed_snapshot():
     _Dialog.responses = [
         (
             QDialog.DialogCode.Accepted,
@@ -171,7 +173,7 @@ def test_controller_warns_for_backup_error_but_returns_committed_snapshot():
     assert outcome.completed
     assert outcome.roster is not None
     assert outcome.roster.custom_fields[-1].name == "구역"
-    assert len(messages.warning_calls) == 1
+    assert not messages.warning_calls
 
 
 def test_controller_returns_no_change_when_append_fails():

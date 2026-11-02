@@ -80,7 +80,7 @@ def test_summary_translates_generated_reason_and_keeps_actor_name():
     model = RevisionSummaryModel((summary,))
     text = model.data(model.index(0, 0), Qt.ItemDataRole.DisplayRole)
     assert ACTOR.username in text
-    assert "엑셀 명단 가져오기" in text
+    assert "엑셀 명단 불러오기" in text
     assert not re.search(r"[A-Za-z]", text.replace(ACTOR.username, ""))
 
 

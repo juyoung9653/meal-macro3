@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from enum import StrEnum
 from uuid import UUID
@@ -20,6 +20,7 @@ class ReconciliationDisposition(StrEnum):
 
 
 class ReviewReason(StrEnum):
+    SAME_NAME_HOUSEHOLD_HEAD = "same_name_household_head"
     MISSING_MOBILE_PHONE = "missing_mobile_phone"
     MISSING_BIRTH_DATE = "missing_birth_date"
     DUPLICATE_SOURCE_IDENTITY = "duplicate_source_identity"
@@ -145,7 +146,7 @@ def stage_reconciliation(
     *,
     effective_on: date,
 ) -> ReconciliationPlan:
-    """Match only exact name+birth identities and surface every ambiguity."""
+    """Prefer exact name+mobile identities, with birth matching as a fallback."""
 
     if roster is not None and not isinstance(roster, RosterSnapshot):
         raise TypeError("roster는 RosterSnapshot 또는 None이어야 합니다.")
@@ -178,6 +179,11 @@ def stage_reconciliation(
                 (_name_key(observation.name), observation.birth_date)
             ].append(observation)
 
+    source_phone_counts = defaultdict(int)
+    for observation in observations:
+        phone = normalize_phone(observation.profile_values.get(ProfileField.MOBILE_PHONE))
+        if phone:
+            source_phone_counts[_name_key(observation.name), phone] += 1
     staged = tuple(
         _stage_person(
             roster,
@@ -187,14 +193,15 @@ def stage_reconciliation(
             people_by_name,
             people_by_birth,
             source_by_identity,
+            source_phone_counts,
         )
         for observation in observations
     )
-    return ReconciliationPlan(
+    return _review_household_head_candidates(roster, ReconciliationPlan(
         None if roster is None else roster.revision_id,
         effective_on,
         staged,
-    )
+    ))
 
 
 def stage_lunch_reconciliation(
@@ -203,7 +210,7 @@ def stage_lunch_reconciliation(
     *,
     effective_on: date,
 ) -> ReconciliationPlan:
-    """Vacation lunch identities use name and the primary mobile number only."""
+    """Prefer name+mobile links, with name+head candidates requiring review."""
     if roster is not None and not isinstance(roster, RosterSnapshot):
         raise TypeError("roster는 RosterSnapshot 또는 None이어야 합니다.")
     _validate_date(effective_on, "적용일")
@@ -253,7 +260,63 @@ def stage_lunch_reconciliation(
             None, tuple(sorted((p.person_id for p in candidates), key=str)),
             tuple(reasons), (), tuple(observation.meals), (), (),
         ))
-    return ReconciliationPlan(None if roster is None else roster.revision_id, effective_on, tuple(staged))
+    return _review_household_head_candidates(roster, ReconciliationPlan(
+        None if roster is None else roster.revision_id, effective_on, tuple(staged)))
+
+
+def _review_household_head_candidates(
+    roster: RosterSnapshot | None, plan: ReconciliationPlan,
+) -> ReconciliationPlan:
+    """Keep unique name+mobile matches; review name+head candidates."""
+    if (None if roster is None else roster.revision_id) != plan.roster_revision_id:
+        raise ValueError("확인 중인 명단이 변경되었습니다. 다시 불러와주세요.")
+    def key(name: str, head: str | None) -> tuple[str, str] | None:
+        normalized = _name_key(head or "")
+        return (_name_key(name), normalized) if name.strip() and normalized else None
+
+    existing: defaultdict[tuple[str, str], set[UUID]] = defaultdict(set)
+    sources: defaultdict[tuple[str, str], set[UUID]] = defaultdict(set)
+    for person in (() if roster is None else roster.persons):
+        identity = key(person.profile.name, person.profile.household_head_name)
+        if identity is not None:
+            existing[identity].add(person.person_id)
+    for staged in plan.staged_people:
+        obs = staged.observation
+        identity = key(obs.name, obs.profile_values.get(ProfileField.HOUSEHOLD_HEAD_NAME))
+        if identity is not None:
+            sources[identity].add(obs.observation_id)
+
+    reviewed = []
+    for staged in plan.staged_people:
+        obs = staged.observation
+        phone = normalize_phone(obs.profile_values.get(ProfileField.MOBILE_PHONE))
+        if staged.disposition is ReconciliationDisposition.MATCHED and phone:
+            assert roster is not None
+            matched = roster.person(staged.matched_person_id)
+            if normalize_phone(matched.profile.mobile_phone) == phone:
+                reviewed.append(staged)
+                continue
+        identity = key(obs.name, obs.profile_values.get(ProfileField.HOUSEHOLD_HEAD_NAME))
+        matches = existing.get(identity, set())
+        duplicate_source = len(sources.get(identity, ())) > 1
+        if not matches and not duplicate_source:
+            reviewed.append(staged)
+            continue
+        candidates = set(staged.candidate_person_ids) | matches
+        if staged.matched_person_id is not None:
+            candidates.add(staged.matched_person_id)
+        reasons = [ReviewReason.SAME_NAME_HOUSEHOLD_HEAD, *staged.review_reasons]
+        if duplicate_source:
+            reasons.append(ReviewReason.DUPLICATE_SOURCE_IDENTITY)
+        if len(candidates) > 1:
+            reasons.append(ReviewReason.DUPLICATE_ROSTER_IDENTITY)
+        reviewed.append(replace(
+            staged, disposition=ReconciliationDisposition.REVIEW,
+            matched_person_id=None, candidate_person_ids=tuple(sorted(candidates, key=str)),
+            review_reasons=tuple(dict.fromkeys(reasons)), profile_differences=(),
+            meals_added=tuple(obs.meals), meals_removed=(),
+        ))
+    return replace(plan, staged_people=tuple(reviewed))
 
 
 def _stage_person(
@@ -264,12 +327,22 @@ def _stage_person(
     people_by_name: dict[str, list[Person]],
     people_by_birth: dict[date, list[Person]],
     source_by_identity: dict[tuple[str, date], list[PersonObservation]],
+    source_phone_counts: dict[tuple[str, str], int],
 ) -> StagedPerson:
     name_key = _name_key(observation.name)
     birth = observation.birth_date
     exact: tuple[Person, ...] = ()
     reasons: list[ReviewReason] = []
-    if birth is None:
+    phone = normalize_phone(observation.profile_values.get(ProfileField.MOBILE_PHONE))
+    phone_matches = tuple(person for person in people_by_name.get(name_key, ())
+                          if phone and normalize_phone(person.profile.mobile_phone) == phone)
+    if phone_matches:
+        exact = phone_matches
+        if len(phone_matches) > 1:
+            reasons.append(ReviewReason.DUPLICATE_ROSTER_IDENTITY)
+        if source_phone_counts.get((name_key, phone), 0) > 1:
+            reasons.append(ReviewReason.DUPLICATE_SOURCE_IDENTITY)
+    elif birth is None:
         if roster is None:
             return StagedPerson(
                 observation,

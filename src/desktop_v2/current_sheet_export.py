@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .user_messages import user_error
+
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -302,11 +304,11 @@ class CurrentSheetExportController:
             result = take_worker_result(worker)
         except Exception as error:  # noqa: BLE001 - output failure is reported at the UI boundary
             failure_title = (
-                "기사·식종별 Excel을 내보내지 못했습니다"
+                f"{snapshot.sheet_name} Excel을 내보내지 못했습니다"
                 if isinstance(snapshot, TextWorkbookSnapshot)
                 else "현재 시트를 내보내지 못했습니다"
             )
-            self._messages.critical(parent, failure_title, str(error))
+            self._messages.critical(parent, failure_title, user_error(error))
             return None
         self._messages.information(parent, "Excel 내보내기 완료", f"저장했습니다: {result.output_path}")
         return result

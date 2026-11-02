@@ -1,4 +1,5 @@
 """Two-row government rosters retain one editable source per physical column."""
+from tests.import_wizard_helpers import advance_wizard
 import json
 from dataclasses import replace
 from datetime import date
@@ -153,8 +154,8 @@ def test_wizard_suggests_leaf_headers_remembers_edits_and_can_read_a_table_next(
     wizard._set_combo(wizard._mapping_combos[ProfileField.TELEPHONE], None)
     wizard._set_combo(wizard._mapping_combos[ProfileField.MOBILE_PHONE], "J")
     wizard.ignored_columns_list.item(10).setCheckState(Qt.CheckState.Unchecked)
-    wizard._go_next()
-    wizard._go_next()
+    advance_wizard(wizard)
+    advance_wizard(wizard)
     assert wizard.preview is not None and wizard.preview.can_continue, wizard.error_label.text()
     profile = wizard.preview.profile
     assert profile.header_row_count == 2 and profile.data_start_row == 3
@@ -197,8 +198,8 @@ def test_explicit_header_start_and_selected_sheet_reach_the_parser(tmp_path, mak
     assert wizard._inspect_source(), wizard.error_label.text()
     wizard.table_combo.setCurrentIndex(wizard.table_combo.findData("다른 중식"))
     assert wizard.inspection.selected_sheet == "다른 중식"
-    wizard._go_next()
-    wizard._go_next()
+    advance_wizard(wizard)
+    advance_wizard(wizard)
     assert wizard.preview is not None and wizard.preview.can_continue, wizard.error_label.text()
     assert [person.name for person in wizard.preview.observations] == ["선택한아동"]
     assert wizard.preview.profile.data_start_row == 6

@@ -397,11 +397,11 @@ def test_attaches_exact_weekly_meal_counts_once_from_typed_dates(
 
     assert result.success, result.error
     assert result.batch.deliveries[0].weekly == (
-        WeeklyDelivery(1, date(2026, 6, 1), date(2026, 6, 6), 1, 0, 0),
-        WeeklyDelivery(2, date(2026, 6, 7), date(2026, 6, 13), 1, 0, 0),
-        WeeklyDelivery(3, date(2026, 6, 14), date(2026, 6, 20), 0, 1, 0),
-        WeeklyDelivery(4, date(2026, 6, 21), date(2026, 6, 27), 0, 0, 0),
-        WeeklyDelivery(5, date(2026, 6, 28), date(2026, 6, 30), 0, 0, 1),
+        WeeklyDelivery(1, date(2026, 6, 1), date(2026, 6, 7), 2, 0, 0),
+        WeeklyDelivery(2, date(2026, 6, 8), date(2026, 6, 14), 0, 1, 0),
+        WeeklyDelivery(3, date(2026, 6, 15), date(2026, 6, 21), 0, 0, 0),
+        WeeklyDelivery(4, date(2026, 6, 22), date(2026, 6, 28), 0, 0, 0),
+        WeeklyDelivery(5, date(2026, 6, 29), date(2026, 6, 30), 0, 0, 1),
     )
 
 

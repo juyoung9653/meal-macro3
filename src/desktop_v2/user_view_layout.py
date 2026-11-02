@@ -1,4 +1,6 @@
 """Share a user's roster appearance inside the same encrypted operating file."""
+
+from .user_messages import user_error
 from datetime import datetime
 import platform
 
@@ -15,7 +17,7 @@ class UserViewLayoutDialog(QDialog):
     def __init__(self, profiles, parent=None):
         super().__init__(parent)
         self._profiles = profiles
-        self.setWindowTitle("다른 사용자 화면 설정 가져오기")
+        self.setWindowTitle("다른 사용자 화면 설정 불러오기")
         self.setStyleSheet(application_stylesheet())
         self.resize(660, 460)
         layout = QVBoxLayout(self)
@@ -39,7 +41,7 @@ class UserViewLayoutDialog(QDialog):
         cancel = QPushButton("취소")
         cancel.setObjectName("quietAction")
         cancel.clicked.connect(self.reject)
-        self.apply_button = QPushButton("가져오기")
+        self.apply_button = QPushButton("불러오기")
         self.apply_button.setObjectName("primaryAction")
         self.apply_button.clicked.connect(self.accept)
         buttons.addWidget(cancel)
@@ -61,7 +63,7 @@ class UserViewLayoutDialog(QDialog):
         try:
             state = self.selected_layout()
         except (TypeError, ValueError) as error:
-            self.preview.setPlainText(str(error))
+            self.preview.setPlainText(user_error(error))
             return
         self.preview.setPlainText("\n".join(
             f'{index}. {sheet["name"]} · 칼럼 {len(sheet["layout"]["order"])}개 · 숨김 {len(sheet["layout"]["hidden"])}개'
@@ -89,7 +91,7 @@ class UserViewLayoutController(QObject):
             self.save_current()
         except Exception as error:
             self.messages.warning(self.window, "화면 설정 공유 저장 실패",
-                "이 PC의 화면 설정은 유지됩니다. 다른 사용자가 가져올 사본을 DB에 저장하지 못했습니다.\n\n" + str(error))
+                "이 PC의 화면 설정은 유지됩니다. 다른 사용자가 가져올 사본을 DB에 저장하지 못했습니다.\n\n" + user_error(error))
 
     def eventFilter(self, watched, event):
         if watched is self.window and event.type() == QEvent.Type.Close:
@@ -106,6 +108,6 @@ class UserViewLayoutController(QObject):
                 return
             self.window.import_view_layout(dialog.selected_layout())
         except Exception as error:
-            self.messages.critical(self.window, "화면 설정을 가져오지 못했습니다", str(error))
+            self.messages.critical(self.window, "화면 설정을 가져오지 못했습니다", user_error(error))
             return
         self.publish()

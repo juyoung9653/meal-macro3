@@ -1,5 +1,7 @@
 """Offscreen person-profile editor safety checks."""
 
+from src.storage.database_session import AutomaticBackupResult
+
 import os
 from datetime import date
 from uuid import UUID
@@ -339,7 +341,7 @@ def test_delivery_controller_copy_unchanged_inherited_person_to_sibling(app):
     records = []
     session = Mock(spec=DatabaseSession)
     session.database = SimpleNamespace(current_roster=lambda: roster)
-    session.append_revision = lambda record: (records.append(record) or SimpleNamespace(error=None))
+    session.append_revision = lambda record: (records.append(record) or AutomaticBackupResult(error=None))
 
     class Dialog:
         def __init__(self, *args, **kwargs):
@@ -384,7 +386,7 @@ def test_controller_saves_household_phone_changes_in_one_revision(app):
     records = []
     def append(record):
         records.append(record)
-        return SimpleNamespace(error=None)
+        return AutomaticBackupResult(error=None)
     from unittest.mock import Mock
 
     from src.storage.database_session import DatabaseSession
@@ -440,7 +442,7 @@ def test_delivery_controller_changes_one_person_and_accepted_noop_skips_revision
     records = []
     session = Mock(spec=DatabaseSession)
     session.database = SimpleNamespace(current_roster=lambda: roster)
-    session.append_revision = lambda record: (records.append(record) or SimpleNamespace(error=None))
+    session.append_revision = lambda record: (records.append(record) or AutomaticBackupResult(error=None))
     setting = HouseholdDeliverySetting(Meal.BREAKFAST, (4, 5, 6), "도시락")
 
     class Dialog:
@@ -511,7 +513,7 @@ def test_delivery_controller_copies_to_selected_day_household_when_membership_ch
     records = []
     session = Mock(spec=DatabaseSession)
     session.database = SimpleNamespace(current_roster=lambda: roster)
-    session.append_revision = lambda record: (records.append(record) or SimpleNamespace(error=None))
+    session.append_revision = lambda record: (records.append(record) or AutomaticBackupResult(error=None))
     setting = HouseholdDeliverySetting(Meal.DINNER, form="도시락")
 
     class Dialog:

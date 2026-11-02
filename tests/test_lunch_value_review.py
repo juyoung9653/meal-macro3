@@ -93,7 +93,7 @@ def test_identity_ignores_birth_uses_normalized_mobile_and_requires_missing_phon
     assert all(s.disposition is D.REVIEW for s in stage_lunch_reconciliation(roster, (obs, duplicate), effective_on=DAY).staged_people)
     duplicated_roster = replace(roster, persons=(*roster.persons, Person(uuid4(), roster.persons[0].profile)))
     assert stage_lunch_reconciliation(duplicated_roster, (obs,), effective_on=DAY).staged_people[0].disposition is D.REVIEW
-    assert stage_reconciliation(roster, (obs,), effective_on=DAY).staged_people[0].disposition is D.REVIEW
+    assert stage_reconciliation(roster, (obs,), effective_on=DAY).staged_people[0].disposition is D.MATCHED
 
 
 def test_profile_and_custom_values_are_editable_and_blanks_default_to_existing():
@@ -137,8 +137,9 @@ def test_new_custom_field_on_existing_person_survives_revision(source_value):
 
 
 def test_value_dialog_keeps_invalid_input_and_accepts_edits(qapp):
-    roster, plan, candidate = scenario(incoming={"school_name": "가상중학교", "grade": "1", "birth_date": date(2015, 1, 1), "note": "새 메모"})
+    roster, plan, candidate = scenario(old=PersonProfile("가상 학생", mobile_phone=PHONE, birth_date=date(2014, 1, 1)), incoming={"school_name": "가상중학교", "grade": "1", "birth_date": date(2015, 1, 1), "note": "새 메모"})
     dialog = LunchValueReviewDialog(roster, candidate, plan)
+    dialog._use_all_values(3)
     index = next(i for i, row in enumerate(dialog.rows) if row.field == "birth_date")
     dialog.table.item(index, 4).setText("날짜 아님")
     dialog.accept()
@@ -211,12 +212,17 @@ def test_controller_cancel_then_save_reviewed_values_and_reopen_database(tmp_pat
             return SimpleNamespace(preview=preview, effective_on=DAY, purpose=ImportPurpose.VACATION_LUNCH, existing_profile=initial.stored_profile)
     class NoIdentityReview:
         def __init__(self, *args, **kwargs): raise AssertionError("name+mobile must match despite a missing old birth date")
-    class ValueReview:
+    class ValueReview(LunchValueReviewDialog):
         accept_next = False
-        def __init__(self, current, result, plan, parent):
-            self.rows = lunch_value_rows(current, result, plan)
-        def exec(self): return QDialog.DialogCode.Accepted if self.accept_next else QDialog.DialogCode.Rejected
-        def choices(self): return {row.key: "수정 메모" if row.field == "note" else row.proposed for row in self.rows if not row.automatic}
+        def exec(self):
+            assert {row.field for row in self.rows} == {"note"}
+            if not self.accept_next:
+                return QDialog.DialogCode.Rejected
+            self._use_all_values(3)
+            self._show_group_details("note")
+            self.table.item(0, 4).setText("예외 메모")
+            self.accept()
+            return self.result()
     class Messages:
         @staticmethod
         def critical(*args): raise AssertionError(args)
@@ -237,12 +243,12 @@ def test_controller_cancel_then_save_reviewed_values_and_reopen_database(tmp_pat
         result = controller.run()
         assert result.completed
         assert result.backup_result.succeeded
-        assert result.roster.person(PERSON_ID).profile.note == "수정 메모"
+        assert result.roster.person(PERSON_ID).profile.note == "예외 메모"
     with DatabaseSession.open(path, "test-password") as session:
         saved = session.database.current_roster()
         assert saved.person(PERSON_ID).profile.school_name == "가상중학교"
         assert saved.person(PERSON_ID).profile.grade == "1"
-        assert saved.person(PERSON_ID).profile.note == "수정 메모"
+        assert saved.person(PERSON_ID).profile.note == "예외 메모"
         assert Meal.DINNER in saved.meals_for(PERSON_ID, on=DAY)
 
 
@@ -250,3 +256,80 @@ def test_controller_cancel_then_save_reviewed_values_and_reopen_database(tmp_pat
 def qapp():
     app = QApplication.instance() or QApplication([])
     yield app
+
+
+def grouped_conflict_scenario():
+    old = PersonProfile("합성 하나", mobile_phone=PHONE, road_address="기존 주소", note="기존 메모")
+    current, original_plan, _ = scenario(old, {"road_address": "새 주소", "note": "새 메모"})
+    second_id = uuid4()
+    second = Person(second_id, replace(old, name="합성 둘", mobile_phone="010-2222-3333"))
+    current = replace(current, persons=(*current.persons, second))
+    first_obs = original_plan.staged_people[0].observation
+    second_obs = replace(first_obs, observation_id=uuid4(),
+        source=SourceReference("synthetic.xlsx", "명단", (3,)),
+        profile_values={**first_obs.profile_values, ProfileField.NAME: second.profile.name,
+                        ProfileField.MOBILE_PHONE: second.profile.mobile_phone})
+    plan = stage_lunch_reconciliation(current, (first_obs, second_obs), effective_on=DAY)
+    result = apply_reconciliation(current, plan, new_revision_id=uuid4())
+    return current, plan, result
+
+
+def test_bulk_fields_show_all_conflicts_and_allow_individual_exceptions(qapp):
+    current, plan, result = grouped_conflict_scenario()
+    dialog = LunchValueReviewDialog(current, result, plan)
+    assert len(dialog.rows) == 4
+    assert dialog.group_table.rowCount() == 2
+    assert dialog.detail_panel.isHidden()
+    dialog._use_all_values(3)
+    dialog._show_group_details("note")
+    assert sum(not dialog.table.isRowHidden(index) for index in range(len(dialog.rows))) == 2
+    selected = next(index for index, row in enumerate(dialog.rows) if row.person_id == PERSON_ID and row.field == "note")
+    dialog.table.item(selected, 4).setText("예외 메모")
+    assert dialog._group_combos["note"].currentData() == "custom"
+    assert dialog._group_combos["road_address"].currentData() == "incoming"
+    dialog.accept()
+    assert dialog.result() == QDialog.DialogCode.Accepted
+    people, _ = apply_lunch_values(current, result, plan, dialog.choices())
+    assert next(person for person in people if person.person_id == PERSON_ID).profile.note == "예외 메모"
+    assert next(person for person in people if person.person_id != PERSON_ID).profile.note == "새 메모"
+    assert all(person.profile.road_address == "새 주소" for person in people)
+    dialog.close()
+
+
+def test_unselected_group_cannot_be_saved_and_bulk_direction_can_be_changed(qapp):
+    current, plan, result = grouped_conflict_scenario()
+    dialog = LunchValueReviewDialog(current, result, plan)
+    combo = dialog._group_combos["road_address"]
+    combo.setCurrentIndex(combo.findData("incoming"))
+    dialog.accept()
+    assert dialog.result() != QDialog.DialogCode.Accepted
+    assert "2개" in dialog.error.text()
+    dialog._use_all_values(2)
+    dialog.accept()
+    assert dialog.result() == QDialog.DialogCode.Accepted
+    people, _ = apply_lunch_values(current, result, plan, dialog.choices())
+    assert all(person.profile.road_address == "기존 주소" and person.profile.note == "기존 메모" for person in people)
+    dialog.close()
+
+
+def test_exception_removal_and_bulk_reset_restore_group_choice(qapp):
+    current, plan, result = grouped_conflict_scenario()
+    dialog = LunchValueReviewDialog(current, result, plan)
+    dialog._use_all_values(3)
+    dialog._show_group_details("note")
+    index = dialog._groups["note"][0]
+    dialog._exception_rows.add(index)
+    dialog._refresh_exception_rows()
+    dialog.table.item(index, 4).setText("개인 수정")
+    dialog.table.setCurrentCell(index, 4)
+    dialog._remove_exceptions()
+    assert not dialog.table.isRowHidden(index)
+    assert dialog.table.item(index, 4).text() == dialog.table.item(index, 3).text()
+    dialog.table.item(index, 4).setText("다시 수정")
+    assert not dialog.table.isRowHidden(index)
+    dialog._set_group_values("note", 2)
+    assert not dialog.table.isRowHidden(index)
+    assert not dialog._exception_rows
+    dialog.accept()
+    assert dialog.result() == QDialog.DialogCode.Accepted
+    dialog.close()

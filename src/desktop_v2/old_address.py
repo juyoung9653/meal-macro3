@@ -1,21 +1,24 @@
 """Manual Juso update and PC-local API key settings."""
 from __future__ import annotations
 
+from .user_messages import user_error
+
 from datetime import UTC, datetime
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QThread, Signal, Slot
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QFormLayout, QHBoxLayout,
     QLabel, QLineEdit, QMessageBox, QPushButton, QRadioButton, QTextEdit, QVBoxLayout)
 
 from src.services.juso_api import JusoApiClient, TEST_ADDRESS
 from src.services.juso_credentials import CredentialStore
-from src.services.old_address_update import (NEW_COLUMN, prepare_address_update,
+from src.services.old_address_update import (NEW_COLUMN, SEARCH_REGION, prepare_address_update,
     source_options, target_options, validate_columns)
 from src.storage.database_session import committed_roster_after_save
 from src.storage.encrypted_database import RevisionConflictError
 from .dialog_workflow import DialogRequest, dialog_workflow
 from .import_controller import current_windows_actor
-from .startup_loading import run_progress_task, save_revision
+from .startup_loading import (StartupLoadingDialog, run_progress_task,
+    run_worker_with_delayed_progress, save_revision, take_worker_result)
 from .theme import application_stylesheet, register_application_fonts
 
 
@@ -85,13 +88,13 @@ class JusoKeyDialog(QDialog):
             self.status.setText("이 PC에 API 키가 저장되어 있습니다." if self._store.get_api_key()
                                 else "저장된 API 키가 없습니다.")
         except Exception as error:
-            self.status.setText(str(error))
+            self.status.setText(user_error(error))
 
     def _save(self):
         try:
             self._store.save_api_key(self.key_edit.text())
         except Exception as error:
-            self._message_box.warning(self, "API 키를 저장하지 못했습니다", str(error))
+            self._message_box.warning(self, "API 키를 저장하지 못했습니다", user_error(error))
             return
         self.key_edit.clear()
         self._refresh()
@@ -104,7 +107,7 @@ class JusoKeyDialog(QDialog):
             self.key_edit.clear()
             self._refresh()
         except Exception as error:
-            self._message_box.warning(self, "API 키를 삭제하지 못했습니다", str(error))
+            self._message_box.warning(self, "API 키를 삭제하지 못했습니다", user_error(error))
 
     def _check(self):
         try:
@@ -124,7 +127,8 @@ class OldAddressDialog(QDialog):
         super().__init__(parent)
         self._roster = roster
         root = _shell(self, "구주소 업데이트")
-        self.setMinimumHeight(440)
+        self.setMinimumHeight(480)
+        self.resize(640, 500)
         root.addWidget(_note(f"{service_day:%Y-%m-%d} 기준 주소를 사용합니다. 전체 명단 {len(roster.persons)}명이 범위이며, "
             "메인 화면의 검색·필터·숨김 여부와 관계없이 선택한 조건으로 처리합니다."))
         form = QFormLayout()
@@ -145,6 +149,8 @@ class OldAddressDialog(QDialog):
         form.addRow("신주소를 읽을 칼럼", self.source_combo)
         form.addRow("구주소를 저장할 칼럼", self.target_combo)
         root.addLayout(form)
+        root.addWidget(_note(f"선택한 칼럼의 주소 앞에 ‘{SEARCH_REGION}’를 붙여 검색합니다. "
+            "관할동은 자동으로 붙이지 않습니다. 주소에 이미 ‘경기도 성남시’가 있으면 중복해서 붙이지 않습니다."))
         self.empty_only = QRadioButton("구주소가 비어 있는 건만 업데이트")
         self.all_rows = QRadioButton("전체 업데이트 · 기존 구주소 덮어쓰기")
         self.empty_only.setChecked(True)
@@ -165,9 +171,48 @@ class OldAddressDialog(QDialog):
         try:
             validate_columns(self._roster, self.source_combo.currentData(), self.target_combo.currentData())
         except ValueError as error:
-            self.error_label.setText(str(error))
+            self.error_label.setText(user_error(error))
             return
         super().accept()
+
+
+class _AddressUpdateWorker(QThread):
+    progress_changed = Signal(int, int)
+
+    def __init__(self, task):
+        super().__init__()
+        self._task = task
+        self.result = None
+        self.error = None
+
+    def run(self):
+        try:
+            self.result = self._task(self.progress_changed.emit)
+        except Exception as error:
+            self.error = error
+
+
+class AddressUpdateProgressDialog(StartupLoadingDialog):
+    def __init__(self, worker, *, total, parent=None):
+        super().__init__(worker, parent=parent, title="구주소를 변환하는 중입니다",
+            message="신주소를 조회해 구주소로 변환하는 중입니다.\n"
+                    "건너뜀·실패를 포함한 전체 명단의 처리 인원을 표시합니다.")
+        self.progress.setTextVisible(True)
+        self.set_progress(0, total)
+        worker.progress_changed.connect(self.set_progress, Qt.ConnectionType.QueuedConnection)
+
+    @Slot(int, int)
+    def set_progress(self, completed, total):
+        self.progress.setRange(0, max(1, total))
+        self.progress.setValue(completed if total else 1)
+        self.progress.setFormat("처리 %v / %m명 · %p%" if total else "처리할 대상이 없습니다")
+
+
+def run_address_update(task, *, total, parent=None):
+    worker = _AddressUpdateWorker(task)
+    dialog = AddressUpdateProgressDialog(worker, total=total, parent=parent)
+    run_worker_with_delayed_progress(worker, dialog)
+    return take_worker_result(worker)
 
 
 class OldAddressController:
@@ -185,7 +230,7 @@ class OldAddressController:
                 raise ValueError("먼저 명단을 가져와주세요.")
             snapshot = self._session.database.snapshot(roster.revision_id)
         except Exception as error:
-            self._message_box.warning(parent, "명단을 읽지 못했습니다", str(error))
+            self._message_box.warning(parent, "명단을 읽지 못했습니다", user_error(error))
             return None
         dialog = self._dialog_type(roster, columns, service_day, parent)
         while (yield DialogRequest(dialog, self._session)) == QDialog.DialogCode.Accepted:
@@ -213,21 +258,21 @@ class OldAddressController:
                 only_empty = dialog.empty_only.isChecked()
                 client = self._client_type(key)
                 actor, recorded_at = current_windows_actor(), datetime.now(UTC)
-                result = run_progress_task(lambda: prepare_address_update(
+                result = run_address_update(lambda progress: prepare_address_update(
                     roster, snapshot, client, source=source, target=target, only_empty=only_empty,
-                    service_day=service_day, actor=actor, recorded_at=recorded_at),
-                    message="신주소를 조회해 구주소로 변환하는 중입니다.", parent=parent)
+                    service_day=service_day, actor=actor, recorded_at=recorded_at, on_progress=progress),
+                    total=len(roster.persons), parent=parent)
                 backup = save_revision(self._session, result.record, parent=parent) if result.record else None
             except RevisionConflictError:
                 dialog.error_label.setText("명단이 변경되어 저장하지 않았습니다. 취소하고 다시 열어주세요.")
                 continue
             except Exception as error:
                 # API/network exceptions may contain echoed secrets; expose only known local messages.
-                text = str(error) if isinstance(error, ValueError) else "API 키·인터넷 연결 또는 운영 파일 상태를 확인해주세요."
+                text = user_error(error) if isinstance(error, ValueError) else "API 키·인터넷 연결 또는 운영 파일 상태를 확인해주세요."
                 dialog.error_label.setText("저장하지 않았습니다. " + text)
                 continue
             summary = (f"변경 {result.updated}명 · 동일 {result.unchanged}명 · 건너뜀 {result.skipped}명 · 실패 {len(result.failures)}명")
-            if backup is not None and backup.error is not None:
+            if backup is not None and backup.warning_required:
                 summary += "\n주소는 저장됐지만 자동 백업에 실패했습니다. 백업 폴더를 확인해주세요."
             report = QDialog(parent)
             layout = _shell(report, "구주소 업데이트 결과")
@@ -235,7 +280,7 @@ class OldAddressController:
             if result.failures:
                 details = QTextEdit()
                 details.setReadOnly(True)
-                details.setPlainText("기존 값을 유지한 대상\n" + "\n".join(result.failures))
+                details.setPlainText("기존 값을 유지한 대상\n" + "\n".join(_failure_message(failure) for failure in result.failures))
                 layout.addWidget(details)
             layout.addWidget(_button("닫기", report.accept, True))
             # Refresh the main roster before opening the result window.
@@ -245,3 +290,8 @@ class OldAddressController:
             yield DialogRequest(report)
             return committed
         return None
+
+
+def _failure_message(failure):
+    name, separator, reason = failure.partition(": ")
+    return f"{name}: {user_error(reason)}" if separator else user_error(failure)

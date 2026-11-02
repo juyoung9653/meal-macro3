@@ -40,6 +40,12 @@ _SOURCE_COLUMN_KEYS = {
     "아동과의 관계": "relationship_to_child",
 }
 SUBSTITUTE_MEALS = ("석식", "조식", "중식")
+HAPPY_REPORT_DEFAULTS = {"driver": "배송담당", "region": "관할동", "address": "도로명주소", "note": AUTO_HISTORY}
+HAPPY_REPORT_LABELS = {"driver": "기사", "region": "지역", "address": "비고에 표시할 주소", "note": "비고"}
+
+
+def daily_report_defaults(profile: str) -> dict[str, str]:
+    return dict(HAPPY_REPORT_DEFAULTS)
 
 
 def substitute_default_mapping(roster: RosterSnapshot | None) -> dict[str, str]:
@@ -110,7 +116,7 @@ def mapping_editor_spec(
     column_labels: Mapping[str, str] | None = None,
     history_column: str | None = None,
 ) -> MappingEditorSpec:
-    if profile not in ("급식", "행복도시락") or document_kind not in ("invoice", "confirmation", "substitute"):
+    if profile not in ("급식", "행복도시락") or document_kind not in ("invoice", "confirmation", "substitute", "daily_report"):
         raise ValueError("지원하지 않는 문서 양식 또는 문서 종류입니다.")
     settings = settings or get_settings()
     missing_sheets = {}
@@ -125,6 +131,9 @@ def mapping_editor_spec(
         for target in targets:
             defaults.setdefault(target, "")
         locked = ()
+    elif document_kind == "daily_report":
+        defaults = daily_report_defaults(profile)
+        targets, locked = tuple(defaults), ()
     elif document_kind == "substitute":
         defaults = substitute_default_mapping(roster)
         targets = tuple(defaults)
@@ -138,10 +147,14 @@ def mapping_editor_spec(
     source_options = list(_STANDARD_SOURCES)
     if document_kind == "substitute":
         source_options.extend(("배송순서", "배송 형태"))
+    if document_kind == "daily_report":
+        source_options.extend(("배송담당", AUTO_HISTORY))
     if document_kind == "invoice":
         source_options.extend(source for source in INVOICE_SOURCE_LABELS if source not in source_options)
     labels = {key: key for key in source_options}
     labels["학교명"] = "학교"
+    if document_kind == "daily_report":
+        labels[AUTO_HISTORY] = "식종 변경 이력"
     labels[FULL_ADDRESS_FIELD] = "전체 주소 (도로명주소 + 상세주소)"
     if document_kind == "confirmation":
         source_options.append(AUTO_CONFIRMATION)
@@ -171,17 +184,21 @@ def mapping_editor_spec(
     labels[""] = "비움"
     selectable_sources = tuple(
         source for source in source_options
-        if not source or (document_kind == "confirmation" and source == AUTO_CONFIRMATION) or (document_kind == "invoice" and source in INVOICE_SOURCE_LABELS) or (
+        if not source or (document_kind == "daily_report" and source == AUTO_HISTORY) or (document_kind == "confirmation" and source == AUTO_CONFIRMATION) or (document_kind == "invoice" and source in INVOICE_SOURCE_LABELS) or (
             (source in _SOURCE_COLUMN_KEYS or source.startswith("custom:")
+             or (document_kind == "daily_report" and source == "배송담당")
              or (document_kind == "substitute" and source in ("배송순서", "배송 형태")))
             and (
                 column_labels is None
+                or (document_kind == "daily_report" and source == "배송담당")
                 or (document_kind == "substitute" and source in ("배송순서", "배송 형태"))
                 or _SOURCE_COLUMN_KEYS.get(source, source) in column_labels
             )
         )
     )
     target_labels = {key: key for key in targets}
+    if document_kind == "daily_report":
+        target_labels = dict(HAPPY_REPORT_LABELS)
     if document_kind == "substitute":
         output_labels = {column.key: column.label for column in STANDARD_COLUMNS}
         if roster is not None:
@@ -231,6 +248,11 @@ def build_mapping_revision(
     roster: RosterSnapshot | None = None,
     desired_fallbacks: Mapping[str, str] | None = None,
 ) -> PreparedMappingRevision | None:
+    if document_kind == "daily_report" and any(
+        target != "note" and source == AUTO_HISTORY
+        for mapping in (desired_mapping, desired_fallbacks or {}) for target, source in mapping.items()
+    ):
+        raise ValueError("일일식수의 식종 변경 이력은 비고에 연결해주세요.")
     spec = mapping_editor_spec(profile, document_kind, settings=settings, roster=roster,
                                history_column=invoice_settings_from_snapshot(snapshot).history_column(profile))
     editable = {key: spec.defaults[key] for key in spec.targets if key not in spec.locked_targets}

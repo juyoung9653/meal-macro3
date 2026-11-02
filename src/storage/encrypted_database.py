@@ -279,7 +279,15 @@ class EncryptedDatabase:
                     self._current_entity_snapshot(actual_parent), self.snapshot(target_id), record,
                 )
                 _validate_changes_against_current(connection, record.changes, restoring=True)
-            if actual_parent is not None and not restoring and not cancelling and (shared or exceptions):
+            from src.domain.mobile_household_merge import (
+                needs_mobile_household_merge, prepare_mobile_household_revision,
+            )
+            mobile_merge = (actual_parent is not None and not restoring and not cancelling
+                            and needs_mobile_household_merge(record))
+            if mobile_merge:
+                record = prepare_mobile_household_revision(self._current_entity_snapshot(actual_parent), record)
+                _validate_changes_against_current(connection, record.changes)
+            elif actual_parent is not None and not restoring and not cancelling and (shared or exceptions):
                 record = expand_household_shared_revision(self._current_entity_snapshot(actual_parent), record)
                 _validate_changes_against_current(connection, record.changes)
             _insert_revision(connection, record.metadata)
@@ -323,7 +331,7 @@ class EncryptedDatabase:
             )
             committed_roster = (
                 validated_roster
-                if shared or shared_setting_changed or restoring else None
+                if shared or shared_setting_changed or restoring or mobile_merge else None
             )
             stamp = self._state_stamp()
             connection.execute("RELEASE SAVEPOINT append_revision" if nested else "COMMIT")

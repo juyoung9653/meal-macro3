@@ -1235,6 +1235,11 @@ def test_import_review_enables_commit_only_after_ambiguous_identity_choice(app):
     assert not ok_button.isEnabled()
     assert dialog._table.rowCount() == 1
     assert set(dialog._combos) == {SECOND_OBSERVATION_ID}
+    assert [dialog._table.horizontalHeaderItem(index).text()
+            for index in range(dialog._table.columnCount()) if not dialog._table.isColumnHidden(index)] == ["번호", "성명", "핸드폰", "세대주명", "확인 사유", "행 반영 방법"]
+    assert dialog._table.item(0, 0).text() == "1"
+    assert dialog._table.item(0, 1).text() == "홍길동"
+    assert dialog._household_combos == {}
     review_combo = dialog._combos[SECOND_OBSERVATION_ID]
     review_combo.setCurrentIndex(review_combo.findData(FIRST_PERSON_ID))
     app.processEvents()
@@ -1355,7 +1360,7 @@ def test_import_review_defaults_later_new_person_to_matching_existing_household(
 
 
 @pytest.mark.parametrize("identity", ["new", "ambiguous", "matched"])
-def test_import_review_requires_choice_when_two_existing_households_match(app, identity):
+def test_import_review_does_not_ask_which_same_phone_household(app, identity):
     roster = _roster()
     other_person_id = UUID("80000000-0000-0000-0000-000000000033")
     other_household_id = UUID("80000000-0000-0000-0000-000000000034")
@@ -1414,39 +1419,18 @@ def test_import_review_requires_choice_when_two_existing_households_match(app, i
         household_plan=household_plan,
     )
     ok_button = dialog._buttons.button(QDialogButtonBox.StandardButton.Ok)
-    if identity == "matched":
-        assert dialog._table.rowCount() == 0
-        assert ok_button.isEnabled()
-        assert dialog.decisions() == {}
-        dialog.close()
-        return
-    assert dialog._table.rowCount() == 1
-    combo = dialog._household_combos[THIRD_OBSERVATION_ID]
-    if identity == "ambiguous":
-        person_combo = dialog._combos[THIRD_OBSERVATION_ID]
-        assert not ok_button.isEnabled()
-        person_combo.setCurrentIndex(person_combo.findData(FIRST_PERSON_ID))
-        assert ok_button.isEnabled()
-        assert not combo.isEnabled()
-        person_combo.setCurrentIndex(person_combo.findData("new"))
-        assert not ok_button.isEnabled()
-        assert combo.isEnabled()
-        with pytest.raises(ValueError, match="모두 선택"):
-            dialog.decisions()
-        person_combo.setCurrentIndex(person_combo.findData("ignore"))
-        assert ok_button.isEnabled()
-        assert not combo.isEnabled()
-        person_combo.setCurrentIndex(person_combo.findData("new"))
-
-    assert combo.currentText() == "기존 가구 선택 필요"
-    assert not ok_button.isEnabled()
-    combo.setCurrentIndex(combo.findData(HOUSEHOLD_ID))
-    app.processEvents()
+    assert dialog._table.rowCount() == 0
+    assert dialog._household_combos == {}
+    assert dialog._table.isColumnHidden(6)
     assert ok_button.isEnabled()
-    assert dialog.household_decisions()[THIRD_OBSERVATION_ID].household_id == (
-        HOUSEHOLD_ID
-    )
+    assert dialog.household_decisions()[THIRD_OBSERVATION_ID].household_id == HOUSEHOLD_ID
+    if identity in ("ambiguous", "matched"):
+        assert dialog.decisions() == {}
+        assert plan.staged_people[0].matched_person_id == FIRST_PERSON_ID
+    else:
+        assert dialog.decisions()[THIRD_OBSERVATION_ID].resolution is IdentityResolution.CREATE_NEW
     dialog.close()
+
 
 
 def test_status_period_dialog_supports_closed_pause_and_open_stop(app):
@@ -1574,8 +1558,11 @@ def test_every_column_context_menu_targets_clicked_person(app, monkeypatch):
                 assert histories[-1] == expected
                 assert complaints[-1] == expected
                 if column.meal is None:
-                    expected_edit = "순서 수정" if column.key == "sequence" else "정보 수정"
-                    assert expected_edit in opened[-1]
+                    if column.key == "sequence":
+                        assert "순서 수정" not in opened[-1]
+                        assert "정보 수정" not in opened[-1]
+                    else:
+                        assert "정보 수정" in opened[-1]
                 else:
                     assert "배송담당 변경" in opened[-1]
         assert len(opened) == window.table_model.rowCount() * len(window.table_model.columns)

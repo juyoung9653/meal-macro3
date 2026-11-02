@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .user_messages import user_error
+
 from .dialog_workflow import DialogRequest, dialog_workflow
 
 from .startup_loading import save_revision
@@ -21,6 +23,7 @@ from PySide6.QtWidgets import (
 from src.domain.revisions import RevisionActor
 from src.domain.roster import RosterSnapshot
 from src.domain.invoice_settings import invoice_settings_from_snapshot
+from src.domain.document_column_sources import AUTO_HISTORY
 from src.templates.confirmation_fields import AUTO_CONFIRMATION, placeholder_mapping
 from src.services.document_column_mappings import (
     MappingEditorSpec, build_mapping_revision, load_mapping_overrides, load_mapping_fallbacks,
@@ -36,7 +39,7 @@ from .theme import application_stylesheet, register_application_fonts
 
 
 _PROFILES = (("급식", "급식"), ("행복도시락", "행복도시락"))
-_DOCUMENTS = (("invoice", "청구서"), ("confirmation", "확인서"))
+_DOCUMENTS = (("invoice", "청구서"), ("confirmation", "확인서"), ("daily_report", "일일식수 · 모든 식종 공용"))
 _SCOPES = tuple((profile, document) for profile, _ in _PROFILES for document, _ in _DOCUMENTS)
 
 
@@ -63,7 +66,7 @@ class DocumentColumnMappingDialog(QDialog):
         self._indicators: dict[str, QLabel] = {}
         self._switching = False
         register_application_fonts()
-        self.setWindowTitle("청구서·확인서 항목 설정")
+        self.setWindowTitle("문서 항목 설정")
         self.setObjectName("documentColumnMappingDialog")
         self.setModal(True)
         self.resize(900, 650)
@@ -122,7 +125,7 @@ class DocumentColumnMappingDialog(QDialog):
         header_layout.setContentsMargins(18, 14, 18, 15)
         eyebrow = QLabel("문서 출력 · 공통 설정")
         eyebrow.setObjectName("editEyebrow")
-        title = QLabel("청구서·확인서 항목 설정")
+        title = QLabel("문서 항목 설정")
         title.setObjectName("workspaceTitle")
         explanation = QLabel(
             "각 대상자의 1순위 값이 비어 있으면 2순위 값을 사용합니다. 둘 다 비어 있으면 빈칸으로 출력합니다. 저장 후 새로 만드는 문서에 적용됩니다."
@@ -193,6 +196,8 @@ class DocumentColumnMappingDialog(QDialog):
         if self._switching or not hasattr(self, "_document_combo"):
             return
         requested = (self._profile_combo.currentData(), self._document_combo.currentData())
+        if requested not in self._specs:
+            requested = (requested[0], "invoice")
         if requested == self._scope:
             return
         if self._dirty():
@@ -213,6 +218,11 @@ class DocumentColumnMappingDialog(QDialog):
         self._show_scope()
 
     def _show_scope(self) -> None:
+        self._switching = True
+        self._document_combo.setCurrentIndex(self._document_combo.findData(self._scope[1]))
+        for index in range(self._document_combo.count()):
+            self._document_combo.model().item(index).setEnabled((self._scope[0], self._document_combo.itemData(index)) in self._specs)
+        self._switching = False
         spec = self._specs[self._scope]
         self._combos = {}
         self._fallback_combos = {}
@@ -221,6 +231,8 @@ class DocumentColumnMappingDialog(QDialog):
         self._reset_button.setText("이 문서 초기화")
         self._target_heading.setText("플레이스홀더" if self.document_kind == "confirmation" else "출력 칼럼")
         self._scope_note.setText(
+            f"{self.selected_profile}의 모든 식종에 같은 연결을 사용합니다. 비고는 식종 변경 이력이 기본이며, 개인 비고나 다른 칼럼으로 바꿀 수 있습니다."
+            if self.document_kind == "daily_report" else
             "번호는 가구원 순서입니다. 일부 시트에만 있는 항목도 연결할 수 있습니다."
             if self.document_kind == "confirmation" else
             "식수·청구금액·연번은 자동 계산이 기본입니다. 계산값을 다른 출력 칼럼에 연결하거나 명단 항목·비움으로 바꿀 수 있습니다.")
@@ -262,6 +274,8 @@ class DocumentColumnMappingDialog(QDialog):
             field.setAccessibleName(f"{spec.target_labels[target]} 1순위")
             field.addItem("비움", "")
             selectable = spec.source_options if spec.selectable_source_options is None else spec.selectable_source_options
+            if self.document_kind == "daily_report" and target != "note":
+                selectable = tuple(source for source in selectable if source != AUTO_HISTORY)
             for source in selectable:
                 if source:
                     field.addItem(spec.source_labels[source], source)
@@ -377,7 +391,7 @@ class DocumentColumnMappingController:
             }
             fallbacks = {scope: load_mapping_fallbacks(snapshot, *scope) for scope in _SCOPES}
         except Exception as error:
-            self._message_box.critical(parent, "출력 칼럼을 읽지 못했습니다", str(error))
+            self._message_box.critical(parent, "출력 칼럼을 읽지 못했습니다", user_error(error))
             return DocumentColumnMappingOutcome(DocumentColumnMappingStatus.FAILED)
 
         dialog = self._dialog_type(specs, overrides, parent, message_box=self._message_box, fallbacks=fallbacks)
@@ -403,12 +417,12 @@ class DocumentColumnMappingController:
             if updated is None:
                 raise RuntimeError("저장 뒤 현재 명단을 다시 읽지 못했습니다.")
         except Exception as error:
-            self._message_box.critical(parent, "출력 칼럼을 저장하지 못했습니다", str(error))
+            self._message_box.critical(parent, "출력 칼럼을 저장하지 못했습니다", user_error(error))
             return DocumentColumnMappingOutcome(DocumentColumnMappingStatus.FAILED)
-        if backup.error is not None:
+        if backup.warning_required:
             self._message_box.warning(
                 parent,
                 "출력 칼럼은 저장됐지만 자동 백업에 실패했습니다",
-                "변경 내용은 저장되었습니다. 백업 폴더를 확인해주세요.\n\n" + str(backup.error),
+                "변경 내용은 저장되었습니다. 백업 폴더를 확인해주세요.\n\n" + user_error(backup.error),
             )
         return DocumentColumnMappingOutcome(DocumentColumnMappingStatus.COMPLETED, updated, backup, True)

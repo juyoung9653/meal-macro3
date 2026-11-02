@@ -1,5 +1,7 @@
 # SQLite 데스크톱 앱 리팩터링 Handoff
 
+> **과거 기록 안내 (2026-10-28)**: 이 문서의 진행 상황·다음 목표·테스트 수치는 당시 기록입니다. 현재 지원 앱은 `sqlite_v2.py`의 PySide6 SQLite v2이며, 구형 PyQt6 UI는 제거되었습니다. 현재 동작과 요구사항은 [UI 기준](docs/ui-guidelines.md), [서비스 규칙](docs/service-rules.md), [저장소 문서](docs/sqlite-storage.md)를 따릅니다. 아래의 구형 앱 보존·미구현·빌드 보류 설명을 현재 작업 지시로 사용하지 않습니다.
+
 UI 작업은 [UI 디자인·상호작용 기준](docs/ui-guidelines.md)을 먼저 확인한다. 아래 과거 기록보다 최신 사용자 피드백을 반영한 UI 기준을 우선한다.
 
 > 독립 감사 후속 정정: 아래 조식 배송 규칙 설정의 구현 설명은 과거 기록이다.

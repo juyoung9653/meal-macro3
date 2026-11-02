@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .user_messages import user_error
+
 from .dialog_workflow import DialogRequest, dialog_workflow
 
 from .startup_loading import save_revision
@@ -15,8 +17,7 @@ from inspect import Parameter, signature
 from uuid import uuid4
 
 from PySide6.QtWidgets import (
-    QDialog, QDialogButtonBox, QFormLayout, QLabel, QLineEdit,
-    QMessageBox, QPushButton, QVBoxLayout, QScrollArea, QWidget,
+    QDialog, QDialogButtonBox, QFormLayout, QLabel, QMessageBox, QPushButton, QVBoxLayout, QScrollArea, QWidget,
 )
 
 from src.domain.roster import Meal, RosterSnapshot
@@ -157,7 +158,7 @@ class SequenceEditDialog(QDialog):
             try:
                 validate_input("sequence", value, rule_for(self._input_rules, "sequence"))
             except ValueError as error:
-                self.error.setText(str(error))
+                self.error.setText(user_error(error))
                 self.fields[meal].setFocus()
                 return
         self.accept()
@@ -202,12 +203,12 @@ class SequenceEditController:
             )
             backup = save_revision(self._session, prepared.record, parent=parent)
         except Exception as error:
-            return SequenceSaveResult(SequenceSaveStatus.FAILED, message=f"배송순서를 저장하지 못했습니다: {error}")
+            return SequenceSaveResult(SequenceSaveStatus.FAILED, message=f"배송순서를 저장하지 못했습니다: {user_error(error)}")
         return SequenceSaveResult(
             SequenceSaveStatus.SAVED, committed_roster_after_save(self._session, prepared.snapshot),
-            f"배송순서는 저장됐지만 자동 백업에 실패했습니다: {backup.error}"
-            if backup.error is not None else "배송순서를 저장했습니다.",
-            backup.error is not None,
+            f"배송순서는 저장됐지만 자동 백업에 실패했습니다: {user_error(backup.error)}"
+            if backup.warning_required else "배송순서를 저장했습니다.",
+            backup.warning_required,
         )
 
     @dialog_workflow
@@ -250,13 +251,13 @@ class SequenceEditController:
                 recorded_at=datetime.now(UTC), revision_id=uuid4(),
             )
             backup = save_revision(self._session, prepared.record, parent=parent)
-            if backup.error is not None:
+            if backup.warning_required:
                 self._message_box.warning(
-                    parent, "배송순서는 저장됐지만 자동 백업에 실패했습니다", str(backup.error)
+                    parent, "배송순서는 저장됐지만 자동 백업에 실패했습니다", user_error(backup.error)
                 )
             return self._session.database.current_roster()
         except Exception as error:  # noqa: BLE001 - storage errors are shown at the UI boundary
-            self._message_box.critical(parent, "배송순서를 저장하지 못했습니다", str(error))
+            self._message_box.critical(parent, "배송순서를 저장하지 못했습니다", user_error(error))
             return None
 
 
@@ -282,12 +283,12 @@ class SequenceEditController:
             )
             backup = save_revision(self._session, prepared.record, parent=parent)
         except Exception as error:  # noqa: BLE001 - observable inline storage boundary
-            return SequenceSaveResult(SequenceSaveStatus.FAILED, message=f"배송순서를 저장하지 못했습니다: {error}")
+            return SequenceSaveResult(SequenceSaveStatus.FAILED, message=f"배송순서를 저장하지 못했습니다: {user_error(error)}")
         # append_revision reports automatic backup failures after the committed
         # revision. Do not turn that result into a failed save or reread error.
-        if backup.error is not None:
+        if backup.warning_required:
             return SequenceSaveResult(
                 SequenceSaveStatus.SAVED, committed_roster_after_save(self._session, prepared.snapshot),
-                f"배송순서는 저장됐지만 자동 백업에 실패했습니다: {backup.error}", True,
+                f"배송순서는 저장됐지만 자동 백업에 실패했습니다: {user_error(backup.error)}", True,
             )
         return SequenceSaveResult(SequenceSaveStatus.SAVED, committed_roster_after_save(self._session, prepared.snapshot), "배송순서를 저장했습니다.")

@@ -216,7 +216,7 @@ def test_unified_controller_saves_all_meals_once_and_preserves_drivers(tmp_path)
         assert saved.resolve_assignment(person_id, Meal.LUNCH).driver == "기존 기사"
 
 
-def test_sequence_display_and_context_menu_signal(app):
+def test_sequence_display_is_read_only_in_main_window(app):
     roster = _mixed_roster()
     person_id = roster.persons[0].person_id
     common_model = RosterTableModel(base_roster())
@@ -228,7 +228,8 @@ def test_sequence_display_and_context_menu_signal(app):
     sequence_column = next(i for i, column in enumerate(model.columns) if column.key == "sequence")
     index = model.index(0, sequence_column)
     assert model.data(index) == "석식: 001\n조식: 010\n중식: 001"
-    assert "더블클릭 → 순서 수정" in model.data(index, Qt.ItemDataRole.ToolTipRole)
+    assert "배송순서관리에서 수정" in model.data(index, Qt.ItemDataRole.ToolTipRole)
+    assert not (model.flags(index) & Qt.ItemFlag.ItemIsEditable)
     window = RosterWindow(roster)
     received = []
     person_edits = []
@@ -236,13 +237,12 @@ def test_sequence_display_and_context_menu_signal(app):
     window.person_edit_requested.connect(person_edits.append)
     sequence_menu = window._create_context_menu(roster.persons[0], column_key="sequence")
     assert [action.text() for action in sequence_menu.actions()] == [
-        "순서 수정", "이력보기", "민원", "", "명단 행 삭제",
+        "이력보기", "민원", "", "명단 행 삭제",
     ]
-    sequence_menu.actions()[0].trigger()
-    assert received == [person_id]
+    assert received == []
     assert person_edits == []
     window._table.doubleClicked.emit(window.table_model.index(0, sequence_column))
-    assert received == [person_id, person_id]
+    assert received == []
     name_menu = window._create_context_menu(roster.persons[0], column_key="name")
     assert [action.text() for action in name_menu.actions()] == [
         "정보 수정", "이력보기", "민원", "", "명단 행 삭제",

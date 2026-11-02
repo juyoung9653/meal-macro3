@@ -31,25 +31,13 @@ def remark_sample_dates(day: date, meal: Meal, active_dates: set[date]) -> tuple
     return tuple(sorted(dates))
 
 
-def build_status_remarks(
-    roster: RosterSnapshot,
-    routing: RoutingState,
-    histories: Mapping[tuple[UUID, Meal], StatusHistory],
-    day: date,
-    meal: Meal,
-    shipments: Sequence[PhysicalShipment],
-    allowed_forms: set[str | None] | None,
-) -> Mapping[str, str]:
+def status_remark_actions(roster, histories, day, meal, shipments, allowed_forms):
+    """Find dated meal changes, including people with no delivery that day."""
     sampled = remark_sample_dates(day, meal, {
         shipment.delivery_on for shipment in shipments if shipment.meal is meal
     })
-    grouped: defaultdict[str, defaultdict[str, defaultdict[str, set[str]]]] = defaultdict(
-        lambda: defaultdict(lambda: defaultdict(set))
-    )
-    enrollment_starts = {
-        (item.person_id, item.meal, item.period.starts_on)
-        for item in roster.enrollments
-    }
+    enrollment_starts = {(item.person_id, item.meal, item.period.starts_on) for item in roster.enrollments}
+    actions = {}
     for person in roster.persons:
         history = histories.get((person.person_id, meal))
         if history is None:
@@ -67,10 +55,27 @@ def build_status_remarks(
                 action = active
             elif "일시중지" in action:
                 action = "복원"
-        if not action:
-            continue
-        view = routing.resolve(roster, person.person_id, day)
-        # Memo-only people have no shipment and must not create a count failure.
+        if action:
+            actions[person.person_id] = action
+    return actions
+
+
+def build_status_remarks(
+    roster: RosterSnapshot,
+    routing: RoutingState,
+    histories: Mapping[tuple[UUID, Meal], StatusHistory],
+    day: date,
+    meal: Meal,
+    shipments: Sequence[PhysicalShipment],
+    allowed_forms: set[str | None] | None,
+    *, actions: Mapping[UUID, str] | None = None,
+) -> Mapping[str, str]:
+    if actions is None:
+        actions = status_remark_actions(roster, histories, day, meal, shipments, allowed_forms)
+    grouped = defaultdict(lambda: defaultdict(lambda: defaultdict(set)))
+    for person_id, action in actions.items():
+        person = roster.person(person_id)
+        view = routing.resolve(roster, person_id, day)
         driver = view.drivers[meal].strip() or "미지정"
         area = view.jurisdiction or "미지정"
         if area == "위례동":

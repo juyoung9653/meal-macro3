@@ -12,6 +12,7 @@ from openpyxl.styles import Alignment
 from src.desktop_v2.document_hub import DocumentAction
 from src.desktop_v2.document_meal import DocumentMealDialog
 from src.domain.daily_report_choices import DailyReportChoices
+from src.domain.document_templates import DocumentTemplateProfile
 from src.domain.roster import Meal
 from src.generators import substitute_generator
 from tests.test_desktop_v2_document_meal import _period
@@ -21,14 +22,19 @@ from tests.test_delivery_substitute_v2 import app, session
 
 @pytest.mark.parametrize("action", (DocumentAction.DELIVERY_REPORT, DocumentAction.DELIVERY_SUBSTITUTE))
 @pytest.mark.parametrize("weekday", range(7))
-def test_weekday_defaults_survive_loading_saved_report_choices(app, action, weekday):
+@pytest.mark.parametrize("profile", (None, DocumentTemplateProfile.SCHOOL_MEAL, DocumentTemplateProfile.HAPPY_LUNCHBOX))
+def test_weekday_defaults_survive_loading_saved_report_choices(app, action, weekday, profile):
     day = date(2026, 10, 26) + timedelta(days=weekday)
     period = replace(_period(action), starts_on=day, ends_on=day, anchor_meal=Meal.LUNCH)
     dialog = DocumentMealDialog(period)
     dialog.set_available_delivery_forms((None, "도시락"))
-    dialog.set_report_choices(DailyReportChoices((Meal.BREAKFAST, Meal.LUNCH), (None,)))
+    dialog.set_report_choices(DailyReportChoices((Meal.BREAKFAST, Meal.LUNCH), (None,)), profile=profile)
     expected = Meal.DINNER if weekday < 4 else Meal.BREAKFAST if weekday == 4 else Meal.LUNCH
-    assert dialog.selected_meals() == (expected,)
+    happy_report = action is DocumentAction.DELIVERY_REPORT and profile is DocumentTemplateProfile.HAPPY_LUNCHBOX
+    assert dialog.selected_meals() == ((Meal.BREAKFAST, Meal.DINNER) if happy_report else (expected,))
+    if happy_report:
+        assert "석식·조식을 기본 선택" in dialog._meal_help.text()
+        assert "중식도 필요하면 체크" in dialog._meal_help.text()
     if action is DocumentAction.DELIVERY_REPORT:
         assert dialog.selected_delivery_forms() == ("도시락",)
         dialog._buttons_by_meal[Meal.BREAKFAST].setChecked(True)

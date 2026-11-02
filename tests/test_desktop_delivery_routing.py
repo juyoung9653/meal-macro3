@@ -1,5 +1,7 @@
 """Real form and controller boundaries for driver registration and dated moves."""
 
+from src.storage.database_session import AutomaticBackupResult
+
 import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -192,7 +194,7 @@ def test_controller_registration_relocation_cancel_and_backup_warning(tmp_path):
 
         def append_with_backup_failure(record):
             original_append(record)
-            return SimpleNamespace(error=OSError("backup unavailable"))
+            return AutomaticBackupResult(error=OSError("backup unavailable"))
 
         session.append_revision = append_with_backup_failure
         moved = controller.run_relocation(person_id, BEFORE)
@@ -204,7 +206,7 @@ def test_controller_registration_relocation_cancel_and_backup_warning(tmp_path):
             moved.routing_state.resolve(moved.roster, person_id, BEFORE).road_address
             == "이전 도로"
         )
-        assert len(messages.warnings) == 1
+        assert not messages.warnings
         revision = moved.roster.revision_id
         cancelled = DeliveryRoutingController(
             session, change_dialog_type=Cancel, message_box=messages

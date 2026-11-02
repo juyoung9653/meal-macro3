@@ -128,8 +128,8 @@ class _AcceptedDialog:
     mapping = {"성명": "학교명", "학교명": "학교명"}
 
     def __init__(self, specs, overrides, parent=None, *, message_box=None, fallbacks=None):
-        assert len(specs) == 4
-        assert len(overrides) == 4
+        assert len(specs) == 6
+        assert len(overrides) == 6
 
     def exec(self):
         return QDialog.DialogCode.Accepted

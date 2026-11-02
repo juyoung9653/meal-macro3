@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from src.storage.database_session import AutomaticBackupResult
+
 import os
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -502,7 +504,7 @@ def test_startup_wires_revision_history_signal_to_injected_dialog(app):
 
     session = SimpleNamespace(
         database=Database(),
-        credentials=SimpleNamespace(database_id=UUID(int=5)),
+        retry_backup_on_open=lambda: AutomaticBackupResult(), credentials=SimpleNamespace(database_id=UUID(int=5)),
     )
 
     class Signal:

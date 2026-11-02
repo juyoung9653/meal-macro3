@@ -181,7 +181,8 @@ def test_generation_failure_closes_progress_before_error_and_leaves_no_file_or_r
     finally:
         gate.close()
     assert outcome.status is generation.DocumentGenerationStatus.FAILED
-    assert len(messages.errors) == 1 and phase in messages.errors[0][-1]
+    assert len(messages.errors) == 1 and phase not in messages.errors[0][-1]
+    assert "다시 시도" in messages.errors[0][-1]
     assert not messages.warnings
     assert gate.observed == [(phase, 1)]
     assert not list(outputs.iterdir())
@@ -197,7 +198,7 @@ def test_backup_only_failure_preserves_published_file_and_sealed_run(app, docume
     ).run(selection_for(session, outputs, DocumentAction.INVOICE))
     assert outcome.completed and outcome.result.output_path.is_file()
     assert len(session.database.document_runs()) == 1
-    assert not messages.errors and len(messages.warnings) == 1
+    assert not messages.errors and not messages.warnings
 
 
 def test_cancel_template_does_not_start_generation(app, document_session, monkeypatch):

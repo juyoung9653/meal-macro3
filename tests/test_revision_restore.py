@@ -246,3 +246,43 @@ def test_restored_tied_status_order_matches_snapshot_projection_and_document_sou
         session.append_document_run(run)
         source_events = status_events_from_historical_snapshot(session.database.document_source_snapshot(run.run_id), person_id=person, meal=Meal.DINNER)
         assert source_events == expected
+
+
+def test_restore_removes_meal_rows_and_restoring_forward_recovers_them(history):
+    from src.desktop_v2.ledger_reader import load_revision_chain
+    from src.desktop_v2.meal_history import build_meal_history_entries_by_person
+    from src.services.monthly_meal_history import build_monthly_meal_history
+    from src.services.person_history import build_history_tables
+    session, first, second, _ = history
+    def visible():
+        head = session.database.latest_revision_id()
+        chain = load_revision_chain(session.database, head)
+        snapshot = session.database.snapshot(head)
+        personal = build_meal_history_entries_by_person(chain)
+        monthly = build_monthly_meal_history(snapshot, chain, 2026, 10)
+        tables = build_history_tables(session.database.current_roster(), snapshot, chain)
+        return personal, monthly.entries, tables['식종 변경'][1]
+    assert all(visible())
+    restored = restore_revision(session, first, second, ACTOR)
+    personal, monthly, tables = visible()
+    assert not personal and not monthly
+    baseline = build_history_tables(session.database.roster_snapshot(first), session.database.snapshot(first),
+                                    load_revision_chain(session.database, first))['식종 변경'][1]
+    assert tables == baseline
+    restore_revision(session, second, restored.revision_id, ACTOR)
+    assert all(visible())
+    assert session.database.revision(second).metadata.revision_id == second
+
+
+def test_restored_meal_visibility_survives_branch_checkout(history):
+    from src.desktop_v2.meal_history import build_meal_history_entries_by_person
+    from src.services.revision_branches import create_branch, checkout_branch, MAIN_BRANCH_ID
+    session, first, second, _ = history
+    database = session.database
+    branch = create_branch(session, second, second, ACTOR, name='식종 이력 복구 검증')
+    restored = restore_revision(session, first, branch.revision_id, ACTOR)
+    assert not build_meal_history_entries_by_person(database.branch_revision_chain(restored.revision_id))
+    main = checkout_branch(session, MAIN_BRANCH_ID, restored.revision_id, ACTOR)
+    assert build_meal_history_entries_by_person(database.branch_revision_chain(main.revision_id))
+    back = checkout_branch(session, branch.branch.branch_id, main.revision_id, ACTOR)
+    assert not build_meal_history_entries_by_person(database.branch_revision_chain(back.revision_id))

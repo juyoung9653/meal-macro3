@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hmac
 import secrets
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from src.domain.documents import DocumentRun
@@ -17,6 +17,7 @@ from .database_backup import (
     restore_backup_with_user_password,
 )
 from .database_replica import DatabaseReplicaService, ReplicaBackupRecord
+from .backup_diagnostics import BackupDiagnostics
 from .database_credentials import (
     CredentialAlreadyExistsError,
     CredentialFormatError,
@@ -38,10 +39,16 @@ class AutomaticBackupResult:
     error: Exception | None = None
     rotation: BackupPasswordRotation | None = None
     rotation_error: Exception | None = None
+    notify_failure: bool = False
+    log_path: Path | None = None
 
     def __post_init__(self) -> None:
         if self.record is not None and self.error is not None:
             raise ValueError("백업 결과와 오류를 동시에 지정할 수 없습니다.")
+
+    @property
+    def warning_required(self) -> bool:
+        return self.error is not None and self.notify_failure
 
     @property
     def attempted(self) -> bool:
@@ -81,6 +88,8 @@ class DatabaseSession:
         )
         self._closed = False
         self.last_committed_roster = None
+        self._backup_diagnostics = BackupDiagnostics(database.path, credentials.database_id)
+        self._startup_backup_result = None
         self._locks = [] if _lock is None else [_lock]
 
     @classmethod
@@ -313,11 +322,13 @@ class DatabaseSession:
         if self._backup_service is None:
             raise RuntimeError("자동 백업 폴더가 설정되지 않았습니다.")
         self._credentials = DatabaseCredentials.load(self.path)
-        return self._backup_service.create_backup(
+        record = self._backup_service.create_backup(
             self._database,
             self._credentials,
             self._key_bytes(),
         )
+        self._backup_diagnostics.succeeded()
+        return record
 
     def prepare_backup_directory(self, directory: str | Path) -> DatabaseReplicaService:
         """Verify a candidate service with a backup before it becomes active."""
@@ -338,17 +349,29 @@ class DatabaseSession:
         """Activate a service already checked by prepare_backup_directory."""
         previous = self._backup_service
         self._backup_service = replacement
+        self._backup_diagnostics.succeeded()
         if previous is not None and previous is not replacement:
             previous.clear_cache()
 
-    def try_backup_now(self) -> AutomaticBackupResult:
+    def try_backup_now(self, *, _startup_retry=False) -> AutomaticBackupResult:
         self._require_open()
         if self._backup_service is None:
             return AutomaticBackupResult()
         try:
-            return AutomaticBackupResult(record=self.backup_now())
+            record = self.backup_now()
         except Exception as error:
-            return AutomaticBackupResult(error=error)
+            log_path = self._backup_diagnostics.failed(error, self.backup_directory, startup_retry=_startup_retry)
+            return AutomaticBackupResult(error=error, log_path=log_path)
+        return AutomaticBackupResult(record=record)
+
+    def retry_backup_on_open(self) -> AutomaticBackupResult:
+        """Catch up on open; warn only if an earlier session also failed."""
+        self._require_open()
+        if self._startup_backup_result is None:
+            result = self.try_backup_now(_startup_retry=True)
+            self._startup_backup_result = replace(
+                result, notify_failure=result.error is not None and self._backup_diagnostics.pending_from_previous_session)
+        return self._startup_backup_result
 
     def change_user_password(
         self,
@@ -381,9 +404,11 @@ class DatabaseSession:
             record = self._backup_service.create_backup(
                 self._database, self._credentials, self._key_bytes(), prune=False,
             )
+            self._backup_diagnostics.succeeded()
             return AutomaticBackupResult(record=record, rotation=rotation, rotation_error=rotation_error)
         except Exception as error:
-            return AutomaticBackupResult(error=error, rotation=rotation, rotation_error=rotation_error)
+            log_path = self._backup_diagnostics.failed(error, self.backup_directory)
+            return AutomaticBackupResult(error=error, rotation=rotation, rotation_error=rotation_error, log_path=log_path)
 
     def close(self) -> None:
         if self._closed:

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from .dialog_workflow import DialogRequest, dialog_workflow
+from .user_messages import user_error
+
+from .dialog_workflow import DialogRequest, dialog_workflow, invoke
+from .mobile_household_merge import review_mobile_household_merge
 
 from .startup_loading import save_revision
 
@@ -431,7 +434,7 @@ class HouseholdSharedColumnDialog(QDialog):
             if self.validation_callback is not None:
                 self.validation_callback(self.enabled.isChecked(), values)
         except (ValueError, TypeError) as error:
-            self.error.setText(str(error))
+            self.error.setText(user_error(error))
             return
         super().accept()
 
@@ -464,7 +467,7 @@ class HouseholdSharedColumnController:
             components = household_shared_components(roster, column_key, snapshot=snapshot)
             rows = household_shared_rows(roster, column_key, service_day, snapshot=snapshot) if not enabled else ()
         except Exception as error:
-            self._message_box.critical(parent, "가구 공용 설정을 열지 못했습니다", str(error))
+            self._message_box.critical(parent, "가구 공용 설정을 열지 못했습니다", user_error(error))
             return HouseholdSharedColumnOutcome()
         selected_enabled = not enabled
         values = {row.household_id: tuple(row.values) for row in rows}
@@ -494,6 +497,9 @@ class HouseholdSharedColumnController:
                 actor=self._actor_provider(), recorded_at=self._recorded_at_provider(),
                 effective_on=service_day, revision_id=self._revision_id_factory(), snapshot=snapshot,
             )
+            record = yield from invoke(review_mobile_household_merge, self._session, record, parent)
+            if record is None:
+                return HouseholdSharedColumnOutcome()
             entities = dict(snapshot.entities)
             for change in record.changes:
                 reference = EntityRef(change.entity_kind, change.entity_id)
@@ -504,8 +510,8 @@ class HouseholdSharedColumnController:
             prepared_roster = roster_from_entity_states(record.metadata.revision_id, entities)
             backup = save_revision(self._session, record, parent=parent)
         except Exception as error:
-            self._message_box.critical(parent, "가구 공용 설정을 저장하지 못했습니다", str(error))
+            self._message_box.critical(parent, "가구 공용 설정을 저장하지 못했습니다", user_error(error))
             return HouseholdSharedColumnOutcome()
-        if backup.error is not None:
-            self._message_box.warning(parent, "가구 공용 설정은 저장됐지만 자동 백업에 실패했습니다", str(backup.error))
+        if backup.warning_required:
+            self._message_box.warning(parent, "가구 공용 설정은 저장됐지만 자동 백업에 실패했습니다", user_error(backup.error))
         return HouseholdSharedColumnOutcome(committed_roster_after_save(self._session, prepared_roster))

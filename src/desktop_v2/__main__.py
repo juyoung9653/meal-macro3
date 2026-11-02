@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .user_messages import user_error
+
 import sys
 
 from PySide6.QtCore import QCoreApplication
@@ -17,6 +19,8 @@ def main() -> int:
     QCoreApplication.setOrganizationName("분당구")
     QCoreApplication.setApplicationName("급식 배송 운영 SQLite v2")
     QCoreApplication.setApplicationVersion(APP_VERSION)
+    from .window_preferences import install_window_preferences
+    install_window_preferences(app)
     lock = None
     outcome = None
     try:
@@ -31,7 +35,7 @@ def main() -> int:
         outcome.window.show()
         return app.exec()
     except Exception as error:
-        QMessageBox.critical(None, "프로그램을 열 수 없습니다", str(error))
+        QMessageBox.critical(None, "프로그램을 열 수 없습니다", user_error(error))
         return 1
     finally:
         try:

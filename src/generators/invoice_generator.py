@@ -26,6 +26,7 @@ from ..domain.document_column_sources import (
     AUTO_SEQUENCE, AUTO_BREAKFAST, AUTO_LUNCH, AUTO_DINNER, AUTO_TOTAL,
     AUTO_PRICE, AUTO_HISTORY, TEMPLATE_VALUE, invoice_output_defaults,
 )
+from ..domain.roster import Meal
 from ..excel.excel_utils import CENTER_ALIGN, adjust_formula, copy_style, write_literal_cell
 from ..excel.publication import WorkbookPublicationResult, publish_workbook
 from ..templates.config import (
@@ -112,6 +113,7 @@ def _fill_invoice_sheet(
     global_note: str | None = None,
     column_fallbacks: Mapping[str, str] | None = None,
     history_note_column: str | None = None,
+    included_meals: tuple[Meal, ...] = tuple(Meal),
 ) -> int:
     """단일 시트에 people 데이터를 채운다. 작성 건수 반환."""
     template_columns = read_template_columns(template_path, sheet_name=sheet_name)
@@ -141,19 +143,27 @@ def _fill_invoice_sheet(
 
     for ordinal, person in enumerate(people, start=1):
         # References follow calculated meal columns, never user-replaced values.
-        # When a count column is absent, use the original calculated facts.
-        has_counts = all(count_columns.values())
-        amount = person.amount(prices)
-        total = person.total_count
+        # Missing/replaced columns do not change the sheet's meal scope.
+        meal_counts = {
+            AUTO_BREAKFAST: (Meal.BREAKFAST, person.breakfast_count),
+            AUTO_DINNER: (Meal.DINNER, person.dinner_count),
+            AUTO_LUNCH: (Meal.LUNCH, person.lunch_count),
+        }
+        counts = {source: count if meal in included_meals else 0
+                  for source, (meal, count) in meal_counts.items()}
+        sheet_columns = {source: count_columns[source] for source, (meal, _) in meal_counts.items()
+                         if meal in included_meals}
+        has_counts = all(sheet_columns.values())
+        amount = person.amount_for_meals(prices, included_meals)
+        total = sum(counts.values())
         if has_counts:
-            references = [f"{_col_idx_to_letter(col_idx_map[col])}{row_idx}" for col in count_columns.values()]
+            references = [f"{_col_idx_to_letter(col_idx_map[col])}{row_idx}" for col in sheet_columns.values()]
             total = "=" + "+".join(references)
-            if person.billing_amount is None:
-                amount = _build_price_formula(col_idx_map, count_columns[AUTO_BREAKFAST],
-                    count_columns[AUTO_DINNER], count_columns[AUTO_LUNCH], row_idx, prices)
+            if person.billing_amount is None and person.billing_amounts is None:
+                amount = _build_price_formula(col_idx_map, sheet_columns.get(AUTO_BREAKFAST, ""),
+                    sheet_columns.get(AUTO_DINNER, ""), sheet_columns.get(AUTO_LUNCH, ""), row_idx, prices)
         calculated = {
-            AUTO_SEQUENCE: ordinal, AUTO_BREAKFAST: person.breakfast_count,
-            AUTO_DINNER: person.dinner_count, AUTO_LUNCH: person.lunch_count,
+            AUTO_SEQUENCE: ordinal, **counts,
             AUTO_TOTAL: total, AUTO_PRICE: amount, AUTO_HISTORY: person.note,
             TEMPLATE_VALUE: preserve_template,
         }
@@ -305,10 +315,10 @@ def _get_sheet_plan(
     is_vacation_month: bool,
     roster_data: tuple[MonthlyDelivery, ...],
     template_sheet_names: list[str],
-) -> tuple[list[tuple[str, list[MonthlyDelivery]]], str | None]:
+) -> tuple[list[tuple[str, list[MonthlyDelivery], tuple[Meal, ...]]], str | None]:
     """(sheet_plan, rename_prefix)
 
-    sheet_plan: [(template_sheet_name, people_for_this_sheet), ...]
+    sheet_plan: [(template_sheet_name, people_for_this_sheet, included_meals), ...]
     rename_prefix: "방학_", "학기_", or None (급식 = no rename).
 
     The last entry in sheet_plan is the "total" sheet whose fill count
@@ -317,7 +327,7 @@ def _get_sheet_plan(
     if meal_type == "급식":
         # 급식: 단일 시트에 모든 인원 (방중/학기중 구분 없음)
         active = [p for p in roster_data if p.total_count > 0]
-        return [(template_sheet_names[0], active)], None
+        return [(template_sheet_names[0], active, tuple(Meal))], None
 
     if is_vacation_month:
         # ── 방학 월 ──
@@ -330,16 +340,16 @@ def _get_sheet_plan(
         vac_people = [p for p in roster_data if p.lunch_count > 0]
         union_people = [p for p in roster_data if p.total_count > 0]
         return [
-            ("방학_학기중", school_people),
-            ("방학_방중", vac_people),
-            ("방학_총괄", union_people),
+            ("방학_학기중", school_people, (Meal.BREAKFAST, Meal.DINNER)),
+            ("방학_방중", vac_people, (Meal.LUNCH,)),
+            ("방학_총괄", union_people, tuple(Meal)),
         ], "방학_"
 
     # ── 일반 월 (행복도시락, 방학 아님) ──
     active = [p for p in roster_data if p.total_count > 0]
     return [
-        ("학기_학기중", active),
-        ("학기_총괄", active),
+        ("학기_학기중", active, tuple(Meal)),
+        ("학기_총괄", active, tuple(Meal)),
     ], "학기_"
 
 
@@ -390,7 +400,7 @@ def make_invoice_publication(
             meal_type, batch.is_vacation_month, batch.deliveries, wb.sheetnames
         )
         total_count = 0
-        for sheet_name, people in sheet_plan:
+        for sheet_name, people, included_meals in sheet_plan:
             total_count = _fill_invoice_sheet(
                 wb,
                 sheet_name,
@@ -402,6 +412,7 @@ def make_invoice_publication(
                 global_note=global_note,
                 column_fallbacks=column_fallbacks,
                 history_note_column=history_note_column,
+                included_meals=included_meals,
             )
         if rename_prefix:
             _rename_sheets(wb, rename_prefix)

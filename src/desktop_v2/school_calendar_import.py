@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .user_messages import user_error
+
 from .dialog_workflow import DialogRequest, dialog_workflow
 
 from .startup_loading import save_revision
@@ -92,7 +94,7 @@ class SchoolCalendarImportDialog(QDialog):
         self._mapping_combos: dict[str, QComboBox] = {}
         register_application_fonts()
         self.setObjectName("schoolCalendarImportDialog")
-        self.setWindowTitle("학교 일정 Excel 가져오기")
+        self.setWindowTitle("학교 일정 불러오기")
         self.setMinimumSize(1020, 760)
         self.resize(1120, 820)
         self.setStyleSheet(application_stylesheet())
@@ -158,7 +160,7 @@ class SchoolCalendarImportDialog(QDialog):
         layout.setContentsMargins(18, 15, 18, 15)
         eyebrow = QLabel("학교별 중식 일정")
         eyebrow.setObjectName("editEyebrow")
-        title = QLabel("학교 급식 운행표 가져오기")
+        title = QLabel("학교 급식 운행표 불러오기")
         title.setObjectName("workspaceTitle")
         subtitle = QLabel(
             "학교명·시작일·종료일·양 끝 O/X를 자동으로 읽습니다. "
@@ -269,7 +271,7 @@ class SchoolCalendarImportDialog(QDialog):
             self._show_error("파일 비밀번호가 맞지 않습니다. 다시 입력해주세요.")
             return
         except (OSError, TypeError, ValueError) as error:
-            self._show_error(str(error))
+            self._show_error(user_error(error))
             return
         self._inspection = inspection
         self._preview = None
@@ -366,13 +368,13 @@ class SchoolCalendarImportDialog(QDialog):
                 password=self._password.text(),
             )
         except (OSError, TypeError, ValueError) as error:
-            self._show_error(str(error))
+            self._show_error(user_error(error))
             return
         self._preview = preview
         self._fill_preview(preview)
         if preview.issues:
             details = "\n".join(
-                f"• {issue.location}: {issue.message}" for issue in preview.issues[:8]
+                f"• {issue.location}: {user_error(issue.message)}" for issue in preview.issues[:8]
             )
             self._show_error(details)
             return
@@ -776,7 +778,7 @@ class SchoolCalendarReviewDialog(QDialog):
             preview, decisions = self._validated_result()
         except (TypeError, ValueError) as error:
             self._save.setEnabled(False)
-            self._summary.setText(str(error))
+            self._summary.setText(user_error(error))
             self._summary.setProperty("outcome", "review")
             _repolish(self._summary)
             return
@@ -797,7 +799,7 @@ class SchoolCalendarReviewDialog(QDialog):
         try:
             preview, decisions = self._validated_result()
         except (TypeError, ValueError) as error:
-            self._error.setText(str(error))
+            self._error.setText(user_error(error))
             self._error.show()
             return
         self._error.hide()
@@ -869,7 +871,7 @@ class SchoolCalendarImportController:
             self._message_box.critical(
                 parent,
                 "학교 일정을 가져올 수 없습니다",
-                "현재 명단이 없습니다. Excel 명단 가져오기를 먼저 완료해주세요.",
+                "현재 명단이 없습니다. 명단 불러오기를 먼저 완료해주세요.",
             )
             return SchoolCalendarImportOutcome(SchoolCalendarImportStatus.FAILED)
         import_dialog = self._import_dialog_type(
@@ -917,7 +919,7 @@ class SchoolCalendarImportController:
                 parent,
                 "학교 일정을 저장하지 못했습니다",
                 "운영 데이터에는 반영하지 않았습니다. 표와 비고 검토 내용을 확인한 뒤 다시 시도해주세요.\n\n"
-                + str(error),
+                + user_error(error),
             )
             return SchoolCalendarImportOutcome(SchoolCalendarImportStatus.FAILED)
         if updated_roster is None:
@@ -927,13 +929,13 @@ class SchoolCalendarImportController:
                 "일정은 저장됐지만 현재 화면을 다시 읽지 못했습니다. 프로그램을 다시 열어주세요.",
             )
             return SchoolCalendarImportOutcome(SchoolCalendarImportStatus.FAILED)
-        if backup_result.error is not None:
+        if backup_result.warning_required:
             self._message_box.warning(
                 parent,
                 "학교 일정은 저장됐지만 자동 백업에 실패했습니다",
                 "학교별 일정과 변경 이력은 운영 데이터에 정상 저장되었습니다. "
                 "백업 폴더 연결을 확인한 뒤 백업을 다시 실행해주세요.\n\n"
-                + str(backup_result.error),
+                + user_error(backup_result.error),
             )
         return SchoolCalendarImportOutcome(
             SchoolCalendarImportStatus.COMPLETED,

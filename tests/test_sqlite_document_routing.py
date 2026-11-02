@@ -141,11 +141,13 @@ def test_document_period_end_routing_changes_presentation_only(tmp_path):
     assert delivery.roster.extra["관할동"] == "수내동"
     assert delivery.roster.extra["동"] == "수내동"
     assert delivery.roster.extra["주소"] == "변경 도로"
-    assert routed.calculation_manifest["calculation_contract_version"] == 5
+    assert routed.calculation_manifest["calculation_contract_version"] == 6
     assert routed.calculation_manifest["document_presentation"] == {
-        "policy_version": 1,
+        "policy_version": 2,
         "effective_on": "2026-08-20",
         "routing_basis": "document_period_end",
+        "household_basis": "document_period_end",
+        "household_fallback": "latest_service_day_with_membership",
     }
 
     template = "assets/급식/급식_확인서템플릿.xlsx"
@@ -159,10 +161,9 @@ def test_document_period_end_routing_changes_presentation_only(tmp_path):
         placeholders = scan_placeholders(template, ["1명"])["1명"]
         assert worksheet["K3"].value == "등록 기사"
         assert worksheet.cell(*placeholders["addr"][0]).value == "변경 도로"
-        assert (
-            worksheet.cell(*placeholders["sum_b_1_1"][0]).value
-            == delivery.weekly[0].breakfast_count
-        )
+        for week in delivery.weekly:
+            value = worksheet.cell(*placeholders[f"sum_b_1_{week.week}"][0]).value
+            assert value == (week.breakfast_count or None)
     finally:
         workbook.close()
 

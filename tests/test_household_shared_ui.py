@@ -1,5 +1,7 @@
 """Shared column editing uses explicit drafts and ordinary native clipboard text."""
 
+from src.storage.database_session import AutomaticBackupResult
+
 from datetime import UTC, date, datetime
 from types import SimpleNamespace
 from uuid import uuid4
@@ -375,7 +377,7 @@ def test_controller_uses_committed_cache_without_fallible_postsave_read(app):
 
     def append(record):
         session.last_committed_roster = committed
-        return SimpleNamespace(error=None)
+        return AutomaticBackupResult(error=None)
 
     session.append_revision = append
     messages = SimpleNamespace(critical=lambda *args: pytest.fail(str(args)))

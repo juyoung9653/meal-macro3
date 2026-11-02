@@ -1,9 +1,15 @@
 """Read-only complaints across everyone in the current operating database."""
 
+from .user_messages import user_error
+
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 import re
+from uuid import UUID
+
+from src.domain.household_grouping import grouping_columns, grouping_options, PROFILE_COLUMNS
+from src.domain.delivery_routing import routing_state_from_snapshot
 
 from PySide6.QtCore import QSortFilterProxyModel, Qt
 from PySide6.QtWidgets import (
@@ -44,11 +50,12 @@ class ComplaintFilterModel(QSortFilterProxyModel):
         self.searches = {}
         self.values = {}
         self.criteria = ()
+        self.columns = _COLUMNS
 
     def lessThan(self, left, right):
         model = self.sourceModel()
         for key, order in self.criteria:
-            column = next(i for i, item in enumerate(_COLUMNS) if item.key == key)
+            column = next(i for i, item in enumerate(self.columns) if item.key == key)
             a, b = (model.data(model.index(index.row(), column)) for index in (left, right))
             if key == "revision":
                 def natural(value):
@@ -63,7 +70,7 @@ class ComplaintFilterModel(QSortFilterProxyModel):
 
     def data(self, index, role=Qt.ItemDataRole.DisplayRole):
         value = super().data(index, role)
-        if role == Qt.ItemDataRole.DisplayRole and index.column() == 4 and isinstance(value, str):
+        if role == Qt.ItemDataRole.DisplayRole and self.columns[index.column()].key == "content" and isinstance(value, str):
             # Qt elides multi-line text even in an ElideNone single-line cell.
             # Keep the table compact; details and tooltips retain the literal text.
             return value.replace("\r", " ").replace("\n", " ")
@@ -78,10 +85,10 @@ class ComplaintFilterModel(QSortFilterProxyModel):
         model = self.sourceModel()
         if query and not any(
             query in model.data(model.index(source_row, column)).casefold()
-            for column in range(7)
+            for column in range(model.columnCount() - 1)
         ):
             return False
-        for column, definition in enumerate(_COLUMNS):
+        for column, definition in enumerate(self.columns):
             value = model.data(model.index(source_row, column))
             if self.searches.get(definition.key, "") not in " ".join(value.split()).casefold():
                 return False
@@ -107,21 +114,42 @@ class ComplaintsHistoryDialog(QDialog):
                 str(change.entity_id): record.metadata.display_code or format_revision_timestamp(record.metadata.recorded_at)
                 for record in revisions for change in record.changes if change.entity_kind == "complaint"
             }
+            keys = tuple(key for key in grouping_columns(snapshot) if key != "name")
+            labels = dict(grouping_options(roster))
+            columns = _COLUMNS[:2] + tuple(_Column("household:" + key, labels.get(key, "삭제된 기준 칼럼")) for key in keys) + _COLUMNS[2:]
+            people = {str(person.person_id): person for person in roster.persons}
+            routing = routing_state_from_snapshot(snapshot)
+            def criteria_values(person_id):
+                person = people.get(person_id)
+                if person is None:
+                    return ("",) * len(keys)
+                view = routing.resolve(roster, person.person_id, date.today())
+                result = []
+                for key in keys:
+                    if key.startswith("custom:"):
+                        value = person.profile.custom_values.get(UUID(key[7:]))
+                    else:
+                        source = view if key in ("address", "detail_address", "jurisdiction") else person.profile
+                        value = getattr(source, PROFILE_COLUMNS[key][0])
+                    result.append("" if value is None else str(value))
+                return tuple(result)
             result = []
             for row in reversed(rows):
                 values = dict(zip(headings, row))
-                result.append((values["접수 시각(KST)"].date(), values["성명"], values["식종"],
+                result.append((values["접수 시각(KST)"].date(), values["성명"], *criteria_values(values["사람 UUID"]), values["식종"],
                                values["채널"], values["내용"], values["변경자"],
                                codes.get(values["민원 ID"], ""), values["기록 시각(KST)"]))
-            return tuple(column.label for column in _COLUMNS), tuple(result)
+            return columns, tuple(result)
 
-        headings, rows = run_progress_task(
+        columns, rows = run_progress_task(
             load, title="전체 민원을 불러오는 중입니다",
             message="현재 운영 파일에 저장된 모든 대상자의 민원을 읽는 중입니다.",
             parent=parent,
         )
         super().__init__(parent)
         self._database = database
+        self.columns = columns
+        headings = tuple(column.label for column in columns)
         register_application_fonts()
         self.setStyleSheet(application_stylesheet())
         self.setWindowTitle("전체 민원")
@@ -131,11 +159,11 @@ class ComplaintsHistoryDialog(QDialog):
         title = QLabel("전체 민원")
         title.setObjectName("workspaceTitle")
         layout.addWidget(title)
-        note = QLabel("현재 운영 파일의 모든 민원입니다. 명단의 검색·필터·식종과 관계없이 최근 접수부터 표시합니다. 접수일은 한국시간 기준입니다. 열 제목은 정렬, ▾는 필터입니다.")
+        note = QLabel("현재 운영 파일의 모든 민원입니다. 명단의 검색·필터·식종과 관계없이 최근 접수부터 표시합니다. 접수일은 한국시간 기준입니다. 성명 옆에는 현재 가구 묶기 기준값을 표시합니다. 삭제된 대상자의 기준값은 빈칸입니다. 열 제목은 정렬, ▾는 필터입니다.")
         note.setWordWrap(True)
         layout.addWidget(note)
         self.search = QLineEdit()
-        self.search.setPlaceholderText("접수일, 성명, 식종, 채널, 내용, 변경자, 변경번호 검색")
+        self.search.setPlaceholderText("접수일, 성명, 가구 기준값, 식종, 채널, 내용, 변경자, 변경번호 검색")
         self.search.setClearButtonEnabled(True)
         search_bar = QHBoxLayout()
         search_bar.addWidget(self.search, 1)
@@ -156,6 +184,7 @@ class ComplaintsHistoryDialog(QDialog):
         self.table.setObjectName("complaintsHistoryTable")
         self.model = HistoryRowsModel(headings, rows, self)
         self.proxy = ComplaintFilterModel(self)
+        self.proxy.columns = columns
         self.proxy.setSourceModel(self.model)
         self.table.setModel(self.proxy)
         self.header = ColumnSearchHeader(
@@ -164,7 +193,7 @@ class ComplaintsHistoryDialog(QDialog):
             search_provider=lambda key: self.proxy.searches.get(key, ""),
         )
         self.table.setHorizontalHeader(self.header)
-        self.header.replace_columns(_COLUMNS)
+        self.header.replace_columns(columns)
         self.header.search_changed.connect(self._set_column_search)
         self.header.values_changed.connect(self._set_column_values)
         self.header.sectionClicked.connect(self._cycle_sort)
@@ -177,11 +206,13 @@ class ComplaintsHistoryDialog(QDialog):
         self.table.setWordWrap(False)
         self.table.setTextElideMode(Qt.TextElideMode.ElideNone)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        for column, width in enumerate((120, 110, 90, 85, 260, 115, 190)):
-            self.table.setColumnWidth(column, width)
-        self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
-        # Recording metadata belongs in the complete selected-record details below.
-        self.table.setColumnHidden(7, True)
+        for index, column in enumerate(columns):
+            self.table.setColumnWidth(index, {"received": 110, "name": 100, "meal": 80, "channel": 70,
+                                             "actor": 100, "revision": 140}.get(column.key, 130))
+            if column.key == "content":
+                self.table.horizontalHeader().setSectionResizeMode(index, QHeaderView.ResizeMode.Stretch)
+            if column.key == "recorded":
+                self.table.setColumnHidden(index, True)
         splitter.addWidget(self.table)
         details_panel = QWidget()
         details_layout = QVBoxLayout(details_panel)
@@ -233,7 +264,7 @@ class ComplaintsHistoryDialog(QDialog):
 
 
     def column_filter_values(self, key):
-        column = next(i for i, item in enumerate(_COLUMNS) if item.key == key)
+        column = next(i for i, item in enumerate(self.columns) if item.key == key)
         return tuple(sorted({self.model.data(self.model.index(row, column))
                              for row in range(self.model.rowCount())}, key=str.casefold))
 
@@ -259,7 +290,7 @@ class ComplaintsHistoryDialog(QDialog):
         self._filter("")
 
     def _cycle_sort(self, column):
-        key = _COLUMNS[column].key
+        key = self.columns[column].key
         criteria = list(self.proxy.criteria)
         found = next((i for i, (name, _) in enumerate(criteria) if name == key), None)
         if found is None:
@@ -274,7 +305,7 @@ class ComplaintsHistoryDialog(QDialog):
         self.header.set_sort_criteria(criteria)
 
     def export_rows(self):
-        return tuple(self.model.rows[self.proxy.mapToSource(self.proxy.index(row, 0)).row()][:7]
+        return tuple(self.model.rows[self.proxy.mapToSource(self.proxy.index(row, 0)).row()][:-1]
                      for row in range(self.proxy.rowCount()))
 
     def _export(self):
@@ -298,7 +329,7 @@ class ComplaintsHistoryDialog(QDialog):
                 roster = self._database.current_roster()
                 snapshot = self._database.snapshot(roster.revision_id)
                 password = require_export_password_setting(snapshot).password
-                workbook = build_complaints_workbook(tuple(c.label for c in _COLUMNS[:7]), rows)
+                workbook = build_complaints_workbook(tuple(c.label for c in self.columns[:-1]), rows)
                 try:
                     return publish_workbook(workbook, target, password=password, overwrite=exists)
                 finally:
@@ -308,6 +339,6 @@ class ComplaintsHistoryDialog(QDialog):
                               message="현재 조회 결과를 공통 Excel 비밀번호로 저장합니다.")
             QMessageBox.information(self, "Excel 저장 완료", f"{len(rows)}건의 민원을 저장했습니다.\n{target}")
         except Exception as error:
-            QMessageBox.critical(self, "민원을 내보내지 못했습니다", str(error))
+            QMessageBox.critical(self, "민원을 내보내지 못했습니다", user_error(error))
         finally:
             self.export_button.setEnabled(bool(self.proxy.rowCount()))

@@ -3,6 +3,7 @@
 import logging
 from collections.abc import Mapping, Sequence
 from copy import copy
+from datetime import timedelta
 from pathlib import Path
 
 import openpyxl
@@ -85,8 +86,13 @@ def _prepared_weekly_counts(
     return indexed
 
 
-def _format_week_range(item: WeeklyDelivery) -> str:
-    return f"{item.start_date:%m.%d}~{item.end_date:%m.%d}"
+def _format_week_range(item: WeeklyDelivery, *, include_next_month_weekend: bool = False) -> str:
+    end_date = item.end_date
+    if include_next_month_weekend and end_date.weekday() in (4, 5):
+        next_day = end_date + timedelta(days=1)
+        if next_day.day == 1:
+            end_date += timedelta(days=6 - end_date.weekday())
+    return f"{item.start_date:%m.%d}~{end_date:%m.%d}"
 
 
 def _household_delivery_staff(members: Sequence[MonthlyDelivery]) -> str:
@@ -205,6 +211,8 @@ def make_confirm_publication(
     output_password: str | None = None,
     overwrite: bool = True,
     column_fallbacks: Mapping[str, str] | None = None,
+    single_meal_first: bool = False,
+    include_next_month_weekend: bool = False,
 ) -> tuple[list[dict], WorkbookPublicationResult]:
     """명단 데이터 → 확인서템플릿 채워서 단일 엑셀 파일 생성."""
     s = get_settings()
@@ -270,6 +278,10 @@ def make_confirm_publication(
         log.info("일부 확인서 시트의 플레이스홀더가 생략되어 있습니다: %s", "; ".join(ph_warnings))
 
     for dong, hh_groups in dong_households.items():
+        if single_meal_first:
+            # A confirmation block contains one serving per household member.
+            # Stable sorting retains the existing order within each block size.
+            hh_groups = dict(sorted(hh_groups.items(), key=lambda item: len(item[1])))
         hh_1 = hh_2 = hh_3 = hh_4 = hh_5 = 0
         for members in hh_groups.values():
             n = len(members)
@@ -443,7 +455,7 @@ def make_confirm_publication(
                         ph_map,
                         f"week{week}",
                         current_row,
-                        _format_week_range(prepared) if prepared is not None else "",
+                        _format_week_range(prepared, include_next_month_weekend=include_next_month_weekend) if prepared is not None else "",
                         tpl_anchor_map,
                     )
                     for meal, placeholder in (

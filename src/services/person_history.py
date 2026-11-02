@@ -19,6 +19,7 @@ from src.domain.projections import (
     PERSON_KIND,
     STATUS_EVENT_KIND,
 )
+from src.domain.revision_visibility import effective_history_revisions
 from src.domain.revisions import (
     HistoricalSnapshot,
     RevisionRecord,
@@ -57,6 +58,8 @@ def build_history_tables(
     if person_id is not None and not isinstance(person_id, UUID):
         raise TypeError("person_id는 UUID 또는 None이어야 합니다.")
     revisions = tuple(record for record in revisions if "workspace_branch" not in record.metadata.decisions)
+    meal_revision_ids = {record.metadata.revision_id for record in effective_history_revisions(revisions)
+                         if "snapshot_restore_target" not in record.metadata.decisions}
     info: list[tuple[object, ...]] = []
     meals: list[tuple[object, ...]] = []
     historical_names = {}
@@ -105,12 +108,16 @@ def build_history_tables(
                         continue
                     target_rows = meals if field == "driver_ids" else info
                     if target_rows is meals:
+                        if metadata.revision_id not in meal_revision_ids:
+                            continue
                         target_rows.append((stamp, applied, code, str(target), name, "식종별", "배송담당", _driver_text(old, drivers), _driver_text(new, drivers), intake, metadata.reason, metadata.actor.username))
                     else:
                         if field == "jurisdiction" and change.before is None:
                             old = _jurisdiction_before(after, profiles, routing_events)
                         target_rows.append((stamp, applied, code, str(target), name, "배송·주소", f"{_label(field)} 등록" if not before else _label(field), _text(old), _text(new), metadata.reason, metadata.actor.username))
             elif change.entity_kind == STATUS_EVENT_KIND:
+                if metadata.revision_id not in meal_revision_ids:
+                    continue
                 meal = after.get("meal", before.get("meal", "공통"))
                 meals.append((
                     stamp,
@@ -127,6 +134,8 @@ def build_history_tables(
                     metadata.actor.username,
                 ))
             elif change.entity_kind in {ENROLLMENT_KIND, ASSIGNMENT_KIND}:
+                if metadata.revision_id not in meal_revision_ids:
+                    continue
                 meal = after.get("meal", before.get("meal", "공통"))
                 category = {ENROLLMENT_KIND: "가입기간", ASSIGNMENT_KIND: "배송배정"}[change.entity_kind]
                 diffs = _differences(before, after)

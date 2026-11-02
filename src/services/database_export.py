@@ -263,8 +263,10 @@ def build_complaints_workbook(headings, rows):
         sheet = _add_table(book, "민원", headings, rows)
         for row in sheet.iter_rows(min_row=2):
             row[0].number_format = "yyyy-mm-dd"
-        sheet.column_dimensions["E"].width = 65
-        sheet.column_dimensions["G"].width = 24
+        from openpyxl.utils import get_column_letter
+        for index, heading in enumerate(headings, 1):
+            if heading in ("내용", "변경번호"):
+                sheet.column_dimensions[get_column_letter(index)].width = 65 if heading == "내용" else 24
         return book
     except Exception:
         book.close()

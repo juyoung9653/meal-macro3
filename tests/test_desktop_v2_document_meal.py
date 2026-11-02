@@ -247,3 +247,36 @@ def test_report_choices_persist_in_database_and_cancel_keeps_previous(app, tmp_p
         assert dialog.selected_meals() == (Meal.DINNER,)
         assert dialog.selected_delivery_forms() == (None, "도시락", "식재료 박스")
         dialog.close()
+
+
+@pytest.mark.parametrize("profile_name", (None, "급식", "행복도시락"))
+def test_report_setup_reads_profile_from_current_database_snapshot(profile_name):
+    from types import SimpleNamespace
+    from src.domain.document_templates import (
+        DOCUMENT_TEMPLATE_SETTING_KIND, DOCUMENT_TEMPLATE_SETTING_ID,
+        DocumentTemplateProfile, DocumentTemplateSetting, document_template_setting_state,
+    )
+    from src.domain.revisions import EntityRef, HistoricalSnapshot
+    from src.desktop_v2.document_meal import load_daily_report_setup
+    from tests.test_sqlite_delivery_report_service import _snapshot
+
+    snapshot, _ = _snapshot()
+    if profile_name is not None:
+        setting = DocumentTemplateSetting(1, DocumentTemplateProfile(profile_name), snapshot.revision_id)
+        snapshot = HistoricalSnapshot(snapshot.revision_id, {
+            **snapshot.entities,
+            EntityRef(DOCUMENT_TEMPLATE_SETTING_KIND, DOCUMENT_TEMPLATE_SETTING_ID):
+                document_template_setting_state(setting),
+        })
+    requested = []
+    def read_snapshot(revision_id):
+        requested.append(revision_id)
+        return snapshot
+    session = SimpleNamespace(database=SimpleNamespace(
+        current_roster=lambda: SimpleNamespace(revision_id=snapshot.revision_id),
+        snapshot=read_snapshot,
+    ))
+    choices, profile = load_daily_report_setup(session)
+    assert requested == [snapshot.revision_id]
+    assert profile == (DocumentTemplateProfile(profile_name) if profile_name else None)
+    assert choices.excluded_forms == ()

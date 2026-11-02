@@ -87,6 +87,69 @@ def test_restart_fills_missing_tail_without_duplicates(tmp_path):
         assert restored.database.current_roster() == roster
 
 
+@pytest.mark.parametrize("failure", [None, "copy", "validation", "replace"])
+def test_restore_replay_failure_repairs_only_after_verified_copy(tmp_path, monkeypatch, failure):
+    from src.services.revision_restore import prepare_snapshot_restore
+    import src.storage.database_replica as module
+
+    folder = tmp_path / "backups"
+    folder.mkdir()
+    with DatabaseSession.create(tmp_path / "source.sqlite3", "password", backup_directory=folder) as session:
+        initial = _roster_snapshot(uuid4())
+        session.append_revision(_roster_record(initial))
+        updated = change(initial, 1)
+        backup = session.append_revision(_roster_record(updated, before=initial)).record
+        previous_bytes = backup.path.read_bytes()
+        previous_manifest = credential_path_for(backup.path).read_bytes()
+        record = prepare_snapshot_restore(session.database, initial.revision_id,
+                                          updated.revision_id, RevisionActor("tester", "test-sid"))
+        session.database.append_revision(record)
+        expected = session.database.snapshot(record.metadata.revision_id)
+        replica = session._backup_service._replica
+
+        def reject_restore(candidate):
+            assert "snapshot_restore_target" in candidate.metadata.decisions
+            raise ValueError("복구 변경 내용이 선택한 변경번호의 전체 상태와 일치하지 않습니다.")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(replica, "append_revision", reject_restore)
+            if failure == "copy":
+                def fail_copy(*args, **kwargs):
+                    raise OSError("injected verified copy failure")
+                patch.setattr(session.database, "backup_to", fail_copy)
+            elif failure == "validation":
+                def fail_validation():
+                    raise DatabaseIntegrityError("injected source integrity failure")
+                patch.setattr(session.database, "check_integrity", fail_validation)
+            elif failure == "replace":
+                original_replace = module.os.replace
+                def fail_replace(source, destination):
+                    if destination == backup.path:
+                        raise OSError("injected replacement failure")
+                    return original_replace(source, destination)
+                patch.setattr(module.os, "replace", fail_replace)
+            result = session.try_backup_now()
+        assert not tuple(folder.glob(".replica-repair-*"))
+        assert session.database.snapshot(record.metadata.revision_id) == expected
+        if failure:
+            assert result.error is not None
+            assert backup.path.read_bytes() == previous_bytes
+            assert credential_path_for(backup.path).read_bytes() == previous_manifest
+            # A failed repair leaves a usable prior backup and can retry later.
+            with DatabaseSession.restore_and_open_with_user_password(backup.path, tmp_path / "prior.sqlite3", "password") as prior:
+                assert prior.database.current_roster() == updated
+            result = session.try_backup_now()
+        assert result.succeeded, result.error
+        assert result.record.path == backup.path
+        expected_records = tuple(session.database.revision(item.revision_id)
+                                 for item in session.database.revision_summaries())
+    with DatabaseSession.restore_and_open_with_user_password(backup.path, tmp_path / "restored.sqlite3", "password") as restored:
+        assert restored.database.snapshot(record.metadata.revision_id) == expected
+        assert tuple(restored.database.revision(item.revision_id)
+                     for item in restored.database.revision_summaries()) == expected_records
+        restored.database.check_integrity()
+
+
 def test_metadata_failure_keeps_source_and_retry_completes_backup(tmp_path, monkeypatch):
     folder = tmp_path / "backups"
     folder.mkdir()

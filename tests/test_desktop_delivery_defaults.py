@@ -1,3 +1,5 @@
+
+from src.storage.database_session import AutomaticBackupResult
 import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from dataclasses import replace
@@ -64,7 +66,7 @@ def test_controller_noop_failure_and_backup_result(mode):
         if mode == "failure":
             raise OSError("save failed")
         saved.append(record)
-        return SimpleNamespace(error=OSError("backup failed") if mode == "backup_failure" else None)
+        return AutomaticBackupResult(error=OSError("backup failed") if mode == "backup_failure" else None)
     class Dialog:
         def __init__(self, current, parent):
             assert current == standard_delivery_defaults()
@@ -78,7 +80,7 @@ def test_controller_noop_failure_and_backup_result(mode):
     assert len(saved) == int(mode in ("save", "backup_failure"))
     assert outcome.completed == bool(saved)
     assert len(errors) == int(mode == "failure")
-    assert len(warnings) == int(mode == "backup_failure")
+    assert not warnings
 
 
 def test_settings_dispatch_refreshes_only_after_save():

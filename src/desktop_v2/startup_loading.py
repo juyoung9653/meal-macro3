@@ -231,7 +231,7 @@ def save_revision(session, record, *, parent: QWidget | None = None):
     """Keep revision commit, projection refresh and automatic backup together.
 
     DatabaseSession owns commit/backup semantics. Its partial-backup result is
-    returned unchanged so each controller can show its existing warning.
+    returned unchanged; the session defers failure warnings until a failed startup retry.
     """
     return run_progress_task(
         lambda: session.append_revision(record),

@@ -10,12 +10,15 @@ from src.desktop_v2.document_hub import DocumentAction
 from src.desktop_v2.document_meal import DocumentMealDialog
 from src.desktop_v2.document_output import DocumentOutputDialog
 from src.desktop_v2.document_period import DocumentPeriodDialog
+from src.domain.document_templates import DocumentTemplateProfile
+from src.domain.roster import Meal
 from src.domain.daily_report_choices import DailyReportChoices, ReportRemarkOptions
 from tests.test_desktop_v2_document_meal import _period
 from tests.test_delivery_report_forms import _snapshot
 
 
-def test_real_back_buttons_reopen_same_steps_with_unsaved_choices(monkeypatch, tmp_path):
+@pytest.mark.parametrize("profile", (None, DocumentTemplateProfile.HAPPY_LUNCHBOX))
+def test_real_back_buttons_reopen_same_steps_with_unsaved_choices(monkeypatch, tmp_path, profile):
     app = QApplication.instance() or QApplication([])
     window = QWidget()
     period_value = _period(DocumentAction.DELIVERY_REPORT)
@@ -25,7 +28,7 @@ def test_real_back_buttons_reopen_same_steps_with_unsaved_choices(monkeypatch, t
     snapshot, _ = _snapshot()
     session = SimpleNamespace(database=SimpleNamespace(revision_summaries=lambda: (period_value.source,), snapshot=lambda _: snapshot))
     import src.desktop_v2.application as module
-    monkeypatch.setattr(module, "load_daily_report_choices", lambda _: DailyReportChoices())
+    monkeypatch.setattr(module, "load_daily_report_setup", lambda _: (DailyReportChoices(), profile))
     monkeypatch.setattr(module, "save_daily_report_choices", lambda *_args, **_kwargs: (None, None))
     controller = DesktopStartupController(settings=SimpleNamespace(document_output_directory=tmp_path))
     monkeypatch.setattr(controller, "_ensure_document_prerequisites", lambda *_: True)
@@ -48,6 +51,13 @@ def test_real_back_buttons_reopen_same_steps_with_unsaved_choices(monkeypatch, t
     settle()
     meal = run.request.dialog
     assert isinstance(meal, DocumentMealDialog)
+    assert meal.selected_meals() == (
+        (Meal.BREAKFAST, Meal.DINNER)
+        if profile is DocumentTemplateProfile.HAPPY_LUNCHBOX else (Meal.DINNER,)
+    )
+    meal._buttons_by_meal[Meal.BREAKFAST].setChecked(False)
+    meal._buttons_by_meal[Meal.LUNCH].setChecked(True)
+    selected_meals = meal.selected_meals()
     options = ReportRemarkOptions(("note",), "below", ("BOX",), False)
     meal._remark_options = options
     meal._extra_settings_toggle.setChecked(True)
@@ -57,6 +67,7 @@ def test_real_back_buttons_reopen_same_steps_with_unsaved_choices(monkeypatch, t
     settle()
     assert run.request.dialog is meal and meal._remark_options == options
     assert meal._extra_settings_toggle.isChecked()
+    assert meal.selected_meals() == selected_meals
     meal.accept()
     settle()
     output = run.request.dialog

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .user_messages import user_error
+
 from .dialog_workflow import DialogRequest, dialog_workflow
 
 from .startup_loading import save_revision
@@ -254,14 +256,14 @@ class CustomFieldController:
                 changed = True
                 if on_saved is not None:
                     on_saved(roster)
-                if backup_result.error is not None:
+                if backup_result.warning_required:
                     self._message_box.warning(
                         parent,
                         "사용자 정의 항목은 저장됐지만 자동 백업에 실패했습니다",
                         "변경 내용과 이력은 운영 데이터에 정상 저장되었습니다.\n\n"
-                        + str(backup_result.error),
+                        + user_error(backup_result.error),
                     )
             except Exception as error:
                 self._message_box.critical(
-                    parent, "사용자 정의 항목을 저장하지 못했습니다", str(error)
+                    parent, "사용자 정의 항목을 저장하지 못했습니다", user_error(error)
                 )

@@ -26,6 +26,18 @@ def validate_delivery_template(path: str | Path, kind: str) -> None:
                     raise ValueError("일일식수는 aaa 시트와 A1:I9 기본 구조가 필요합니다.")
                 if any(merge.min_row <= 9 and merge.max_row >= 4 for merge in wb["aaa"].merged_cells.ranges):
                     raise ValueError("일일식수 데이터 영역 4~9행은 셀을 병합하지 마세요.")
+            elif kind in ("happy_report_dinner", "happy_report_lunch"):
+                ws = wb.worksheets[0]
+                lunch = kind == "happy_report_lunch"
+                if (ws.max_row < 5 or ws.max_column < 10
+                        or ws["B2"].value not in ("기사", "담당") or ws["C2"].value != "지역"
+                        or ws["D3"].value != ("중식" if lunch else "조식")
+                        or (not lunch and ws["E3"].value != "석식")):
+                    raise ValueError("행복도시락 " + ("중식" if lunch else "조식·석식") + " 일일식수 양식의 첫 시트와 A1:J5 구조·제목을 유지해주세요.")
+                allowed = {"A1:I1", "A2:A3", "B2:B3", "C2:C3", "D2:H2", "I2:I3", "J2:J3", "A5:C5"}
+                allowed |= {"D3:E3", "F3:H3", "D4:E4", "F4:H4", "D5:E5", "F5:H5"} if lunch else set()
+                if any(str(merge) not in allowed for merge in ws.merged_cells.ranges):
+                    raise ValueError("행복도시락 일일식수의 기본 병합 위치를 유지해주세요.")
             elif kind == "delivery_substitute":
                 if STYLE_SHEET not in wb.sheetnames:
                     raise ValueError("배송대타 시트가 있는 기본 양식 파일을 선택해주세요.")

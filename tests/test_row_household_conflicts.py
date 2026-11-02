@@ -28,7 +28,7 @@ ACTOR = RevisionActor("test", "test")
 
 @pytest.fixture
 def setup(tmp_path):
-    old = Person(uuid4(), PersonProfile("기존", telephone="031-123-4567", jurisdiction="위례동", note="기존 메모"))
+    old = Person(uuid4(), PersonProfile("기존", mobile_phone="010-1234-5678", telephone="031-123-4567", jurisdiction="위례동", note="기존 메모"))
     household = Household(uuid4())
     roster = RosterSnapshot(uuid4(), persons=(old,), households=(household,), memberships=(HouseholdMembership(old.person_id, household.household_id),))
     state = {"columns": ["telephone", "jurisdiction", "note"], "address_columns_version": 2}
@@ -37,7 +37,7 @@ def setup(tmp_path):
     path = tmp_path / "conflicts.db"
     with EncryptedDatabase.create(path, b"k" * 32) as database:
         database.append_revision(initial)
-        person = Person(uuid4(), PersonProfile("신규", telephone="031-123-4567", jurisdiction="정자동", note="입력 메모"))
+        person = Person(uuid4(), PersonProfile("신규", mobile_phone="010-1234-5678", telephone="031-123-4567", jurisdiction="정자동", note="입력 메모"))
         prepared = build_roster_row_revision(roster, actor=ACTOR, recorded_at=NOW, effective_on=DAY,
             revision_id=uuid4(), add_person=person, enroll_meals=(Meal.DINNER,), household_id=household.household_id)
         yield database, roster, person, prepared, path
@@ -115,9 +115,9 @@ def test_back_and_failed_save_retain_same_dialogs(setup, monkeypatch):
     assert isinstance(dialog, RosterRowCreateDialog)
     dialog._editors["name"].setText("입력 유지")
     dialog._editors["telephone"].setText("031-123-4567")
+    dialog._editors["mobile_phone"].setText("010-1234-5678")
     dialog._editors["jurisdiction"].setText("정자동")
     dialog._editors["note"].setPlainText("입력 메모")
-    dialog._household_matcher = lambda *_: roster.households[0].household_id
     dialog._accept_valid()
     conflict = steps.send(QDialog.DialogCode.Accepted).dialog
     assert isinstance(conflict, RowHouseholdConflictDialog)

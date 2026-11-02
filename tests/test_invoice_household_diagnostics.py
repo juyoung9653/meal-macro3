@@ -86,7 +86,6 @@ class _Parent(QWidget):
 @pytest.mark.parametrize(("case", "location", "row"), (
     ("missing", "sorted", 2),
     ("outside", "sorted", 2),
-    ("multiple", "sorted", 2),
     ("missing", "filtered", 1),
     ("missing", "hidden", None),
     ("missing", "deleted", None),
@@ -143,3 +142,28 @@ def test_real_worker_household_failure_reports_truthful_location_and_publishes_n
         assert set(backups.iterdir()) == backups_before
         if parent is not None:
             parent.close()
+
+
+@pytest.mark.parametrize("action", [DocumentAction.INVOICE, DocumentAction.CONFIRMATION])
+def test_real_worker_publishes_monthly_documents_after_household_change(app, tmp_path, action):
+    import msoffcrypto
+
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    with DatabaseSession.create(tmp_path / "documents.sqlite3", "password",
+                                backup_directory=tmp_path / "backups") as session:
+        session.append_revision(_invalid_revision("multiple"))
+        roster = session.database.current_roster()
+        revisions = session.database.revision_summaries()
+        messages = Messages(app)
+        outcome = generation.DocumentGenerationController(
+            session, message_box=messages, template_controller_type=configured_template,
+        ).run(selection_for(session, outputs, action))
+        assert outcome.completed
+        assert not messages.errors and not messages.warnings
+        assert len(session.database.document_runs()) == 1
+        assert session.database.current_roster() == roster
+        assert session.database.revision_summaries() == revisions
+        with outcome.result.output_path.open("rb") as stream:
+            assert msoffcrypto.OfficeFile(stream).is_encrypted()
+        session.database.check_integrity()

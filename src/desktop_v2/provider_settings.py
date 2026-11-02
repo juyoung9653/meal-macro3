@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .user_messages import user_error
+
 from .dialog_workflow import DialogRequest, dialog_workflow
 
 from .startup_loading import save_revision
@@ -144,14 +146,14 @@ class ProviderSettingsController:
             backup = save_revision(self._session, prepared.record, parent=parent)
         except Exception as error:  # noqa: BLE001 - report save failures at the UI boundary
             self._message_box.critical(
-                parent, "공통 제공기관을 저장하지 못했습니다", str(error)
+                parent, "공통 제공기관을 저장하지 못했습니다", user_error(error)
             )
             return ProviderSettingsOutcome(ProviderSettingsStatus.FAILED)
-        if backup.error is not None:
+        if backup.warning_required:
             self._message_box.warning(
                 parent,
                 "공통 제공기관은 저장됐지만 자동 백업에 실패했습니다",
-                str(backup.error),
+                user_error(backup.error),
             )
         return ProviderSettingsOutcome(
             ProviderSettingsStatus.COMPLETED,

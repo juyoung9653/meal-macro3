@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .user_messages import user_error
+
 from datetime import date
 
 from PySide6.QtCore import QDate
@@ -111,7 +113,7 @@ class StatusPeriodDialog(QDialog):
         try:
             self.selected_period()
         except ValueError as error:
-            self._error.setText(str(error))
+            self._error.setText(user_error(error))
             return
         self.accept()
 

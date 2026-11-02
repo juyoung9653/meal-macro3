@@ -46,6 +46,39 @@ class PhoneNormalization(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class ImportRowFilter:
+    column: str
+    mode: str
+    value: str = ""
+
+    def __post_init__(self):
+        object.__setattr__(self, "column", _required_text(self.column, "가져올 행 조건의 원본 열"))
+        if self.mode not in ("nonempty", "equals"):
+            raise ValueError("가져올 행 조건은 값 있음 또는 특정 값이어야 합니다.")
+        if not isinstance(self.value, str):
+            raise TypeError("행 조건의 비교 값은 문자열이어야 합니다.")
+        value = self.value.strip()
+        if self.mode == "equals" and not value:
+            raise ValueError("가져올 행의 비교 값을 입력해주세요.")
+        if self.mode == "nonempty" and value:
+            raise ValueError("값 있음 조건에는 비교 값을 지정할 수 없습니다.")
+        object.__setattr__(self, "value", value)
+
+    def matches(self, text: str) -> bool:
+        text = text.strip()
+        return bool(text) if self.mode == "nonempty" else text == self.value
+
+    def manifest(self):
+        return {"column": self.column, "mode": self.mode, "value": self.value}
+
+    @classmethod
+    def from_manifest(cls, state):
+        if not isinstance(state, Mapping) or set(state) != {"column", "mode", "value"}:
+            raise ValueError("가져올 행 조건이 올바르지 않습니다.")
+        return cls(state["column"], state["mode"], state["value"])
+
+
+@dataclass(frozen=True, slots=True)
 class ImportMappingProfile:
     """Versioned mapping from one external layout to canonical observations."""
 
@@ -74,8 +107,11 @@ class ImportMappingProfile:
     provider_value: str | None = None
     custom_field_names: Mapping[UUID, str] = field(default_factory=dict)
     header_row_count: int = 1
+    row_filter: ImportRowFilter | None = None
 
     def __post_init__(self) -> None:
+        if self.row_filter is not None and not isinstance(self.row_filter, ImportRowFilter):
+            raise TypeError("row_filter는 ImportRowFilter 또는 None이어야 합니다.")
         _validate_uuid(self.profile_id, "import profile ID")
         if isinstance(self.version, bool) or not isinstance(self.version, int):
             raise TypeError("import profile version은 정수여야 합니다.")
@@ -231,6 +267,7 @@ class ImportMappingProfile:
     def manifest(self) -> dict[str, object]:
         return {
             "profile_id": str(self.profile_id),
+            **({"row_filter": self.row_filter.manifest()} if self.row_filter is not None else {}),
             "version": self.version,
             "name": self.name,
             "source_kind": self.source_kind,
@@ -341,6 +378,7 @@ class ImportMappingProfile:
                 "ignored_columns",
             ),
             provider_value=manifest.get("provider_value"),
+            row_filter=(ImportRowFilter.from_manifest(manifest["row_filter"]) if "row_filter" in manifest else None),
             custom_field_names={
                 UUID(str(key)): value for key, value in _manifest_mapping(
                     manifest, "custom_field_names", default={}

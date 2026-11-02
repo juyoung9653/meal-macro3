@@ -1,4 +1,6 @@
 """Confirmation and atomic persistence for selected meal history actions."""
+
+from .user_messages import user_error
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -118,9 +120,9 @@ class MealHistoryCancelController:
             backup = save_revision(self.session, record, parent=parent)
         except Exception as error:
             self.messages.critical(parent, "식종 변경을 취소하지 못했습니다",
-                                   "운영 데이터는 변경하지 않았습니다.\n\n" + str(error))
+                                   "운영 데이터는 변경하지 않았습니다.\n\n" + user_error(error))
             return None
-        if backup.error is not None:
+        if backup.warning_required:
             self.messages.warning(parent, "취소는 저장됐지만 자동 백업에 실패했습니다",
-                                  "취소 내용과 변경 이력은 저장되었습니다.\n\n" + str(backup.error))
+                                  "취소 내용과 변경 이력은 저장되었습니다.\n\n" + user_error(backup.error))
         return roster

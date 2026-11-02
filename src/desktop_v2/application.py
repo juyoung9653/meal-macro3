@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .user_messages import user_error
+
 from .dialog_workflow import DialogRequest, dialog_workflow, invoke, launch
 
 from collections import defaultdict
@@ -41,7 +43,7 @@ from .document_completion import (
 )
 from .document_generation import DocumentGenerationController
 from .document_hub import DocumentAction, DocumentHubDialog, DocumentSetupRequest
-from .document_meal import DocumentMealDialog, load_daily_report_choices, save_daily_report_choices
+from .document_meal import DocumentMealDialog, load_daily_report_setup, save_daily_report_choices
 from .delivery_substitute import DeliverySubstituteDialog
 from src.services.sqlite_delivery_substitute_service import prepare_delivery_substitute_data
 from src.services.sqlite_delivery_report_service import delivery_forms_from_snapshot
@@ -239,7 +241,7 @@ class DesktopStartupController:
             outcome = self._start_with_dialog(access_dialog, parent)
             return outcome
         except Exception as error:
-            self._message_box.critical(parent, "운영 데이터를 열지 못했습니다", str(error))
+            self._message_box.critical(parent, "운영 데이터를 열지 못했습니다", user_error(error))
             return DesktopStartupOutcome(StartupStatus.FAILED)
         finally:
             if access_dialog is not None and (outcome is None or not outcome.ready):
@@ -262,13 +264,15 @@ class DesktopStartupController:
             )
             return DesktopStartupOutcome(StartupStatus.FAILED)
         initial_backup = getattr(access_dialog, "backup_result", None)
-        if initial_backup is not None and initial_backup.error is not None:
-            self._message_box.warning(
-                parent,
-                "운영 데이터는 만들었지만 첫 백업에 실패했습니다",
-                "운영 데이터는 정상 생성되었습니다. 백업 폴더 연결을 확인해주세요.\n\n"
-                + str(initial_backup.error),
+        if initial_backup is None or not initial_backup.attempted:
+            initial_backup = self._startup_task_runner(
+                session.retry_backup_on_open,
+                message="자동 백업의 누락된 내용을 확인하고 다시 저장하는 중입니다.",
+                parent=parent,
             )
+        if initial_backup.warning_required:
+            detail = "운영 데이터는 저장되어 있습니다. 재시작 후에도 자동 백업에 실패했습니다. 백업 폴더 연결과 쓰기 권한을 확인해주세요.\n\n" + user_error(initial_backup.error)
+            self._message_box.warning(parent, "재시작 후 자동 백업 재시도 실패", detail)
 
         preparation = self._startup_task_runner(
             lambda: self._prepare_startup(session),
@@ -300,7 +304,7 @@ class DesktopStartupController:
             self._message_box.critical(
                 parent,
                 "명단이 아직 없습니다",
-                "기존 Excel 명단 가져오기를 완료해야 운영 화면을 열 수 있습니다.",
+                "기존 Excel 명단 불러오기를 완료해야 운영 화면을 열 수 있습니다.",
             )
             return DesktopStartupOutcome(StartupStatus.ONBOARDING_PENDING)
 
@@ -620,7 +624,7 @@ class DesktopStartupController:
                 ))
             return dialog
         except Exception as error:
-            self._message_box.critical(parent, "이력을 읽지 못했습니다", str(error))
+            self._message_box.critical(parent, "이력을 읽지 못했습니다", user_error(error))
             return None
 
     @dialog_workflow
@@ -638,7 +642,7 @@ class DesktopStartupController:
                 except Exception as error:
                     self._message_box.warning(
                         source_dialog, "취소는 저장됐지만 이력을 새로고침하지 못했습니다",
-                        "취소 내용은 저장되었습니다. 이력 창을 닫고 다시 열어주세요.\n\n" + str(error),
+                        "취소 내용은 저장되었습니다. 이력 창을 닫고 다시 열어주세요.\n\n" + user_error(error),
                     )
 
     @dialog_workflow
@@ -766,7 +770,7 @@ class DesktopStartupController:
                 message="저장된 공용 예외 설정을 확인하는 중입니다.",
             )
         except Exception as error:
-            self._message_box.critical(window, "공용 예외 설정을 읽지 못했습니다", str(error))
+            self._message_box.critical(window, "공용 예외 설정을 읽지 못했습니다", user_error(error))
             return
         if current is not None:
             self._refresh_household_shared_columns(session, window, current, snapshot=snapshot)
@@ -812,7 +816,7 @@ class DesktopStartupController:
                         message="문서에 사용할 변경번호 목록을 읽는 중입니다.", parent=window,
                     )
                 except Exception as error:
-                    self._message_box.critical(window, "문서 원본을 읽지 못했습니다", str(error))
+                    self._message_box.critical(window, "문서 원본을 읽지 못했습니다", user_error(error))
                     return
                 if not summaries:
                     self._message_box.information(
@@ -882,18 +886,18 @@ class DesktopStartupController:
                                 columns_setter(tuple((key, labels.get(key, label)) for key, label in columns))
                         except Exception as error:
                             self._message_box.critical(
-                                window, "배송 형태를 읽지 못했습니다", str(error),
+                                window, "배송 형태를 읽지 못했습니다", user_error(error),
                             )
                             return
                     if action is DocumentAction.DELIVERY_REPORT:
                         preferences_setter = getattr(meal, "set_report_choices", None)
                         if callable(preferences_setter):
                             try:
-                                choices = run_progress_task(lambda: load_daily_report_choices(session),
+                                choices, profile = run_progress_task(lambda: load_daily_report_setup(session),
                                     title="일일식수 선택을 불러오는 중입니다", message="운영 DB에 저장된 식종과 배송 형태를 확인합니다.", parent=window)
-                                preferences_setter(choices)
+                                preferences_setter(choices, profile=profile)
                             except Exception as error:
-                                self._message_box.critical(window, "일일식수 선택을 읽지 못했습니다", str(error))
+                                self._message_box.critical(window, "일일식수 선택을 읽지 못했습니다", user_error(error))
                                 return
                     meal_period = selected_period
                 stage = "meal"
@@ -912,10 +916,10 @@ class DesktopStartupController:
                         roster, backup = save_daily_report_choices(session, choices_getter(), parent=window)
                         self._replace_roster_if_changed(session, window, roster)
                     except Exception as error:
-                        self._message_box.critical(window, "일일식수 선택을 저장하지 못했습니다", str(error))
+                        self._message_box.critical(window, "일일식수 선택을 저장하지 못했습니다", user_error(error))
                         continue
-                    if backup is not None and backup.error is not None:
-                        self._message_box.warning(window, "선택은 저장됐지만 자동 백업에 실패했습니다", str(backup.error))
+                    if backup is not None and backup.warning_required:
+                        self._message_box.warning(window, "선택은 저장됐지만 자동 백업에 실패했습니다", user_error(backup.error))
                 stage = "substitute" if action is DocumentAction.DELIVERY_SUBSTITUTE else "output"
                 continue
             if stage == "substitute":
@@ -963,7 +967,7 @@ class DesktopStartupController:
                         return
                     document = substitute.selection()
                 except Exception as error:
-                    self._message_box.critical(window, "배송대타 대상을 읽지 못했습니다", str(error))
+                    self._message_box.critical(window, "배송대타 대상을 읽지 못했습니다", user_error(error))
                     return
                 stage = "output"
                 continue
@@ -984,7 +988,7 @@ class DesktopStartupController:
                     try:
                         self._settings.save_document_output_directory(selection.directory)
                     except OSError as error:
-                        self._message_box.critical(window, "문서 저장 폴더를 저장하지 못했습니다", str(error))
+                        self._message_box.critical(window, "문서 저장 폴더를 저장하지 못했습니다", user_error(error))
                         return
                 selected_signal = getattr(window, "document_output_selected", None)
                 if selected_signal is not None and hasattr(selected_signal, "emit"):
@@ -1013,7 +1017,7 @@ class DesktopStartupController:
                 window,
                 "문서 완료 상태를 확인하지 못했습니다",
                 "파일이 없거나 생성 결과가 달라 완료 화면을 열 수 없습니다.\n\n"
-                + str(error),
+                + user_error(error),
             )
             return
         (yield DialogRequest(dialog))
@@ -1076,12 +1080,12 @@ class DesktopStartupController:
                 failed = 0 if rotation is None else len(rotation.failed)
                 unreadable = 0 if rotation is None else len(rotation.unreadable)
                 details = []
-                if dialog.backup_result.error is not None:
-                    details.append(f"새 백업 오류: {dialog.backup_result.error}")
+                if dialog.backup_result.warning_required:
+                    details.append(f"새 백업 오류: {user_error(dialog.backup_result.error)}")
                 if dialog.backup_result.rotation_error is not None:
-                    details.append(f"기존 백업 처리 오류: {dialog.backup_result.rotation_error}")
+                    details.append(f"기존 백업 처리 오류: {user_error(dialog.backup_result.rotation_error)}")
                 if rotation is not None:
-                    details.extend(f"{path.name}: {reason}" for path, reason in rotation.failed)
+                    details.extend(f"{path.name}: {user_error(reason)}" for path, reason in rotation.failed)
                     details.extend(f"{path.name}: 읽거나 검증할 수 없음" for path in rotation.unreadable)
                 title = "비밀번호 변경 완료 · 백업 확인 필요"
                 summary = (
@@ -1130,6 +1134,12 @@ class DesktopStartupController:
             if roster is not None:
                 self._replace_roster_if_changed(session, window, roster)
             return
+        if hub.selected_action is SettingsAction.HOUSEHOLD_GROUPING:
+            from .household_grouping import HouseholdGroupingController
+            roster = (yield from invoke(HouseholdGroupingController(session).run, parent=window))
+            if roster is not None:
+                self._replace_roster_if_changed(session, window, roster)
+            return
         if hub.selected_action is SettingsAction.MISSING_HOUSEHOLD_REPAIR:
             outcome = (yield from invoke(self._missing_household_repair_controller_type(session).run, parent=window))
             if outcome.completed and outcome.roster is not None:
@@ -1174,7 +1184,7 @@ class DesktopStartupController:
         try:
             self._settings.save_document_output_directory(dialog.selected_directory)
         except OSError as error:
-            self._message_box.critical(window, "문서 저장 폴더를 저장하지 못했습니다", str(error))
+            self._message_box.critical(window, "문서 저장 폴더를 저장하지 못했습니다", user_error(error))
 
     @dialog_workflow
     def _run_followup_import(self, session: DatabaseSession, window) -> None:
@@ -1212,6 +1222,7 @@ class DesktopStartupController:
             return
         self._replace_roster(session, window, roster)
 
+    @dialog_workflow
     def _run_roster_cell_edit(
         self,
         session: DatabaseSession,
@@ -1222,7 +1233,7 @@ class DesktopStartupController:
     ) -> None:
         controller = self._roster_cell_edit_controller_type(session)
         if is_roster_routing_cell(column_key):
-            outcome = controller.save(
+            outcome = yield from invoke(controller.save,
                 person_id,
                 column_key,
                 text,
@@ -1230,7 +1241,7 @@ class DesktopStartupController:
                 service_day=window.table_model.service_day,
             )
         else:
-            outcome = controller.save(person_id, column_key, text, window)
+            outcome = yield from invoke(controller.save, person_id, column_key, text, window)
         if not outcome.completed:
             return
         roster = outcome.roster
@@ -1474,7 +1485,7 @@ class DesktopStartupController:
         except Exception as error:
             self._message_box.critical(
                 window, "저장된 명단을 새로 불러오지 못했습니다",
-                "저장된 내용은 유지됩니다. 명단을 다시 열어주세요.\n\n" + str(error),
+                "저장된 내용은 유지됩니다. 명단을 다시 열어주세요.\n\n" + user_error(error),
             )
             return False
         window.replace_roster(

@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from .user_messages import user_error
+
 from pathlib import Path
 
-from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
@@ -14,7 +15,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
-    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -822,10 +822,9 @@ def _friendly_error(error: Exception) -> str:
     if isinstance(error, (CredentialUnlockError, DatabaseUnlockError)):
         return "비밀번호가 맞지 않거나 운영 데이터가 손상되었습니다. 입력을 확인해주세요."
     if isinstance(error, PasswordPolicyError):
-        return str(error)
+        return user_error(error)
     if isinstance(error, (BackupFormatError, BackupIntegrityError)):
         return "선택한 자동 백업 파일이 올바르지 않거나 손상되었습니다."
     if isinstance(error, BackupRestoreConflictError):
         return "복원할 위치에 기존 파일이 있습니다. 다른 파일 이름을 선택해주세요."
-    message = str(error).strip()
-    return message or "작업을 완료하지 못했습니다. 입력한 위치를 확인해주세요."
+    return user_error(error)

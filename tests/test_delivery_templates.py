@@ -66,7 +66,7 @@ def test_default_asset_is_consumed_and_unchanged_style_keeps_native_layout(tmp_p
     from src.core.settings import get_settings
     path = tmp_path / "default.xlsx"
     create_substitute_template(path)
-    monkeypatch.setattr(get_settings(), "get_substitute_template_path", lambda: str(path))
+    monkeypatch.setattr(get_settings(), "get_substitute_template_path", lambda profile="급식": str(path))
     snapshot, _ = source()
     data = prepare_delivery_substitute_data(snapshot, DAY, Meal.BREAKFAST)
     flags = []
@@ -84,7 +84,7 @@ def test_default_asset_is_consumed_and_unchanged_style_keeps_native_layout(tmp_p
 
 def test_report_multiline_memo_repeated_rows_and_summary_keep_styles(tmp_path):
     path = tmp_path / "report.xlsx"
-    wb = openpyxl.load_workbook("assets/report_template.xlsx")
+    wb = openpyxl.load_workbook("assets/급식/일일식수템플릿.xlsx")
     ws = wb["aaa"]
     for row in range(4, 9):
         ws.cell(row, 8).font = Font(name="Arial", size=16, italic=True, color="123456")
@@ -150,7 +150,7 @@ def test_dialog_copy_open_cancel_apply_and_database_scope(tmp_path, app):
 
 
 def test_report_managed_copy_is_data_free_and_leaves_bundle_unchanged(tmp_path, app):
-    source = Path("assets/report_template.xlsx")
+    source = Path("assets/급식/일일식수템플릿.xlsx")
     before = source.read_bytes()
     store = DeliveryTemplateStore("synthetic", settings=QSettings(str(tmp_path / "prefs.ini"), QSettings.Format.IniFormat), root=tmp_path / "forms")
     target = store.create(DocumentAction.DELIVERY_REPORT)
@@ -173,7 +173,7 @@ def test_generation_freezes_template_bytes_before_external_save(tmp_path, app, m
     path = tmp_path / "default.xlsx"
     create_substitute_template(path)
     original = path.read_bytes()
-    monkeypatch.setattr(get_settings(), "get_substitute_template_path", lambda: str(path))
+    monkeypatch.setattr(get_settings(), "get_substitute_template_path", lambda profile="급식": str(path))
     backups = tmp_path / "backups"
     backups.mkdir()
     temporary_paths = []

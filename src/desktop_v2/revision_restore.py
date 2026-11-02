@@ -1,6 +1,8 @@
 """User-confirmed historical restoration and named branches in one database."""
 from __future__ import annotations
 
+from .user_messages import user_error
+
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -74,7 +76,7 @@ class RevisionRestoreDialog(QDialog):
         try:
             self.selection()
         except ValueError as error:
-            self.error_label.setText(str(error))
+            self.error_label.setText(user_error(error))
             return
         self.accept()
 
@@ -185,7 +187,7 @@ class RevisionRestoreController:
         if result.revision_id is None:
             self.messages.information(parent, "변경 없음", "현재 분기와 저장값이 선택한 내용과 같습니다.")
             return
-        if result.backup.error is not None:
+        if result.backup.warning_required:
             self.messages.warning(parent, "저장 완료 · 자동 백업 실패", "운영 파일 저장은 완료했으나 자동 백업을 만들지 못했습니다. 백업 폴더 연결과 쓰기 권한을 확인해주세요.")
         self.messages.information(parent, title, "같은 운영 파일에 저장했습니다. 프로그램을 종료합니다. 다시 실행하면 선택한 분기의 명단과 설정 전체를 읽습니다.")
         self.on_restart()
@@ -225,7 +227,7 @@ class RevisionRestoreController:
                 title="운영 파일을 확인하는 중입니다",
                 message="선택한 파일과 저장된 내용을 확인하고 있습니다.",
                 parent=parent,
-            ) as opened:
+            ):
                 if self.messages.question(parent, "운영 파일 전환", f"{path} 파일로 전환하고 종료할까요? 다음 실행부터 선택한 파일을 사용합니다.",
                         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
                         QMessageBox.StandardButton.Cancel) != QMessageBox.StandardButton.Yes:

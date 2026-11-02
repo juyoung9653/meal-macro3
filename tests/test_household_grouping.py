@@ -155,7 +155,7 @@ def test_row_add_matching_uses_normalized_default_mobile_and_requires_a_value():
     ) is None
 
 
-def test_row_add_matching_uses_all_saved_rule_criteria():
+def test_row_add_matching_ignores_old_address_rule():
     roster = _existing_roster()
     rule = HouseholdMatchingRule(
         RULE_ID,
@@ -175,7 +175,7 @@ def test_row_add_matching_uses_all_saved_rule_criteria():
         rule,
         roster,
         effective_on=EFFECTIVE_ON,
-    ) == EXISTING_HOUSEHOLD_1
+    ) is None
     assert match_existing_household_id(
         PersonProfile(
             "신규",
@@ -188,15 +188,17 @@ def test_row_add_matching_uses_all_saved_rule_criteria():
         effective_on=EFFECTIVE_ON,
     ) is None
 
+    assert match_existing_household_id(
+        PersonProfile("신규", mobile_phone="01012345678", road_address="다른 주소"),
+        rule, roster, effective_on=EFFECTIVE_ON,
+    ) == EXISTING_HOUSEHOLD_1
 
-def test_row_add_matching_rejects_ambiguous_households():
-    with pytest.raises(ValueError, match="기존 가구가 둘 이상"):
-        match_existing_household_id(
-            PersonProfile("신규", mobile_phone="010-1234-5678"),
-            None,
-            _existing_roster(duplicate_phone_household=True),
-            effective_on=EFFECTIVE_ON,
-        )
+
+def test_row_add_matching_selects_stable_target_for_automatic_merge():
+    assert match_existing_household_id(
+        PersonProfile("신규", mobile_phone="010-1234-5678"), None,
+        _existing_roster(duplicate_phone_household=True), effective_on=EFFECTIVE_ON,
+    ) == EXISTING_HOUSEHOLD_1
 
 
 def test_row_add_matching_ignores_membership_inactive_on_start_date():
@@ -562,7 +564,7 @@ def test_existing_household_match_also_requires_every_selected_criterion():
     )
 
 
-def test_multiple_matching_existing_households_require_explicit_choice():
+def test_multiple_matching_existing_households_default_without_choice():
     roster = _existing_roster(duplicate_phone_household=True)
     observation = _observation(
         OBSERVATION_1,
@@ -584,7 +586,7 @@ def test_multiple_matching_existing_households_require_explicit_choice():
         EXISTING_HOUSEHOLD_1,
         EXISTING_HOUSEHOLD_2,
     )
-    assert grouping_plan.required_decision_ids == (OBSERVATION_1,)
+    assert grouping_plan.required_decision_ids == ()
 
     reconciliation = apply_reconciliation(
         roster,
@@ -598,12 +600,8 @@ def test_multiple_matching_existing_households_require_explicit_choice():
             )
         },
     )
-    with pytest.raises(ValueError, match="가구 선택"):
-        apply_household_grouping(
-            reconciliation,
-            grouping_plan,
-            previous_roster=roster,
-        )
+    automatic = apply_household_grouping(reconciliation, grouping_plan, previous_roster=roster)
+    assert automatic.snapshot.household_for(PERSON_1, on=EFFECTIVE_ON).household_id == EXISTING_HOUSEHOLD_1
 
     chosen = apply_household_grouping(
         reconciliation,
