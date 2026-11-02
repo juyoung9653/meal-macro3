@@ -57,7 +57,7 @@ def test_import_reviews_two_columns_and_saves_or_cancels_everything(app, tmp_pat
                             existing_profile=profiles[0], existing_household_rule=rule)
         opened = []
         class IdentityReview:
-            def __init__(self, roster, plan, parent=None, *, household_plan=None):
+            def __init__(self, roster, plan, parent=None, *, household_plan=None, preview=None, column_labels=None):
                 self.plan, self.household_plan = plan, household_plan
             def exec(self):
                 return QDialog.DialogCode.Accepted

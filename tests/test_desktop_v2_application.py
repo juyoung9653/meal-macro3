@@ -287,7 +287,7 @@ class _AcceptedReview:
 
 
 class _RejectedReview:
-    def __init__(self, roster, plan, parent=None, *, household_plan=None):
+    def __init__(self, roster, plan, parent=None, *, household_plan=None, preview=None, column_labels=None):
         assert any(item.review_reasons for item in plan.staged_people)
 
     def exec(self):

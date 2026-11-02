@@ -10,7 +10,7 @@ from src.desktop_v2.import_review import ImportReviewDialog
 from src.domain.revisions import RevisionActor
 from src.domain.roster import Person, PersonProfile, RosterSnapshot, Meal
 from src.importing.application import IdentityResolution, apply_reconciliation
-from src.importing.contracts import ImportMappingProfile, PersonObservation, ProfileField, SourceReference
+from src.importing.contracts import ImportMappingProfile, ObservedDeliveryAssignment, PersonObservation, ProfileField, SourceReference
 from src.importing.reconciliation import (
     ReconciliationDisposition as D, ReviewReason, stage_reconciliation, stage_lunch_reconciliation,
 )
@@ -18,6 +18,58 @@ from src.importing.revision import ImportPurpose, build_import_revision
 from src.importing.workbook import WorkbookImportPreview
 
 DAY = date(2026, 11, 2)
+
+
+@pytest.mark.parametrize("purpose", [ImportPurpose.DATABASE, ImportPurpose.VACATION_LUNCH])
+@pytest.mark.parametrize("separate_meals", [False, True])
+def test_review_shows_every_mapped_destination_including_empty_and_custom_columns(purpose, separate_meals):
+    app = QApplication.instance() or QApplication([])
+    current = roster()
+    custom_id = uuid4()
+    obs = observation()
+    obs = replace(obs, profile_values={**obs.profile_values,
+        ProfileField.BIRTH_DATE: date(2015, 2, 3), ProfileField.SCHOOL_NAME: "합성초등학교",
+        ProfileField.NOTE: "연결하지 않은 항목"},
+        custom_values={custom_id: "001\n둘째 줄"},
+        assignments=(ObservedDeliveryAssignment(Meal.LUNCH, "합성기사", "001"),),
+        source=replace(obs.source, external_reference="0007"))
+    profile = ImportMappingProfile(uuid4(), 1, "합성 명단", "xlsx", {
+        ProfileField.NAME: "A", ProfileField.MOBILE_PHONE: "B", ProfileField.HOUSEHOLD_HEAD_NAME: "C",
+        ProfileField.BIRTH_DATE: "D", ProfileField.SCHOOL_NAME: "E", ProfileField.ROAD_ADDRESS: "F",
+    }, custom_field_columns={custom_id: "G"}, custom_field_names={custom_id: "학교"},
+        combined_meals_column=None if separate_meals else "H",
+        meal_flag_columns={Meal.LUNCH: "H", Meal.DINNER: "L"} if separate_meals else {},
+        driver_column="I", sequence_column="J", source_reference_column="K", ignored_columns=("M",))
+    preview = WorkbookImportPreview("synthetic.xlsx", "a" * 64, 1, "명단", "b" * 64, profile, (obs,), (), ())
+    stage = stage_lunch_reconciliation if purpose is ImportPurpose.VACATION_LUNCH else stage_reconciliation
+    plan = stage(current, (obs,), effective_on=DAY)
+    dialog = ImportReviewDialog(current, plan, purpose=purpose, preview=preview,
+        column_labels={"address": "배송 주소"})
+    try:
+        table = dialog._table
+        cells = {table.horizontalHeaderItem(i).text(): table.item(0, i).text()
+                 for i in range(dialog._reason_column)}
+        assert cells["생년월일"] == "2015-02-03"
+        assert cells["학교 (E)"] == "합성초등학교"
+        assert cells["학교 (G)"] == "001\n둘째 줄"
+        assert cells["배송 주소"] == "미입력"
+        assert cells["배송담당"] == "중식: 합성기사"
+        assert cells["배송순서"] == "중식: 001"
+        assert cells["원본 식별값"] == "0007"
+        if separate_meals:
+            assert cells["중식"] == "포함"
+            assert cells["석식"] == "미포함"
+        else:
+            assert cells["식종"] == "중식"
+        assert "비고" not in cells
+        assert "M" not in cells
+        assert table.isColumnHidden(dialog._household_column)
+        assert not table.isColumnHidden(dialog._decision_column)
+        assert table.cellWidget(0, dialog._decision_column) is dialog._combos[obs.observation_id]
+        dialog._skip_all.click()
+        assert dialog.decisions()[obs.observation_id].resolution is IdentityResolution.CREATE_NEW
+    finally:
+        dialog.close()
 
 
 def observation(name="합성아동", phone="010-9999-0000", head="합성보호자", row=2):

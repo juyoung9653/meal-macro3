@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from src.domain.roster import RosterSnapshot
+from src.domain.roster import Meal, RosterSnapshot
 from src.importing.revision import ImportPurpose
 from src.importing.households import (
     ExistingHouseholdProposal,
@@ -34,6 +34,8 @@ from src.importing.application import (
     ReconciliationDecision,
 )
 from src.importing.contracts import ProfileField
+from src.importing.lunch_values import FIELD_LABELS
+from src.importing.workbook import WorkbookImportPreview
 from src.importing.reconciliation import (
     ReconciliationDisposition,
     ReconciliationPlan,
@@ -93,6 +95,8 @@ class ImportReviewDialog(QDialog):
         household_plan: HouseholdGroupingPlan | None = None,
         purpose: ImportPurpose = ImportPurpose.DATABASE,
         lunch_delivering_ids: tuple[UUID, ...] = (),
+        preview: WorkbookImportPreview | None = None,
+        column_labels: dict[str, str] | None = None,
     ) -> None:
         super().__init__(parent)
         if roster is not None and not isinstance(roster, RosterSnapshot):
@@ -118,6 +122,10 @@ class ImportReviewDialog(QDialog):
         self._plan = plan
         self._household_plan = household_plan
         self._decision_rows = import_decision_rows(plan, household_plan)
+        self._display_columns = self._mapped_columns(preview, column_labels or {})
+        self._reason_column = len(self._display_columns) + 1
+        self._decision_column = self._reason_column + 1
+        self._household_column = self._reason_column + 2
         self._household_required = frozenset(() if household_plan is None else household_plan.required_decision_ids)
         self._purpose = purpose
         self._lunch_delivering_ids = frozenset(lunch_delivering_ids)
@@ -136,6 +144,59 @@ class ImportReviewDialog(QDialog):
         self.resize(min(960, screen.width() - 32), min(640, screen.height() - 48))
         self._build_ui()
         self._refresh_accept_state()
+
+    def _mapped_columns(self, preview, labels):
+        columns = {
+            ProfileField.NAME: ("성명", ()),
+            ProfileField.MOBILE_PHONE: ("핸드폰", ()),
+            ProfileField.HOUSEHOLD_HEAD_NAME: ("세대주명", ()),
+        }
+        if preview is not None:
+            profile = preview.profile
+            for field, source in profile.profile_columns.items():
+                key = {ProfileField.SCHOOL_NAME: "school", ProfileField.MOBILE_PHONE: "mobile",
+                       ProfileField.ROAD_ADDRESS: "address"}.get(field, field.value)
+                label = labels.get(key, columns.get(field, (FIELD_LABELS[field], ()))[0])
+                columns[field] = (label, (source, *profile.fallback_profile_columns.get(field, ())))
+            definitions = {item.definition_id: item.name for item in preview.custom_fields}
+            for field_id, source in profile.custom_field_columns.items():
+                name = labels.get("custom:" + str(field_id),
+                    definitions.get(field_id, profile.custom_field_names.get(field_id, "사용자 칼럼")))
+                columns[field_id] = (name, (source,))
+            if profile.combined_meals_column:
+                columns["meals"] = ("식종", (profile.combined_meals_column,))
+            for meal, source in profile.meal_flag_columns.items():
+                columns[meal] = (meal.value, (source,))
+            for key, label, source in (
+                ("driver", "배송담당", profile.driver_column),
+                ("sequence", "배송순서", profile.sequence_column),
+                ("reference", "원본 식별값", profile.source_reference_column),
+            ):
+                if source:
+                    columns[key] = (labels.get(key, label), (source,))
+        titles = [label for label, _sources in columns.values()]
+        return tuple((key, label if titles.count(label) == 1 else f"{label} ({'·'.join(sources) or '기본'})", sources)
+                     for key, (label, sources) in columns.items())
+
+    @staticmethod
+    def _mapped_value(observation, key):
+        if isinstance(key, ProfileField):
+            value = observation.profile_values.get(key)
+            additional = (observation.additional_mobile_phones if key is ProfileField.MOBILE_PHONE
+                          else observation.additional_telephones if key is ProfileField.TELEPHONE else ())
+            return "\n".join(str(item) for item in (value, *additional) if item is not None) or "미입력"
+        if isinstance(key, UUID):
+            return observation.custom_values.get(key) or "미입력"
+        if isinstance(key, Meal):
+            return "포함" if key in observation.meals else "미포함"
+        if key == "meals":
+            return " · ".join(meal.value for meal in observation.meals) or "미입력"
+        if key == "reference":
+            return observation.source.external_reference or "미입력"
+        return "\n".join(
+            (f"{item.meal.value}: " if item.meal is not None else "") + str(getattr(item, key))
+            for item in observation.assignments if getattr(item, key) is not None
+        ) or "미입력"
 
     def decisions(self) -> dict[UUID, ReconciliationDecision]:
         if not self._all_resolved():
@@ -216,12 +277,10 @@ class ImportReviewDialog(QDialog):
         header.addWidget(self._summary)
         layout.addLayout(header)
 
-        self._table = QTableWidget(len(self._decision_rows), 7)
+        self._table = QTableWidget(len(self._decision_rows), self._household_column + 1)
         self._table.setHorizontalHeaderLabels((
             "번호",
-            "성명",
-            "핸드폰",
-            "세대주명",
+            *(label for _key, label, _sources in self._display_columns),
             "확인 사유",
             "행 반영 방법",
             "기존 가구 선택",
@@ -231,17 +290,21 @@ class ImportReviewDialog(QDialog):
             QAbstractItemView.SelectionBehavior.SelectRows
         )
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self._table.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self._table.verticalHeader().setVisible(False)
         header = self._table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Interactive)
-        self._table.setColumnWidth(4, 170)
-        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(6, QHeaderView.ResizeMode.Stretch)
-        self._table.setColumnHidden(6, True)
+        for column, (_key, label, sources) in enumerate(self._display_columns, 1):
+            header.setSectionResizeMode(column, QHeaderView.ResizeMode.Interactive)
+            self._table.setColumnWidth(column, 160)
+            self._table.horizontalHeaderItem(column).setToolTip(
+                label + ("\n연결한 원본 열: " + " · ".join(sources) if sources else ""))
+        for column, width in ((self._reason_column, 170), (self._decision_column, 340),
+                              (self._household_column, 240)):
+            header.setSectionResizeMode(column, QHeaderView.ResizeMode.Interactive)
+            self._table.setColumnWidth(column, width)
+        self._table.setColumnHidden(self._household_column, True)
         for row, staged in enumerate(self._decision_rows):
             self._populate_row(row, staged)
         self._table.resizeRowsToContents()
@@ -288,9 +351,7 @@ class ImportReviewDialog(QDialog):
         observation = staged.observation
         values = (
             str(row + 1),
-            observation.name,
-            observation.profile_values.get(ProfileField.MOBILE_PHONE) or "미입력",
-            observation.profile_values.get(ProfileField.HOUSEHOLD_HEAD_NAME) or "미입력",
+            *(self._mapped_value(observation, key) for key, _label, _sources in self._display_columns),
             " · ".join(_REVIEW_LABELS[reason] for reason in staged.review_reasons) or "가구 확인",
         )
         for column, value in enumerate(values):
@@ -302,14 +363,14 @@ class ImportReviewDialog(QDialog):
             self._table.setItem(row, column, item)
         combo = self._decision_combo(staged)
         self._combos[observation.observation_id] = combo
-        self._table.setCellWidget(row, 5, combo)
+        self._table.setCellWidget(row, self._decision_column, combo)
         if observation.observation_id in self._household_required:
             household_combo = self._household_combo(staged)
             self._household_combos[observation.observation_id] = household_combo
-            self._table.setCellWidget(row, 6, household_combo)
+            self._table.setCellWidget(row, self._household_column, household_combo)
             self._sync_household_choice(observation.observation_id)
         else:
-            self._table.setItem(row, 6, QTableWidgetItem("자동 처리"))
+            self._table.setItem(row, self._household_column, QTableWidgetItem("자동 처리"))
         combo.ensurePolished()
         self._table.setRowHeight(row, max(40, combo.sizeHint().height() + 1))
 
@@ -452,7 +513,7 @@ class ImportReviewDialog(QDialog):
         show_households = any(
             self._combos[observation_id].currentData() == "new"
             for observation_id in self._household_combos)
-        self._table.setColumnHidden(6, not show_households)
+        self._table.setColumnHidden(self._household_column, not show_households)
         self._household_note.setVisible(show_households)
         matched = len(self._plan.by_disposition(ReconciliationDisposition.MATCHED))
         new = sum(

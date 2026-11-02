@@ -12,7 +12,7 @@ import logging
 import weakref
 
 from PySide6.QtCore import QEvent, QObject, QTimer, Qt
-from PySide6.QtWidgets import QDialog, QMessageBox, QWidget
+from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QMessageBox, QWidget
 from shiboken6 import isValid
 
 
@@ -82,13 +82,59 @@ def launch(method, *args, **kwargs):
 
 def _show_work_dialog(dialog):
     """Show a retained dialog without making its main window a native owner."""
-    # Keep the QWidget parent for lifetime management and findChildren(), but
-    # clear the platform transient parent before Windows assigns GW_OWNER.
+    if isinstance(dialog, (QMessageBox, QFileDialog)):
+        dialog.show()
+        return
+    # Polish may change window flags (including restored title-bar buttons).
+    # Do that before detaching; otherwise Qt recreates the native owner on show.
+    dialog.ensurePolished()
     dialog.winId()
     handle = dialog.windowHandle()
     if handle is not None:
         handle.setTransientParent(None)
+    _configure_taskbar_window(dialog)
     dialog.show()
+    # Keep the QWidget parent for lifetime management and findChildren(). Qt's
+    # transientParent alone does not clear the existing Windows GW_OWNER.
+    handle = dialog.windowHandle()
+    if handle is not None:
+        handle.setTransientParent(None)
+    _configure_taskbar_window(dialog)
+
+
+def _configure_taskbar_window(dialog):
+    if QApplication.platformName() != "windows":
+        return
+    import ctypes
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    get_long = getattr(user32, "GetWindowLongPtrW", user32.GetWindowLongW)
+    set_long = getattr(user32, "SetWindowLongPtrW", user32.SetWindowLongW)
+    get_long.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    get_long.restype = ctypes.c_ssize_t
+    set_long.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_ssize_t]
+    set_long.restype = ctypes.c_ssize_t
+    hwnd = int(dialog.winId())
+
+    def set_value(index, value):
+        if get_long(hwnd, index) == value:
+            return
+        ctypes.set_last_error(0)
+        previous = set_long(hwnd, index, value)
+        if not previous and ctypes.get_last_error():
+            raise ctypes.WinError(ctypes.get_last_error())
+
+    set_value(-8, 0)  # GWLP_HWNDPARENT: native owner, not QWidget lifetime parent.
+    style = get_long(hwnd, -20)  # GWL_EXSTYLE
+    desired = (style | 0x00040000) & ~0x00000080  # APPWINDOW, without TOOLWINDOW
+    if style != desired:
+        set_value(-20, desired)
+        user32.SetWindowPos.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
+            ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_uint]
+        user32.SetWindowPos.restype = ctypes.c_int
+        # Refresh cached styles without moving, resizing or activating the window.
+        if not user32.SetWindowPos(hwnd, None, 0, 0, 0, 0, 0x0037):
+            raise ctypes.WinError(ctypes.get_last_error())
 
 
 class _DialogManager(QObject):

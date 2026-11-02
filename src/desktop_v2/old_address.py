@@ -197,7 +197,11 @@ class AddressUpdateProgressDialog(StartupLoadingDialog):
         super().__init__(worker, parent=parent, title="구주소를 변환하는 중입니다",
             message="신주소를 조회해 구주소로 변환하는 중입니다.\n"
                     "건너뜀·실패를 포함한 전체 명단의 처리 인원을 표시합니다.")
-        self.progress.setTextVisible(True)
+        self.progress_status = QLabel()
+        self.progress_status.setObjectName("sectionLabel")
+        self.progress_status.setWordWrap(True)
+        progress_layout = self.progress.parentWidget().layout()
+        progress_layout.insertWidget(progress_layout.indexOf(self.progress), self.progress_status)
         self.set_progress(0, total)
         worker.progress_changed.connect(self.set_progress, Qt.ConnectionType.QueuedConnection)
 
@@ -206,6 +210,7 @@ class AddressUpdateProgressDialog(StartupLoadingDialog):
         self.progress.setRange(0, max(1, total))
         self.progress.setValue(completed if total else 1)
         self.progress.setFormat("처리 %v / %m명 · %p%" if total else "처리할 대상이 없습니다")
+        self.progress_status.setText(self.progress.text())
 
 
 def run_address_update(task, *, total, parent=None):

@@ -119,9 +119,9 @@ class GuidedRosterImportController:
             allow_vacation_lunch=current_roster is not None,
             parent=parent,
         )
+        model = getattr(parent, "table_model", None)
+        labels = {column.key: column.label for column in getattr(model, "columns", ())}
         if hasattr(wizard, "set_database_columns"):
-            model = getattr(parent, "table_model", None)
-            labels = {column.key: column.label for column in getattr(model, "columns", ())}
             wizard.set_database_columns(current_roster, labels)
         if hasattr(wizard, "set_document_targets"):
             latest = self._session.database.latest_revision()
@@ -185,6 +185,8 @@ class GuidedRosterImportController:
                 plan,
                 parent,
                 household_plan=household_plan,
+                preview=selection.preview,
+                column_labels=labels,
                 **({"purpose": purpose, "lunch_delivering_ids": lunch_delivering_ids} if purpose is ImportPurpose.VACATION_LUNCH else {}),
             )
             if (yield DialogRequest(review, self._session)) != QDialog.DialogCode.Accepted:

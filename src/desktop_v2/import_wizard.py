@@ -1697,7 +1697,8 @@ class RosterImportWizard(QDialog):
         self.correction_table.scrollToTop()
         self.correction_table.horizontalScrollBar().setValue(0)
         self.correction_dialog.setWindowModality(Qt.WindowModality.NonModal)
-        self.correction_dialog.show()
+        from .dialog_workflow import _show_work_dialog
+        _show_work_dialog(self.correction_dialog)
         self.correction_dialog.raise_()
         self.correction_dialog.activateWindow()
         QTimer.singleShot(0, self._resize_correction_columns)

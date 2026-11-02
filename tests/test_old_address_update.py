@@ -318,6 +318,10 @@ def test_address_progress_updates_on_ui_thread_and_restores_parent(app, fail):
         if dialog is None or dialog.progress.value() != 2:
             return
         observed.append((dialog.progress.text(), parent.isEnabled(), get_ident()))
+        assert dialog.progress_status.text() == "처리 2 / 5명 · 40%"
+        assert dialog.progress_status.isVisible()
+        assert dialog.progress_status.height() >= dialog.progress_status.fontMetrics().height()
+        assert dialog.progress_status.geometry().bottom() < dialog.progress.geometry().top()
         dialog.reject()
         assert not dialog.close()
         assert dialog.isVisible()
