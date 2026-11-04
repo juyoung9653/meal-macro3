@@ -233,6 +233,7 @@ def test_older_schema_backup_rotates_without_migrating_archive_and_restores(tmp_
             connection.execute("BEGIN IMMEDIATE")
             connection.execute("ALTER TABLE household_projection DROP COLUMN delivery_settings_json")
             connection.execute("ALTER TABLE person_projection DROP COLUMN delivery_settings_json")
+            connection.execute("ALTER TABLE person_projection DROP COLUMN lunch_period_json")
             connection.execute("DROP TRIGGER schema_migration_no_delete")
             connection.execute("DELETE FROM schema_migration WHERE version >= 6")
             connection.execute("DROP TABLE user_view_layout")

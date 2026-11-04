@@ -83,6 +83,18 @@ def _generated_result(
     )
 
 
+def test_completion_shows_missing_lunch_school_dates_without_blocking(app, tmp_path):
+    from dataclasses import replace
+    from PySide6.QtWidgets import QPlainTextEdit
+    result = replace(_generated_result(tmp_path), lunch_exclusions=("누락학교 · 1명 · 2026-08-21 (1식 제외)",))
+    dialog = DocumentCompletionDialog(result)
+    detail = dialog.findChild(QPlainTextEdit, "missingLunchScheduleDetails")
+    assert detail.isReadOnly()
+    assert "누락학교" in detail.toPlainText() and "2026-08-21" in detail.toPlainText()
+    assert dialog.result.verify_file().is_file()
+    dialog.close()
+
+
 def test_result_requires_existing_nonempty_bytes_matching_size_and_hash(
     tmp_path: Path,
 ):

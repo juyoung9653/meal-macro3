@@ -75,6 +75,23 @@ def _measure(workbook, excel_sheet, columns, layout, options, *, preserve_styles
                                         "dashDot": 4, "dashDotDot": 5}.get(style, 1) if style else -4142
                     if style:
                         native.Weight = {"hair": 1, "medium": -4138, "thick": 4}.get(style, 2)
+    if layout.fixed_column_widths:
+        # ColumnWidth units depend on the workbook's Normal font.
+        font = workbook._named_styles[0].font
+        native_font = excel_sheet.Parent.Styles("Normal").Font
+        native_font.Name = font.name or "Calibri"
+        native_font.Size = font.sz or 11
+        native_font.Bold = bool(font.bold)
+        native_font.Italic = bool(font.italic)
+        # OOXML widths include native padding, unlike COM ColumnWidth.
+        probe = excel_sheet.Columns(layout.used_cols + 1)
+        probe.ColumnWidth = 20
+        width20 = probe.Width
+        probe.ColumnWidth = 50
+        character_width = (probe.Width - width20) / 30
+        padding = width20 / character_width - 20
+        for col, width in enumerate(layout.fixed_column_widths, 1):
+            excel_sheet.Columns(col).ColumnWidth = max(0, width - padding)
     apply_page_formatting(excel_sheet, columns,
                           mode={"none": 0, "dong": 1, "groups": 2}[options.split],
                           max_groups_limit=options.groups_per_page,
@@ -89,8 +106,9 @@ def _measure(workbook, excel_sheet, columns, layout, options, *, preserve_styles
     scratch.ColumnWidth = 50
     character_width_pt = (scratch.Width - width20) / 30
     for col in range(1, layout.used_cols + 1):
-        ws.column_dimensions[get_column_letter(col)].width = floor(
-            excel_sheet.Columns(col).Width / character_width_pt * 256) / 256
+        ws.column_dimensions[get_column_letter(col)].width = (
+            layout.fixed_column_widths[col - 1] if layout.fixed_column_widths else
+            floor(excel_sheet.Columns(col).Width / character_width_pt * 256) / 256)
     # SpreadsheetML exposes unrounded internal row heights. COM RowHeight is
     # rounded for screen DPI and can differ from the native saved/printed size.
     import pythoncom
@@ -156,8 +174,16 @@ def _measure(workbook, excel_sheet, columns, layout, options, *, preserve_styles
     alignment = Alignment(horizontal=horizontal, vertical=vertical, wrap_text=True)
     workbook._named_styles[0].font = normal_font
     workbook._named_styles[0].alignment = Alignment(horizontal=horizontal, vertical=vertical)
+    fixed_heights = {}
+    if layout.group_row_heights:
+        for group in layout.groups:
+            size = group.end_row - group.start_row + 1
+            sample = (layout.group_row_heights[size - 1] if size <= len(layout.group_row_heights)
+                      else layout.group_row_heights[0] * size)
+            fixed_heights.update({group.start_row + offset: height for offset, height in enumerate(sample)})
     for row in range(1, layout.used_rows + 1):
-        ws.row_dimensions[row].height = heights[row]
+        # Preserve the template's stored values, not COM's rounded screen size.
+        ws.row_dimensions[row].height = fixed_heights.get(row, heights[row])
         for col in range(1, layout.used_cols + 1):
             cell = ws.cell(row, col)
             font = copy(cell.font)

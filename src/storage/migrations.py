@@ -943,4 +943,14 @@ MIGRATIONS = (*MIGRATIONS, Migration(
     """,),
 ))
 
+MIGRATIONS = (*MIGRATIONS, Migration(
+    version=11,
+    name="person_lunch_period",
+    statements=("""
+        ALTER TABLE person_projection ADD COLUMN lunch_period_json TEXT
+        CHECK(lunch_period_json IS NULL OR
+              (json_valid(lunch_period_json) AND json_type(lunch_period_json) = 'object'))
+    """,),
+))
+
 CURRENT_SCHEMA_VERSION = MIGRATIONS[-1].version

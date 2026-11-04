@@ -32,6 +32,7 @@ from src.domain.household_shared import (
     profile_with_shared_routing,
 )
 from src.domain.profile_edits import build_person_profile_revision
+from src.domain.lunch_periods import LUNCH_DATE_COLUMNS, build_lunch_period_revision, lunch_date
 from src.domain.column_input_rules import RULES_KIND, load_rules, rule_for, validate_input
 from src.domain.revisions import RevisionActor
 from src.domain.roster import (
@@ -72,6 +73,7 @@ _ROUTING_PROFILE_FIELDS = {
 def is_roster_cell_editable(column_key: str) -> bool:
     return (
         column_key == "birth_date"
+        or column_key in LUNCH_DATE_COLUMNS
         or column_key in _PROFILE_FIELDS
         or column_key in _ROUTING_PROFILE_FIELDS
         or column_key.startswith("custom:")
@@ -86,6 +88,9 @@ def roster_cell_text(person: Person, column_key: str, definition: CustomFieldDef
     """Return the exact stored value used to seed an inline editor."""
 
     profile = person.profile
+    if column_key in LUNCH_DATE_COLUMNS:
+        value = lunch_date(person, column_key)
+        return "" if value is None else value.isoformat()
     if column_key == "birth_date":
         return "" if profile.birth_date is None else profile.birth_date.isoformat()
     if column_key in _PROFILE_FIELDS:
@@ -162,7 +167,7 @@ class RosterCellEditDelegate(QStyledItemDelegate):
             editor.setTabChangesFocus(True)
         else:
             editor = make_rule_editor(column.key, getattr(self, "_input_rules", {}), parent)
-            if column.key == "birth_date" or (
+            if column.key == "birth_date" or column.key in LUNCH_DATE_COLUMNS or (
                 column.custom_field is not None
                 and column.custom_field.field_type is CustomFieldType.DATE
             ):
@@ -307,6 +312,8 @@ class RosterCellEditController:
                 raise ValueError("현재 명단이 없습니다.")
             person = roster.person(person_id)
             effective_on = self._effective_date_provider()
+            if column_key in LUNCH_DATE_COLUMNS:
+                return self._save_lunch_date(roster, person_id, column_key, text, effective_on, parent)
             snapshot = None
             editing_person = person
             forced_routing_fields = ()
@@ -394,7 +401,25 @@ class RosterCellEditController:
                 + user_error(error),
             )
             return RosterCellEditOutcome(RosterCellEditStatus.FAILED)
-        if backup_result.warning_required:
+        return self._completed(prepared, backup_result, parent)
+
+    def _save_lunch_date(self, roster, person_id, column_key, text, effective_on, parent):
+        from src.domain.column_input_rules import default_rule
+        text = text.strip()
+        validate_input(column_key, text, default_rule(column_key))
+        snapshot = self._session.database.snapshot(roster.revision_id)
+        validate_input(column_key, text, rule_for(load_rules(snapshot), column_key))
+        prepared = build_lunch_period_revision(roster, person_id, column_key,
+            date.fromisoformat(text) if text else None,
+            actor=self._actor_provider(), recorded_at=self._recorded_at_provider(),
+            effective_on=effective_on, revision_id=self._revision_id_factory())
+        if prepared is None:
+            return RosterCellEditOutcome(RosterCellEditStatus.CANCELLED)
+        backup = save_revision(self._session, prepared.record, parent=parent)
+        return self._completed(prepared, backup, parent)
+
+    def _completed(self, prepared, backup_result, parent):
+        if getattr(backup_result, "warning_required", bool(getattr(backup_result, "error", None))):
             self._message_box.warning(
                 parent,
                 "명단 셀은 저장됐지만 자동 백업에 실패했습니다",

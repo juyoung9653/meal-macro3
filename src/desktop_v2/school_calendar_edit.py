@@ -10,7 +10,7 @@ from .startup_loading import save_revision
 
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 from enum import StrEnum
 from uuid import UUID, uuid4
@@ -51,13 +51,13 @@ from src.domain.school_calendar import (
     SchoolLunchCalendar,
     SchoolLunchSchoolSchedule,
     normalize_grade,
+    normalize_school_name,
     school_lunch_calendar_from_snapshot,
 )
 from src.domain.school_calendar_edits import (
     SchoolLunchRuleSegment,
     apply_school_lunch_rule_period,
     build_school_calendar_edit_revision,
-    replace_school_lunch_rule_segment,
     school_lunch_rule_segments,
 )
 from src.storage.database_session import (
@@ -68,6 +68,7 @@ from src.storage.database_session import (
 from .date_edit import WheelSafeDateEdit
 from .import_controller import current_windows_actor
 from .theme import application_stylesheet, register_application_fonts
+from .school_grade_checks import SchoolGradeChecks
 
 
 class SchoolCalendarEditDialog(QDialog):
@@ -96,6 +97,8 @@ class SchoolCalendarEditDialog(QDialog):
         self._selected_segment: SchoolLunchRuleSegment | None = None
         self._edit_coverage: InclusiveDateRange | None = None
         self._import_requested = False
+        self.delete_import_requested = None
+        self._import_history = ()
         register_application_fonts()
         self.setObjectName("schoolCalendarEditDialog")
         self.setWindowTitle("저장된 학교 일정 관리")
@@ -133,6 +136,23 @@ class SchoolCalendarEditDialog(QDialog):
         root.setSpacing(11)
         root.addWidget(self._header())
 
+        periods = QHBoxLayout()
+        periods.addWidget(QLabel("불러온 방학"))
+        self._period_choice = QComboBox()
+        self._period_choice.setObjectName("schoolCalendarImportPeriod")
+        self._period_choice.addItem("전체 저장 기간", None)
+        self._period_choice.currentIndexChanged.connect(self._filter_schools)
+        periods.addWidget(self._period_choice, 1)
+        self._history_button = QPushButton("불러온 원본 보기")
+        self._history_button.setEnabled(False)
+        self._history_button.clicked.connect(self._show_import_rows)
+        periods.addWidget(self._history_button)
+        self._delete_import = QPushButton("선택한 불러오기 전체 삭제")
+        self._delete_import.setEnabled(False)
+        self._delete_import.clicked.connect(self._request_delete_import)
+        periods.addWidget(self._delete_import)
+        root.addLayout(periods)
+
         self._summary = QLabel()
         self._summary.setObjectName("schoolCalendarEditSummary")
         self._summary.setWordWrap(True)
@@ -154,9 +174,9 @@ class SchoolCalendarEditDialog(QDialog):
         root.addWidget(self._error)
 
         actions = QHBoxLayout()
-        self._import = QPushButton("Excel에서 새로 불러오기")
+        self._import = QPushButton("다음 방학 일정 추가")
         self._import.setObjectName("quietAction")
-        self._import.setToolTip("현재 편집 화면을 닫고 학교 일정 Excel 불러오기를 시작합니다")
+        self._import.setToolTip("다른 방학은 누적 보관하고 겹치는 날짜만 새 일정으로 반영합니다")
         self._import.clicked.connect(self._request_import)
         actions.addWidget(self._import)
         actions.addStretch(1)
@@ -179,10 +199,10 @@ class SchoolCalendarEditDialog(QDialog):
         text.setSpacing(2)
         eyebrow = QLabel("저장된 학교별 중식 일정")
         eyebrow.setObjectName("editEyebrow")
-        title = QLabel("저장된 학교 급식 운행표")
+        title = QLabel("방학별 중식 일정")
         title.setObjectName("workspaceTitle")
         subtitle = QLabel(
-            "Excel 파일 없이 운영 데이터의 최신 일정을 엽니다. 표에서 기간을 고쳐도 저장 전까지 원본은 바뀌지 않습니다."
+            "불러온 방학을 골라 학교별 센터 중식 기간을 확인하세요. 다음 방학도 이어서 추가할 수 있습니다."
         )
         subtitle.setObjectName("workspaceSubtitle")
         subtitle.setWordWrap(True)
@@ -211,6 +231,11 @@ class SchoolCalendarEditDialog(QDialog):
         guide.setObjectName("fieldHelp")
         guide.setWordWrap(True)
         layout.addWidget(guide)
+        self._school_search = QLineEdit()
+        self._school_search.setPlaceholderText("학교 이름 검색")
+        self._school_search.setClearButtonEnabled(True)
+        self._school_search.textChanged.connect(self._filter_schools)
+        layout.addWidget(self._school_search)
         self._schools = QListWidget()
         self._schools.setObjectName("schoolCalendarSchoolList")
         self._schools.setSelectionMode(
@@ -235,20 +260,21 @@ class SchoolCalendarEditDialog(QDialog):
         self._school_title = QLabel()
         self._school_title.setObjectName("schoolCalendarSelectedSchool")
         self._coverage_text = QLabel()
+        self._coverage_text.setWordWrap(True)
         self._coverage_text.setObjectName("fieldHelp")
         school_text.addWidget(self._school_title)
         school_text.addWidget(self._coverage_text)
         heading.addLayout(school_text, 1)
-        self._new_period = QPushButton("선택 범위에 새 기간 지정")
+        self._new_period = QPushButton("중식 기간 추가")
         self._new_period.setObjectName("quietAction")
         self._new_period.clicked.connect(self._start_new_period)
         heading.addWidget(self._new_period)
         layout.addLayout(heading)
 
-        self._ledger = QTableWidget(0, 7)
+        self._ledger = QTableWidget(0, 5)
         self._ledger.setObjectName("schoolCalendarStoredLedger")
         self._ledger.setHorizontalHeaderLabels(
-            ("시작일", "종료일", "O/X", "중식 처리", "학년 예외", "평일", "상태")
+            ("중식 시작일", "중식 종료일", "날짜별 학년 예외", "중식 일수", "상태")
         )
         self._ledger.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._ledger.setSelectionBehavior(
@@ -260,10 +286,9 @@ class SchoolCalendarEditDialog(QDialog):
         header = self._ledger.horizontalHeader()
         header.setMinimumSectionSize(54)
         header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(6, QHeaderView.ResizeMode.Fixed)
-        header.resizeSection(6, 66)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
+        header.resizeSection(4, 66)
         self._ledger.currentCellChanged.connect(self._segment_selected)
         layout.addWidget(self._ledger, 1)
 
@@ -276,31 +301,34 @@ class SchoolCalendarEditDialog(QDialog):
         self._edit_mode = QLabel("구간을 선택해주세요")
         self._edit_mode.setObjectName("schoolCalendarEditMode")
         editor_layout.addWidget(self._edit_mode, 0, 0, 1, 6)
-        editor_layout.addWidget(_field_label("시작일"), 1, 0)
-        editor_layout.addWidget(_field_label("종료일"), 1, 1)
-        editor_layout.addWidget(_field_label("O/X"), 1, 2)
-        editor_layout.addWidget(_field_label("학교 급식 없는 학년"), 1, 3, 1, 2)
+        editor_layout.addWidget(_field_label("중식 시작일"), 1, 0)
+        editor_layout.addWidget(_field_label("중식 종료일"), 1, 1)
         self._starts_on = _date_edit(date.today())
         self._ends_on = _date_edit(date.today())
-        self._mark = _mark_combo(SchoolLunchMark.SCHOOL_PROVIDES)
-        self._grades = QLineEdit()
+        self._grades = SchoolGradeChecks()
         self._grades.setObjectName("schoolCalendarGrades")
-        self._grades.setPlaceholderText("예: 6학년, 특수학급 (없으면 비움)")
         editor_layout.addWidget(self._starts_on, 2, 0)
         editor_layout.addWidget(self._ends_on, 2, 1)
-        editor_layout.addWidget(self._mark, 2, 2)
-        editor_layout.addWidget(self._grades, 2, 3, 1, 2)
+        editor_layout.addWidget(_field_label("학년 예외 날짜"), 3, 0)
+        self._grade_day = _date_edit(date.today())
+        self._grade_day.dateChanged.connect(self._load_grade_day)
+        editor_layout.addWidget(self._grade_day, 4, 0)
+        editor_layout.addWidget(_field_label("이 날짜에 중식 받을 학년"), 3, 1, 1, 4)
+        editor_layout.addWidget(self._grades, 4, 1, 1, 4)
+        self._apply_grades = QPushButton("선택 날짜에 학년 예외 반영")
+        self._apply_grades.clicked.connect(self._apply_grade_day)
+        editor_layout.addWidget(self._apply_grades, 4, 5)
         self._apply = QPushButton("표에 반영")
         self._apply.setObjectName("primaryAction")
         self._apply.clicked.connect(self._apply_edit)
         editor_layout.addWidget(self._apply, 2, 5)
         help_text = QLabel(
-            "O = 학교가 중식 제공(센터 배송 없음) · X = 학교 미급식(센터 중식 배송). "
-            "학년을 적으면 O인 날에도 해당 학년만 센터에서 배송합니다."
+            "학년 예외는 선택한 날짜 하루에만 적용됩니다. 체크한 학년만 중식을 받고, 모두 해제하면 그날은 중식에서 제외됩니다. "
+            "기간 수정은 다른 날짜의 학년 예외를 바꾸지 않습니다."
         )
         help_text.setObjectName("schoolCalendarRuleHelp")
         help_text.setWordWrap(True)
-        editor_layout.addWidget(help_text, 3, 0, 1, 6)
+        editor_layout.addWidget(help_text, 5, 0, 1, 6)
         layout.addWidget(editor)
         return workspace
 
@@ -314,8 +342,6 @@ class SchoolCalendarEditDialog(QDialog):
             item = QListWidgetItem(
                 ("●  " if changed else "   ")
                 + schedule.school_name
-                + "\n"
-                + _coverage_caption(schedule)
             )
             item.setData(Qt.ItemDataRole.UserRole, key)
             if changed:
@@ -324,11 +350,149 @@ class SchoolCalendarEditDialog(QDialog):
         self._schools.blockSignals(False)
         if current_key in self._school_order:
             self._schools.setCurrentRow(self._school_order.index(current_key))
+        self._filter_schools()
         self._refresh_summary()
+
+    def set_import_history(self, entries) -> None:
+        self._import_history = tuple(entries)
+        self._period_choice.blockSignals(True)
+        self._period_choice.clear()
+        for index, entry in enumerate(self._import_history):
+            self._period_choice.addItem(entry.label, index)
+        self._period_choice.addItem("전체 저장 기간", None)
+        self._period_choice.setCurrentIndex(0)
+        self._period_choice.blockSignals(False)
+        self._filter_schools()
+
+    def _selected_import(self):
+        index = self._period_choice.currentData()
+        return None if index is None else self._import_history[index]
+
+    def _filter_schools(self, *_args):
+        if not hasattr(self, "_schools"):
+            return
+        entry = self._selected_import()
+        self._history_button.setEnabled(entry is not None)
+        self._delete_import.setEnabled(entry is not None)
+        query = "".join(self._school_search.text().casefold().split())
+        visible = []
+        for index, key in enumerate(self._school_order):
+            school = self._edited[key].school_name
+            item = self._schools.item(index)
+            item.setText(("●  " if self._edited[key] != self._original[key] else "   ") + school)
+            item.setToolTip(school)
+            show = query in "".join(school.casefold().split()) and (
+                entry is None or bool(entry.school_rows(school)))
+            item.setHidden(not show)
+            if show:
+                visible.append(index)
+        selected = self._schools.currentRow()
+        if selected not in visible:
+            selected = visible[0] if visible else -1
+            self._schools.setCurrentRow(selected)
+        self._school_changed(selected)
+
+    def _school_periods(self, school_name):
+        entry = self._selected_import()
+        if entry is None:
+            return ()
+        merged = []
+        for row in sorted(entry.school_rows(school_name), key=lambda item: (item.starts_on, item.ends_on)):
+            if merged and row.starts_on.toordinal() <= merged[-1].ends_on.toordinal() + 1:
+                merged[-1] = InclusiveDateRange(merged[-1].starts_on, max(merged[-1].ends_on, row.ends_on))
+            else:
+                merged.append(InclusiveDateRange(row.starts_on, row.ends_on))
+        return tuple(merged)
+
+    def _filtered_segments(self, schedule):
+        # Show only actual center-lunch days, grouped by imported vacation.
+        # Monthly SCHOOL_PROVIDES defaults are calculation data, never rows.
+        periods = list(self._school_periods(schedule.school_name))
+        if self._selected_import() is None:
+            periods = [InclusiveDateRange(row.starts_on, row.ends_on)
+                       for entry in self._import_history for row in entry.school_rows(schedule.school_name)]
+        active = [item for item in schedule.days if item.rule.mark is SchoolLunchMark.VENDOR_REQUIRED
+                  or item.rule.grades_without_school_meal]
+        # Include manually added periods, and support legacy schedules without import history.
+        outside = [item.service_on for item in active if not any(p.contains(item.service_on) for p in periods)]
+        if self._selected_import() is None:
+            for day in outside:
+                if periods and periods[-1].ends_on < day and all(
+                    candidate.weekday() >= 5 for candidate in _days_between(periods[-1].ends_on, day)):
+                    periods[-1] = InclusiveDateRange(periods[-1].starts_on, day)
+                else:
+                    periods.append(InclusiveDateRange(day, day))
+        merged = []
+        for period in sorted(set(periods), key=lambda p: (p.starts_on, p.ends_on)):
+            if merged and period.starts_on <= merged[-1].ends_on:
+                merged[-1] = InclusiveDateRange(merged[-1].starts_on, max(merged[-1].ends_on, period.ends_on))
+            else:
+                merged.append(period)
+        result = []
+        for period in merged:
+            days = [item for item in active if period.contains(item.service_on)]
+            if not days:
+                continue
+            grades = frozenset(grade for item in days for grade in item.rule.grades_without_school_meal)
+            mark = SchoolLunchMark.VENDOR_REQUIRED if any(item.rule.mark is SchoolLunchMark.VENDOR_REQUIRED for item in days) else SchoolLunchMark.SCHOOL_PROVIDES
+            result.append(SchoolLunchRuleSegment(days[0].service_on, days[-1].service_on, LunchDayRule(mark, grades), len(days)))
+        return tuple(result)
+
+    def _selected_coverage(self, schedule, coverage, service_on):
+        periods = self._school_periods(schedule.school_name)
+        period = next((item for item in periods if item.contains(service_on)), None)
+        if period is None:
+            return coverage
+        return InclusiveDateRange(max(coverage.starts_on, period.starts_on),
+                                  min(coverage.ends_on, period.ends_on))
+
+    def _school_summary(self, schedule):
+        return "센터 중식이 있는 방학 기간만 표시합니다. 학년 예외는 아래에서 날짜를 골라 하루씩 지정하세요."
+
+    def _show_import_rows(self):
+        entry = self._selected_import()
+        if entry is None:
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("불러온 원본 기록")
+        dialog.resize(1050, 620)
+        root = QVBoxLayout(dialog)
+        label = QLabel(f"{entry.filename} · {entry.recorded_at.astimezone():%Y.%m.%d %H:%M} · {entry.display_code}\n"
+                       "불러올 당시의 원본입니다. 이후 수정한 일정은 이전 화면에서 확인하세요.")
+        label.setWordWrap(True)
+        root.addWidget(label)
+        table = QTableWidget(len(entry.rows), 6)
+        table.setHorizontalHeaderLabels(("학교명", "방학식", "방학식 급식 제공 여부", "개학식", "개학식 급식 제공 여부", "비고"))
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        for index, row in enumerate(entry.rows):
+            values = (row.school_name, row.starts_on.isoformat(),
+                      "○" if row.starts_on_mark is SchoolLunchMark.SCHOOL_PROVIDES else "×",
+                      row.ends_on.isoformat(),
+                      "○" if row.ends_on_mark is SchoolLunchMark.SCHOOL_PROVIDES else "×", row.note or "")
+            for column, value in enumerate(values):
+                table.setItem(index, column, QTableWidgetItem(value))
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        table.horizontalHeader().setStretchLastSection(True)
+        root.addWidget(table)
+        close = QPushButton("닫기")
+        close.clicked.connect(dialog.close)
+        root.addWidget(close)
+        self._history_dialog = dialog
+        dialog.open()
 
     def _school_changed(self, row: int) -> None:
         if row < 0 or row >= len(self._school_order):
+            self._ledger.setRowCount(0)
+            self._school_title.setText("검색 결과가 없습니다")
+            self._coverage_text.clear()
+            self._apply.setEnabled(False)
+            self._new_period.setEnabled(False)
+            self._grades.setEnabled(False)
+            self._apply_grades.setEnabled(False)
             return
+        self._new_period.setEnabled(True)
+        self._grades.setEnabled(True)
+        self._apply_grades.setEnabled(True)
         self._selected_segment = None
         self._edit_coverage = None
         self._fill_schedule()
@@ -338,24 +502,21 @@ class SchoolCalendarEditDialog(QDialog):
         if schedule is None:
             return
         self._school_title.setText(schedule.school_name)
-        self._coverage_text.setText("저장 검토 범위  " + _coverage_caption(schedule))
-        self._visible_segments = school_lunch_rule_segments(schedule)
+        self._grades.set_school(schedule.school_name)
+        self._visible_segments = self._filtered_segments(schedule)
+        self._coverage_text.setText(self._school_summary(schedule))
         original = self._original[schedule.normalized_school_name]
         original_rules = {item.service_on: item.rule for item in original.days}
         current_rules = {item.service_on: item.rule for item in schedule.days}
         self._ledger.blockSignals(True)
         self._ledger.setRowCount(len(self._visible_segments))
         for row, segment in enumerate(self._visible_segments):
-            grades = ", ".join(sorted(segment.rule.grades_without_school_meal)) or "—"
+            grades = "\n".join(f"{item.service_on:%m.%d}: {', '.join(sorted(item.rule.grades_without_school_meal))}"
+                for item in schedule.days if segment.starts_on <= item.service_on <= segment.ends_on
+                and item.rule.grades_without_school_meal) or "—"
             values = (
                 segment.starts_on.strftime("%Y.%m.%d"),
                 segment.ends_on.strftime("%Y.%m.%d"),
-                segment.rule.mark.value,
-                (
-                    "학교 급식"
-                    if segment.rule.mark is SchoolLunchMark.SCHOOL_PROVIDES
-                    else "센터 중식 배송"
-                ),
                 grades,
                 f"{segment.weekday_count}일",
             )
@@ -375,15 +536,18 @@ class SchoolCalendarEditDialog(QDialog):
                 status.setBackground(QColor("#E6F4F5"))
             else:
                 status.setForeground(QColor("#71838A"))
-            self._ledger.setItem(row, 6, status)
+            self._ledger.setItem(row, 4, status)
         self._ledger.blockSignals(False)
+        self._ledger.resizeRowsToContents()
         if self._visible_segments:
             target = min(max(select_row, 0), len(self._visible_segments) - 1)
             self._ledger.selectRow(target)
             self._segment_selected(target, 0, -1, -1)
         else:
-            self._edit_mode.setText("이 검토 범위에는 평일이 없습니다")
+            self._edit_mode.setText("이 범위에 센터 중식 기간이 없습니다")
             self._apply.setEnabled(False)
+            periods = self._school_periods(schedule.school_name)
+            self._configure_grade_dates(periods[0] if periods else schedule.covered_periods[0])
         self._reset_school.setEnabled(schedule != original)
 
     def _segment_selected(
@@ -400,11 +564,12 @@ class SchoolCalendarEditDialog(QDialog):
             return
         segment = self._visible_segments[current_row]
         coverage = _coverage_for(schedule, segment.starts_on, segment.ends_on)
+        coverage = self._selected_coverage(schedule, coverage, segment.starts_on)
         self._selected_segment = segment
         self._edit_coverage = coverage
         self._configure_dates(coverage, segment.starts_on, segment.ends_on)
-        self._set_rule(segment.rule)
-        self._edit_mode.setText("선택 구간 수정 · 앞뒤 날짜는 자동으로 이어집니다")
+        self._configure_grade_dates(coverage)
+        self._edit_mode.setText("선택한 방학의 센터 중식 기간을 수정합니다")
         self._apply.setText("수정 내용을 표에 반영")
         self._apply.setEnabled(True)
         self._hide_error()
@@ -412,18 +577,26 @@ class SchoolCalendarEditDialog(QDialog):
     def _start_new_period(self) -> None:
         schedule = self._current_schedule()
         row = self._ledger.currentRow()
-        if schedule is None or row < 0 or row >= len(self._visible_segments):
-            self._show_error("먼저 기준으로 삼을 저장 구간을 선택해주세요.")
+        if schedule is None:
+            self._show_error("먼저 학교를 선택해주세요.")
             return
-        segment = self._visible_segments[row]
-        coverage = _coverage_for(schedule, segment.starts_on, segment.ends_on)
+        if row < 0 or row >= len(self._visible_segments):
+            periods = self._school_periods(schedule.school_name)
+            coverage = periods[0] if periods else schedule.covered_periods[0]
+            first, last = coverage.starts_on, coverage.ends_on
+        else:
+            segment = self._visible_segments[row]
+            coverage = _coverage_for(schedule, segment.starts_on, segment.ends_on)
+            coverage = self._selected_coverage(schedule, coverage, segment.starts_on)
+            first, last = segment.starts_on, segment.ends_on
         self._selected_segment = None
         self._edit_coverage = coverage
-        self._configure_dates(coverage, segment.starts_on, segment.ends_on)
-        self._set_rule(segment.rule)
+        self._configure_dates(coverage, first, last)
+        self._configure_grade_dates(coverage)
         self._ledger.clearSelection()
-        self._edit_mode.setText("새 기간 지정 · 입력한 날짜만 선택한 O/X로 덮어씁니다")
+        self._edit_mode.setText("새 기간 지정 · 입력한 날짜에 센터 중식 기간을 추가합니다")
         self._apply.setText("새 기간을 표에 반영")
+        self._apply.setEnabled(True)
         self._hide_error()
 
     def _configure_dates(
@@ -449,9 +622,37 @@ class SchoolCalendarEditDialog(QDialog):
         self._starts_on.setDate(QDate(starts_on.year, starts_on.month, starts_on.day))
         self._ends_on.setDate(QDate(ends_on.year, ends_on.month, ends_on.day))
 
-    def _set_rule(self, rule: LunchDayRule) -> None:
-        self._mark.setCurrentIndex(self._mark.findData(rule.mark.value))
-        self._grades.setText(", ".join(sorted(rule.grades_without_school_meal)))
+    def _configure_grade_dates(self, coverage):
+        self._grade_day.setMinimumDate(QDate(coverage.starts_on.year, coverage.starts_on.month, coverage.starts_on.day))
+        self._grade_day.setMaximumDate(QDate(coverage.ends_on.year, coverage.ends_on.month, coverage.ends_on.day))
+        self._load_grade_day()
+
+    def _load_grade_day(self, *_args):
+        schedule = self._current_schedule()
+        if schedule is None:
+            return
+        day = _python_date(self._grade_day)
+        item = next((item for item in schedule.days if item.service_on == day), None)
+        self._grades.set_grades(item.rule.grades_without_school_meal if item else ())
+
+    def _apply_grade_day(self):
+        schedule = self._current_schedule()
+        if schedule is None:
+            return
+        day = _python_date(self._grade_day)
+        if day.weekday() >= 5:
+            self._show_error("학년 예외를 지정할 평일을 선택해주세요.")
+            return
+        try:
+            updated = apply_school_lunch_rule_period(schedule, InclusiveDateRange(day, day),
+                LunchDayRule(SchoolLunchMark.SCHOOL_PROVIDES, self._grades.selected_grades()))
+        except (TypeError, ValueError) as error:
+            self._show_error(user_error(error))
+            return
+        self._edited[schedule.normalized_school_name] = updated
+        self._hide_error()
+        self._populate_schools()
+        self._fill_schedule()
 
     def _apply_edit(self) -> None:
         schedule = self._current_schedule()
@@ -463,19 +664,21 @@ class SchoolCalendarEditDialog(QDialog):
                 _python_date(self._starts_on),
                 _python_date(self._ends_on),
             )
-            rule = LunchDayRule(
-                SchoolLunchMark(str(self._mark.currentData())),
-                frozenset(_grades(self._grades.text())),
-            )
-            if self._selected_segment is None:
-                updated = apply_school_lunch_rule_period(schedule, period, rule)
-            else:
-                updated = replace_school_lunch_rule_segment(
-                    schedule,
-                    self._selected_segment,
-                    period,
-                    rule,
-                )
+            if period.starts_on < self._edit_coverage.starts_on or period.ends_on > self._edit_coverage.ends_on:
+                raise ValueError("선택한 방학 범위 안에서 날짜를 입력해주세요.")
+            days = []
+            for item in schedule.days:
+                rule = item.rule
+                selected = self._selected_segment
+                was_inside = selected is not None and selected.starts_on <= item.service_on <= selected.ends_on
+                if was_inside and not period.contains(item.service_on) and not rule.grades_without_school_meal:
+                    rule = LunchDayRule(SchoolLunchMark.SCHOOL_PROVIDES)
+                elif period.contains(item.service_on) and not was_inside:
+                    # Keep independently configured single-day grade exceptions.
+                    if not rule.grades_without_school_meal:
+                        rule = LunchDayRule(SchoolLunchMark.VENDOR_REQUIRED)
+                days.append(replace(item, rule=rule))
+            updated = replace(schedule, days=tuple(days))
         except (TypeError, ValueError) as error:
             self._show_error(user_error(error))
             return
@@ -483,7 +686,8 @@ class SchoolCalendarEditDialog(QDialog):
         self._edited[key] = updated
         self._hide_error()
         self._populate_schools()
-        self._fill_schedule(_segment_row_for(updated, period, rule))
+        self._fill_schedule(next((index for index, item in enumerate(self._filtered_segments(updated))
+                                  if item.starts_on <= period.starts_on <= item.ends_on), 0))
 
     def _restore_school(self) -> None:
         key = self._current_key()
@@ -506,7 +710,7 @@ class SchoolCalendarEditDialog(QDialog):
         else:
             self._summary.setText(
                 f"현재 저장된 데이터의 저장 일정 · {len(self._school_order)}개 학교. "
-                "학교와 구간을 선택해 시작일·종료일·O/X를 고칠 수 있습니다."
+                "학교와 구간을 선택해 시작일·종료일·급식 제공 여부를 고칠 수 있습니다."
             )
             self._summary.setProperty("changed", False)
         self._save.setEnabled(bool(school_count))
@@ -526,6 +730,26 @@ class SchoolCalendarEditDialog(QDialog):
                 return
         self._import_requested = True
         self.reject()
+
+    def _request_delete_import(self) -> None:
+        entry = self._selected_import()
+        if entry is None:
+            return
+        if self.changed_school_count():
+            self._show_error("수정 중인 학교 일정이 있습니다. 먼저 변경 일정을 저장하거나 창을 닫고 다시 열어 삭제해주세요.")
+            return
+        school_count = len({normalize_school_name(row.school_name) for row in entry.rows})
+        answer = self._message_box.question(self, "불러온 학교 일정 전체를 삭제할까요?",
+            f"{entry.label}\n\n이 파일에서 불러온 {school_count}개 학교의 일정을 한 번에 삭제합니다. "
+            "검색 결과나 선택한 학교만 삭제하는 것이 아닙니다.\n"
+            "다른 불러오기 기록은 유지하며, 겹치는 날짜는 남은 기록의 일정으로 돌아갑니다. "
+            "이 기록으로 자동 입력한 중식 날짜도 이후 수정하지 않았다면 되돌립니다.\n"
+            "삭제는 변경 이력에 남으며 이전 자료로 되돌리기에서 복구할 수 있습니다.",
+            self._message_box.StandardButton.Yes | self._message_box.StandardButton.No,
+            self._message_box.StandardButton.No)
+        if answer == self._message_box.StandardButton.Yes:
+            self.delete_import_requested = entry.revision_id
+            self.accept()
 
     def _save_changes(self) -> None:
         if not self.changed_school_count():
@@ -624,6 +848,14 @@ class SchoolCalendarEditController:
             )
 
         dialog = self._dialog_type(calendar, parent=parent)
+        setter = getattr(dialog, "set_import_history", None)
+        if callable(setter):
+            from src.services.school_calendar_history import school_calendar_import_history
+            try:
+                setter(school_calendar_import_history(self._session.database, snapshot.revision_id))
+            except Exception as error:
+                self._message_box.critical(parent, "불러온 방학 기록을 읽지 못했습니다", user_error(error))
+                return SchoolCalendarEditOutcome(SchoolCalendarEditStatus.FAILED)
         result = (yield DialogRequest(dialog, self._session))
         if dialog.import_requested:
             return SchoolCalendarEditOutcome(
@@ -633,21 +865,27 @@ class SchoolCalendarEditController:
             )
         if result != QDialog.DialogCode.Accepted:
             return SchoolCalendarEditOutcome(SchoolCalendarEditStatus.CANCELLED)
+        saved = False
         try:
-            prepared = build_school_calendar_edit_revision(
-                snapshot,
-                dialog.edited_schedules(),
-                actor=self._actor_provider(),
-                recorded_at=self._recorded_at_provider(),
-                revision_id=self._revision_id_factory(),
-            )
+            requested_deletion = getattr(dialog, "delete_import_requested", None)
+            if requested_deletion is not None:
+                from src.services.school_calendar_delete import build_import_deletion
+                prepared = build_import_deletion(snapshot,
+                    self._session.database.branch_revision_chain(snapshot.revision_id), requested_deletion,
+                    actor=self._actor_provider(), recorded_at=self._recorded_at_provider(),
+                    revision_id=self._revision_id_factory())
+            else:
+                prepared = build_school_calendar_edit_revision(
+                    snapshot, dialog.edited_schedules(), actor=self._actor_provider(),
+                    recorded_at=self._recorded_at_provider(), revision_id=self._revision_id_factory())
             backup_result = save_revision(self._session, prepared.record, parent=parent)
+            saved = True
             updated_roster = self._session.database.current_roster()
         except Exception as error:
             self._message_box.critical(
                 parent,
                 "학교 일정을 저장하지 못했습니다",
-                "운영 데이터에는 반영하지 않았습니다. 수정 날짜와 O/X를 확인한 뒤 다시 시도해주세요.\n\n"
+                ("일정은 저장됐지만 화면을 갱신하지 못했습니다. 프로그램을 다시 열어 확인해주세요.\n\n" if saved else "")
                 + user_error(error),
             )
             return SchoolCalendarEditOutcome(SchoolCalendarEditStatus.FAILED)
@@ -693,13 +931,8 @@ def _python_date(editor: WheelSafeDateEdit) -> date:
     return date(value.year(), value.month(), value.day())
 
 
-def _mark_combo(selected: SchoolLunchMark) -> QComboBox:
-    combo = QComboBox()
-    combo.setObjectName("schoolCalendarMark")
-    combo.addItem("O · 학교 급식", SchoolLunchMark.SCHOOL_PROVIDES.value)
-    combo.addItem("X · 센터 배송", SchoolLunchMark.VENDOR_REQUIRED.value)
-    combo.setCurrentIndex(combo.findData(selected.value))
-    return combo
+def _days_between(first, last):
+    return (date.fromordinal(value) for value in range(first.toordinal() + 1, last.toordinal()))
 
 
 def _grades(value: str) -> tuple[str, ...]:

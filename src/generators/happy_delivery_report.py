@@ -6,17 +6,12 @@ from collections import Counter
 from copy import copy
 
 from openpyxl import Workbook, load_workbook
-from openpyxl.cell.cell import MergedCell
-from openpyxl.styles import Side
 
 from src.services.happy_delivery_report import DailyDeliveryRow, DailyDeliverySheet
 from src.excel.delivery_templates import validate_delivery_template
 from src.excel.publication import publish_workbook
 
-HAPPY_REPORT_RENDER_VERSION = 3
-_BLACK = "000000"
-_THIN = Side(style="thin", color=_BLACK)
-_MEDIUM = Side(style="medium", color=_BLACK)
+HAPPY_REPORT_RENDER_VERSION = 4
 
 
 def _literal(cell, value):
@@ -39,72 +34,10 @@ def _driver_ranges(rows: list[DailyDeliveryRow]) -> list[tuple[int, int]]:
     return ranges
 
 
-def _set_horizontal_border(cell, top: Side, bottom: Side) -> None:
-    border = copy(cell.border)
-    border.top = copy(top)
-    border.bottom = copy(bottom)
-    cell.border = border
-
-
 def _copy_template_sheet(source_ws, target_wb: Workbook, title: str):
-    """서로 다른 통합문서 사이에서 템플릿 시트 서식을 복제한다."""
-
+    from src.excel.template_sheet import copy_template_sheet
     target_ws = target_wb.create_sheet(title)
-    for source_row in source_ws.iter_rows():
-        for source_cell in source_row:
-            target_cell = target_ws[source_cell.coordinate]
-            if not isinstance(source_cell, MergedCell):
-                target_cell.value = source_cell.value
-                if source_cell.comment is not None:
-                    target_cell.comment = copy(source_cell.comment)
-                if source_cell.hyperlink is not None:
-                    target_cell._hyperlink = copy(source_cell.hyperlink)
-            if source_cell.has_style:
-                target_cell.font = copy(source_cell.font)
-                target_cell.fill = copy(source_cell.fill)
-                target_cell.border = copy(source_cell.border)
-                target_cell.alignment = copy(source_cell.alignment)
-                target_cell.number_format = source_cell.number_format
-                target_cell.protection = copy(source_cell.protection)
-
-    for key, source_dimension in source_ws.column_dimensions.items():
-        target_dimension = target_ws.column_dimensions[key]
-        target_dimension.min = source_dimension.min
-        target_dimension.max = source_dimension.max
-        target_dimension.width = source_dimension.width
-        target_dimension.hidden = source_dimension.hidden
-        target_dimension.bestFit = source_dimension.bestFit
-        target_dimension.outlineLevel = source_dimension.outlineLevel
-        target_dimension.collapsed = source_dimension.collapsed
-
-    for key, source_dimension in source_ws.row_dimensions.items():
-        target_dimension = target_ws.row_dimensions[key]
-        target_dimension.height = source_dimension.height
-        target_dimension.hidden = source_dimension.hidden
-        target_dimension.outlineLevel = source_dimension.outlineLevel
-        target_dimension.collapsed = source_dimension.collapsed
-        target_dimension.thickTop = source_dimension.thickTop
-        target_dimension.thickBot = source_dimension.thickBot
-
-    for merged_range in source_ws.merged_cells.ranges:
-        target_ws.merge_cells(str(merged_range))
-
-    target_ws.sheet_format = copy(source_ws.sheet_format)
-    target_ws.sheet_properties = copy(source_ws.sheet_properties)
-    target_ws.page_margins = copy(source_ws.page_margins)
-    target_ws.page_setup = copy(source_ws.page_setup)
-    target_ws.print_options = copy(source_ws.print_options)
-    target_ws.oddHeader = copy(source_ws.oddHeader)
-    target_ws.oddFooter = copy(source_ws.oddFooter)
-    target_ws.evenHeader = copy(source_ws.evenHeader)
-    target_ws.evenFooter = copy(source_ws.evenFooter)
-    target_ws.firstHeader = copy(source_ws.firstHeader)
-    target_ws.firstFooter = copy(source_ws.firstFooter)
-    target_ws.freeze_panes = source_ws.freeze_panes
-    target_ws.sheet_view.showGridLines = source_ws.sheet_view.showGridLines
-    target_ws.sheet_view.zoomScale = source_ws.sheet_view.zoomScale
-    target_ws.sheet_view.zoomScaleNormal = source_ws.sheet_view.zoomScaleNormal
-    target_ws.sheet_state = source_ws.sheet_state
+    copy_template_sheet(source_ws, target_ws)
     return target_ws
 
 
@@ -126,8 +59,8 @@ def _fill_daily_sheet(ws, sheet: DailyDeliverySheet, *, lunch_only: bool = False
 
     data_styles = [copy(ws.cell(data_start, column)._style) for column in range(1, 11)]
     total_styles = [copy(ws.cell(5, column)._style) for column in range(1, 11)]
-    data_height = ws.row_dimensions[data_start].height
-    total_height = ws.row_dimensions[5].height
+    data_dimension = copy(ws.row_dimensions[data_start])
+    total_dimension = copy(ws.row_dimensions[5])
     district_label = ws.cell(data_start, 1).value
     total_label = ws.cell(5, 1).value
 
@@ -141,14 +74,15 @@ def _fill_daily_sheet(ws, sheet: DailyDeliverySheet, *, lunch_only: bool = False
             del ws.row_dimensions[row_index]
 
     for row_no in range(data_start, data_end + 1):
-        ws.row_dimensions[row_no].height = data_height
+        ws.row_dimensions[row_no] = copy(data_dimension)
+        ws.row_dimensions[row_no].index = row_no
         for column, style in enumerate(data_styles, start=1):
             cell = ws.cell(row_no, column)
             cell._style = copy(style)
             cell.value = None
-            _set_horizontal_border(cell, _THIN, _THIN)
 
-    ws.row_dimensions[total_row].height = total_height
+    ws.row_dimensions[total_row] = copy(total_dimension)
+    ws.row_dimensions[total_row].index = total_row
     for column, style in enumerate(total_styles, start=1):
         cell = ws.cell(total_row, column)
         cell._style = copy(style)
@@ -197,13 +131,6 @@ def _fill_daily_sheet(ws, sheet: DailyDeliverySheet, *, lunch_only: bool = False
                 key for row in driver_rows for key in row._dinner_household_keys
             ]
         ws.cell(first_row, 10, _format_distribution(driver_households).replace("/", "\n"))
-
-        for row_no in range(first_row, last_row + 1):
-            for col in range(1, 11):
-                cell = ws.cell(row_no, col)
-                top = _MEDIUM if row_no == first_row else _THIN
-                bottom = _MEDIUM if row_no == last_row else _THIN
-                _set_horizontal_border(cell, top, bottom)
 
         if lunch_only:
             ws.merge_cells(

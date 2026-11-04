@@ -7,7 +7,8 @@ from uuid import UUID
 
 from src.domain.delivery_routing import MEAL_ORDER
 from src.domain.roster import Meal
-from src.services.driver_households import DriverHouseholdRow
+from src.services.driver_households import DriverHouseholdRow, lunch_period_texts
+from src.domain.lunch_periods import LUNCH_DATE_COLUMNS
 
 from .current_sheet_export import CurrentSheetSnapshot, TextWorkbookSnapshot
 
@@ -20,9 +21,12 @@ def build_driver_households_template_snapshot(
     rows: Iterable[DriverHouseholdRow],
     *,
     selected_driver_id: UUID | None = None,
+    lunch_date_columns: tuple[str, ...] = (),
 ) -> TextWorkbookSnapshot:
     """Freeze exact meal projections into driver-first, meal-ordered worksheets."""
 
+    headers = (*TEMPLATE_HEADERS, *(LUNCH_DATE_COLUMNS[key] for key in lunch_date_columns))
+    date_indices = tuple(tuple(LUNCH_DATE_COLUMNS).index(key) for key in lunch_date_columns)
     groups: dict[
         tuple[tuple[str, UUID | str | None], Meal],
         list[DriverHouseholdRow],
@@ -54,13 +58,14 @@ def build_driver_households_template_snapshot(
         sheets.append(
             CurrentSheetSnapshot(
                 title,
-                TEMPLATE_HEADERS,
-                tuple(_display_values(row) for row in projections),
+                headers,
+                tuple((*_display_values(row), *(lunch_period_texts(row)[i] for i in date_indices))
+                      for row in projections),
             )
         )
 
     if not sheets:
-        sheets.append(CurrentSheetSnapshot(TEMPLATE_NAME, TEMPLATE_HEADERS, ()))
+        sheets.append(CurrentSheetSnapshot(TEMPLATE_NAME, headers, ()))
     return TextWorkbookSnapshot(TEMPLATE_NAME, tuple(sheets))
 
 

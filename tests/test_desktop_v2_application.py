@@ -1654,7 +1654,11 @@ def test_document_period_controls_optional_revision_choice_and_cancellation(
         assert events == ["period:1"]
         assert snapshot_revisions == [latest.revision_id]
         assert not emitted
-        assert errors[0][1:] == ("배송 형태를 읽지 못했습니다", "작업을 완료하지 못했습니다. 다시 시도해주세요.")
+        assert errors[0][1:] == (
+            "배송 형태를 읽지 못했습니다",
+            "프로그램이 자료를 처리하는 중 예상하지 못한 문제가 발생했습니다. 현재 저장 상태를 확인한 뒤 "
+            "작업 창을 다시 열어 다시 시도해주세요. 같은 문제가 계속되면 수행한 작업과 이 안내를 프로그램 담당자에게 전달해주세요.",
+        )
     else:
         assert events == ["period:1", "archive", "source", "period:2", "forms"]
         assert len(emitted) == 1

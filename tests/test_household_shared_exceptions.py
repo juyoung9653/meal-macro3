@@ -422,7 +422,11 @@ def test_exception_save_keeps_ui_responsive_and_errors_on_gui_thread(app, tmp_pa
         def tick():
             if entered.is_set() and not released.is_set():
                 dialog = app.activeModalWidget()
-                heartbeat.append(isinstance(dialog, StartupLoadingDialog) and dialog.isVisible())
+                # The polling timer may run before the queued progress show.
+                # Keep the worker blocked until the UI has actually shown it.
+                if not isinstance(dialog, StartupLoadingDialog) or not dialog.isVisible():
+                    return
+                heartbeat.append(True)
                 released.set()
         timer = QTimer()
         timer.timeout.connect(tick)

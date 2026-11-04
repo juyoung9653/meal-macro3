@@ -91,6 +91,10 @@ def prepare_snapshot_restore(database, target_revision_id, expected_head, actor,
     latest = database.latest_revision()
     if latest is None or latest.metadata.revision_id != expected_head:
         raise RevisionConflictError("현재 변경번호가 달라졌습니다. 변경 이력을 다시 열어주세요.")
+    # Checkout records only select a workspace; its actual tip belongs to the
+    # logical history chain used by history views and later restores.
+    if branch is None:
+        target_revision_id = database.branch_revision_ids(target_revision_id)[-1]
     current = database.snapshot(expected_head)
     target = database.snapshot(target_revision_id)
     changes = _branch_marker_changes(current, target, branch)

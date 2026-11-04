@@ -12,7 +12,8 @@ from .revisions import AuditChange, ChangeOperation, HistoricalSnapshot, Revisio
 
 RULES_KIND = "column_input_rules"
 RULES_ID = UUID("d8a74ea6-c358-50fd-b624-9eb897ed5387")
-DEFAULT_FORMATS = {"telephone": "phone", "mobile": "phone", "birth_date": "date"}
+DEFAULT_FORMATS = {"telephone": "phone", "mobile": "phone", "birth_date": "date",
+                   "lunch_starts_on": "date", "lunch_ends_on": "date"}
 FORMATS = frozenset({"text", "phone", "date"})
 
 

@@ -595,6 +595,10 @@ def _propagate_enrollments(before, after, working, selected, on, exceptions):
         for name, meal in _MEALS.items():
             if "status:" + name not in selected or (person.person_id, "status:" + name) in exceptions:
                 continue
+            if meal is Meal.LUNCH and person.lunch_period is not None:
+                # Lunch dates belong to each person. Shared status events below
+                # can add a member using that member's own school calendar.
+                continue
             previous = tuple(
                 e.period
                 for e in before.enrollments
@@ -628,6 +632,8 @@ def _propagate_enrollments(before, after, working, selected, on, exceptions):
                             period,
                         )
                         if clipped is None:
+                            continue
+                        if meal is Meal.LUNCH and member.lunch_period is not None:
                             continue
                         target = (member.person_id, meal)
                         for old_period, old_adding in claims.get(target, ()):
@@ -768,12 +774,20 @@ def build_household_shared_revision(
                                 recorded_at,
                                 "가구 공용 설정",
                             )
-                            working = replace(
-                                working,
-                                enrollments=_cover_delivery_period(
-                                    working.enrollments, pid, meal, period
-                                ),
-                            )
+                            if meal is Meal.LUNCH and status == "배송" and meal not in working.meals_for(pid, on=effective_on):
+                                from .lunch_periods import set_lunch_periods, suggested_person_lunch_period
+                                from .school_calendar import school_lunch_calendar_from_snapshot
+                                calendar = school_lunch_calendar_from_snapshot(snapshot) if snapshot is not None else None
+                                lunch_period = suggested_person_lunch_period(person.profile, calendar,
+                                    effective_on, exact_start=True, ends_on=ends_on)
+                                working = set_lunch_periods(working, {pid: lunch_period}, replace_from={pid: effective_on})
+                            elif meal is not Meal.LUNCH or working.person(pid).lunch_period is None:
+                                working = replace(
+                                    working,
+                                    enrollments=_cover_delivery_period(
+                                        working.enrollments, pid, meal, period
+                                    ),
+                                )
                             extra.append(status_event_audit_change(event))
                     matches = (
                         [d for d in routing.drivers if d.name == driver.strip()]
@@ -882,6 +896,8 @@ def row_add_comparison_days(roster, person_id, effective_on):
 
 def expand_household_shared_revision(snapshot, record):
     """Expand explicit changed components before the ledger transaction commits."""
+    if "lunch_period_edit" in record.metadata.decisions:
+        return record
     from .import_shared import IMPORT_SHARED_VALUES, apply_import_shared_values
 
     record = apply_import_shared_values(snapshot, record)
@@ -925,6 +941,8 @@ def expand_household_shared_revision(snapshot, record):
     )
     available = selected & set(available_shared_column_keys(after))
     active = available - reviewed
+    if "vacation_lunch" in record.metadata.decisions:
+        active = active - {"status:lunch"}
     correction = record.metadata.decisions.get("profile_routing_correction", {})
     corrected_components = {
         (UUID(item["person_id"]), item["column"])
@@ -1125,15 +1143,25 @@ def expand_household_shared_revision(snapshot, record):
                     member.person_id != event.person_id
                     and event.status is MealStatus.DELIVERY
                 ):
-                    working = replace(
-                        working,
-                        enrollments=_cover_delivery_period(
-                            working.enrollments, member.person_id, event.meal, period
-                        ),
-                    )
+                    if event.meal is Meal.LUNCH and event.meal not in working.meals_for(member.person_id, on=day):
+                        from .lunch_periods import set_lunch_periods, suggested_person_lunch_period
+                        from .school_calendar import school_lunch_calendar_from_snapshot
+                        lunch_period = suggested_person_lunch_period(member.profile,
+                            school_lunch_calendar_from_snapshot(after_snapshot), day,
+                            exact_start=True, ends_on=period.ends_on)
+                        working = set_lunch_periods(working, {member.person_id: lunch_period},
+                                                   replace_from={member.person_id: day})
+                    elif event.meal is not Meal.LUNCH or working.person(member.person_id).lunch_period is None:
+                        working = replace(
+                            working,
+                            enrollments=_cover_delivery_period(
+                                working.enrollments, member.person_id, event.meal, period
+                            ),
+                        )
                 elif (
                     member.person_id != event.person_id
                     and event.meal not in working.meals_for(member.person_id, on=day)
+                    and not (event.meal is Meal.LUNCH and working.person(member.person_id).lunch_period is not None)
                 ):
                     raise HouseholdSharedConflict(
                         key, day,

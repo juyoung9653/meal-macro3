@@ -28,6 +28,7 @@ from src.domain.revisions import (
     plain_json,
 )
 from src.domain.roster import Meal, RosterSnapshot
+from src.domain.school_calendar import SCHOOL_LUNCH_SCHEDULE_KIND
 from src.domain.status import StatusEvent, StatusHistory, resolve_status_history
 
 from .migrations import CURRENT_SCHEMA_VERSION, MIGRATIONS
@@ -241,13 +242,16 @@ class EncryptedDatabase:
                 CANCELLATION_DECISION, CANCELLATION_KIND, validate_meal_history_cancellation,
             )
             from src.services.meal_history_cleanup import CLEANUP_DECISION, validate_meal_history_cleanup
+            from src.services.september30_cleanup import RESET_DECISION, validate_cleanup
+            resetting_meals = RESET_DECISION in record.metadata.decisions
             deduplicating = CLEANUP_DECISION in record.metadata.decisions
-            cancelling = CANCELLATION_DECISION in record.metadata.decisions or deduplicating
+            cancelling = CANCELLATION_DECISION in record.metadata.decisions or deduplicating or resetting_meals
             if cancelling and not replay:
                 if restoring or actual_parent is None:
                     raise ValueError("식종 변경 취소는 현재 명단에서 처리해야 합니다.")
                 chain = self.branch_revision_chain(actual_parent)
-                validator = validate_meal_history_cleanup if deduplicating else validate_meal_history_cancellation
+                validator = (validate_cleanup if resetting_meals else
+                             validate_meal_history_cleanup if deduplicating else validate_meal_history_cancellation)
                 validator(
                     self._current_entity_snapshot(actual_parent), chain, record,
                 )
@@ -608,6 +612,28 @@ class EncryptedDatabase:
         if not ids or ids[-1] != revision_id:
             records += (self._read_revision(revision_id, use_cache=use_cache),)
         return records
+
+    def import_batches(self, *, source_kind: str | None = None) -> tuple[ImportBatch, ...]:
+        """Read import summaries without loading the audit changes for each revision."""
+        batches = []
+        rows = self._require_connection().execute("""
+            SELECT b.batch_id, b.revision_id, b.source_filename, b.sha256,
+                   b.byte_size, b.sheet_name, b.header_fingerprint,
+                   b.mapping_manifest_json, b.effective_on, b.decisions_json
+            FROM import_batch AS b JOIN revision AS r ON r.revision_id = b.revision_id
+            JOIN revision_seal AS s ON s.revision_id = b.revision_id
+            ORDER BY r.sequence DESC
+        """)
+        for row in rows:
+            mapping = json.loads(str(row[7]))
+            if source_kind is not None and mapping.get("source_kind") != source_kind:
+                continue
+            batches.append(ImportBatch(
+                UUID(str(row[0])), UUID(str(row[1])), str(row[2]), str(row[3]),
+                int(row[4]), None if row[5] is None else str(row[5]), str(row[6]),
+                mapping, date.fromisoformat(str(row[8])), json.loads(str(row[9])),
+            ))
+        return tuple(batches)
 
     def search_revision_ids(self, text: str) -> frozenset[UUID]:
         """Search metadata and audit values without loading historical rosters."""
@@ -1269,7 +1295,12 @@ def _validate_changes_against_current(
             current = json.loads(str(row[1]))
 
         if change.operation is ChangeOperation.INSERT:
-            if row is not None and not (restoring and current is None):
+            # School schedules are keyed by normalized school name. Restoring an
+            # earlier snapshot can remove them without retiring that school name.
+            reintroducing = current is None and (
+                restoring or change.entity_kind == SCHOOL_LUNCH_SCHEDULE_KIND
+            )
+            if row is not None and not reintroducing:
                 raise RevisionConflictError(
                     f"이력이 있는 entity ID를 다시 insert할 수 없습니다: "
                     f"{change.entity_kind}/{change.entity_id}"
@@ -1475,7 +1506,10 @@ def _validate_ledger(connection: apsw.Connection):
             before = None if row[4] is None else json.loads(str(row[4]))
             after = None if row[5] is None else json.loads(str(row[5]))
             if operation is ChangeOperation.INSERT:
-                if reference in seen and not (restoring and reference not in current):
+                reintroducing = reference not in current and (
+                    restoring or reference.entity_kind == SCHOOL_LUNCH_SCHEDULE_KIND
+                )
+                if reference in seen and not reintroducing:
                     raise DatabaseIntegrityError(f"entity ID가 다시 insert되었습니다: {reference}")
                 seen.add(reference)
                 current[reference] = after

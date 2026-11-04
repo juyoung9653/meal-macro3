@@ -2150,7 +2150,8 @@ class RosterImportWizard(QDialog):
         self.lunch_filter_panel.setVisible(self.purpose_combo.currentData() == ImportPurpose.VACATION_LUNCH)
         self._lunch_filter_changed()
         self.purpose_note.setText(
-            "가져올 조건에 포함된 대상자는 중식 배송, <b>빠진 기존 중식 배송자는 중지</b>로 반영합니다."
+            "포함된 대상자는 중식 배송으로 반영하고 학교 일정과 적용일로 <b>중식 시작일·종료일</b>을 채웁니다. "
+            "<b>빠진 기존 중식 배송자는 중지</b>하고, 빠진 사람의 중식 날짜 칼럼은 비웁니다."
             if self.purpose_combo.currentData() == ImportPurpose.VACATION_LUNCH else
             "학교·학년은 높은 쪽을 유지하고 빈칸은 기존 값을 유지합니다. 충돌하는 값만 항목별로 선택합니다."
         )

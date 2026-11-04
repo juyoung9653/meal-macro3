@@ -59,7 +59,7 @@ from src.services.meal_service_availability import (
     RECURRING_MEAL_SERVICE_POLICY_VERSION,
 )
 
-MONTHLY_DOCUMENT_CALCULATION_CONTRACT_VERSION = 7
+MONTHLY_DOCUMENT_CALCULATION_CONTRACT_VERSION = 8
 
 
 class HouseholdServiceDatesError(ValueError):

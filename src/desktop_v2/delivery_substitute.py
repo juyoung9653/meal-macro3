@@ -166,7 +166,7 @@ class DeliverySubstituteDialog(QDialog):
         self.columns.setObjectName("substituteColumns")
         self.columns.setRootIsDecorated(False)
         self.columns.setColumnCount(4)
-        self.columns.setHeaderLabels(["출력할 칼럼", "값이 비어 있으면", "가로 정렬", "세로 정렬"])
+        self.columns.setHeaderLabels(["출력할 칼럼 · 2순위", "1순위", "가로 정렬", "세로 정렬"])
         self.columns.header().setStretchLastSection(False)
         for col in (0, 1):
             self.columns.header().setSectionResizeMode(col, QHeaderView.ResizeMode.Stretch)
@@ -181,8 +181,9 @@ class DeliverySubstituteDialog(QDialog):
         self.visibility_note = QLabel()
         self.visibility_note.setWordWrap(True)
         layout.addWidget(self.visibility_note)
-        hint = QLabel("칼럼 이름을 문서 제목으로 사용하고, 값이 없을 때만 오른쪽 칼럼에서 가져옵니다.\n"
-                      "출력 선택·순서·대체 칼럼·정렬은 이 PC의 운영 파일별로 기억합니다.\n"
+        hint = QLabel("체크한 칼럼 이름을 문서 제목으로 사용합니다. 오른쪽 1순위 값을 먼저 쓰고,\n"
+                      "미선택이거나 값이 비어 있으면 체크한 칼럼(2순위)의 값을 사용합니다.\n"
+                      "출력 선택·순서·1순위 칼럼·정렬은 이 PC의 운영 파일별로 기억합니다.\n"
                       "가구 집계와 BOX 표시는 원래 명단을 기준으로 유지됩니다.")
         hint.setWordWrap(True)
         layout.addWidget(hint)
@@ -339,14 +340,14 @@ class DeliverySubstituteDialog(QDialog):
             self.columns.addTopLevelItem(item)
             item.setHidden(key not in self._visible_keys)
             combo = QComboBox()
-            combo.setAccessibleName(f"{by_key[key].label} 값이 비어 있으면")
+            combo.setAccessibleName(f"{by_key[key].label} 1순위")
             combo.addItem("사용 안 함", "")
             for candidate in self._data.columns:
                 if candidate.key != key and candidate.key in self._visible_keys:
                     combo.addItem(candidate.label, candidate.key)
             selected = fallbacks.get(key, "")
             if selected and combo.findData(selected) < 0:
-                combo.addItem("저장된 대체 칼럼 (현재 목록에 없음)", selected)
+                combo.addItem("저장된 1순위 칼럼 (현재 목록에 없음)", selected)
             combo.setCurrentIndex(combo.findData(selected))
             combo.currentIndexChanged.connect(self._refresh)
             self.columns.setItemWidget(item, 1, combo)
@@ -391,7 +392,7 @@ class DeliverySubstituteDialog(QDialog):
         self._data.selected_rows(options)
         known = {column.key for column in self._data.columns}
         if any(value not in known for value in options.fallbacks.values()):
-            raise ValueError("저장된 대체 칼럼이 현재 원본에 없습니다. 다시 선택해주세요.")
+            raise ValueError("저장된 1순위 칼럼이 현재 원본에 없습니다. 다시 선택해주세요.")
         return replace(self._document, substitute_options=options)
 
     def _refresh(self, *_args):

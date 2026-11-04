@@ -22,6 +22,7 @@ from src.domain.projections import (
 from src.domain.revision_visibility import effective_history_revisions
 from src.domain.revisions import (
     HistoricalSnapshot,
+    EntityRef,
     RevisionRecord,
     RevisionSource,
     format_revision_timestamp,
@@ -57,9 +58,11 @@ def build_history_tables(
     """Build stable tables for the passed immutable revision ancestry only."""
     if person_id is not None and not isinstance(person_id, UUID):
         raise TypeError("person_id는 UUID 또는 None이어야 합니다.")
-    revisions = tuple(record for record in revisions if "workspace_branch" not in record.metadata.decisions)
+    from .september30_cleanup import hidden_history_changes
+    hidden_meals = hidden_history_changes(revisions) if revisions else set()
     meal_revision_ids = {record.metadata.revision_id for record in effective_history_revisions(revisions)
                          if "snapshot_restore_target" not in record.metadata.decisions}
+    revisions = tuple(record for record in revisions if "workspace_branch" not in record.metadata.decisions)
     info: list[tuple[object, ...]] = []
     meals: list[tuple[object, ...]] = []
     historical_names = {}
@@ -84,6 +87,8 @@ def build_history_tables(
         code = format_revision_timestamp(metadata.recorded_at)
         for change in record.changes:
             before, after = change.before or {}, change.after or {}
+            if (metadata.revision_id, EntityRef(change.entity_kind, change.entity_id)) in hidden_meals:
+                continue
             target = _person_id(change.entity_kind, change.entity_id, before, after)
             if person_id is not None and target != person_id:
                 continue
@@ -312,6 +317,7 @@ def _driver_text(value: object, names: Mapping[str, str]) -> str:
 def _label(value: str) -> str:
     return {
         "name": "성명", "birth_date": "생년월일", "school_type": "취학유형",
+        "lunch_period": "중식 기간",
         "school_name": "학교명", "grade": "학년", "class_name": "반",
         "household_head_name": "세대주 성명", "relationship_to_child": "아동과의 관계",
         "jurisdiction": "관할동", "provider": "제공기관", "telephone": "전화번호",

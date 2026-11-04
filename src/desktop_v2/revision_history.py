@@ -257,12 +257,12 @@ class GlobalRevisionHistoryDialog(QDialog):
         try:
             self._branches = run_progress_task(
                 lambda: list_branches(self._database),
-                message="분기 목록을 읽고 있습니다.", parent=self,
-                title="분기를 불러오는 중입니다",
+                message="작업본 목록을 읽고 있습니다.", parent=self,
+                title="작업본을 불러오는 중입니다",
             )
         except Exception:
             self._branch_read_failed = True
-            self._current_branch.setText("현재 분기를 읽지 못했습니다. 창을 다시 열어주세요.")
+            self._current_branch.setText("현재 작업본을 읽지 못했습니다. 창을 다시 열어주세요.")
             self._current_branch.show()
             return
         active_index = 0
@@ -273,7 +273,7 @@ class GlobalRevisionHistoryDialog(QDialog):
                 )
                 if branch.is_active:
                     active_index = self._branch_selector.count() - 1
-                    self._current_branch.setText(f"현재 사용 중인 분기: {branch.name}")
+                    self._current_branch.setText(f"현재 사용 중인 작업본: {branch.name}")
             self._branch_selector.setCurrentIndex(active_index)
         self._branch_selector.setVisible(bool(self._branches))
         self._current_branch.setVisible(True)
@@ -296,23 +296,23 @@ class GlobalRevisionHistoryDialog(QDialog):
                     before = () if source is None else self._database.branch_revision_ids(source)
                     return ids, source, before
                 ids, source, before = run_progress_task(
-                    read_branch_history, message="선택한 분기의 변경 기록을 읽고 있습니다.",
-                    parent=self, title="분기 이력을 불러오는 중입니다",
+                    read_branch_history, message="선택한 작업본의 변경 기록을 읽고 있습니다.",
+                    parent=self, title="작업본 이력을 불러오는 중입니다",
                 )
-                labels = {revision_id: "분기 전 기록" for revision_id in before}
+                labels = {revision_id: "작업본 전 기록" for revision_id in before}
                 if source is not None:
-                    labels[source] = "분기 시작점"
+                    labels[source] = "작업본 시작점"
         except Exception:
-            self._current_branch.setText("분기의 변경 이력을 읽지 못했습니다. 창을 다시 열어주세요.")
+            self._current_branch.setText("작업본의 변경 이력을 읽지 못했습니다. 창을 다시 열어주세요.")
             ids = ()
         self._summary_model.branch_labels = labels
         with QSignalBlocker(self._summary_table.selectionModel()):
             self._summary_proxy.set_revision_ids(ids)
         self._branch_note.setText(
-            "모든 분기의 저장·전환 기록을 함께 표시합니다."
+            "모든 작업본의 저장·전환 기록을 함께 표시합니다."
             if branch is None else
-            f"‘{branch.name}’의 변경 기록입니다. 분기 시작점과 그 이전 기록도 선택할 수 있습니다. "
-            "목록 선택만으로 사용 중인 분기는 바뀌지 않습니다."
+            f"‘{branch.name}’의 변경 기록입니다. 작업본 시작점과 그 이전 기록도 선택할 수 있습니다. "
+            "목록 선택만으로 사용 중인 작업본은 바뀌지 않습니다."
         )
         self._update_checkout_action()
         self._apply_filter(self._search.text())
@@ -385,7 +385,7 @@ class GlobalRevisionHistoryDialog(QDialog):
         buttons.button(QDialogButtonBox.StandardButton.Close).setObjectName(
             "quietAction"
         )
-        self._restore_button = QPushButton("선택한 변경번호로 복구·분기")
+        self._restore_button = QPushButton("이전 자료로 되돌리기")
         self._restore_button.setObjectName("primaryAction")
         self._restore_button.clicked.connect(self._restore_selected)
         buttons.addButton(self._restore_button, QDialogButtonBox.ButtonRole.ActionRole)
@@ -405,12 +405,12 @@ class GlobalRevisionHistoryDialog(QDialog):
         branch_row = QHBoxLayout()
         self._branch_selector = QComboBox()
         self._branch_selector.setObjectName("revisionHistoryBranchSelector")
-        self._branch_selector.setAccessibleName("표시할 분기")
-        self._branch_selector.addItem("전체 분기 · 감사 기록", None)
+        self._branch_selector.setAccessibleName("표시할 작업본")
+        self._branch_selector.addItem("전체 작업본 · 감사 기록", None)
         self._branch_selector.hide()
         self._branch_selector.currentIndexChanged.connect(self._branch_changed)
         branch_row.addWidget(self._branch_selector, 1)
-        self._checkout_button = QPushButton("이 분기로 전환")
+        self._checkout_button = QPushButton("이 작업본으로 전환")
         self._checkout_button.setObjectName("quietAction")
         self._checkout_button.clicked.connect(self._checkout_selected_branch)
         self._checkout_button.hide()
@@ -655,12 +655,12 @@ class GlobalRevisionHistoryDialog(QDialog):
                 if isinstance(event, Mapping) and event.get("operation") in {"create", "checkout"}:
                     branch = next((item for item in self._branches
                                    if str(item.branch_id) == event.get("branch_id")), None)
-                    name = branch.name if branch is not None else event.get("name", "선택한 분기")
+                    name = branch.name if branch is not None else event.get("name", "선택한 작업본")
                     target = UUID(decisions[RESTORE_TARGET_KEY])
                     code = self._database.revision_display_code(target)
-                    operation = "분기 생성" if event["operation"] == "create" else "분기 전환"
+                    operation = "작업본 생성" if event["operation"] == "create" else "작업본 전환"
                     target_label = "시작 변경번호" if event["operation"] == "create" else "전환 변경번호"
-                    return (("운영 데이터", "", operation, f"분기: {name}\n{target_label}: {code}"),)
+                    return (("운영 데이터", "", operation, f"작업본: {name}\n{target_label}: {code}"),)
                 snapshot = self._database.snapshot(summary.revision_id)
                 parent_revision_id = record.metadata.parent_revision_id
                 previous_snapshot = (

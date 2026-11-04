@@ -58,7 +58,7 @@ class HouseholdGroupingDialog(QDialog):
         self.summary.setWordWrap(True)
         self.summary.setTextFormat(Qt.TextFormat.PlainText)
         root.addWidget(self.summary)
-        note = QLabel("저장하면 전체 명단에서 기준값이 같은 사람을 합치고 다른 사람은 별도 가구로 나눕니다. 가구 연결일과 관계없이 즉시 적용하며, 이전 구성은 변경 이력에 보존합니다. 이후 불러오기·행 추가·정보 수정에도 이 기준을 사용합니다. 가구 공용 값이 다르면 저장 전에 확인합니다. 기사·식종별 가구 순서를 1부터 다시 매겨 명단 배송순서에도 함께 저장합니다.")
+        note = QLabel("저장하면 전체 명단에서 기준값이 같은 사람을 합치고 다른 사람은 별도 가구로 나눕니다. 가구 연결일과 관계없이 즉시 적용하며, 이전 구성은 변경 이력에 보존합니다. 이후 불러오기·행 추가·정보 수정에도 이 기준을 사용합니다. 가구 공용 값이 다르면 저장 전에 확인합니다. 기사·식종별 가구 순서를 1부터 다시 매겨 명단 배송순서에도 함께 저장합니다. 조회일에 미가입이거나 학교 일정상 중식 대상이 아닌 식종의 기존 순서는 비웁니다.")
         note.setWordWrap(True)
         root.addWidget(note)
         self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)

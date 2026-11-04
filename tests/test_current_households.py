@@ -112,11 +112,26 @@ def test_grouping_is_immediate_and_old_revision_and_backup_remain_exact(tmp_path
         historical = roster_from_historical_snapshot(session.database.snapshot(roster.revision_id))
         assert historical.household_for(first, on=DAY) != historical.household_for(second, on=DAY)
         assert set(historical.memberships) == set(roster.memberships)
-        assert set(updated.assignments) == set(roster.assignments)
+        assert set(historical.assignments) == set(roster.assignments)
+        # Reapplying criteria renumbers every driver/meal route from one.
+        # Each fixture driver has one stop; driver assignments stay unchanged.
+        assert set(updated.assignments) == {
+            replace(assignment, sequence="1") for assignment in roster.assignments
+        }
         assert set(updated.enrollments) == set(roster.enrollments)
         session.database.check_integrity()
+        backup = session.backup_now()
     with DatabaseSession.open(tmp_path / "groups.sqlite3", "password") as session:
         assert session.database.current_roster() == updated
+    with DatabaseSession.restore_and_open_with_user_password(
+        backup.path, tmp_path / "restored.sqlite3", "password",
+    ) as restored:
+        assert restored.database.current_roster() == updated
+        historical = roster_from_historical_snapshot(restored.database.snapshot(roster.revision_id))
+        assert set(historical.memberships) == set(roster.memberships)
+        assert set(historical.assignments) == set(roster.assignments)
+        assert set(historical.enrollments) == set(roster.enrollments)
+        restored.database.check_integrity()
 
 
 @pytest.mark.parametrize("phone", ["01055555555", "", None])
@@ -130,7 +145,16 @@ def test_changed_or_cleared_key_splits_even_when_phone_is_shared(tmp_path, phone
         updated = session.database.current_roster()
         assert updated.household_for(first, on=DAY) != updated.household_for(second, on=DAY)
         assert updated.person(second).profile.mobile_phone == roster.person(second).profile.mobile_phone
-        assert set(updated.assignments) == set(roster.assignments)
+        # Only the separated and remaining households' routes are renumbered.
+        # The unrelated third driver's original sequence must remain intact.
+        assert set(updated.assignments) == {
+            replace(assignment, sequence="1") if assignment.person_id in (first, second)
+            else assignment for assignment in roster.assignments
+        }
+        assert set(updated.enrollments) == set(roster.enrollments)
+        historical = roster_from_historical_snapshot(session.database.snapshot(roster.revision_id))
+        assert set(historical.assignments) == set(roster.assignments)
+        session.database.check_integrity()
 
 
 def test_multiple_keys_split_on_mismatch_and_merge_on_match(tmp_path):

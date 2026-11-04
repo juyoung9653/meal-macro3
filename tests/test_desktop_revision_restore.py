@@ -64,11 +64,16 @@ def controller(choice, answers=(), *, accepted=True, save_error=False, backup=No
     return instance, calls, saved, restarts, messages
 
 
-def test_dialog_defaults_to_same_database_branch_without_file_or_password_fields(app):
+def test_dialog_defaults_to_current_restore_and_optional_named_work_copy(app):
     dialog = RevisionRestoreDialog(Path("source.sqlite3"), "20261001-001")
-    assert dialog.branch_radio.isChecked()
+    assert dialog.restore_radio.isChecked()
+    assert dialog.selection() == RevisionRestoreSelection(False)
+    assert not dialog.branch_fields.isEnabled()
+    assert dialog.windowTitle() == "이전 자료로 되돌리기"
+    assert dialog.restore_radio.text() == "현재 자료를 이 시점으로 되돌리기"
     assert not hasattr(dialog, "path_edit")
     assert not hasattr(dialog, "password_edit")
+    dialog.branch_radio.setChecked(True)
     dialog.name_edit.clear()
     dialog._submit()
     assert dialog.result() != QDialog.DialogCode.Accepted

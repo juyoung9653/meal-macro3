@@ -387,8 +387,8 @@ def _apply_person(
                 school_name, grade, class_name, household_head_name,
                 relationship_to_child, jurisdiction, provider, road_address,
                 detail_address, telephone, mobile_phone, note,
-                custom_values_json, delivery_settings_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                custom_values_json, delivery_settings_json, lunch_period_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             values,
         )
@@ -400,7 +400,7 @@ def _apply_person(
             school_name = ?, grade = ?, class_name = ?,
             household_head_name = ?, relationship_to_child = ?,
             jurisdiction = ?, provider = ?, road_address = ?, detail_address = ?,
-            telephone = ?, mobile_phone = ?, note = ?, custom_values_json = ?, delivery_settings_json = ?
+            telephone = ?, mobile_phone = ?, note = ?, custom_values_json = ?, delivery_settings_json = ?, lunch_period_json = ?
         WHERE person_id = ?
         """,
         (*values[1:], values[0]),
@@ -619,7 +619,7 @@ def _load_person_states(
         SELECT person_id, name, birth_date, school_type, school_name, grade,
                class_name, household_head_name, relationship_to_child,
                jurisdiction, provider, road_address, detail_address, telephone,
-               mobile_phone, note, custom_values_json, delivery_settings_json
+               mobile_phone, note, custom_values_json, delivery_settings_json, lunch_period_json
         FROM person_projection
         """
     parameters = () if person_id is None else (str(person_id),)
@@ -645,6 +645,7 @@ def _load_person_states(
             "note": row[15],
             "custom_values": json.loads(str(row[16])),
             **({"delivery_settings": json.loads(str(row[17]))} if row[17] is not None else {}),
+            **({"lunch_period": json.loads(str(row[18]))} if row[18] is not None else {}),
         }
         yield UUID(str(row[0])), state
 
@@ -780,6 +781,10 @@ def _person_values(person: Person, revision_id: UUID) -> tuple:
              **({"delivery_weekdays": list(item.delivery_weekdays)} if item.delivery_weekdays is not None else {})}
             for item in person.delivery_settings
         ], ensure_ascii=False),
+        None if person.lunch_period is None else json.dumps({
+            "starts_on": _date_text(person.lunch_period.starts_on),
+            "ends_on": _date_text(person.lunch_period.ends_on),
+        }),
     )
 
 

@@ -92,8 +92,8 @@ def test_export_multi_creates_the_exact_requested_file(
             None,
             None,
         ]
-        assert worksheet["A4"].fill.fill_type == "solid"
-        assert worksheet["B4"].fill.fill_type == "solid"
+        assert worksheet["A4"].fill.fill_type is None
+        assert worksheet["B4"].fill.fill_type is None
         assert [worksheet.cell(5, column).value for column in range(2, 10)] == [
             1,
             0,
@@ -126,7 +126,7 @@ def test_make_report_publication_returns_verified_file_facts(tmp_path: Path):
     assert publication.output_byte_size == output.stat().st_size
 
 
-def test_export_keeps_long_multiple_form_counts_readable(tmp_path: Path):
+def test_export_preserves_template_size_even_for_clipped_long_form_counts(tmp_path: Path):
     template = tmp_path / "report_template.xlsx"
     output = tmp_path / "forms.xlsx"
     _write_minimal_template(template)
@@ -145,9 +145,8 @@ def test_export_keeps_long_multiple_form_counts_readable(tmp_path: Path):
         sheet = workbook.active
         assert sheet is not None
         assert str(sheet["H4"].value) == memo
-        assert sheet["H4"].alignment.wrap_text is True
-        assert sheet.row_dimensions[4].height >= 7 * 17
-        assert sheet.row_dimensions[4].height <= 409.5
+        assert sheet["H4"].alignment.wrap_text is None
+        assert sheet.row_dimensions[4].height is None
         assert sheet["G4"].value == 5
         assert sheet["B5"].value == 5
     finally:

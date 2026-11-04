@@ -144,7 +144,8 @@ class ColumnInputRuleController:
             rules = load_rules(snapshot)
             definition = next((item for item in roster.custom_fields if f"custom:{item.definition_id}" == key), None)
             allowed = (
-                frozenset({"text", "date"}) if key == "birth_date" or (definition is not None and definition.field_type is CustomFieldType.DATE)
+                frozenset({"date"}) if key in {"lunch_starts_on", "lunch_ends_on"}
+                else frozenset({"text", "date"}) if key == "birth_date" or (definition is not None and definition.field_type is CustomFieldType.DATE)
                 else frozenset({"text"}) if definition is not None and definition.field_type is CustomFieldType.NUMBER
                 else frozenset({"text", "phone", "date"})
             )

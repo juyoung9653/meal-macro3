@@ -248,7 +248,7 @@ def test_calculates_shared_invoice_and_confirmation_facts_from_source_revision()
         "석식",
     )
     assert prepared.calculation_manifest["billing"]["total_amount"] == 267_000
-    assert prepared.calculation_manifest["calculation_contract_version"] == 7
+    assert prepared.calculation_manifest["calculation_contract_version"] == 8
     assert prepared.calculation_manifest["recurring_service_policy"]["version"] == 5
 
 
@@ -269,14 +269,15 @@ def test_default_dinner_week_has_four_billed_meals(stored_defaults):
     assert prepared.batch.deliveries[0].billing_amount == 40_000
 
 
-def test_blocks_enrolled_lunch_when_reviewed_school_period_is_missing():
-    with pytest.raises(ValueError, match="푸른초.*중식 일정이 없습니다"):
-        prepare_monthly_document_data(
+def test_excludes_enrolled_lunch_when_reviewed_school_period_is_missing():
+    prepared = prepare_monthly_document_data(
             _source_snapshot(include_school=False),
             date(2026, 8, 1),
             date(2026, 8, 31),
             (Meal.LUNCH,),
         )
+    assert prepared.entitlements == ()
+    assert prepared.calculation_manifest["exclusions"]["school_lunch_schedule_missing"] > 0
 
 
 def test_same_month_delivery_mappings_keep_billing_equal():

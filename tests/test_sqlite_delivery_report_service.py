@@ -180,7 +180,7 @@ def test_breakfast_report_uses_physical_friday_and_keeps_three_entitlements():
         date(2026, 8, 23),
     )
     assert prepared.calculation_manifest["target_entitlement_count"] == 3
-    assert prepared.calculation_manifest["calculation_contract_version"] == 6
+    assert prepared.calculation_manifest["calculation_contract_version"] == 7
     assert prepared.calculation_manifest["recurring_service_policy"]["version"] == 5
     assert prepared.calculation_manifest["household_grouping"]["policy_version"] == 3
     assert prepared.calculation_manifest["report_period"]["basis"] == (
@@ -521,7 +521,7 @@ def test_retired_closed_friday_policy_does_not_override_default_delivery(tmp_pat
     assert prepared.calculation_manifest["breakfast_physical_delivery"]["closed_delivery_day"] == "exclude_entire_bundle"
 
 
-def test_selected_lunch_period_remains_strict_about_missing_school_schedule():
+def test_selected_lunch_period_skips_missing_school_schedule():
     # The normal fixture's earlier comparison dates may be incomplete, but an
     # enrolled lunch date inside the selected period may never be guessed.
     snapshot, _person_ids = _snapshot(meals=(Meal.LUNCH,))
@@ -532,13 +532,15 @@ def test_selected_lunch_period_remains_strict_about_missing_school_schedule():
     }
     snapshot = HistoricalSnapshot(snapshot.revision_id, states)
 
-    with pytest.raises(ValueError, match="중식 일정이 없습니다"):
-        prepare_delivery_report_data(
+    prepared = prepare_delivery_report_data(
             snapshot,
             date(2026, 8, 3),
             date(2026, 8, 3),
             (Meal.LUNCH,),
         )
+    assert prepared.shipments == ()
+    assert prepared.calculation_manifest["missing_lunch_schedules"][0]["school_name"] == "푸른초"
+    assert prepared.calculation_manifest["missing_lunch_schedules"][0]["service_dates"] == ("2026-08-03",)
 
 
 def test_global_defaults_change_breakfast_delivery_without_rewriting_overrides():
@@ -600,7 +602,7 @@ def test_physical_delivery_preparation_keeps_strict_school_calendar_failure():
 
     snapshot, _ = _snapshot(meals=(Meal.LUNCH,))
     with pytest.raises(SchoolLunchCalendarError):
-        prepare_physical_delivery_data(snapshot, date(2026, 10, 19), date(2026, 10, 19), (Meal.LUNCH,))
+        prepare_physical_delivery_data(snapshot, date(2026, 10, 19), date(2026, 10, 19), (Meal.LUNCH,), missing_lunch_schedule_as_zero=False)
 
 
 @pytest.mark.parametrize('day', [date(2026, 8, 21), date(2027, 1, 1)])

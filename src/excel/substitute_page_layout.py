@@ -30,6 +30,8 @@ class SheetLayout:
     data_end_row: int
     used_rows: int
     used_cols: int
+    fixed_column_widths: tuple[float, ...] = ()
+    group_row_heights: tuple[tuple[float, ...], ...] = ()
 
 
 
@@ -203,6 +205,25 @@ def apply_page_formatting(
     )
     groups = sheet_layout.groups
 
+    if sheet_layout.fixed_column_widths:
+        # Widths have already been set from the template by the Excel boundary.
+        # Fit printing to one page wide without resizing columns or fonts.
+        if not preserve_styles:
+            _set_fonts(ws, used_rows, used_cols, 0)
+        ws.Range(ws.Cells(1, 1), ws.Cells(used_rows, used_cols)).WrapText = True
+        ws.Rows.AutoFit()
+        if sheet_layout.group_row_heights:
+            for group in groups:
+                size = group.end_row - group.start_row + 1
+                heights = (sheet_layout.group_row_heights[size - 1] if size <= len(sheet_layout.group_row_heights)
+                           else sheet_layout.group_row_heights[0] * size)
+                for offset, height in enumerate(heights):
+                    ws.Rows(group.start_row + offset).RowHeight = height
+        else:
+            _fit_merged_text_heights(ws, columns, groups, used_rows, used_cols, all_columns=True)
+        apply_page_breaks_by_groups(ws, groups, mode, max_groups_limit)
+        return
+
     apply_page_breaks_by_groups(ws, groups, mode, max_groups_limit)
     _optimize_font_and_layout(ws, columns, used_rows, used_cols, groups, actual_orientation, preserve_styles)
 
@@ -303,10 +324,10 @@ def _wrap_long_columns_to_page(ws, columns: list[str], used_cols: int, safe_w: f
 
 
 def _fit_merged_text_heights(ws, columns: list[str], groups: tuple[SheetGroup, ...],
-                             used_rows: int, used_cols: int) -> None:
+                             used_rows: int, used_cols: int, *, all_columns: bool = False) -> None:
     """Excel AutoFit ignores merged cells; measure their text in an unmerged cell."""
     text_cols = [index for index, label in enumerate(columns, 1)
-                 if label in ("상세주소", COL_ADDR, "비고2")]
+                 if all_columns or label in ("상세주소", COL_ADDR, "비고2")]
     scratch = ws.Cells(used_rows + 1, used_cols + 1)
     try:
         scratch.NumberFormat = "@"

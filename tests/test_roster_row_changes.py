@@ -38,7 +38,8 @@ def test_add_person_enrolls_selected_meals_and_audits_insert():
     person = Person(UUID("89000000-0000-0000-0000-000000000006"), PersonProfile("새 대상"))
     original = _roster()
     result = build_roster_row_revision(original, add_person=person, enroll_meals=(Meal.DINNER, Meal.LUNCH), delivery_starts_on=date(2026, 10, 5), **ARGS)
-    assert result.snapshot.person(person.person_id) == person
+    assert result.snapshot.person(person.person_id).profile == person.profile
+    assert result.snapshot.person(person.person_id).lunch_period.starts_on == date(2026, 10, 5)
     assert result.snapshot.meals_for(person.person_id, on=date(2026, 10, 4)) == ()
     assert result.snapshot.meals_for(person.person_id, on=date(2026, 10, 5)) == (Meal.LUNCH, Meal.DINNER)
     assert result.snapshot.meals_for(person.person_id, on=date(2026, 10, 6)) == (Meal.LUNCH, Meal.DINNER)
@@ -82,7 +83,13 @@ def test_add_start_date_persists_through_revision_reload(tmp_path, household_id)
         assert database.snapshot(OLD).entity(PERSON_KIND, person.person_id) is None
 
 
-def test_add_full_row_persists_distinct_registered_drivers_sequences_and_status(tmp_path):
+@pytest.mark.parametrize(("effective_on", "dinner_sequence"), [
+    (date(2026, 9, 29), None),
+    (date(2026, 10, 6), "1"),
+])
+def test_add_full_row_preserves_drivers_and_status_and_normalizes_eligible_sequences(
+    tmp_path, effective_on, dinner_sequence,
+):
     fields = (
         CustomFieldDefinition(UUID("89000000-0000-0000-0000-000000000011"), "추가 전화", CustomFieldType.TEXT, 0),
         CustomFieldDefinition(UUID("89000000-0000-0000-0000-000000000012"), "수량", CustomFieldType.NUMBER, 1),
@@ -115,15 +122,19 @@ def test_add_full_row_persists_distinct_registered_drivers_sequences_and_status(
             date(2026, 10, 6): UUID("89000000-0000-0000-0000-000000000015"),
         },
         initial_statuses={Meal.DINNER: (MealStatus.PAUSED, date(2026, 10, 7))},
-        status_event_ids={Meal.DINNER: UUID("89000000-0000-0000-0000-000000000010")}, **ARGS,
+        status_event_ids={Meal.DINNER: UUID("89000000-0000-0000-0000-000000000010")},
+        **{**ARGS, "effective_on": effective_on},
     )
     with EncryptedDatabase.create(tmp_path / "rows.db", b"k" * 32) as database:
         database.append_revision(initial)
         database.append_revision(added.record)
         restored = database.current_roster()
         assert restored.person(person.person_id).profile == person.profile
-        assert restored.resolve_assignment(person.person_id, Meal.DINNER).sequence == "001"
-        assert restored.resolve_assignment(person.person_id, Meal.LUNCH).sequence == "013"
+        # Blank grouping keys split the legacy household selection. The affected
+        # routes clear pre-enrollment numbers, then number eligible meals from one.
+        assert restored.resolve_assignment(person.person_id, Meal.DINNER).sequence == dinner_sequence
+        # Lunch has no reviewed school schedule, even after enrollment starts.
+        assert restored.resolve_assignment(person.person_id, Meal.LUNCH).sequence is None
         assert restored.current_membership(person.person_id).household_id != HOUSEHOLD
         state = routing_state_from_snapshot(database.snapshot(NEW))
         assert state.resolve(restored, person.person_id, date(2026, 10, 4)).driver_ids[Meal.DINNER] is None
@@ -132,6 +143,9 @@ def test_add_full_row_persists_distinct_registered_drivers_sequences_and_status(
         assert [(event.status, event.period.starts_on, event.period.ends_on) for event in database.status_events(person_id=person.person_id, meal=Meal.DINNER)] == [(MealStatus.PAUSED, date(2026, 10, 5), date(2026, 10, 7))]
         assert restored.meals_for(person.person_id, on=date(2026, 10, 4)) == ()
         assert restored.meals_for(person.person_id, on=date(2026, 10, 5)) == (Meal.DINNER,)
+        assert set(restored.meals_for(person.person_id, on=date(2026, 10, 6))) == {Meal.DINNER, Meal.LUNCH}
+        assert database.snapshot(OLD).entity(PERSON_KIND, person.person_id) is None
+        database.check_integrity()
 
 
 def test_delete_removes_one_person_and_current_dependents_only():

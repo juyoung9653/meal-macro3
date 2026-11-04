@@ -1,5 +1,6 @@
 """Synthetic integration coverage for the legacy builder.py/memo.py port."""
 
+from copy import copy
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from uuid import uuid4
@@ -156,7 +157,7 @@ def test_form_summaries_counts_and_filter_are_preserved_with_status_memos():
     assert selected.reports[0].totals.person_total == len(selected.shipments) == 1
 
 
-def test_status_heading_keeps_red_emphasis_with_one_form_summary(tmp_path):
+def test_status_heading_keeps_template_font_with_one_form_summary(tmp_path):
     historical, _, _ = source(count=1, starts={0: MONDAY}, forms={0: "박스"})
     prepared = prepare(historical)
     output = tmp_path / "report-colors.xlsx"
@@ -165,8 +166,12 @@ def test_status_heading_keeps_red_emphasis_with_one_form_summary(tmp_path):
     try:
         value = workbook.active["H4"].value
         assert str(value) == "신규 8/17~\n정자동(아동0)\n박스 1가구·1식"
-        assert value[0].font.color.rgb == "FFFF0000"
-        assert value[1].font.color.rgb == "FF000000"
+        template = openpyxl.load_workbook("assets/급식/일일식수템플릿.xlsx")
+        try:
+            assert isinstance(value, str)
+            assert copy(workbook.active["H4"].font) == copy(template["aaa"]["H4"].font)
+        finally:
+            template.close()
     finally:
         workbook.close()
 

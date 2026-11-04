@@ -29,6 +29,7 @@ from src.domain.delivery_dates import (
 from src.domain.column_input_rules import InputRule, load_rules, validate_new_profile
 from src.domain.roster import CustomFieldDefinition, CustomFieldType, DeliveryAssignment, HouseholdDeliverySetting, Meal, Person, PersonProfile, RosterSnapshot, standard_delivery_defaults
 from src.domain.roster_row_changes import build_roster_row_revision
+from src.domain.school_calendar import school_lunch_calendar_from_snapshot
 from src.domain.row_household_conflicts import row_household_conflicts
 from src.domain.revisions import RevisionActor
 from src.domain.status import MealStatus
@@ -89,7 +90,7 @@ class RosterRowCreateDialog(QDialog):
         super().__init__(parent)
         register_application_fonts()
         self.setStyleSheet(application_stylesheet())
-        self.setWindowTitle("명단 행 추가")
+        self.setWindowTitle("신규 대상자 등록")
         self.resize(760, 640)
         self.setMinimumSize(650, 580)
         if column_labels is None:
@@ -105,10 +106,10 @@ class RosterRowCreateDialog(QDialog):
         self._delivery_defaults = delivery_defaults or standard_delivery_defaults()
         self._editors: dict[str, QLineEdit | QPlainTextEdit | QComboBox] = {}
         root = QVBoxLayout(self)
-        title = QLabel("대상자 추가")
+        title = QLabel("신규 대상자 등록")
         title.setObjectName("workspaceTitle")
         root.addWidget(title)
-        hint = QLabel("명단의 인적사항과 가입 식종을 입력합니다. 배송 시작일 전에는 배송 대상에 포함되지 않습니다.")
+        hint = QLabel("명단의 인적사항과 가입 식종을 입력합니다. 배송 시작일 전에는 배송 대상에 포함되지 않습니다. 중식 시작일은 입력한 날짜로, 종료일은 등록된 학교 일정으로 채웁니다.")
         hint.setObjectName("workspaceSubtitle")
         hint.setWordWrap(True)
         root.addWidget(hint)
@@ -224,7 +225,7 @@ class RosterRowCreateDialog(QDialog):
         cancel.setObjectName("quietAction")
         cancel.clicked.connect(self.reject)
         actions.addWidget(cancel)
-        save = QPushButton("행 추가")
+        save = QPushButton("신규 대상자 등록")
         save.setObjectName("primaryAction")
         save.clicked.connect(self._accept_valid)
         actions.addWidget(save)
@@ -443,6 +444,7 @@ class RosterRowEditController:
                     initial_statuses=request.statuses,
                     status_event_ids={meal: uuid4() for meal in request.statuses},
                     intake_channel=request.intake_channel,
+                    school_calendar=school_lunch_calendar_from_snapshot(snapshot) if snapshot is not None else None,
                 )
                 conflicts = row_household_conflicts(snapshot, prepared)
                 if conflicts:

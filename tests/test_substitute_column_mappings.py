@@ -105,12 +105,12 @@ def test_missing_source_definition_fails_for_both_priorities():
             prepare_delivery_substitute_data(old, DAY, Meal.BREAKFAST, mapping_snapshot=updated)
 
 
-def test_mapping_settings_only_offer_invoice_and_confirmation(app):
+def test_mapping_settings_offer_invoice_confirmation_and_daily_report(app):
     _, roster = source()
     specs = {scope: mapping_editor_spec(*scope, roster=roster) for scope in _SCOPES}
     dialog = DocumentColumnMappingDialog(specs, {scope: {} for scope in _SCOPES})
     assert dialog._document_combo.findData("substitute") == -1
-    assert {dialog._document_combo.itemData(index) for index in range(dialog._document_combo.count())} == {"invoice", "confirmation"}
+    assert {dialog._document_combo.itemData(index) for index in range(dialog._document_combo.count())} == {"invoice", "confirmation", "daily_report"}
     dialog.reject()
 
 

@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QPlainTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -42,6 +43,7 @@ class GeneratedDocumentResult:
     generated_at: datetime
     output_sha256: str
     output_byte_size: int
+    lunch_exclusions: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.output, DocumentOutputSelection):
@@ -123,8 +125,8 @@ class DocumentCompletionDialog(QDialog):
         self.setObjectName("documentCompletionDialog")
         self.setWindowTitle(f"{result.output.document.period.action.label} 발행 완료")
         self.setModal(True)
-        self.resize(820, 590)
-        self.setMinimumSize(720, 540)
+        self.resize(820, 730 if result.lunch_exclusions else 590)
+        self.setMinimumSize(720, 680 if result.lunch_exclusions else 540)
         self.setStyleSheet(application_stylesheet())
         self._build_ui()
 
@@ -138,6 +140,15 @@ class DocumentCompletionDialog(QDialog):
         root.setSpacing(13)
         root.addWidget(self._build_header())
         root.addWidget(self._build_dispatch_ticket(), 1)
+        if self._result.lunch_exclusions:
+            notice = QLabel("학교 일정이 없는 학교·날짜의 중식만 제외하고 문서를 만들었습니다. 학교 일정 등록 후 다시 만들면 반영됩니다.")
+            notice.setWordWrap(True)
+            root.addWidget(notice)
+            details = QPlainTextEdit("\n".join(self._result.lunch_exclusions))
+            details.setObjectName("missingLunchScheduleDetails")
+            details.setReadOnly(True)
+            details.setMaximumHeight(120)
+            root.addWidget(details)
 
         notice = QLabel(
             "파일은 자동으로 열지 않았습니다. 필요할 때 아래 버튼을 누르세요."

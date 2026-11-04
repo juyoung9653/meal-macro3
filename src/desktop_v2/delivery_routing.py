@@ -175,6 +175,8 @@ class DailyDriverOrderLaunch:
 class DriverRegistryDialog(QDialog):
     """Only name and phone are user-facing driver attributes."""
 
+    lunch_period_export_requested = Signal()
+
     def __init__(self, state: RoutingState, parent=None):
         super().__init__(parent)
         _style(self, "배송기사 관리")
@@ -218,7 +220,14 @@ class DriverRegistryDialog(QDialog):
         self.daily_order_button = QPushButton("일일식수 기사 순서")
         self.daily_order_button.setObjectName("quietAction")
         self.daily_order_button.clicked.connect(self._daily_order)
-        layout.addWidget(self.daily_order_button)
+        tools_row = QHBoxLayout()
+        tools_row.addWidget(self.daily_order_button)
+        self.lunch_export_button = QPushButton("중식 기간 Excel 내보내기")
+        self.lunch_export_button.setObjectName("quietAction")
+        self.lunch_export_button.setToolTip("저장된 명단·학교 일정으로 전체 기사의 중식 시작일과 종료일을 내보냅니다")
+        self.lunch_export_button.clicked.connect(self.lunch_period_export_requested.emit)
+        tools_row.addWidget(self.lunch_export_button)
+        layout.addLayout(tools_row)
         self.name = QLineEdit()
         self.phone = QLineEdit()
         form = QFormLayout()
@@ -801,7 +810,7 @@ class DeliveryRoutingController:
         return DeliveryRoutingOutcome(roster, state)
 
     @dialog_workflow
-    def run_drivers(self, parent=None, *, on_saved=None, service_day=None):
+    def run_drivers(self, parent=None, *, on_saved=None, service_day=None, on_lunch_export=None):
         outcome = DeliveryRoutingOutcome()
         dialog = None
         while True:
@@ -809,6 +818,9 @@ class DeliveryRoutingController:
                 if dialog is None:
                     roster, state = self._load()
                     dialog = self._registry_dialog_type(state, parent)
+                    if on_lunch_export is not None and isinstance(dialog, DriverRegistryDialog):
+                        dialog.lunch_period_export_requested.connect(
+                            lambda current=dialog: on_lunch_export(current))
                 if (yield DialogRequest(dialog, self._session)) != QDialog.DialogCode.Accepted:
                     return DeliveryRoutingOutcome(*self._load()) if outcome.roster is not None else outcome
                 request = dialog.request()

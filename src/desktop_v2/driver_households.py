@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
 from src.domain.delivery_routing import Driver
 from src.domain.roster import Meal
 from src.services.driver_households import sequence_sort_key as _sequence_key
+from src.services.driver_households import lunch_period_texts
 
 from .column_search import ColumnSearchHeader
 from .current_sheet_export import CurrentSheetSnapshot
@@ -42,8 +43,8 @@ if TYPE_CHECKING:
     from src.services.driver_households import DriverHouseholdRow
 
 
-_COLUMNS = ("배송기사", "가구원", "식종", "배송순서", "주소", "연락처")
-_COLUMN_KEYS = ("driver", "members", "meals", "sequence", "address", "contacts")
+_COLUMNS = ("배송기사", "가구원", "식종", "배송순서", "주소", "연락처", "중식 시작일", "중식 종료일")
+_COLUMN_KEYS = ("driver", "members", "meals", "sequence", "address", "contacts", "lunch_starts_on", "lunch_ends_on")
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,6 +214,10 @@ class DriverHouseholdsDialog(QDialog):
         self.template_export_button.clicked.connect(self._request_template_export)
         layout.addLayout(filters)
         exports = QHBoxLayout()
+        self.lunch_period_checkbox = QCheckBox("중식 기간 표시")
+        self.lunch_period_checkbox.setChecked(True)
+        self.lunch_period_checkbox.toggled.connect(self._set_lunch_period_visible)
+        exports.addWidget(self.lunch_period_checkbox)
         exports.addStretch(1)
         exports.addWidget(self.export_button)
         exports.addWidget(self.template_export_button)
@@ -251,7 +256,7 @@ class DriverHouseholdsDialog(QDialog):
         header.setToolTip("열 제목 클릭: 정렬 · ▾: 칼럼별 검색과 값 필터")
         header.setMinimumSectionSize(110)
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        for column, width in enumerate((140, 165, 125, 115, 240, 180)):
+        for column, width in enumerate((140, 165, 125, 115, 240, 180, 155, 155)):
             header.resizeSection(column, width)
         header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
         # Preserve the service's initial order until a column title is clicked.
@@ -281,6 +286,9 @@ class DriverHouseholdsDialog(QDialog):
         layout.addWidget(buttons)
 
         self._restore_filter_settings()
+        if self._filter_settings is not None:
+            self.lunch_period_checkbox.setChecked(self._filter_settings.value(
+                f"{self._filter_settings_key}:show_lunch_period", True, type=bool))
         self.driver_combo.currentIndexChanged.connect(self._change_driver)
         self.meal_combo.currentIndexChanged.connect(self._change_meal)
         self._change_driver()
@@ -290,6 +298,14 @@ class DriverHouseholdsDialog(QDialog):
     @property
     def include_hidden(self) -> bool:
         return self.include_hidden_checkbox.isChecked()
+
+    def _set_lunch_period_visible(self, visible):
+        for column in (6, 7):
+            self.table.setColumnHidden(column, not visible)
+        self._column_search_header.refresh_buttons()
+        if self._filter_settings is not None:
+            self._filter_settings.setValue(f"{self._filter_settings_key}:show_lunch_period", visible)
+            self._filter_settings.sync()
 
     def refresh_rows(self):
         """Reload using the provider and service day captured when opened."""
@@ -399,6 +415,7 @@ class DriverHouseholdsDialog(QDialog):
         source_rows = self._rows if self.meal_combo.currentData() is None else self._display_rows()
         snapshot = build_driver_households_template_snapshot(
             tuple(row for row in source_rows if self._matches_driver(row)),
+            lunch_date_columns=_COLUMN_KEYS[6:8] if self.lunch_period_checkbox.isChecked() else (),
         )
         self.export_requested.emit(snapshot)
 
@@ -472,6 +489,7 @@ class DriverHouseholdsDialog(QDialog):
             ", ".join(row.sequences),
             row.address,
             ", ".join(row.contacts),
+            *lunch_period_texts(row),
         )
 
     def column_filter_values(self, key):

@@ -63,6 +63,7 @@ def build_meal_status_revision(
     reason: str = "배송 상태 변경",
     intake_channel: IntakeChannel | None = None,
     note: str = "",
+    school_calendar=None,
 ) -> PreparedMealStatusRevision:
     """Apply one status/period to many meals, auto-enrolling delivery gaps."""
 
@@ -115,6 +116,8 @@ def build_meal_status_revision(
     auto_enrolled: list[Meal] = []
     if status is MealStatus.DELIVERY:
         for meal in selected_meals:
+            if meal is Meal.LUNCH and meal not in not_enrolled and current_roster.person(person_id).lunch_period is not None:
+                continue
             updated = _cover_delivery_period(
                 enrollments,
                 person_id,
@@ -135,6 +138,13 @@ def build_meal_status_revision(
         custom_fields=current_roster.custom_fields,
         delivery_defaults=current_roster.delivery_defaults,
     )
+    if status is MealStatus.DELIVERY and Meal.LUNCH in not_enrolled:
+        from .lunch_periods import set_lunch_periods, suggested_person_lunch_period
+        requested = periods[Meal.LUNCH]
+        lunch_period = suggested_person_lunch_period(current_roster.person(person_id).profile,
+            school_calendar, requested.starts_on, exact_start=True, ends_on=requested.ends_on)
+        snapshot = set_lunch_periods(snapshot, {person_id: lunch_period},
+                                    replace_from={person_id: requested.starts_on})
     events = tuple(
         StatusEvent(
             event_id=ids_by_meal[meal],
@@ -220,6 +230,7 @@ def build_batch_meal_status_revision(
     periods_by_meal: Mapping[Meal, InclusiveDateRange] | None = None,
     intake_channel: IntakeChannel | None = None,
     note: str = "",
+    school_calendar=None,
 ) -> PreparedBatchMealStatusRevision:
     """Validate every target and prepare one atomic revision for the whole batch."""
     if not isinstance(current_roster, RosterSnapshot):
@@ -279,6 +290,8 @@ def build_batch_meal_status_revision(
             )
         if status is MealStatus.DELIVERY:
             for meal in selected_meals:
+                if meal is Meal.LUNCH and meal not in not_enrolled and current_roster.person(person_id).lunch_period is not None:
+                    continue
                 updated = _cover_delivery_period(
                     enrollments, person_id, meal, periods[meal]
                 )
@@ -308,6 +321,15 @@ def build_batch_meal_status_revision(
         custom_fields=current_roster.custom_fields,
         delivery_defaults=current_roster.delivery_defaults,
     )
+    if status is MealStatus.DELIVERY and Meal.LUNCH in all_selected_meals:
+        from .lunch_periods import set_lunch_periods, suggested_person_lunch_period
+        requested = periods[Meal.LUNCH]
+        updates = {pid: suggested_person_lunch_period(current_roster.person(pid).profile,
+            school_calendar, requested.starts_on, exact_start=True, ends_on=requested.ends_on)
+            for pid, selected in grouped.items() if Meal.LUNCH in selected
+            and Meal.LUNCH not in current_roster.meals_for(pid, on=requested.starts_on)}
+        working = set_lunch_periods(working, updates,
+                                   replace_from={pid: requested.starts_on for pid in updates})
     changes = (
         *roster_audit_changes(current_roster, working),
         *(status_event_audit_change(event) for event in events),

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from dataclasses import replace
 from copy import copy
 from pathlib import Path
 import re
@@ -13,12 +14,12 @@ from openpyxl.worksheet.page import PageMargins
 
 from src.domain.delivery_substitute import PreparedSubstituteData, SubstituteOptions
 from src.domain.roster import Meal
-from src.excel.delivery_templates import load_substitute_styles, substitute_styles_are_default, STYLE_COLUMNS
+from src.excel.delivery_templates import load_substitute_widths, load_substitute_styles, substitute_styles_are_default, STYLE_COLUMNS
 from src.excel.publication import WorkbookPublicationResult, publish_workbook
 from src.excel.substitute_excel_metrics import apply_excel_metrics
 from src.excel.substitute_page_layout import SheetGroup, SheetLayout
 
-SUBSTITUTE_RENDER_CONTRACT_VERSION = 9
+SUBSTITUTE_RENDER_CONTRACT_VERSION = 11
 _LABELS = {"name": "이름", "road_address": "신주소", "note": "비고2"}
 _FILLS = {2: "E6B8B7", 3: "B8CCE4", 4: "D8E4BC", 5: "CCC0DA"}
 _THIN = Side(style="thin", color="000000")
@@ -173,6 +174,7 @@ def _build_sheet(data: PreparedSubstituteData, options: SubstituteOptions):
 
 def _apply_template_styles(workbook, layout, data, options, styles):
     ws = workbook.active
+    template_keys = styles["column_keys"]
     for row in range(1, layout.used_rows + 1):
         role = ("title" if row == 1 else "header" if row == 2 else
                 "body" if row <= layout.data_end_row else
@@ -180,9 +182,9 @@ def _apply_template_styles(workbook, layout, data, options, styles):
                 "total" if row == layout.used_rows else "summary")
         for col in range(1, layout.used_cols + 1):
             key = options.columns[col - 1] if col <= len(options.columns) else "__summary"
-            source_col = STYLE_COLUMNS.index(key) if key in STYLE_COLUMNS else 6
+            source_col = template_keys.index(key if key in template_keys else "note")
             if row > layout.data_end_row:
-                source_col = min(col - 1, 7)
+                source_col = template_keys.index(STYLE_COLUMNS[min(col - 1, 7)])
             if row == 1:
                 source_col = 0
             font, fill, border = styles[role][source_col]
@@ -191,22 +193,28 @@ def _apply_template_styles(workbook, layout, data, options, styles):
     rows = data.selected_rows(options)
 
     for group in layout.groups:
-        fill = styles.get(f"household{group.source_end - group.source_start + 1}")
+        size = group.source_end - group.source_start + 1
+        group_styles = styles.get("group_styles", ())
+        sample = group_styles[size - 1] if size <= len(group_styles) else None
+        fill = styles.get(f"household{size}")
         box = any(item.box for item in rows[group.source_start:group.source_end + 1])
         for row in range(group.start_row, group.end_row + 1):
             for col in range(1, layout.used_cols + 1):
                 cell = ws.cell(row, col)
                 key = options.columns[col - 1] if col <= len(options.columns) else "__summary"
-                source_col = STYLE_COLUMNS.index(key) if key in STYLE_COLUMNS else 6
-                if fill:
+                source_col = template_keys.index(key if key in template_keys else "note")
+                if sample is not None:
+                    font, fill_style, border = sample[row - group.start_row][source_col]
+                    cell.font, cell.fill, cell.border = copy(font), copy(fill_style), copy(border)
+                elif fill:
                     cell.fill = copy(fill[source_col][1])
                 box_border = styles["box"][source_col][2]
                 if box:
                     border = copy(cell.border)
                     if col == 1:
-                        border.left = copy(styles["box"][0][2].left)
+                        border.left = copy(styles["box"][template_keys.index("sequence")][2].left)
                     if col == layout.used_cols:
-                        border.right = copy(styles["box"][7][2].right)
+                        border.right = copy(styles["box"][template_keys.index("__summary")][2].right)
                     if row == group.start_row:
                         border.top = copy(box_border.top)
                     if row == group.end_row:
@@ -234,10 +242,20 @@ def build_substitute_workbook(data: PreparedSubstituteData, options: SubstituteO
         from src.core.settings import get_settings
         template_path = get_settings().get_substitute_template_path()
     styles = load_substitute_styles(template_path)
-    if substitute_styles_are_default(styles):
+    normal_font = styles["normal_font"]
+    if substitute_styles_are_default(styles) and not styles["group_styles"]:
         styles = None
     workbook, columns, layout = _build_sheet(data, options)
     try:
+        workbook._named_styles[0].font = copy(normal_font)
+        template_widths = load_substitute_widths(template_path)
+        widths = tuple(template_widths.get(key, template_widths["note"])
+                       for key in options.columns)
+        widths += (template_widths["__summary"],) * (layout.used_cols - len(widths))
+        layout = replace(layout, fixed_column_widths=widths,
+                         group_row_heights=styles["group_row_heights"] if styles else ())
+        for index, width in enumerate(widths, 1):
+            workbook.active.column_dimensions[get_column_letter(index)].width = width
         if styles is not None:
             _apply_template_styles(workbook, layout, data, options, styles)
         apply_excel_metrics(workbook, columns, layout, options,

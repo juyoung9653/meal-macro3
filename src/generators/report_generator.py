@@ -1,9 +1,8 @@
-"""일일식수 엑셀 출력 — openpyxl만 사용. 템플릿 복사 + water-filling + 페이지설정."""
+"""일일식수 출력: 내용이 넘쳐도 템플릿의 크기·서식·인쇄 설정을 유지한다."""
 
 from __future__ import annotations
 
 import logging
-from math import ceil
 from collections.abc import Sequence
 from copy import copy
 from datetime import date
@@ -12,19 +11,14 @@ from pathlib import Path
 from openpyxl import Workbook, load_workbook
 from openpyxl.cell.rich_text import CellRichText, TextBlock
 from openpyxl.cell.text import InlineFont
-from openpyxl.styles import Border, Font, PatternFill, Side
-from openpyxl.worksheet.page import PageMargins
 
-from ..core.diff_format import has_diff, strip_diff
+from ..core.diff_format import strip_diff
 from ..core.settings import get_settings
 from ..excel.excel_utils import write_literal_cell
 from ..excel.publication import WorkbookPublicationResult, publish_workbook
 from ..services.delivery_service import DeliveryReport
 
 log = logging.getLogger(__name__)
-
-_DEFAULT_ROW_HEIGHT = 15
-
 
 def get_template_path() -> str:
     return get_settings().get_report_template_path()
@@ -100,8 +94,6 @@ def make_report_publication(
 
             last_row = ws.max_row
             ws.print_area = f"A1:I{last_row}"
-            _stretch_rows_to_page(ws, last_row)
-            _apply_page_setup(ws)
 
         publication = publish_workbook(out, out_file, password=output_password, overwrite=overwrite)
     finally:
@@ -129,230 +121,55 @@ def export(
 
 
 def _copy_sheet(src, dst) -> None:
-    """src 워크시트의 서식/값/병합을 dst로 복사."""
-    for col_letter, dim in src.column_dimensions.items():
-        dst.column_dimensions[col_letter].width = dim.width
-    for row_num, dim in src.row_dimensions.items():
-        dst.row_dimensions[row_num].height = dim.height
-
-    for row in src.iter_rows(min_row=1, max_row=src.max_row, max_col=src.max_column):
-        for cell in row:
-            nc = dst.cell(row=cell.row, column=cell.column)
-            if cell.value is not None:
-                nc.value = cell.value
-            nc.font = copy(cell.font)
-            nc.alignment = copy(cell.alignment)
-            nc.border = copy(cell.border)
-            nc.fill = copy(cell.fill)
-            nc.number_format = cell.number_format
-
-    for merged in src.merged_cells.ranges:
-        dst.merge_cells(str(merged))
-
-
-def _stretch_rows_to_page(ws, last_row: int) -> None:
-    """Water-filling: 낮은 행부터 차례로 다음 높이까지 끌어올림."""
-    if last_row <= 0:
-        return
-
-    total_ht = 0.0
-    for r in range(1, last_row + 1):
-        h = ws.row_dimensions[r].height
-        total_ht += h if h is not None else _DEFAULT_ROW_HEIGHT
-
-    extra = 900 - total_ht
-    if extra <= 1:
-        return
-
-    staff_rows = []
-    for r in range(4, last_row + 1):
-        val = ws.cell(r, 1).value
-        if val is not None and str(val) != "합계":
-            staff_rows.append(r)
-    if not staff_rows:
-        return
-
-    arr = []
-    for r in staff_rows:
-        h = ws.row_dimensions[r].height
-        arr.append((r, h if h is not None else _DEFAULT_ROW_HEIGHT))
-    arr.sort(key=lambda x: x[1])
-
-    n = len(arr)
-    i = 1
-    while i < n and extra > 1:
-        gap = arr[i][1] - arr[i - 1][1]
-        if gap > 0:
-            cost = gap * i
-            if extra >= cost:
-                for j in range(i):
-                    arr[j] = (arr[j][0], arr[i][1])
-                extra -= cost
-            else:
-                add_each = extra / i
-                for j in range(i):
-                    arr[j] = (arr[j][0], arr[j][1] + add_each)
-                extra = 0
-                break
-        i += 1
-
-    if extra > 1:
-        add_each = extra / n
-        for j in range(n):
-            arr[j] = (arr[j][0], arr[j][1] + add_each)
-
-    for r, h in arr:
-        # Excel's row-height limit is 409.5 pt. A form breakdown can already
-        # need several wrapped lines; page filling must not make it invalid.
-        ws.row_dimensions[r].height = min(h, 409.5) if ws.cell(r, 8).value else h
-
-
-def _apply_page_setup(ws) -> None:
-    CM2IN = 0.3 / 2.54
-    ws.page_setup.paperSize = ws.PAPERSIZE_A4
-    ws.page_setup.orientation = "portrait"
-    ws.page_setup.fitToPage = True
-    ws.page_setup.fitToWidth = 1
-    ws.page_setup.fitToHeight = 0
-    ws.page_setup.scale = None
-    ws.page_margins = PageMargins(
-        left=CM2IN,
-        right=CM2IN,
-        top=CM2IN,
-        bottom=CM2IN,
-        header=0,
-        footer=0,
-    )
-
-
-_FILL_DIFF = PatternFill(start_color="C5D9F1", end_color="C5D9F1", fill_type="solid")
+    from src.excel.template_sheet import copy_template_sheet
+    copy_template_sheet(src, dst)
 
 
 def _fill_data(ws, report: DeliveryReport, *, preserve_template_styles=False) -> None:
-    """템플릿 시트에 일일식수 데이터를 채움."""
-    data_count = len(report.rows)
-    summary_styles = [copy(ws.cell(9, col)._style) for col in range(1, 10)]
+    """Keep template rows 4–8 and repeat row 8 for any extra driver rows.
 
+    Row 9 supplies the total row. The legacy style flag is accepted for callers;
+    all reports now preserve the template, including clipped text and print scale.
+    """
+    count = len(report.rows)
+    styles = {r: [copy(ws.cell(r, c)._style) for c in range(1, 10)] for r in range(4, 10)}
+    dimensions = {r: copy(ws.row_dimensions[r]) for r in range(4, 10)}
+    total_row = 4 + count
+    total_label = ws.cell(9, 1).value or "합계"
     ws["A2"] = f"*아동급식 {report.meal}*"
-    if data_count > 5:
-        ws.insert_rows(9, data_count - 5)
-        src_height = ws.row_dimensions[8].height
-        for r in range(9, 9 + data_count - 5):
-            if src_height:
-                ws.row_dimensions[r].height = src_height
-            for c in range(1, 10):
-                src = ws.cell(8, c)
-                dst = ws.cell(r, c)
-                dst.font = copy(src.font)
-                dst.alignment = copy(src.alignment)
-                dst.border = copy(src.border)
-                dst.fill = copy(src.fill)
-                dst.number_format = src.number_format
+    if count > 5:
+        ws.insert_rows(9, count - 5)
+    elif count < 5:
+        ws.delete_rows(total_row + 1, 5 - count)
+    for r in range(4, max(9, total_row) + 1):
+        if r in ws.row_dimensions:
+            del ws.row_dimensions[r]
 
-    group_rows = list(range(4, 4 + data_count))
-    summary_row_num = 4 + data_count
+    def apply_row(row, prototype):
+        dimension = copy(dimensions[prototype])
+        dimension.index = row
+        dimension.parent = ws
+        ws.row_dimensions[row] = dimension
+        for column, style in enumerate(styles[prototype], 1):
+            ws.cell(row, column)._style = copy(style)
 
-    for gr, row in zip(group_rows, report.rows):
-        row_has_diff = any(has_diff(value) for value in row.household_size_cells)
+    for row_no, item in enumerate(report.rows, 4):
+        apply_row(row_no, min(row_no, 8))
+        write_literal_cell(ws.cell(row_no, 1), item.staff_label)
+        for column, raw in enumerate(item.household_size_cells, 2):
+            value = strip_diff(raw)
+            ws.cell(row_no, column).value = int(value) if value != "" else ""
+        ws.cell(row_no, 7).value = item.person_total
+        write_literal_cell(ws.cell(row_no, 8), item.memo)
+        write_literal_cell(ws.cell(row_no, 9), item.reference_areas)
 
-        c_a = ws.cell(gr, 1)
-        c_a.value = row.staff_label
-        if row_has_diff and not preserve_template_styles:
-            c_a.fill = _FILL_DIFF
-
-        for column, raw in enumerate(row.household_size_cells, start=2):
-            c = ws.cell(gr, column)
-            stripped = strip_diff(raw)
-            c.value = int(stripped) if stripped != "" else ""
-            if has_diff(raw) and not preserve_template_styles:
-                c.fill = _FILL_DIFF
-
-        ws.cell(gr, 7).value = row.person_total
-
-        raw = row.memo
-        c_h = ws.cell(gr, 8)
-
-        if raw:
-            if preserve_template_styles:
-                c_h.value = raw
-                c_h.data_type = "s"
-                align = copy(c_h.alignment)
-                align.wrap_text = True
-                c_h.alignment = align
-                size = c_h.font.sz or 11
-                width = max(1, (ws.column_dimensions["H"].width or 23) * 8 - 12)
-                lines = sum(max(1, ceil(sum(1.33 if ord(c) > 127 else .67 for c in line) * size / width))
-                            for line in raw.split("\n"))
-                ws.row_dimensions[gr].height = max(ws.row_dimensions[gr].height or 15, lines * size * 1.55)
-            else:
-                # 컬럼 폭 대비 텍스트 길이에 맞춰 폰트 크기 자동 조절
-                col_w = ws.column_dimensions["H"].width or 23
-                col_px = max(1, int(col_w * 8) - 12)  # 184px - 여유 12px
-                lines = raw.split("\n")
-
-                # 줄별 필요한 폰트 크기 계산
-                font_sizes: list[int] = []
-                visual_line_count = 0
-                for line in lines:
-                    cnt_k = sum(1 for c in line if ord(c) > 127)
-                    cnt_a = sum(1 for c in line if ord(c) <= 127)
-                    coeff = cnt_k * 1.33 + cnt_a * 0.67
-                    if coeff > 0:
-                        ideal = col_px / coeff
-                        font_size = max(6, min(11, int(ideal)))
-                        font_sizes.append(font_size)
-                        visual_line_count += max(1, ceil(coeff * font_size / col_px))
-                    else:
-                        font_sizes.append(_FONT_SIZE)
-                        visual_line_count += 1
-
-                c_h.value = _make_memo_rich_text(raw, font_sizes)
-
-                # plain string이면 셀 폰트 직접 설정
-                if isinstance(c_h.value, str) and "\n" not in raw:
-                    c_h.font = Font(name=_FONT_NAME, size=font_sizes[0])
-
-                align = copy(c_h.alignment)
-                align.wrap_text = True
-                c_h.alignment = align
-
-                est_height = max(17, visual_line_count * 17)
-                if est_height > (ws.row_dimensions[gr].height or 0):
-                    ws.row_dimensions[gr].height = est_height
-        else:
-            c_h.value = ""
-
-        write_literal_cell(ws.cell(gr, 9), row.reference_areas)
-
-    if preserve_template_styles:
-        for col, style in enumerate(summary_styles, 1):
-            ws.cell(summary_row_num, col)._style = style
-        ws.cell(summary_row_num, 1).value = "합계"
-        if data_count < 5:
-            ws.delete_rows(summary_row_num + 1, 9 - summary_row_num)
-
-    totals = report.totals
-    for column, count in enumerate(totals.household_counts, start=2):
-        ws.cell(summary_row_num, column).value = count
-    ws.cell(summary_row_num, 7).value = totals.person_total
-    ws.cell(summary_row_num, 8).value = ""
-    ws.cell(summary_row_num, 9).value = ""
-
-    if preserve_template_styles:
-        return
-
-    thin = Side(style="thin")
-    medium = Side(style="medium")
-    for r in range(4, 4 + data_count):
-        bt = medium if r == 4 + data_count - 1 else thin
-        for c in range(1, 10):
-            cell = ws.cell(r, c)
-            cell.border = Border(
-                left=cell.border.left,
-                right=cell.border.right,
-                top=cell.border.top,
-                bottom=bt,
-            )
+    apply_row(total_row, 9)
+    ws.cell(total_row, 1).value = total_label
+    for column, count in enumerate(report.totals.household_counts, 2):
+        ws.cell(total_row, column).value = count
+    ws.cell(total_row, 7).value = report.totals.person_total
+    ws.cell(total_row, 8).value = ""
+    ws.cell(total_row, 9).value = ""
 
 
 _FONT_NAME = "맑은 고딕"

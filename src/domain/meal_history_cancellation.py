@@ -7,7 +7,7 @@ from datetime import date, timedelta
 from uuid import UUID, uuid5
 
 from .projections import (
-    ENROLLMENT_KIND, STATUS_EVENT_KIND, enrollment_entity_id, enrollments_from_state,
+    ENROLLMENT_KIND, PERSON_KIND, STATUS_EVENT_KIND, enrollment_entity_id, enrollments_from_state,
     roster_from_entity_states, status_event_from_state,
 )
 from .revisions import (
@@ -134,6 +134,23 @@ def _build_cancellation(current, revisions, target, *, actor, recorded_at, revis
                                    ChangeOperation.DELETE if after is None else ChangeOperation.UPDATE,
                                    enrollment_change.after, after))
         retained = () if after is None else enrollments_from_state(enrollment_change.entity_id, after)
+        if meal is Meal.LUNCH:
+            person_change = next((c for c in source.changes
+                if c.entity_kind == PERSON_KIND and c.entity_id == person_id
+                and c.after is not None and "lunch_period" in c.after), None)
+            if person_change is not None:
+                person_state = entities[EntityRef(PERSON_KIND, person_id)]
+                if person_state.get("lunch_period") != person_change.after["lunch_period"]:
+                    raise ValueError("이후 중식 기간이 수정되어 이 시작 기록만 취소할 수 없습니다.")
+                restored_person = dict(person_state)
+                previous = (person_change.before or {}).get("lunch_period")
+                if previous is None:
+                    restored_person.pop("lunch_period", None)
+                else:
+                    restored_person["lunch_period"] = previous
+                if restored_person != person_state:
+                    changes.append(AuditChange(PERSON_KIND, person_id, ChangeOperation.UPDATE,
+                                               person_state, restored_person))
         original = enrollments_from_state(enrollment_change.entity_id, enrollment_change.after)
         for ref, state in entities.items():
             if ref.entity_kind != STATUS_EVENT_KIND or ref.entity_id == target.entity_id:

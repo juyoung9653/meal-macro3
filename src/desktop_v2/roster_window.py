@@ -60,9 +60,9 @@ from src.domain.roster import (
     additional_telephone_field_ordinal,
 )
 from src.domain.delivery_routing import RoutingState
+from src.domain.meal_status_projection import effective_meal_status
 from src.domain.school_calendar import (
     SchoolLunchCalendar,
-    SchoolLunchScheduleMissingError,
 )
 from src.domain.service_adjustments import (
     ServiceAdjustmentSchedule,
@@ -85,6 +85,7 @@ from .column_search import (
     sequence_present_meal,
 )
 from .current_sheet_export import CurrentSheetSnapshot
+from .meal_column_filter import MealColumnValuePicker, decode_meal_filter
 from .date_edit import WheelSafeDateEdit
 from .inactive_roster import InactiveRosterSettings, InactiveThresholdDialog
 from .inspector_history import MealHistoryRow
@@ -745,6 +746,8 @@ class RosterTableModel(QAbstractTableModel):
             _Column("status:dinner", "석식", 112, meal=Meal.DINNER),
             _Column("status:breakfast", "조식", 112, meal=Meal.BREAKFAST),
             _Column("status:lunch", "중식", 112, meal=Meal.LUNCH),
+            _Column("lunch_starts_on", "중식 시작일", 112),
+            _Column("lunch_ends_on", "중식 종료일", 112),
             *(column for column in optional_columns if column.key == "school_type"),
             _Column("school", "학교", 120),
             _Column("grade", "학년", 82),
@@ -872,7 +875,8 @@ class RosterTableModel(QAbstractTableModel):
                 column,
                 self._column_values[column.key],
                 self._compile_sequence_values(self._column_values[column.key])
-                if column.key == "sequence" else None,
+                if column.key == "sequence" else (
+                    decode_meal_filter(self._column_values[column.key]) if column.meal is not None else None),
             )
             for column in self._columns if column.key in self._column_values
         ]
@@ -925,6 +929,12 @@ class RosterTableModel(QAbstractTableModel):
     def _matches_column_values(self, person, column, context, selected, compiled=None):
         if column.key == "sequence":
             return self._matches_sequence_values(context, selected, compiled)
+        if column.meal is not None and compiled is not None:
+            driver = context.meal_drivers[column.meal] or "미지정"
+            status = self._status_for_column(column, context)
+            status = "-" if status == MealStatus.STOPPED.value else status
+            return ((compiled["drivers"] is None or driver in compiled["drivers"])
+                    and (compiled["statuses"] is None or status in compiled["statuses"]))
         return str(self._display_value(person, column, context)) in selected
 
     @staticmethod
@@ -1157,22 +1167,9 @@ class RosterTableModel(QAbstractTableModel):
         day: date,
         meals: tuple[Meal, ...],
     ) -> MealStatus | None:
-        if meal not in meals:
-            return None
-        if meal is Meal.LUNCH:
-            try:
-                if not self._school_calendar.vendor_service_available(
-                    self._roster.person(person_id).profile,
-                    day,
-                ):
-                    return None
-            except SchoolLunchScheduleMissingError:
-                return None
-        history = self._histories.get((person_id, meal))
-        return (
-            MealStatus.DELIVERY
-            if history is None
-            else history.status_on(day)
+        return effective_meal_status(
+            self._roster, self._histories, self._school_calendar,
+            person_id, meal, day, enrolled_meals=meals,
         )
 
     @staticmethod
@@ -1194,6 +1191,8 @@ class RosterTableModel(QAbstractTableModel):
                 context.detail_address or "",
                 context.jurisdiction or "",
                 profile.note or "",
+                person.lunch_period.starts_on if person.lunch_period and person.lunch_period.starts_on else "",
+                person.lunch_period.ends_on if person.lunch_period and person.lunch_period.ends_on else "",
                 *(
                     value
                     for value in profile.custom_values.values()
@@ -1209,6 +1208,10 @@ class RosterTableModel(QAbstractTableModel):
         context: _PersonContext,
     ):
         profile = person.profile
+        if column.key in {"lunch_starts_on", "lunch_ends_on"}:
+            from src.domain.lunch_periods import lunch_date
+            value = lunch_date(person, column.key)
+            return "" if value is None else value.isoformat()
         if column.key == "delivery_settings":
             return self._delivery_setting_text(person)
         if column.meal is not None:
@@ -1890,7 +1893,7 @@ class RosterWindow(QMainWindow):
         self._special_only_filter.toggled.connect(self._special_only_action.setChecked)
         self._special_only_action.toggled.connect(self._special_only_filter.setChecked)
         filters.addWidget(self._special_only_filter)
-        self._add_person_button = QPushButton("행 추가")
+        self._add_person_button = QPushButton("신규 대상자 등록")
         self._add_person_button.setObjectName("quietAction")
         self._add_person_button.setToolTip("현재 식종에 가입한 대상자를 명단에 추가합니다")
         self._add_person_button.clicked.connect(lambda: self.person_add_requested.emit(self._model.meal))
@@ -2255,7 +2258,8 @@ class RosterWindow(QMainWindow):
             values_provider=self._model.column_filter_values,
             selection_provider=self._model.selected_column_values,
             search_provider=self._model.selected_column_search,
-            picker_provider=lambda key: SequenceValuePicker if key == "sequence" else ColumnValuePicker,
+            picker_provider=lambda key: (SequenceValuePicker if key == "sequence" else
+                                         MealColumnValuePicker if key.startswith("status:") else ColumnValuePicker),
             exception_provider=self._model.exception_filter_state,
         )
         self._table.setHorizontalHeader(self._column_search_header)

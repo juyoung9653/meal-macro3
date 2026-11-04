@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from .user_messages import user_error
 
+import json
 from hashlib import sha256
 from pathlib import Path
 from uuid import uuid4
@@ -16,6 +17,10 @@ from PySide6.QtWidgets import QComboBox, QDialog, QDialogButtonBox, QFileDialog,
 from src.core.settings import get_settings
 from src.domain.document_templates import DocumentTemplateProfile
 from src.excel.delivery_templates import validate_delivery_template
+from src.excel.substitute_template_columns import sync_substitute_template
+from src.domain.delivery_substitute import STANDARD_COLUMNS
+from src.services.delivery_template_backup import DeliveryTemplateBackup
+from .substitute_preferences import preferences
 from .document_hub import DocumentAction
 from .theme import application_stylesheet, register_application_fonts
 
@@ -28,6 +33,10 @@ class DeliveryTemplateStore:
         self.legacy_key = f"documents/delivery_templates_v1/{scope}/"
         self.key = self.legacy_key + self.profile.value + "/"
         self.root = Path(root) if root is not None else Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppLocalDataLocation)) / "delivery_templates" / scope / self.profile.value
+
+    @property
+    def substitute_backup(self):
+        return DeliveryTemplateBackup(self.root)
 
     def validation_kind(self, action, meal="석식"):
         if self.profile is DocumentTemplateProfile.HAPPY_LUNCHBOX and action is DocumentAction.DELIVERY_REPORT:
@@ -47,6 +56,8 @@ class DeliveryTemplateStore:
     def save(self, action: DocumentAction, path: Path | None, *, meal="석식") -> None:
         if path is not None:
             validate_delivery_template(path, self.validation_kind(action, meal))
+            if action is DocumentAction.DELIVERY_SUBSTITUTE:
+                self.substitute_backup.remember(path)
         key = self.selection_key(action, meal)
         had_previous = self.settings.contains(key)
         previous = self.settings.value(key)
@@ -72,7 +83,7 @@ class DeliveryTemplateStore:
                     "1~3행 제목, 4행 기사·지역별 본문, 5행 합계 서식을 사용합니다.",
                     "중식 양식과 조식·석식 양식을 각각 수정·저장합니다. 기사·지역·주소·비고 연결은 문서 항목 설정에서 공용으로 정합니다.",
                     "조식·석식은 배송 없는 날에도 마지막 식수를 표시하며 이전 기록이 없으면 빈칸입니다. 가구 집계는 DB의 가구 소속을 따릅니다.",
-                    "글꼴·색·정렬·열 너비·행 높이·인쇄 설정을 수정할 수 있습니다. 기사 구분 테두리와 병합은 자동으로 만듭니다.",
+                    "글꼴·색·테두리·정렬·줄바꿈·열 너비·행 높이·인쇄 설정을 그대로 적용합니다. 내용이 잘려도 자동으로 늘리거나 줄이지 않습니다. 기사별 병합·집계는 자동으로 만듭니다.",
                     "Excel에서 저장하고 닫은 뒤 이 양식 사용을 누르세요."), 1):
                     guide.cell(row, 1, text)
                 guide.column_dimensions["A"].width = 130
@@ -102,7 +113,7 @@ class DeliveryTemplateStore:
                     "1~3행은 제목, 4~8행은 담당별 본문입니다. 6번째 담당부터 8행 서식을 반복합니다.",
                     "9행은 합계 서식입니다. 데이터와 합계 위치는 인원에 맞춰 자동으로 정해집니다.",
                     "시트 이름과 A:I 칼럼, 1~9행 위치를 유지하세요. 데이터 영역 병합·행/열 삽입은 지원하지 않습니다.",
-                    "직접 수정한 양식은 비고의 자동 글꼴/색과 변경 강조색 대신 지정한 서식을 사용합니다.",
+                    "모든 일일식수는 열 너비·행 높이·글꼴·색·테두리·정렬·줄바꿈·인쇄 설정을 그대로 사용합니다. 내용이 잘려도 자동으로 늘리거나 줄이지 않습니다.",
                     "Excel에서 저장하고 닫은 뒤 이 양식 사용을 누르세요. 기존 생성 파일은 바뀌지 않습니다."), 1):
                     guide.cell(row, 1, text)
                 guide.column_dimensions["A"].width = 120
@@ -118,6 +129,8 @@ class DeliveryTemplateDialog(QDialog):
             raise ValueError("배송 문서 양식을 선택해주세요.")
         super().__init__(parent)
         self.action = action
+        self._database_id = database_id
+        self._substitute_columns = STANDARD_COLUMNS
         self.store = store if store is not None else DeliveryTemplateStore(database_id, profile=profile)
         self.profile = self.store.profile
         self.meal = "석식"
@@ -155,7 +168,7 @@ class DeliveryTemplateDialog(QDialog):
             button.clicked.connect(handler)
             layout.addWidget(button)
         if action is DocumentAction.DELIVERY_SUBSTITUTE:
-            limits = QLabel("템플릿의 셀 정렬·줄바꿈·표시 형식·열 너비·행 높이·인쇄 설정 변경은 출력에 반영되지 않습니다. "
+            limits = QLabel("열 너비는 가로·세로 용지 모두 해당 항목의 템플릿 너비로 고정합니다. 새 칼럼은 자동 추가되며 각 칼럼의 너비를 따로 수정할 수 있습니다. 체크한 칼럼은 Excel 템플릿 앞쪽에 배치합니다. 1~5식 예시의 높이·글꼴·크기·색·테두리도 출력에 적용합니다. 양식 구조가 잘못되면 이전 정상 저장본을 사용하고 안내합니다. 셀 정렬·줄바꿈·표시 형식·인쇄 설정은 프로그램에서 정합니다. "
                             "정렬과 용지·페이지 구분은 배송목록을 만들 때 선택하세요.")
             limits.setWordWrap(True)
             layout.addWidget(limits)
@@ -191,12 +204,42 @@ class DeliveryTemplateDialog(QDialog):
         self._saved_path = self.path
         self._refresh()
 
+    def set_substitute_columns(self, columns):
+        self._substitute_columns = tuple(columns)
+
+    def _sync_substitute(self):
+        if self.action is not DocumentAction.DELIVERY_SUBSTITUTE or self.path is None:
+            return
+        resolved = self.store.substitute_backup.resolve(self.path)
+        if resolved.used_previous:
+            self.store.root.mkdir(parents=True, exist_ok=True)
+            self.path = self.store.root / f"배송목록_이전정상본_{uuid4().hex[:8]}.xlsx"
+            self.path.write_bytes(resolved.contents)
+            self._refresh()
+            QMessageBox.warning(self, "배송목록 이전 정상 양식 사용", resolved.warning)
+        store, key = preferences(self._database_id, self.store.settings)
+        selected = tuple(column.key for column in STANDARD_COLUMNS[:6])
+        note2 = next((column.key for column in self._substitute_columns
+                      if column.key.startswith("custom:") and column.label.strip() == "비고2"), "note")
+        selected += (note2,)
+        try:
+            saved = json.loads(store.value(key, "{}"))
+            if isinstance(saved, dict) and isinstance(saved.get("columns"), list):
+                selected = [key for key in saved["columns"] if isinstance(key, str)]
+        except (TypeError, ValueError):
+            pass
+        sync_substitute_template(self.path, self._substitute_columns, selected)
+        self.store.substitute_backup.remember(self.path)
+
     def _open(self):
         try:
             if self.path is None:
                 self.path = self.store.create(self.action, meal=self.meal)
                 self._refresh()
-            validate_delivery_template(self.path, self.store.validation_kind(self.action, self.meal))
+            if self.action is DocumentAction.DELIVERY_SUBSTITUTE:
+                self._sync_substitute()
+            else:
+                validate_delivery_template(self.path, self.store.validation_kind(self.action, self.meal))
             if not self._opener(QUrl.fromLocalFile(str(self.path.resolve()))):
                 raise OSError("Excel을 열지 못했습니다. 표시된 경로의 파일을 직접 열어주세요.")
         except Exception as error:
@@ -220,6 +263,7 @@ class DeliveryTemplateDialog(QDialog):
 
     def accept(self):
         try:
+            self._sync_substitute()
             self.store.save(self.action, self.path, meal=self.meal)
         except Exception as error:
             QMessageBox.critical(self, "양식을 저장하지 못했습니다", user_error(error))

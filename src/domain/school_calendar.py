@@ -382,6 +382,22 @@ def merge_school_lunch_schedule(
     )
 
 
+def merge_school_lunch_import(existing, replacement, explicit_periods):
+    """Keep prior days outside the imported school's actual vacation periods.
+
+    Monthly coverage still supplies school-meal defaults for previously unknown
+    days. Those defaults must not erase another vacation in the same month.
+    """
+    merged = merge_school_lunch_schedule(existing, replacement)
+    if existing is None:
+        return merged
+    days = {item.service_on: item for item in merged.days}
+    for item in existing.days:
+        if not any(period.contains(item.service_on) for period in explicit_periods):
+            days[item.service_on] = item
+    return SchoolLunchSchoolSchedule(merged.school_name, merged.covered_periods, tuple(days.values()))
+
+
 def _merge_periods(
     periods: Iterable[InclusiveDateRange],
 ) -> tuple[InclusiveDateRange, ...]:

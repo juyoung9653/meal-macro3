@@ -138,3 +138,25 @@ def pytest_collection_modifyitems(items):
     for item in items:
         if item.get_closest_marker("excel") and not item.get_closest_marker("slow"):
             raise pytest.UsageError(f"{item.nodeid}: excel tests must also have the slow marker")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_delivery_template_preferences_and_backups(monkeypatch, tmp_path):
+    """Keep synthetic template backups and selections out of operator folders."""
+    import sys
+    module = sys.modules.get("src.desktop_v2.delivery_template")
+    if module is None:
+        return
+    store_type = module.DeliveryTemplateStore
+    # Some tests replace the factory themselves; their explicit store is isolated.
+    if not isinstance(store_type, type):
+        return
+    original = store_type.__init__
+    def initialize(self, database_id, *, profile=module.DocumentTemplateProfile.SCHOOL_MEAL, settings=None, root=None):
+        if settings is None:
+            settings = module.QSettings(str(tmp_path / "delivery-preferences.ini"), module.QSettings.Format.IniFormat)
+        if root is None:
+            from hashlib import sha256
+            root = tmp_path / "delivery-templates" / sha256(database_id.encode()).hexdigest() / module.DocumentTemplateProfile(profile).value
+        original(self, database_id, profile=profile, settings=settings, root=root)
+    monkeypatch.setattr(store_type, "__init__", initialize)

@@ -32,6 +32,7 @@ class DriverHouseholdRow:
     meal_rows: tuple[DriverHouseholdRow, ...] = ()
     # Preserve missing values that are intentionally absent from display text.
     has_empty_sequence: bool = False
+    lunch_periods: tuple[tuple[str, date | None, date | None], ...] = ()
 
 
 def build_driver_household_rows(
@@ -112,6 +113,7 @@ def build_driver_household_rows(
                 meal=meal,
                 sequence=roster.resolve_assignment(person.person_id, meal).sequence,
                 address=address,
+                lunch_period=person.lunch_period,
             )
             meal_parts = meal_groups.setdefault(
                 (*key, meal),
@@ -124,6 +126,7 @@ def build_driver_household_rows(
                 meal=meal,
                 sequence=roster.resolve_assignment(person.person_id, meal).sequence,
                 address=address,
+                lunch_period=person.lunch_period,
             )
 
     rows = tuple(
@@ -174,6 +177,7 @@ class _RowParts:
     contacts: list[str] = field(default_factory=list)
     sequences: list[str] = field(default_factory=list)
     has_empty_sequence: bool = False
+    lunch_periods: dict[UUID, tuple[str, date | None, date | None]] = field(default_factory=dict)
 
     def add(
         self,
@@ -184,9 +188,14 @@ class _RowParts:
         meal: Meal,
         sequence: str | None,
         address: str,
+        lunch_period=None,
     ) -> None:
         if person_id not in self.member_ids:
             self.member_ids.append(person_id)
+        if meal is Meal.LUNCH:
+            self.lunch_periods[person_id] = (name,
+                lunch_period.starts_on if lunch_period else None,
+                lunch_period.ends_on if lunch_period else None)
         if name not in self.member_names:
             self.member_names.append(name)
         for contact in contacts:
@@ -213,7 +222,21 @@ class _RowParts:
             tuple(self.contacts),
             tuple(sorted(self.sequences, key=_sequence_sort_key)),
             has_empty_sequence=self.has_empty_sequence,
+            lunch_periods=tuple(self.lunch_periods.values()),
         )
+
+
+def lunch_period_texts(row: DriverHouseholdRow) -> tuple[str, str]:
+    """Keep differing family-member periods paired by name in both columns."""
+    periods = row.lunch_periods
+    if not periods:
+        return "", ""
+    def text(day):
+        return "" if day is None else day.isoformat()
+    if len({(start, end) for _, start, end in periods}) == 1:
+        return text(periods[0][1]), text(periods[0][2])
+    return tuple("\n".join(f"{item[0]}: {text(item[index]) or '-'}" for item in periods)
+                 for index in (1, 2))
 
 
 def _address(road_address: str | None, detail_address: str | None) -> str:

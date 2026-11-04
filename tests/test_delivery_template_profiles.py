@@ -225,11 +225,12 @@ def test_saved_profile_routes_frozen_template_and_manifest(app, session, prefere
 
 
 @pytest.mark.parametrize("action", [DocumentAction.DELIVERY_REPORT, DocumentAction.DELIVERY_SUBSTITUTE])
-def test_happy_missing_file_blocks_without_school_fallback(app, session, preferences, tmp_path, action):
+def test_happy_missing_file_uses_own_backup_or_blocks_without_school_fallback(app, session, preferences, tmp_path, action):
     set_profile(session, Profile.HAPPY_LUNCHBOX)
     happy = preferences(str(session.credentials.database_id), profile=Profile.HAPPY_LUNCHBOX)
     broken = template_file(tmp_path / "broken", action, Profile.HAPPY_LUNCHBOX)
     happy.save(action, broken)
+    previous = broken.read_bytes()
     broken.unlink()
     # Even a legacy school binding must never satisfy a broken happy request.
     school = preferences(str(session.credentials.database_id))
@@ -238,14 +239,26 @@ def test_happy_missing_file_blocks_without_school_fallback(app, session, prefere
     if action is DocumentAction.DELIVERY_REPORT:
         document = replace(selection.document, period=replace(selection.document.period, action=action), substitute_options=None)
         selection = next_available_document_output(document, tmp_path, selection.mode)
+    received = []
+    def writer(*args, **kwargs):
+        received.append(kwargs["template_path"].read_bytes())
+        book = openpyxl.Workbook()
+        book.active["A1"] = "synthetic"
+        return publish_workbook(book, args[2], password=kwargs["output_password"], overwrite=False)
     def unexpected(*args, **kwargs):
-        raise AssertionError("writer must not run")
+        received.append("unexpected report call")
+        raise AssertionError("report writer must not run")
     messages = Messages()
-    outcome = DocumentGenerationController(session, message_box=messages, report_writer=unexpected, happy_report_writer=unexpected, substitute_writer=unexpected).run(selection)
-    assert not outcome.completed
-    assert messages.errors
-    assert not selection.output_path.exists()
-    assert session.database.document_runs() == ()
+    outcome = DocumentGenerationController(session, message_box=messages, report_writer=unexpected, happy_report_writer=unexpected, substitute_writer=writer).run(selection)
+    if action is DocumentAction.DELIVERY_SUBSTITUTE:
+        assert outcome.completed, messages.errors
+        assert messages.warnings and received == [previous]
+        assert session.database.document_runs()[0].template_manifest["template_used_previous_valid"]
+    else:
+        assert not outcome.completed
+        assert messages.errors and not received
+        assert not selection.output_path.exists()
+        assert session.database.document_runs() == ()
 
 
 def test_actual_settings_menu_opens_scoped_document_template_dialog(app, session, preferences):

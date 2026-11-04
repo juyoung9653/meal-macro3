@@ -178,6 +178,7 @@ def _downgrade_to_schema_two_for_migration_test(path: Path) -> None:
         connection.execute("ALTER TABLE person_projection DROP COLUMN delivery_settings_json")
         connection.execute("DROP TRIGGER schema_migration_no_delete")
         connection.execute("DELETE FROM schema_migration WHERE version >= 3")
+        connection.execute("ALTER TABLE person_projection DROP COLUMN lunch_period_json")
         connection.execute("DROP TABLE user_view_layout")
         connection.execute(
             """
@@ -361,6 +362,7 @@ def test_open_migrates_schema_five_and_preserves_default_household(tmp_path: Pat
         connection.execute("ALTER TABLE person_projection DROP COLUMN delivery_settings_json")
         connection.execute("DROP TRIGGER schema_migration_no_delete")
         connection.execute("DELETE FROM schema_migration WHERE version >= 6")
+        connection.execute("ALTER TABLE person_projection DROP COLUMN lunch_period_json")
         connection.execute("DROP TABLE user_view_layout")
         connection.execute("""CREATE TRIGGER schema_migration_no_delete
             BEFORE DELETE ON schema_migration BEGIN
@@ -372,6 +374,34 @@ def test_open_migrates_schema_five_and_preserves_default_household(tmp_path: Pat
     with EncryptedDatabase.open(path, KEY) as migrated:
         assert migrated.schema_version == CURRENT_SCHEMA_VERSION
         assert migrated.current_roster().households == first.households
+        migrated.check_integrity()
+
+
+def test_open_migrates_schema_ten_without_rewriting_legacy_people(tmp_path: Path):
+    path = tmp_path / "schema-ten.sqlite3"
+    original = _roster_snapshot(REVISION_ID)
+    with EncryptedDatabase.create(path, KEY) as database:
+        database.append_revision(_roster_record(original))
+        states = database.snapshot(REVISION_ID).entities
+    connection = apsw.Connection(str(path))
+    try:
+        connection.pragma("cipher", "chacha20")
+        connection.pragma("hexkey", KEY.hex())
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute("ALTER TABLE person_projection DROP COLUMN lunch_period_json")
+        connection.execute("DROP TRIGGER schema_migration_no_delete")
+        connection.execute("DELETE FROM schema_migration WHERE version = 11")
+        connection.execute("""CREATE TRIGGER schema_migration_no_delete
+            BEFORE DELETE ON schema_migration BEGIN
+            SELECT RAISE(ABORT, 'schema migration rows are immutable'); END""")
+        connection.pragma("user_version", 10)
+        connection.execute("COMMIT")
+    finally:
+        connection.close()
+    with EncryptedDatabase.open(path, KEY) as migrated:
+        assert migrated.schema_version == CURRENT_SCHEMA_VERSION
+        assert migrated.current_roster().persons == original.persons
+        assert migrated.snapshot(REVISION_ID).entities == states
         migrated.check_integrity()
 
 

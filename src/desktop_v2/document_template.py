@@ -80,6 +80,7 @@ class DocumentTemplateDialog(QDialog):
         super().__init__(parent)
         self._current = current
         self._database_id = None
+        self._substitute_columns = None
         self._delivery_dialog_type = delivery_dialog_type
         self._delivery_buttons = {}
         self._delivery_status = {}
@@ -98,6 +99,9 @@ class DocumentTemplateDialog(QDialog):
         self._build_ui()
         self._refresh_delivery_status()
         self._refresh()
+
+    def set_substitute_columns(self, columns):
+        self._substitute_columns = tuple(columns)
 
     def set_preferences_scope(self, database_id: str) -> None:
         self._database_id = database_id
@@ -118,6 +122,9 @@ class DocumentTemplateDialog(QDialog):
     @dialog_workflow
     def _edit_delivery(self, profile, action) -> None:
         dialog = self._delivery_dialog_type(action, self._database_id, self, profile=profile)
+        setter = getattr(dialog, "set_substitute_columns", None)
+        if callable(setter) and self._substitute_columns is not None:
+            setter(self._substitute_columns)
         (yield DialogRequest(dialog))
         self._refresh_delivery_status()
 
@@ -360,6 +367,11 @@ class DocumentTemplateController:
         scope_setter = getattr(dialog, "set_preferences_scope", None)
         if callable(scope_setter):
             scope_setter(str(self._session.credentials.database_id))
+        column_setter = getattr(dialog, "set_substitute_columns", None)
+        if callable(column_setter):
+            from src.services.sqlite_delivery_substitute_service import all_substitute_template_columns
+            model = getattr(parent, "table_model", None)
+            column_setter(all_substitute_template_columns(roster, getattr(model, "columns", None)))
         if (yield DialogRequest(dialog, self._session)) != QDialog.DialogCode.Accepted:
             return DocumentTemplateChangeOutcome(
                 DocumentTemplateChangeStatus.CANCELLED,

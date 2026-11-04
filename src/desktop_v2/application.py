@@ -518,8 +518,48 @@ class DesktopStartupController:
         if isinstance(controller, DeliveryRoutingController):
             options["on_saved"] = lambda outcome: self._apply_routing_outcome(session, window, outcome)
             options["service_day"] = window.table_model.service_day
+            options["on_lunch_export"] = lambda dialog: launch(
+                self._run_driver_lunch_export, session, window, parent=dialog)
         outcome = yield from invoke(controller.run_drivers, parent=window, **options)
         self._apply_routing_outcome(session, window, outcome)
+
+    @dialog_workflow
+    def _run_driver_lunch_export(self, session, window, *, parent=None):
+        from .driver_lunch_export import DriverLunchPeriodDialog, lunch_period_snapshot, suggested_lunch_period
+        from src.services.driver_lunch_periods import build_driver_lunch_periods
+
+        export_parent = parent if parent is not None else window
+        try:
+            roster = session.database.current_roster()
+            if roster is None:
+                raise ValueError("현재 명단이 없습니다.")
+            source = session.database.snapshot(roster.revision_id)
+            calendar = school_lunch_calendar_from_snapshot(source)
+            if not calendar.schedules:
+                self._message_box.information(export_parent, "중식 기간 Excel 내보내기",
+                                              "운영 일정에서 학교 일정을 먼저 불러와 저장해주세요.")
+                return
+            starts_on, ends_on = suggested_lunch_period(calendar, window.table_model.service_day)
+            dialog = DriverLunchPeriodDialog(starts_on, ends_on, export_parent)
+            if (yield DialogRequest(dialog)) != QDialog.DialogCode.Accepted:
+                return
+            starts_on, ends_on = dialog.period()
+
+            def prepare():
+                current = session.database.current_roster()
+                if current is None:
+                    raise ValueError("현재 명단이 없습니다.")
+                snapshot = session.database.snapshot(current.revision_id)
+                rows = build_driver_lunch_periods(snapshot, starts_on, ends_on)
+                return lunch_period_snapshot(rows, starts_on, ends_on)
+
+            snapshot = run_progress_task(prepare, title="중식 기간을 계산하는 중입니다",
+                                        message="기사별 첫 중식 배송일과 마지막 배송일을 확인합니다.",
+                                        parent=export_parent)
+        except Exception as error:
+            self._message_box.critical(export_parent, "중식 기간을 내보내지 못했습니다", user_error(error))
+            return
+        yield from invoke(self._run_current_sheet_export, session, window, snapshot, parent=export_parent)
 
     @dialog_workflow
     def _run_driver_replacement(self, session, window) -> None:

@@ -75,13 +75,14 @@ def test_missing_lunch_schedule_only_zeros_affected_lunch(missing):
 
 
 @pytest.mark.parametrize("prepare", [prepare_delivery_report_data, prepare_physical_delivery_data])
-def test_other_delivery_calculations_remain_strict_about_missing_lunch(prepare):
+def test_other_delivery_calculations_skip_missing_lunch(prepare):
     snapshot, _ = _snapshot(meals=(Meal.DINNER, Meal.BREAKFAST, Meal.LUNCH))
     missing = HistoricalSnapshot(snapshot.revision_id, {
         ref: state for ref, state in snapshot.entities.items() if ref.entity_kind != SCHOOL_LUNCH_SCHEDULE_KIND
     })
-    with pytest.raises(SchoolLunchScheduleMissingError):
-        prepare(missing, date(2026, 8, 1), date(2026, 8, 31), (Meal.DINNER, Meal.BREAKFAST, Meal.LUNCH))
+    result = prepare(missing, date(2026, 8, 1), date(2026, 8, 31), (Meal.DINNER, Meal.BREAKFAST, Meal.LUNCH))
+    assert result.shipments
+    assert all(item.meal is not Meal.LUNCH for item in result.shipments)
 
 
 def test_monthly_statistics_does_not_hide_invalid_calendar_data():

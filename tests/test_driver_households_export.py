@@ -61,10 +61,10 @@ def test_export_freezes_filtered_split_sorted_visual_table(app):
         assert len(captured) == 1
         snapshot = captured[0]
         assert snapshot.sheet_name == "배송순서관리"
-        assert snapshot.headers == ("가구원", "식종", "주소")
+        assert snapshot.headers == ("가구원", "식종", "주소", "중식 시작일", "중식 종료일")
         assert snapshot.rows == (
-            ("둘째", "조식", "성남시"),
-            ("=가구", "석식", "성남시"),
+            ("둘째", "조식", "성남시", "", ""),
+            ("=가구", "석식", "성남시", "", ""),
         )
         assert dialog.export_button.objectName() == "quietAction"
     finally:
@@ -77,7 +77,7 @@ def test_export_allows_header_only_result(app):
     )
     try:
         snapshot = dialog.current_view_snapshot()
-        assert snapshot.headers == ("가구원", "식종", "주소", "연락처")
+        assert snapshot.headers == ("가구원", "식종", "주소", "연락처", "중식 시작일", "중식 종료일")
         assert snapshot.rows == ()
     finally:
         dialog.close()

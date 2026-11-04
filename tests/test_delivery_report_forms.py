@@ -82,7 +82,7 @@ def test_selected_forms_count_only_included_people_and_households():
     assert selected.reports[0].rows[0].memo == "기본 1가구·1식\n도시락 1가구·1식"
     assert selected.calculation_manifest["selected_delivery_forms"] == (None, "도시락")
     assert selected.calculation_manifest["target_entitlement_count"] == 2
-    assert selected.calculation_manifest["calculation_contract_version"] == 6
+    assert selected.calculation_manifest["calculation_contract_version"] == 7
     assert all_forms.calculation_manifest["selected_delivery_forms"] is None
 
 
@@ -140,10 +140,12 @@ def test_excluded_lunch_form_does_not_require_its_missing_school_calendar():
     )
     source = HistoricalSnapshot(snapshot.revision_id, roster_entity_states(roster))
 
-    with pytest.raises(ValueError, match="중식 일정"):
-        prepare_delivery_report_data(source, DAY, DAY, (Meal.LUNCH,))
+    unfiltered = prepare_delivery_report_data(source, DAY, DAY, (Meal.LUNCH,))
+    assert unfiltered.shipments == ()
+    assert unfiltered.calculation_manifest["missing_lunch_schedules"]
     selected = prepare_delivery_report_data(
         source, DAY, DAY, (Meal.LUNCH,), delivery_forms=(None,),
     )
     assert selected.reports == ()
     assert selected.shipments == ()
+    assert selected.calculation_manifest["missing_lunch_schedules"] == ()

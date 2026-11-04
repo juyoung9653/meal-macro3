@@ -341,7 +341,8 @@ def person_from_state(person_id: UUID, state: Mapping[str, JsonValue]) -> Person
         "note",
         "custom_values",
     }
-    _require_exact_keys(state, profile_keys | ({"delivery_settings"} if "delivery_settings" in state else set()), PERSON_KIND)
+    _require_exact_keys(state, profile_keys | ({"delivery_settings"} if "delivery_settings" in state else set())
+                        | ({"lunch_period"} if "lunch_period" in state else set()), PERSON_KIND)
     custom_state = state["custom_values"]
     if not isinstance(custom_state, Mapping):
         raise TypeError("custom_values는 JSON object여야 합니다.")
@@ -349,6 +350,13 @@ def person_from_state(person_id: UUID, state: Mapping[str, JsonValue]) -> Person
         _uuid_value(key, "사용자 정의 필드 ID"): _custom_value_from_state(value)
         for key, value in custom_state.items()
     }
+    lunch_period = None
+    if "lunch_period" in state:
+        raw_period = state["lunch_period"]
+        if not isinstance(raw_period, Mapping) or set(raw_period) != {"starts_on", "ends_on"}:
+            raise ValueError("저장된 중식 기간 형식이 올바르지 않습니다.")
+        lunch_period = InclusiveDateRange(_date_value(raw_period["starts_on"], "중식 시작일"),
+                                         _date_value(raw_period["ends_on"], "중식 종료일"))
     person = Person(
         person_id,
         PersonProfile(
@@ -378,6 +386,7 @@ def person_from_state(person_id: UUID, state: Mapping[str, JsonValue]) -> Person
         None if "delivery_settings" not in state else household_from_state(
             person_id, {"delivery_settings": state["delivery_settings"]}
         ).delivery_settings,
+        lunch_period,
     )
     _require_canonical(state, _person_state(person), PERSON_KIND)
     return person
@@ -647,6 +656,9 @@ def _person_state(person: Person) -> Mapping[str, JsonValue]:
     profile = person.profile
     return {
         "name": profile.name,
+        **({"lunch_period": {"starts_on": _date_text(person.lunch_period.starts_on),
+                            "ends_on": _date_text(person.lunch_period.ends_on)}}
+           if person.lunch_period is not None else {}),
         "birth_date": _date_text(profile.birth_date),
         "school_type": profile.school_type,
         "school_name": profile.school_name,

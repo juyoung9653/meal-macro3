@@ -1203,6 +1203,18 @@ def application_stylesheet() -> str:
     QLineEdit:focus, QComboBox:focus, QDateEdit:focus, QPlainTextEdit:focus, QSpinBox:focus {{
         border: 2px solid {FOCUS};
     }}
+    /* Windows 11's native side-by-side buttons overlap the styled edit field.
+       Define both subcontrols so drawing, hit testing and text layout agree. */
+    QAbstractSpinBox::up-button {{
+        subcontrol-origin: border;
+        subcontrol-position: top right;
+        width: 24px;
+    }}
+    QAbstractSpinBox::down-button {{
+        subcontrol-origin: border;
+        subcontrol-position: bottom right;
+        width: 24px;
+    }}
     QSpinBox#unitPriceInput {{
         color: {INK};
         font-family: "Bahnschrift SemiCondensed", "Malgun Gothic";

@@ -30,6 +30,9 @@ def history(tmp_path):
     backups = tmp_path / "backups"
     backups.mkdir()
     with DatabaseSession.create(tmp_path / "source.sqlite3", "source-password", backup_directory=backups) as session:
+        if session.database.schema_version < 11:
+            # Temporary support for seeding legacy-only states with the current writer.
+            session.database._require_connection().execute("ALTER TABLE person_projection ADD COLUMN lunch_period_json TEXT")
         first, second = uuid4(), uuid4()
         person, household, setting = uuid4(), uuid4(), uuid4()
         before = RosterSnapshot(first,
@@ -198,6 +201,7 @@ def test_real_schema_seven_upgrades_then_restores_status_provenance(tmp_path, mo
         assert session.database.schema_version == 7
         original_events = session.database.status_events()
         source = session.path
+        session.database._require_connection().execute("ALTER TABLE person_projection DROP COLUMN lunch_period_json")
         generator.close()
     with DatabaseSession.open(source, "source-password") as session:
         assert session.database.schema_version == MIGRATIONS[-1].version

@@ -136,6 +136,7 @@ def build_import_revision(
         result, lunch_events = _apply_vacation_lunch(
             current_roster, result, preview, plan, revision_id,
             recorded_at, tuple(lunch_status_events), lunch_value_choices,
+            household_grouping_snapshot=household_grouping_snapshot,
         )
     elif current_roster is not None:
         from .values import apply_import_values
@@ -391,6 +392,16 @@ def _apply_vacation_lunch(
     ) for status, ids in (
         (MealStatus.DELIVERY, present_ids), (MealStatus.STOPPED, stopped_ids),
     ) for person_id in sorted(ids, key=str))
+    from src.domain.lunch_periods import set_lunch_periods, suggested_person_lunch_period
+    from src.domain.school_calendar import SchoolLunchCalendar, school_lunch_calendar_from_snapshot
+    calendar = (school_lunch_calendar_from_snapshot(household_grouping_snapshot)
+                if household_grouping_snapshot is not None else SchoolLunchCalendar())
+    updates = {pid: suggested_person_lunch_period(snapshot.person(pid).profile, calendar, plan.effective_on)
+               for pid in present_ids}
+    previous_lunch_ids = {item.person_id for item in current.enrollments if item.meal is Meal.LUNCH}
+    previous_lunch_ids.update(person.person_id for person in current.persons if person.lunch_period is not None)
+    updates.update({pid: InclusiveDateRange() for pid in previous_lunch_ids - present_ids})
+    snapshot = set_lunch_periods(snapshot, updates, replace_from={pid: plan.effective_on for pid in updates})
     return ReconciliationResult(
         snapshot, result.person_ids_by_observation,
         result.ignored_observation_ids, result.decision_manifest,

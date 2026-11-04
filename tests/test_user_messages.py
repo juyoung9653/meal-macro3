@@ -96,3 +96,86 @@ def test_quoted_internal_identifiers_do_not_escape_translation():
     message = user_error(ValueError("알 수 없는 칼럼: 'custom_internal_key'"))
     assert "custom_internal_key" not in message
     assert "선택한 항목" in message
+
+
+@pytest.mark.parametrize("raw", [
+    "이력이 있는 entity ID를 다시 insert할 수 없습니다: school-lunch.schedule/9e8dbad4-1ba4-4537-a41c-7412717968e6",
+    "entity ID가 다시 insert되었습니다: EntityRef(entity_kind='school-lunch.schedule')",
+    "이미 사용한 이사·배정 기록 ID입니다.",
+    "기사 표시 순서 기록 ID가 올바르지 않습니다.",
+    "상태 사건 ID는 중복될 수 없습니다.",
+    "typed observation에는 원본 파일의 basename만 저장합니다.",
+    "import batch의 revision source가 import가 아닙니다.",
+    "봉인되지 않은 revision입니다: 9e8dbad4-1ba4-4537-a41c-7412717968e6",
+    "household ID factory가 중복 UUID를 반환했습니다.",
+    "학교-lunch.일정/해당 항목",
+])
+def test_internal_contracts_are_explained_instead_of_word_translation(raw):
+    message = user_error(ValueError(raw))
+    assert not re.search(r"school-lunch|EntityRef|UUID|식별 정보|해당 항목|봉인|정리된|\.일정", message)
+    assert "해주세요" in message
+    assert "담당자" in message
+
+
+def test_stale_edit_and_integrity_failure_have_different_next_steps():
+    from src.storage.encrypted_database import RevisionConflictError, DatabaseIntegrityError
+    stale = user_error(RevisionConflictError("audit before가 현재 entity 상태와 다릅니다: roster.person/id"))
+    corrupt = user_error(DatabaseIntegrityError("audit before chain이 일치하지 않습니다"))
+    assert "최신 내용" in stale and "다시 입력" in stale
+    assert "변경 이력" in corrupt and "정상 백업" in corrupt
+    assert stale != corrupt
+
+
+def test_school_missing_schedule_keeps_school_and_date_with_next_step():
+    message = user_error("예시초의 2027.07.22 중식 일정이 없습니다.")
+    assert "예시초" in message and "2027.07.22" in message
+    assert "운영 일정" in message and "불러온 뒤" in message
+
+
+def test_all_literal_internal_error_templates_use_actionable_messages():
+    """New domain/storage assertions must not leak through word translation."""
+    import ast
+    root = Path(__file__).parents[1] / "src"
+    tokens = re.compile(r"(?<![A-Za-z_])(?:entity|snapshot|projection|UUID|ID|typed|factory)(?![A-Za-z_])")
+    for path in root.rglob("*.py"):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8-sig"))):
+            if not isinstance(node, ast.Raise) or not isinstance(node.exc, ast.Call) or not node.exc.args:
+                continue
+            arg = node.exc.args[0]
+            if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                raw = arg.value
+            elif isinstance(arg, ast.JoinedStr):
+                raw = "".join(v.value if isinstance(v, ast.Constant) else "합성값" for v in arg.values)
+            else:
+                continue
+            if not tokens.search(raw):
+                continue
+            message = user_error(ValueError(raw))
+            assert not re.search(r"식별 정보|해당 항목|정리된|EntityRef|UUID|\btyped\b", message), (path, node.lineno, message)
+            assert "해주세요" in message, (path, node.lineno, message)
+
+
+def test_exception_aliases_cannot_bypass_ui_error_formatter():
+    import ast
+    root = Path(__file__).parents[1] / "src" / "desktop_v2"
+    def exposes(node, alias):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in {"user_error", "_friendly_error", "type"}:
+            return False
+        if isinstance(node, ast.Name) and node.id == alias:
+            return True
+        return any(exposes(child, alias) for child in ast.iter_child_nodes(node))
+    for path in root.glob("*.py"):
+        if path.name == "user_messages.py":
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8-sig"))
+        for handler in ast.walk(tree):
+            if not isinstance(handler, ast.ExceptHandler) or not handler.name:
+                continue
+            for call in ast.walk(handler):
+                if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Attribute):
+                    continue
+                if call.func.attr in {"critical", "warning", "setText", "_show_error"}:
+                    # Logger calls are diagnostics, not user-facing dialogs.
+                    if isinstance(call.func.value, ast.Name) and "log" in call.func.value.id.lower():
+                        continue
+                    assert not any(exposes(arg, handler.name) for arg in call.args), (path, call.lineno)

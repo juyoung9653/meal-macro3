@@ -107,13 +107,14 @@ def test_variant_selection_is_independent_and_wrong_variant_is_rejected(tmp_path
     validate_delivery_template(lunch, "happy_report_lunch")
 
 
-def test_unassigned_driver_goes_to_unclassified_and_no_lunch_schedule_is_still_an_error():
+def test_unassigned_driver_goes_to_unclassified_and_missing_lunch_is_excluded():
     snapshot, _ = _snapshot(include_driver=False, meals=(Meal.DINNER, Meal.LUNCH))
     result = prepare_happy_report_data(snapshot, date(2026, 8, 17), date(2026, 8, 17), (Meal.DINNER,))
     assert result.reports[0].rows[0].route.driver == "미분류"
     assert result.reports[0].rows[0].route.region == "미분류"
-    with pytest.raises(ValueError):
-        prepare_happy_report_data(snapshot, date(2026, 10, 5), date(2026, 10, 5), (Meal.LUNCH,))
+    missing = prepare_happy_report_data(snapshot, date(2026, 10, 5), date(2026, 10, 5), (Meal.LUNCH,))
+    assert not missing.shipments
+    assert missing.calculation_manifest["missing_lunch_schedules"]
 
 
 def test_mapping_dialog_exposes_shared_daily_scope_for_both_profiles():

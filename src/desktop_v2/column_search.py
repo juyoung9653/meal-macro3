@@ -513,8 +513,9 @@ class ColumnSearchHeader(QHeaderView):
             exceptions.setChecked(exception_state)
             picker.layout().insertWidget(1, exceptions)
             # Reset must clear this condition along with search/value conditions.
-            picker.reset.clicked.disconnect()
-            picker.reset.clicked.connect(lambda: self._apply_filter(key, "", None, menu, False))
+            if hasattr(picker, "reset"):
+                picker.reset.clicked.disconnect()
+                picker.reset.clicked.connect(lambda: self._apply_filter(key, "", None, menu, False))
         action = QWidgetAction(menu)
         action.setDefaultWidget(picker)
         menu.addAction(action)
@@ -552,12 +553,20 @@ class ColumnSearchHeader(QHeaderView):
         if screen is None:
             return
         available = screen.availableGeometry()
-        widget_hint = picker.sizeHint()
+        # QWidget's layout hint can stay wider than its fixed width. Size the
+        # surrounding menu from the actual constraints, including wrapped text.
+        widget_hint = picker.sizeHint().boundedTo(picker.maximumSize()).expandedTo(picker.minimumSize())
+        if picker.hasHeightForWidth():
+            height = picker.heightForWidth(widget_hint.width())
+            if height >= 0:
+                widget_hint.setHeight(max(picker.minimumHeight(), min(height, picker.maximumHeight())))
         margins = menu.contentsMargins()
         panel = menu.style().pixelMetric(QStyle.PixelMetric.PM_MenuPanelWidth, None, menu)
+        horizontal = menu.style().pixelMetric(QStyle.PixelMetric.PM_MenuHMargin, None, menu)
+        vertical = menu.style().pixelMetric(QStyle.PixelMetric.PM_MenuVMargin, None, menu)
         hint = QSize(
-            widget_hint.width() + margins.left() + margins.right() + panel * 2,
-            widget_hint.height() + margins.top() + margins.bottom() + panel * 2,
+            widget_hint.width() + margins.left() + margins.right() + (panel + horizontal) * 2,
+            widget_hint.height() + margins.top() + margins.bottom() + (panel + vertical) * 2,
         )
         size = QSize(min(hint.width(), available.width()), min(hint.height(), available.height()))
         menu.resize(size)

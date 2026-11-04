@@ -125,11 +125,11 @@ def test_dialog_reopens_stored_segments_and_marks_only_actual_changes(
     dialog = SchoolCalendarEditDialog(SchoolLunchCalendar((_schedule(),)))
     try:
         qapp.processEvents()
-        assert dialog._ledger.rowCount() == 3
+        assert dialog._ledger.rowCount() == 1
         assert not dialog._save.isEnabled()
         assert "분당초" in dialog._school_title.text()
 
-        dialog._ledger.selectRow(1)
+        dialog._ledger.selectRow(0)
         qapp.processEvents()
         dialog._starts_on.setDate(QDate(2026, 8, 20))
         dialog._ends_on.setDate(QDate(2026, 8, 26))
@@ -140,7 +140,7 @@ def test_dialog_reopens_stored_segments_and_marks_only_actual_changes(
         assert dialog.changed_weekday_count() == 2
         assert dialog._save.isEnabled()
         assert any(
-            dialog._ledger.item(row, 6).text() == "수정됨"
+            dialog._ledger.item(row, 4).text() == "수정됨"
             for row in range(dialog._ledger.rowCount())
         )
         dialog._save.click()
@@ -150,6 +150,23 @@ def test_dialog_reopens_stored_segments_and_marks_only_actual_changes(
         assert updated.rule_on(date(2026, 8, 26)).mark is SchoolLunchMark.VENDOR_REQUIRED
     finally:
         dialog.close()
+
+
+def test_empty_center_period_stays_hidden_and_can_be_added(qapp):
+    from dataclasses import replace
+    original = _schedule()
+    empty = replace(original, days=tuple(replace(item, rule=LunchDayRule(SchoolLunchMark.SCHOOL_PROVIDES)) for item in original.days))
+    dialog = SchoolCalendarEditDialog(SchoolLunchCalendar((empty,)))
+    assert dialog._ledger.rowCount() == 0
+    dialog._new_period.click()
+    dialog._starts_on.setDate(QDate(2026, 8, 20))
+    dialog._ends_on.setDate(QDate(2026, 8, 21))
+    dialog._apply.click()
+    assert dialog._ledger.rowCount() == 1
+    assert dialog._ledger.item(0, 0).text() == "2026.08.20"
+    assert dialog._ledger.item(0, 1).text() == "2026.08.21"
+    assert dialog._current_schedule().rule_on(date(2026, 8, 19)).mark is SchoolLunchMark.SCHOOL_PROVIDES
+    dialog.close()
 
 
 def test_controller_commits_one_ui_revision_and_backup_restores_it(

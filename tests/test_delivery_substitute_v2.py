@@ -267,7 +267,7 @@ def test_failure_rolls_back_output_and_run_and_backup_only_failure_succeeds(app,
     assert not selection.output_path.exists()
     assert session.database.document_runs() == ()
     monkeypatch.setattr(session, "append_document_run", original)
-    monkeypatch.setattr(session, "try_backup_now", lambda: AutomaticBackupResult(None, OSError("backup fail")))
+    monkeypatch.setattr(session, "try_backup_now", lambda: AutomaticBackupResult(None, OSError("backup fail"), notify_failure=True))
     outcome = DocumentGenerationController(session, message_box=messages).run(selection)
     assert outcome.completed and messages.warnings
     assert len(session.database.document_runs()) == 1
@@ -309,11 +309,15 @@ def test_schema_eight_upgrade_preserves_old_runs_and_accepts_substitute(tmp_path
         old.setattr(storage, "MIGRATIONS", MIGRATIONS[:8])
         old.setattr(storage, "CURRENT_SCHEMA_VERSION", 8)
         with EncryptedDatabase.create(path, key) as database:
+            # Seed legacy states with today's writer, then remove the temporary
+            # column so the on-disk fixture is an actual schema-eight database.
+            database._require_connection().execute("ALTER TABLE person_projection ADD COLUMN lunch_period_json TEXT")
             database.append_revision(record)
             summary = database.revision_summaries()[0]
             old_run = DocumentRun(uuid4(), DocumentKind.INVOICE, snapshot.revision_id, summary.display_code,
                 DAY, DAY, datetime(2026, 8, 28, tzinfo=UTC), ACTOR, {"version": 1}, {"version": 1}, "old.xlsx", "b" * 64, 80)
             database.append_document_run(old_run)
+            database._require_connection().execute("ALTER TABLE person_projection DROP COLUMN lunch_period_json")
     with EncryptedDatabase.open(path, key) as database:
         assert database.schema_version == CURRENT_SCHEMA_VERSION
         assert database.document_runs() == (old_run,)

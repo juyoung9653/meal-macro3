@@ -83,11 +83,19 @@ def test_no_visible_columns_blocks_output_and_moving_skips_hidden(app, session, 
     dialog.reject()
 
 
-@pytest.mark.parametrize("value,expected", [(None, "표준 비고"), (" \n ", "표준 비고"), (0, "0")])
-def test_direct_fallback_uses_raw_source_and_column_name(value, expected):
+@pytest.mark.parametrize("value,note,expected", [
+    ("사용자 비고", "표준 비고", "표준 비고"),
+    (None, "표준 비고", "표준 비고"),
+    ("사용자 비고", None, "사용자 비고"),
+    ("사용자 비고", " \n ", "사용자 비고"),
+    (None, "", ""),
+    (0, "", "0"),
+    (0, "표준 비고", "표준 비고"),
+])
+def test_side_selection_has_priority_and_uses_raw_source(value, note, expected):
     snapshot, roster = source(sizes=(1,))
     roster = replace(roster, persons=tuple(replace(person, profile=replace(person.profile,
-        custom_values={CUSTOM: value})) for person in roster.persons),
+        note=note, custom_values={CUSTOM: value})) for person in roster.persons),
         custom_fields=tuple(replace(field, field_type=CustomFieldType.NUMBER if type(value) is int else CustomFieldType.TEXT)
                             for field in roster.custom_fields))
     snapshot = HistoricalSnapshot(snapshot.revision_id, roster_entity_states(roster))
@@ -97,8 +105,23 @@ def test_direct_fallback_uses_raw_source_and_column_name(value, expected):
     data = prepare_delivery_substitute_data(snapshot, DAY, Meal.BREAKFAST, columns=columns,
                                             fallbacks={custom_key: "note", "note": "road_address"})
     assert data.rows[0].values[custom_key] == expected
-    assert data.rows[0].values["note"] == "표준 비고"
+    assert data.rows[0].values["note"] == "테스트로 1"
     assert [column.label for column in data.columns] == ["비고2", "비고", "내 주소"]
+
+
+
+@pytest.mark.parametrize("side_selection,expected", [(True, "0"), (False, "표준 비고")])
+def test_numeric_zero_priority_and_no_side_selection(side_selection, expected):
+    snapshot, roster = source(sizes=(1,))
+    roster = replace(roster,
+        persons=tuple(replace(person, profile=replace(person.profile,
+            custom_values={CUSTOM: 0})) for person in roster.persons),
+        custom_fields=tuple(replace(field, field_type=CustomFieldType.NUMBER)
+                            for field in roster.custom_fields))
+    snapshot = HistoricalSnapshot(snapshot.revision_id, roster_entity_states(roster))
+    data = prepare_delivery_substitute_data(snapshot, DAY, Meal.BREAKFAST,
+        fallbacks={"note": f"custom:{CUSTOM}"} if side_selection else {})
+    assert data.rows[0].values["note"] == expected
 
 
 def test_historical_source_omits_columns_created_later():
@@ -115,11 +138,11 @@ def test_historical_source_omits_columns_created_later():
 def test_new_selection_ignores_old_primary_mapping_and_generates_named_fallback_column(app, session, tmp_path):
     selection = selection_for(session, tmp_path)
     snapshot = session.database.snapshot(selection.document.period.source.revision_id)
-    _, revision = mapped(snapshot, session.database.current_roster(), {"조식:telephone": "성명"})
+    _, revision = mapped(snapshot, session.database.current_roster(), {"조식:mobile_phone": "성명"})
     session.append_revision(revision.record)
-    options = replace(selection.document.substitute_options, columns=("telephone",),
-                      fallbacks={"telephone": "detail_address"},
-                      column_labels={"telephone": "연락처", "detail_address": "상세주소"})
+    options = replace(selection.document.substitute_options, columns=("mobile_phone",),
+                      fallbacks={"mobile_phone": "detail_address"},
+                      column_labels={"mobile_phone": "연락처", "detail_address": "상세주소"})
     selection = replace(selection, document=replace(selection.document, substitute_options=options))
     def writer(data, opts, path, **kwargs):
         workbook, _, _ = _build_sheet(data, opts)
@@ -130,7 +153,7 @@ def test_new_selection_ignores_old_primary_mapping_and_generates_named_fallback_
     assert result.completed, messages.errors
     run = session.database.document_runs()[0]
     assert run.template_manifest["column_mapping_setting"] is None
-    assert run.template_manifest["column_fallbacks"] == {"telephone": "detail_address"}
+    assert run.template_manifest["column_fallbacks"] == {"mobile_phone": "detail_address"}
     with selection.output_path.open("rb") as stream:
         encrypted = msoffcrypto.OfficeFile(stream)
         encrypted.load_key(password="sheet-password")

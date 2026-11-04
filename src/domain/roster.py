@@ -195,11 +195,19 @@ class Person:
     person_id: UUID
     profile: PersonProfile
     delivery_settings: tuple[HouseholdDeliverySetting, ...] | None = None
+    # Current lunch registration shown in the roster. Earlier registrations
+    # remain in enrollments; None preserves pre-period-field databases.
+    lunch_period: InclusiveDateRange | None = None
 
     def __post_init__(self) -> None:
         _validate_uuid(self.person_id, "사람 ID")
         if not isinstance(self.profile, PersonProfile):
             raise TypeError("profile은 PersonProfile이어야 합니다.")
+        if self.lunch_period is not None:
+            if not isinstance(self.lunch_period, InclusiveDateRange):
+                raise TypeError("중식 기간은 날짜 범위여야 합니다.")
+            if self.lunch_period.starts_on is None and self.lunch_period.ends_on is not None:
+                raise ValueError("중식 종료일을 입력하려면 중식 시작일이 필요합니다.")
         if self.delivery_settings is not None:
             settings = tuple(self.delivery_settings)
             if any(not isinstance(item, HouseholdDeliverySetting) for item in settings):

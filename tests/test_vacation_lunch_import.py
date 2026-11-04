@@ -111,7 +111,9 @@ def _build(preview: WorkbookImportPreview, *, events: tuple[StatusEvent, ...] = 
 def test_vacation_lunch_retains_present_restores_stopped_and_stops_only_omitted_lunch():
     prepared = _build(_preview("유지", "재개"), events=(_stopped(RESTORE),))
     snapshot = prepared.result.snapshot
-    assert snapshot.persons == _roster().persons
+    assert tuple(person.profile for person in snapshot.persons) == tuple(person.profile for person in _roster().persons)
+    assert snapshot.person(KEEP).lunch_period == InclusiveDateRange(START)
+    assert snapshot.person(OMIT).lunch_period == InclusiveDateRange()
     assert Meal.BREAKFAST in snapshot.meals_for(OMIT, on=START)
     assert prepared.record.metadata.decisions["vacation_lunch"] == {
         "present": (str(KEEP), str(RESTORE)),

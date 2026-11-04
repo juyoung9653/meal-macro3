@@ -61,7 +61,12 @@ def test_checkbox_only_on_shared_apply_cancel_reset(app, tmp_path, key):
     assert not window._column_filter_strip.isHidden()
     picker = picker_for(window,key)
     assert picker.findChild(QCheckBox).isChecked()
-    picker.reset.click()
+    if key == "status:dinner":
+        assert not hasattr(picker, "reset")
+        picker.findChild(QCheckBox).setChecked(False)
+        picker.apply.click()
+    else:
+        picker.reset.click()
     assert ids(model) == {p.person_id for p in r.persons}
     assert model.exception_filter_state(key) is False
     assert not window._column_search_header.buttons[key].property("filterActive")

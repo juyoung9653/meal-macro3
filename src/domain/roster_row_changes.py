@@ -43,6 +43,7 @@ def build_roster_row_revision(
     status_event_ids: dict[Meal, UUID] | None = None,
     delete_person_id: UUID | None = None,
     intake_channel: IntakeChannel | None = None,
+    school_calendar=None,
 ) -> PreparedRosterRowRevision:
     """Apply exactly one person insertion or deletion to the current roster."""
     if not isinstance(current_roster, RosterSnapshot):
@@ -148,6 +149,12 @@ def build_roster_row_revision(
         custom_fields=current_roster.custom_fields,
         delivery_defaults=current_roster.delivery_defaults,
     )
+    if add_person is not None and Meal.LUNCH in enroll_meals:
+        from .lunch_periods import set_lunch_periods, suggested_person_lunch_period
+        start = starts_by_meal[Meal.LUNCH]
+        period = suggested_person_lunch_period(add_person.profile, school_calendar, start, exact_start=True)
+        snapshot = set_lunch_periods(snapshot, {add_person.person_id: period},
+                                    replace_from={add_person.person_id: start})
     changes = list(roster_audit_changes(current_roster, snapshot))
     if add_person is not None:
         if selected_driver_ids:

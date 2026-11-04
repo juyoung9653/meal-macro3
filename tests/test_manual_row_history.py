@@ -1,4 +1,4 @@
-"""Manual row creation exposes its household and delivery start independently."""
+"""Current households ignore recorded bounds; meal starts keep their own dates."""
 
 import os
 from dataclasses import replace
@@ -186,16 +186,15 @@ def test_legacy_household_before_saved_start_keeps_individual_meal_dates(tmp_pat
             meals = text.split("   ", 1)[1]
             assert (set() if meals == "-" else set(meals.split(" · "))) == expected_meals
             assert database.current_roster() == saved
-            assert (saved.household_for(person.person_id, on=day) is not None) == (day >= last)
+            assert saved.household_for(person.person_id, on=day) == household
+            assert set(saved.memberships) == set(roster.memberships)
+            assert set(saved.enrollments) == set(roster.enrollments)
         finally:
             window.close()
 
 
-@pytest.mark.parametrize("number,expected_group", [
-    (9, "first"), (10, "first"), (15, "first"),
-    (16, None), (19, None), (20, "second"), (25, "second"), (26, None),
-])
-def test_inspector_household_context_preserves_transfers_gaps_and_ends(number, expected_group):
+@pytest.mark.parametrize("number", [9, 10, 15, 16, 19, 20, 25, 26])
+def test_inspector_uses_current_household_across_recorded_transfers_gaps_and_ends(number):
     from src.desktop_v2.roster_window import _inspector_household_members
     from src.domain.roster import Household, HouseholdMembership
 
@@ -210,12 +209,17 @@ def test_inspector_household_context_preserves_transfers_gaps_and_ends(number, e
             HouseholdMembership(new_peer.person_id, second.household_id),
         ),
     )
-    expected = () if expected_group is None else (person, old_peer if expected_group == "first" else new_peer)
-    assert _inspector_household_members(roster, person.person_id, date(2026, 10, number)) == expected
+    recorded_memberships = roster.memberships
+    day = date(2026, 10, number)
+    assert _inspector_household_members(roster, person.person_id, day) == (person, new_peer)
+    assert _inspector_household_members(roster, old_peer.person_id, day) == (old_peer,)
+    assert roster.memberships == recorded_memberships
 
 
-def test_inspector_does_not_infer_household_without_membership():
+def test_inspector_shows_stable_single_person_household_without_recorded_membership():
     from src.desktop_v2.roster_window import _inspector_household_members
     person = Person(uuid4(), PersonProfile("가구 기록 없음"))
     roster = RosterSnapshot(uuid4(), persons=(person,))
-    assert _inspector_household_members(roster, person.person_id, BEFORE) == ()
+    assert _inspector_household_members(roster, person.person_id, BEFORE) == (person,)
+    assert roster.household_for(person.person_id, on=BEFORE) == roster.household_for(person.person_id, on=START)
+    assert roster.memberships == ()

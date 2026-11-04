@@ -247,8 +247,9 @@ class DialogWorkflow:
             self.cancel()
             owner = self.owner
             if owner is not None and isValid(owner):
+                from .user_messages import user_error
                 QMessageBox.critical(owner, "창 작업을 완료하지 못했습니다",
-                    "작업 중 오류가 발생했습니다. 현재 명단을 확인한 뒤 창을 다시 열어주세요.")
+                    user_error(error))
         finally:
             self._advancing = False
             if self.closed:

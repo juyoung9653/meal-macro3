@@ -1,7 +1,7 @@
-"""School calendar Excel adapter and reviewed revision builder.
+"""School calendar column mapping, configurable provided text, and revisions.
 
-The adapter recognizes columns and explicit O/X facts.  Free-form notes remain
-review candidates until the operator explicitly applies or ignores each one.
+Notes retain their original text. The direct GUI import records IGNORE decisions;
+explicit note decisions remain supported for legacy review callers.
 """
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ from src.domain.school_calendar import (
     SchoolLunchCalendar,
     SchoolLunchDay,
     SchoolLunchSchoolSchedule,
-    merge_school_lunch_schedule,
+    merge_school_lunch_import,
     normalize_grade,
     normalize_school_name,
     school_lunch_calendar_from_snapshot,
@@ -59,7 +59,7 @@ from .workbook import (
 )
 
 
-SCHOOL_CALENDAR_IMPORT_POLICY_VERSION = 1
+SCHOOL_CALENDAR_IMPORT_POLICY_VERSION = 3
 _NOTE_NAMESPACE = UUID("3616b7ab-b68d-4fc3-96ac-43efb8bde014")
 _MAX_DATA_ROWS = 10_000
 _BLANK_ROW_STOP = 100
@@ -85,6 +85,10 @@ class SchoolCalendarColumnMapping:
     ends_on_column: int
     ends_on_mark_column: int
     note_column: int | None = None
+    # None preserves legacy O/X parsing for older callers. GUI imports always
+    # pass the user's explicit strings, including the default "O".
+    starts_on_provided_text: str | None = None
+    ends_on_provided_text: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.sheet_name, str) or not self.sheet_name.strip():
@@ -93,10 +97,10 @@ class SchoolCalendarColumnMapping:
             (self.header_row, "헤더 행"),
             (self.data_start_row, "데이터 시작 행"),
             (self.school_column, "학교명 열"),
-            (self.starts_on_column, "시작일 열"),
-            (self.starts_on_mark_column, "시작일 O/X 열"),
-            (self.ends_on_column, "종료일 열"),
-            (self.ends_on_mark_column, "종료일 O/X 열"),
+            (self.starts_on_column, "방학식 열"),
+            (self.starts_on_mark_column, "방학식 급식 제공 여부 열"),
+            (self.ends_on_column, "개학식 열"),
+            (self.ends_on_mark_column, "개학식 급식 제공 여부 열"),
         ):
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ValueError(f"{label}은 1 이상의 정수여야 합니다.")
@@ -119,6 +123,13 @@ class SchoolCalendarColumnMapping:
             if self.note_column in columns:
                 raise ValueError("비고 열은 필수 열과 달라야 합니다.")
         object.__setattr__(self, "sheet_name", self.sheet_name.strip())
+        for key, label in (("starts_on_provided_text", "방학식"),
+                           ("ends_on_provided_text", "개학식")):
+            value = getattr(self, key)
+            if value is not None:
+                if not isinstance(value, str) or not value.strip():
+                    raise ValueError(f"{label} 급식 제공으로 판단할 문자열을 입력해주세요.")
+                object.__setattr__(self, key, value.strip())
 
     def manifest(self) -> Mapping[str, JsonValue]:
         return MappingProxyType(
@@ -129,6 +140,12 @@ class SchoolCalendarColumnMapping:
                 "header_row": self.header_row,
                 "data_start_row": self.data_start_row,
                 "calendar_year": self.calendar_year,
+                "provided_text": {
+                    "starts_on": self.starts_on_provided_text,
+                    "ends_on": self.ends_on_provided_text,
+                    "comparison": "trimmed-exact-case-sensitive",
+                    "when_unset": "legacy-OX",
+                },
                 "columns": {
                     "school_name": self.school_column,
                     "starts_on": self.starts_on_column,
@@ -167,10 +184,10 @@ class SchoolVacationRow:
         if self.row_number < 1:
             raise ValueError("원본 행 번호는 1 이상이어야 합니다.")
         school = _required_text(self.school_name, "학교명")
-        _validate_date(self.starts_on, "시작일")
-        _validate_date(self.ends_on, "종료일")
+        _validate_date(self.starts_on, "방학식")
+        _validate_date(self.ends_on, "개학식")
         if self.starts_on > self.ends_on:
-            raise ValueError("학교 일정 시작일은 종료일보다 늦을 수 없습니다.")
+            raise ValueError("방학식은 개학식보다 늦을 수 없습니다.")
         if not isinstance(self.starts_on_mark, SchoolLunchMark):
             raise TypeError("시작일 표시는 SchoolLunchMark여야 합니다.")
         if not isinstance(self.ends_on_mark, SchoolLunchMark):
@@ -270,7 +287,7 @@ class SchoolCalendarImportPreview:
             row.starts_on < self.coverage.starts_on or row.ends_on > self.coverage.ends_on
             for row in rows
         ):
-            raise ValueError("학교별 시작일·종료일은 검토 범위 안에 있어야 합니다.")
+            raise ValueError("학교별 방학식·개학식은 일정 범위 안에 있어야 합니다.")
         object.__setattr__(self, "rows", rows)
         object.__setattr__(self, "note_candidates", candidates)
         object.__setattr__(self, "issues", issues)
@@ -406,9 +423,9 @@ def parse_school_calendar_workbook(
                     row_number,
                     school_name,
                     starts_on,
-                    _mark_value(values["starts_on_mark"]),
+                    _mark_value(values["starts_on_mark"], mapping.starts_on_provided_text),
                     ends_on,
-                    _mark_value(values["ends_on_mark"]),
+                    _mark_value(values["ends_on_mark"], mapping.ends_on_provided_text),
                     _optional_cell_text(values.get("note")),
                 )
             except (TypeError, ValueError) as error:
@@ -467,7 +484,7 @@ def build_school_lunch_schedules(
             for day in _weekdays(preview.coverage.starts_on, preview.coverage.ends_on)
         }
         assigned: dict[date, tuple[LunchDayRule, int, str]] = {}
-        for row in sorted(rows, key=lambda item: (item.starts_on, item.ends_on, item.row_number)):
+        for row in sorted(rows, key=lambda item: item.row_number):
             for day in _days(row.starts_on + timedelta(days=1), row.ends_on - timedelta(days=1)):
                 if day.weekday() < 5:
                     _assign_explicit_rule(
@@ -476,11 +493,11 @@ def build_school_lunch_schedules(
                         day,
                         LunchDayRule(SchoolLunchMark.VENDOR_REQUIRED),
                         row.row_number,
-                        "시작일과 종료일 사이",
+                        "방학식과 개학식 사이",
                     )
             for day, mark, label in (
-                (row.starts_on, row.starts_on_mark, "시작일 O/X"),
-                (row.ends_on, row.ends_on_mark, "종료일 O/X"),
+                (row.starts_on, row.starts_on_mark, "방학식 급식 제공 여부"),
+                (row.ends_on, row.ends_on_mark, "개학식 급식 제공 여부"),
             ):
                 if day.weekday() < 5:
                     _assign_explicit_rule(
@@ -566,7 +583,12 @@ def build_school_calendar_import_revision(
     for replacement_schedule in replacements:
         key = replacement_schedule.normalized_school_name
         existing = existing_by_key.get(key)
-        merged = merge_school_lunch_schedule(existing, replacement_schedule)
+        explicit_periods = [InclusiveDateRange(row.starts_on, row.ends_on) for row in preview.rows
+                            if normalize_school_name(row.school_name) == key]
+        explicit_periods.extend(decision.period for candidate_id, decision in decisions.items()
+            if decision.period is not None and any(candidate.candidate_id == candidate_id
+                and normalize_school_name(candidate.school_name) == key for candidate in preview.note_candidates))
+        merged = merge_school_lunch_import(existing, replacement_schedule, explicit_periods)
         if existing == merged:
             continue
         entity_id = school_lunch_schedule_entity_id(merged.school_name)
@@ -583,10 +605,19 @@ def build_school_calendar_import_revision(
         )
         merged_by_key[key] = merged
         changed_names.append(merged.school_name)
+    from src.domain.lunch_periods import fill_missing_lunch_periods
+    from src.domain.projections import roster_audit_changes, roster_from_historical_snapshot
+    roster = roster_from_historical_snapshot(current_snapshot)
+    filled_roster = fill_missing_lunch_periods(roster, SchoolLunchCalendar(replacements))
+    period_changes = roster_audit_changes(roster, filled_roster)
+    changes.extend(period_changes)
     if not changes:
         raise ValueError("이번 학교 일정 가져오기로 달라지는 내용이 없습니다.")
 
     decision_manifest = {
+        "date_overlay_version": 1,
+        "source_schedules": [school_lunch_school_schedule_state(item) for item in replacements],
+        "filled_lunch_periods": [str(change.entity_id) for change in period_changes],
         "coverage": {
             "starts_on": preview.coverage.starts_on.isoformat(),
             "ends_on": preview.coverage.ends_on.isoformat(),
@@ -673,7 +704,7 @@ def _assign_explicit_rule(
     label: str,
 ) -> None:
     previous = assigned.get(day)
-    if previous is not None and previous[0] != rule:
+    if previous is not None and previous[0] != rule and previous[1] == row_number:
         raise ValueError(
             f"{day:%Y.%m.%d} 일정이 {previous[1]}행 {previous[2]}와 "
             f"{row_number}행 {label}에서 서로 다릅니다."
@@ -712,7 +743,11 @@ def _note_candidates(
         grades = tuple(
             dict.fromkeys(normalize_grade(value) for value in _GRADE_PATTERN.findall(row.note))
         )
-        dates = _dates_from_note(row.note, calendar_year, row.starts_on, row.ends_on)
+        try:
+            dates = _dates_from_note(row.note, calendar_year, row.starts_on, row.ends_on)
+        except ValueError:
+            # Free-form notes are references, not required date input.
+            dates = ()
         period = None
         if dates:
             period = InclusiveDateRange(min(dates), max(dates))
@@ -764,7 +799,7 @@ def _propose_mapping(
     normalized = {column.index: _header_key(column.header) for column in columns}
     school = _unique_header(normalized, ("학교명", "학교"))
     start = _unique_contains(normalized, ("방학식", "시작일", "방학시작", "종업식", "졸업식"), exclude=("급식", "ox"))
-    end = _unique_contains(normalized, ("개학일", "종료일", "방학종료"), exclude=("급식", "ox"))
+    end = _unique_contains(normalized, ("개학식", "개학일", "종료일", "방학종료"), exclude=("급식", "ox"))
     note = _unique_contains(normalized, ("비고", "특이사항", "참고"), required=False)
     ox_columns = _ox_columns(columns, preview_rows)
     start_mark = _associated_mark(normalized, ox_columns, start, ("방학식", "시작", "종업", "졸업"))
@@ -885,7 +920,7 @@ def _date_value(value: object, default_year: int, epoch) -> date:
     if isinstance(value, date):
         return value
     if isinstance(value, bool) or value is None:
-        raise ValueError("시작일·종료일이 비어 있거나 날짜가 아닙니다.")
+        raise ValueError("방학식·개학식이 비어 있거나 날짜가 아닙니다.")
     if isinstance(value, (int, float)):
         parsed = from_excel(value, epoch)
         return parsed.date() if isinstance(parsed, datetime) else parsed
@@ -909,7 +944,13 @@ def _date_has_no_year(value: object) -> bool:
     return _PARTIAL_DATE_PATTERN.fullmatch(text) is not None
 
 
-def _mark_value(value: object) -> SchoolLunchMark:
+def _mark_value(value: object, provided_text: str | None = None) -> SchoolLunchMark:
+    if provided_text is not None:
+        if isinstance(value, str) and value.startswith("="):
+            raise ValueError("급식 제공 여부에는 수식 대신 값을 입력해주세요.")
+        text = "" if value is None else str(value).strip()
+        return (SchoolLunchMark.SCHOOL_PROVIDES if text == provided_text
+                else SchoolLunchMark.VENDOR_REQUIRED)
     text = _normalized_mark_text(value)
     if text == "O":
         return SchoolLunchMark.SCHOOL_PROVIDES

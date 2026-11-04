@@ -169,7 +169,7 @@ def test_drag_orders_only_selected_driver_exact_pairs_and_hides_columns(app):
     dialog.driver_combo.setCurrentIndex(1)
     assert dialog.table.rowCount() == 1
     assert dialog.table.item(0, 1).text() == "다른 기사 가구"
-    assert dialog.current_view_snapshot().headers == ("가구원", "식종", "주소", "연락처")
+    assert dialog.current_view_snapshot().headers == ("가구원", "식종", "주소", "연락처", "중식 시작일", "중식 종료일")
     dialog.close()
 
 

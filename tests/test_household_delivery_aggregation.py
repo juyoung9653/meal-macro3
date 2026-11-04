@@ -39,7 +39,7 @@ def test_route_groups_different_addresses_details_and_notes_without_extra_column
             if tuple(dialog.driver_combo.itemData(i)) == (None, '합성 기사')))
         assert dialog.table.rowCount() == 1
         current = dialog.current_view_snapshot()
-        assert current.headers == ('가구원', '식종', '주소', '연락처')
+        assert current.headers == ('가구원', '식종', '주소', '연락처', '중식 시작일', '중식 종료일')
     finally:
         dialog.close()
     template = build_driver_households_template_snapshot((combined,))

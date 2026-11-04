@@ -36,6 +36,26 @@ def substitute_columns_from_roster(columns, *, source_snapshot=None):
                  if custom_ids is None or not column.key.startswith("custom:") or column.key in custom_ids)
 
 
+
+def all_substitute_template_columns(roster, view_columns=None):
+    """The complete current catalog, independent of visibility or source date."""
+    columns = {column.key: column for column in STANDARD_COLUMNS}
+    for key, label in (("school_type", "학교급"), ("class_name", "반"),
+                       ("household_head_name", "세대주명"), ("relationship_to_child", "아동과의 관계")):
+        columns[key] = SubstituteColumn(key, label)
+    for meal in Meal:
+        key = f"status:{meal.name.lower()}"
+        columns[key] = SubstituteColumn(key, meal.value)
+    for field in sorted(roster.custom_fields, key=lambda field: (field.display_order, str(field.definition_id))):
+        key = f"custom:{field.definition_id}"
+        columns[key] = SubstituteColumn(key, field.name)
+    if view_columns is not None:
+        for column in substitute_columns_from_roster(view_columns):
+            if column.key in columns:
+                columns[column.key] = column
+    return tuple(columns.values())
+
+
 def _text(value) -> str:
     if value is None:
         return ""
@@ -105,7 +125,7 @@ def prepare_delivery_substitute_data(
         keys = {column.key for column in columns}
         if any(target not in keys or source not in keys or target == source
                for target, source in requested_fallbacks.items()):
-            raise ValueError("대체 칼럼이 선택한 원본에 없습니다. 배송대타 칼럼을 다시 선택해주세요.")
+            raise ValueError("1순위 칼럼이 선택한 원본에 없습니다. 배송대타 칼럼을 다시 선택해주세요.")
         mapping = {key: key for key in keys}
         fallbacks = dict(requested_fallbacks)
     manifest.update(mapping=mapping, fallbacks=fallbacks)
@@ -147,9 +167,11 @@ def prepare_delivery_substitute_data(
             for target, source in mapping.items():
                 values[target] = _text(resolve_mapping_value(sources, source, fallbacks.get(target, "")))
         if requested_fallbacks is not None:
+            # Keep the saved option keys; the side selection now takes priority.
+            # Always read original values so mappings cannot cascade.
             original = dict(values)
             for target, fallback in fallbacks.items():
-                values[target] = _text(resolve_mapping_value(original, target, fallback))
+                values[target] = _text(resolve_mapping_value(original, fallback, target))
         rows.append(SubstituteRow(person.person_id, household_id, driver_key, driver or "미지정",
                                   values, shipment.entitlement_count, any(value.upper().endswith("BOX") for value in forms),
                                   _text(profile.mobile_phone), view.jurisdiction or ""))

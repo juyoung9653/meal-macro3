@@ -39,6 +39,9 @@ def _names(model):
 
 
 def _click_header_label(header, logical_index):
+    table = header.parentWidget()
+    table.scrollTo(table.model().index(0, logical_index))
+    QApplication.processEvents()
     point = QPoint(
         header.sectionViewportPosition(logical_index)
         + header.sectionSize(logical_index) // 2,

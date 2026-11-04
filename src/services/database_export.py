@@ -122,7 +122,9 @@ def _roster_sheets(book, roster, snapshot, routing, calendar, day, progress):
         profile_values[_profile_headers(custom).index("관할동")] = effective.jurisdiction
         profile_values[_profile_headers(custom).index("도로명주소")] = effective.road_address
         profile_values[_profile_headers(custom).index("상세주소")] = effective.detail_address
-        base = [str(person.person_id), *profile_values, *[profile.custom_values.get(item.definition_id) for item in custom]]
+        base = [str(person.person_id), *profile_values, *[profile.custom_values.get(item.definition_id) for item in custom],
+                person.lunch_period.starts_on if person.lunch_period else None,
+                person.lunch_period.ends_on if person.lunch_period else None]
         meals = enrolled[person.person_id]
         if long_mode:
             status_cells = [_status(snapshot, person.person_id, meal, day, profile, calendar) if meal in meals else "미가입" for meal in _MEALS]
@@ -174,7 +176,7 @@ def _driver_identity(view, meal):
 
 
 def _profile_headers(custom):
-    return [label for label, _ in _PROFILE_COLUMNS] + [item.name for item in custom]
+    return [label for label, _ in _PROFILE_COLUMNS] + [item.name for item in custom] + ["중식 시작일", "중식 종료일"]
 
 
 def _profile_value(profile, key):

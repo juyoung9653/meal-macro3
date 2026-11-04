@@ -664,8 +664,8 @@ def test_named_branch_view_keeps_shared_history_and_marks_fork_boundary(app):
     assert "검토용" in dialog._current_branch.text()
     assert dialog._summary_proxy.rowCount() == 2
     assert dialog.selected_revision_id == REVISION_2
-    assert dialog._summary_proxy.data(dialog._summary_proxy.index(0, 0)).startswith("분기 시작점 · ")
-    assert dialog._summary_proxy.data(dialog._summary_proxy.index(1, 0)).startswith("분기 전 기록 · ")
+    assert dialog._summary_proxy.data(dialog._summary_proxy.index(0, 0)).startswith("작업본 시작점 · ")
+    assert dialog._summary_proxy.data(dialog._summary_proxy.index(1, 0)).startswith("작업본 전 기록 · ")
     _select_revision(dialog, REVISION_1)
     assert dialog.selected_revision_id == REVISION_1
     dialog.configure_actions(SimpleNamespace(path=Path("synthetic.sqlite3")), SimpleNamespace(), lambda: None)
@@ -725,7 +725,7 @@ def test_audit_branch_events_show_named_korean_details_without_synthetic_entity(
     rows = dialog._detail_model.rows
     assert len(rows) == 1
     assert rows[0][0] == "운영 데이터"
-    assert rows[0][2] == ("분기 생성" if operation == "create" else "분기 전환")
+    assert rows[0][2] == ("작업본 생성" if operation == "create" else "작업본 전환")
     assert "검토 분기" in rows[0][3] and "20261014-100000" in rows[0][3]
     assert str(branch_id) not in str(rows)
     dialog.close()
@@ -748,12 +748,12 @@ def test_encrypted_branch_history_displays_shared_revisions_once(app, history):
                     for row in range(dialog._summary_proxy.rowCount()))
     assert visible == (edited, second, first)
     assert branch.revision_id not in visible and main.revision_id not in visible
-    assert dialog._summary_model.branch_labels[first] == "분기 전 기록"
-    assert dialog._summary_model.branch_labels[second] == "분기 시작점"
+    assert dialog._summary_model.branch_labels[first] == "작업본 전 기록"
+    assert dialog._summary_model.branch_labels[second] == "작업본 시작점"
     _select_revision(dialog, first)
     assert dialog._detail_model.rowCount() > 0
     dialog._branch_selector.setCurrentIndex(0)
     _select_revision(dialog, main.revision_id)
-    assert dialog._detail_model.rows[0][2] == "분기 전환"
+    assert dialog._detail_model.rows[0][2] == "작업본 전환"
     assert "main" in dialog._detail_model.rows[0][3]
     dialog.close()

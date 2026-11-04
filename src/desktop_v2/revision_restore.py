@@ -30,7 +30,7 @@ class RevisionRestoreSelection:
 class RevisionRestoreDialog(QDialog):
     def __init__(self, source_path, code, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("이전 변경번호 복구·분기")
+        self.setWindowTitle("이전 자료로 되돌리기")
         self.setStyleSheet(application_stylesheet())
         self.resize(650, 390)
         self.setMinimumWidth(560)
@@ -41,22 +41,24 @@ class RevisionRestoreDialog(QDialog):
         )
         intro.setWordWrap(True)
         root.addWidget(intro)
-        self.branch_radio = QRadioButton("새 분기를 만들고 전환 (같은 운영 파일)")
-        self.restore_radio = QRadioButton("현재 분기에 복구 기록 추가")
-        self.branch_radio.setChecked(True)
-        root.addWidget(self.branch_radio)
+        self.branch_radio = QRadioButton("이 시점에서 별도 작업본 만들기")
+        self.restore_radio = QRadioButton("현재 자료를 이 시점으로 되돌리기")
+        self.restore_radio.setChecked(True)
         root.addWidget(self.restore_radio)
+        root.addWidget(self.branch_radio)
         self.branch_fields = QWidget()
         form = QFormLayout(self.branch_fields)
-        self.name_edit = QLineEdit(f"분기 {code}")
-        self.name_edit.setAccessibleName("새 분기 이름")
-        form.addRow("분기 이름", self.name_edit)
+        self.name_edit = QLineEdit(f"작업본 {code}")
+        self.name_edit.setAccessibleName("새 작업본 이름")
+        form.addRow("작업본 이름", self.name_edit)
         root.addWidget(self.branch_fields)
         self.branch_radio.toggled.connect(self.branch_fields.setEnabled)
+        self.branch_fields.setEnabled(False)
         note = QLabel(
-            "새 분기는 선택한 변경번호부터 시작합니다. 현재 분기의 작업은 그대로 남으며, "
-            "전체 변경 이력에서 분기를 골라 다시 전환할 수 있습니다. 분기끼리 합치지는 않습니다.\n"
-            "저장 후 프로그램을 종료합니다. 다시 실행하면 선택한 분기의 명단과 설정 전체를 읽습니다."
+            "현재 자료 되돌리기는 명단과 설정을 선택한 시점으로 되돌리고 새 변경 기록을 남깁니다. 기존 변경 이력은 그대로 보관합니다.\n"
+            "새 작업본은 선택한 변경번호부터 시작합니다. 현재 작업본의 작업은 그대로 남으며, "
+            "전체 변경 이력에서 작업본을 골라 다시 전환할 수 있습니다. 작업본끼리 합치지는 않습니다.\n"
+            "저장 후 프로그램을 종료합니다. 다시 실행하면 선택한 작업본의 명단과 설정 전체를 읽습니다."
         )
         note.setWordWrap(True)
         root.addWidget(note)
@@ -85,7 +87,7 @@ class RevisionRestoreDialog(QDialog):
             return RevisionRestoreSelection(False)
         name = self.name_edit.text().strip()
         if not name:
-            raise ValueError("분기 이름을 입력해주세요.")
+            raise ValueError("작업본 이름을 입력해주세요.")
         return RevisionRestoreSelection(True, name)
 
 
@@ -115,14 +117,14 @@ class RevisionRestoreController:
                 return
             choice = dialog.selection()
             details = (
-                f"{code}에서 새 분기 ‘{choice.name}’를 만들고 전환합니다.\n"
-                "같은 운영 파일에 저장하며 현재 분기의 작업과 기존 이력을 보존합니다.\n"
-                "프로그램을 종료합니다. 다시 실행하면 새 분기의 명단과 설정을 읽습니다."
+                f"{code}에서 새 작업본 ‘{choice.name}’를 만들고 전환합니다.\n"
+                "같은 운영 파일에 저장하며 현재 작업본의 작업과 기존 이력을 보존합니다.\n"
+                "프로그램을 종료합니다. 다시 실행하면 새 작업본의 명단과 설정을 읽습니다."
                 if choice.branch else
-                f"현재 분기를 {code}의 명단과 운영 파일 설정 전체로 복구하고 종료합니다. "
+                f"현재 작업본을 {code}의 명단과 운영 파일 설정 전체로 복구하고 종료합니다. "
                 "새 변경번호로 저장하며 기존 변경 이력은 보존합니다."
             )
-            if self.messages.question(parent, "변경번호 복구·분기 확인", details,
+            if self.messages.question(parent, "이전 자료로 되돌리기 확인", details,
                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
                     QMessageBox.StandardButton.Cancel) != QMessageBox.StandardButton.Yes:
                 return
@@ -130,8 +132,8 @@ class RevisionRestoreController:
             if choice.branch:
                 result = run_progress_task(
                     lambda: self.branch_service(self.session, revision_id, head, actor, name=choice.name),
-                    title="새 분기로 전환하는 중입니다",
-                    message="선택한 기록에서 분기를 만들고 명단과 설정을 적용하고 있습니다.",
+                    title="새 작업본으로 전환하는 중입니다",
+                    message="선택한 기록에서 작업본을 만들고 명단과 설정을 적용하고 있습니다.",
                     parent=parent,
                 )
             else:
@@ -145,22 +147,22 @@ class RevisionRestoreController:
             self._conflict(parent)
             return
         except ValueError:
-            self.messages.warning(parent, "복구·분기 내용을 확인해주세요", "분기 이름의 중복 여부와 선택한 변경번호를 확인해주세요. 다른 분기의 기록이면 새 분기 만들기 또는 분기 전환을 사용해주세요.")
+            self.messages.warning(parent, "선택한 내용을 확인해주세요", "작업본 이름의 중복 여부와 선택한 변경번호를 확인해주세요. 다른 작업본의 기록이면 새 작업본 만들기 또는 작업본 전환을 사용해주세요.")
             return
         except Exception:
             # Ledger payloads/passwords must never appear in exception text.
-            self.messages.critical(parent, "복구·분기를 완료하지 못했습니다", "운영 파일의 연결과 쓰기 권한을 확인해주세요. 변경 이력을 다시 열어 현재 분기를 확인해주세요.")
+            self.messages.critical(parent, "복구·작업본을 완료하지 못했습니다", "운영 파일의 연결과 쓰기 권한을 확인해주세요. 변경 이력을 다시 열어 현재 작업본을 확인해주세요.")
             return
-        self._complete(result, "분기 생성·전환 완료" if choice.branch else "복구 완료", parent)
+        self._complete(result, "작업본 생성·전환 완료" if choice.branch else "복구 완료", parent)
 
     def checkout(self, branch_id, name, parent=None):
         """Switch the active branch with an expected-head guard and full reload."""
         try:
             head = self._head()
             if self.messages.question(
-                parent, "분기 전환 확인",
-                f"‘{name}’ 분기의 마지막 저장 상태로 전환하고 프로그램을 종료합니다.\n"
-                "현재 분기의 작업은 보존합니다. 다시 실행하면 선택한 분기의 명단과 설정 전체를 읽습니다.",
+                parent, "작업본 전환 확인",
+                f"‘{name}’ 작업본의 마지막 저장 상태로 전환하고 프로그램을 종료합니다.\n"
+                "현재 작업본의 작업은 보존합니다. 다시 실행하면 선택한 작업본의 명단과 설정 전체를 읽습니다.",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
                 QMessageBox.StandardButton.Cancel,
             ) != QMessageBox.StandardButton.Yes:
@@ -168,28 +170,28 @@ class RevisionRestoreController:
             actor = self.actor_provider()
             result = run_progress_task(
                 lambda: self.checkout_service(self.session, branch_id, head, actor),
-                title="분기를 전환하는 중입니다",
-                message="선택한 분기의 명단과 설정을 적용하고 있습니다.",
+                title="작업본을 전환하는 중입니다",
+                message="선택한 작업본의 명단과 설정을 적용하고 있습니다.",
                 parent=parent,
             )
         except RevisionConflictError:
             self._conflict(parent)
             return
         except Exception:
-            self.messages.critical(parent, "분기를 전환하지 못했습니다", "운영 파일의 연결과 쓰기 권한을 확인하고 변경 이력을 다시 열어주세요.")
+            self.messages.critical(parent, "작업본을 전환하지 못했습니다", "운영 파일의 연결과 쓰기 권한을 확인하고 변경 이력을 다시 열어주세요.")
             return
-        self._complete(result, "분기 전환 완료", parent)
+        self._complete(result, "작업본 전환 완료", parent)
 
     def _conflict(self, parent):
         self.messages.warning(parent, "변경번호가 달라졌습니다", "작업 중 새 변경이 저장되었습니다. 변경 이력을 닫고 다시 선택해주세요.")
 
     def _complete(self, result, title, parent):
         if result.revision_id is None:
-            self.messages.information(parent, "변경 없음", "현재 분기와 저장값이 선택한 내용과 같습니다.")
+            self.messages.information(parent, "변경 없음", "현재 작업본와 저장값이 선택한 내용과 같습니다.")
             return
         if result.backup.warning_required:
             self.messages.warning(parent, "저장 완료 · 자동 백업 실패", "운영 파일 저장은 완료했으나 자동 백업을 만들지 못했습니다. 백업 폴더 연결과 쓰기 권한을 확인해주세요.")
-        self.messages.information(parent, title, "같은 운영 파일에 저장했습니다. 프로그램을 종료합니다. 다시 실행하면 선택한 분기의 명단과 설정 전체를 읽습니다.")
+        self.messages.information(parent, title, "같은 운영 파일에 저장했습니다. 프로그램을 종료합니다. 다시 실행하면 선택한 작업본의 명단과 설정 전체를 읽습니다.")
         self.on_restart()
 
     def _switch(self, path, parent):

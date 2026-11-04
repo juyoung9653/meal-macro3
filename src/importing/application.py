@@ -239,12 +239,14 @@ def apply_reconciliation(
         persons_by_id[person_id] = Person(
             person_id, merged_profile,
             None if person_id not in persons_by_id else persons_by_id[person_id].delivery_settings,
+            None if person_id not in persons_by_id else persons_by_id[person_id].lunch_period,
         )
         enrollments = _replace_active_meals(
             enrollments,
             person_id,
             set(staged.observation.meals),
             plan.effective_on,
+            preserve_lunch=persons_by_id[person_id].lunch_period is not None,
         )
         for observed_assignment in staged.observation.assignments:
             assignment = observed_assignment.for_person(person_id)
@@ -281,6 +283,17 @@ def apply_reconciliation(
             sorted(custom_fields, key=lambda item: item.display_order)
         ),
     )
+    from src.domain.lunch_periods import set_lunch_periods
+    lunch_removals = {
+        applied[item.observation.observation_id]: InclusiveDateRange()
+        for item in plan.staged_people
+        if item.observation.observation_id in applied
+        and Meal.LUNCH not in item.observation.meals
+        and persons_by_id[applied[item.observation.observation_id]].lunch_period is not None
+    }
+    if lunch_removals:
+        snapshot = set_lunch_periods(snapshot, lunch_removals,
+            replace_from={pid: plan.effective_on for pid in lunch_removals})
     ignored_ids = tuple(sorted(ignored, key=str))
     manifest = {
         "effective_on": plan.effective_on.isoformat(),
@@ -486,9 +499,13 @@ def _replace_active_meals(
     person_id: UUID,
     desired_meals: set[Meal],
     effective_on: date,
+    *,
+    preserve_lunch: bool = False,
 ) -> list[MealEnrollment]:
     result = list(enrollments)
     for meal in Meal:
+        if meal is Meal.LUNCH and preserve_lunch and meal in desired_meals:
+            continue
         matching = [
             item
             for item in result

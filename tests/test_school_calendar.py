@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from pathlib import Path
 from uuid import UUID
@@ -291,3 +292,52 @@ def test_gui_style_row_edits_are_the_values_committed_to_revision(tmp_path: Path
         PersonProfile("아동", school_name="분당새초", grade="5"),
         date(2026, 7, 27),
     )
+
+
+@pytest.mark.parametrize("start_value,end_value,expected_start,expected_end", [
+    ("급식 실시", "Yes", True, True),
+    (" 급식 실시 ", " Yes ", True, True),
+    ("미실시", "yes", False, False),
+    (None, None, False, False),
+    ("급식 실시(일부)", "YES", False, False),
+    ("O", "○", False, False),
+])
+def test_custom_provided_text_exact_match(tmp_path, start_value, end_value,
+                                         expected_start, expected_end):
+    path = tmp_path / "custom-school.xlsx"
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(("학교 일정",))
+    ws.append(("학교명", "방학식", "방학식 급식 제공 여부",
+               "개학식", "개학식 급식 제공 여부", "비고"))
+    ws.append(("분당초", date(2026, 7, 24), start_value,
+               date(2026, 8, 19), end_value, "2/30 6학년 확인 필요"))
+    wb.save(path)
+    wb.close()
+    inspection = inspect_school_calendar_workbook(path, calendar_year=2026)
+    assert inspection.proposed_mapping is not None
+    mapping = replace(inspection.proposed_mapping,
+                      starts_on_provided_text="급식 실시", ends_on_provided_text="Yes")
+    preview = parse_school_calendar_workbook(path, mapping)
+    assert preview.can_continue
+    row = preview.rows[0]
+    assert (row.starts_on_mark is SchoolLunchMark.SCHOOL_PROVIDES) == expected_start
+    assert (row.ends_on_mark is SchoolLunchMark.SCHOOL_PROVIDES) == expected_end
+    decisions = {c.candidate_id: SchoolCalendarNoteDecision(
+        c.candidate_id, SchoolCalendarNoteAction.IGNORE) for c in preview.note_candidates}
+    calendar = SchoolLunchCalendar(build_school_lunch_schedules(preview, decisions))
+    person = PersonProfile("합성", school_name="분당초", grade="6")
+    assert calendar.vendor_service_available(person, date(2026, 7, 24)) == (not expected_start)
+    assert calendar.vendor_service_available(person, date(2026, 8, 19)) == (not expected_end)
+    assert calendar.vendor_service_available(person, date(2026, 8, 3))
+    assert mapping.manifest()["provided_text"]["ends_on"] == "Yes"
+
+
+def test_custom_provided_text_cannot_be_blank(tmp_path):
+    path = tmp_path / "school.xlsx"
+    _write_schedule(path)
+    mapping = inspect_school_calendar_workbook(path, calendar_year=2026).proposed_mapping
+    with pytest.raises(ValueError, match="방학식"):
+        replace(mapping, starts_on_provided_text=" ")
+    with pytest.raises(ValueError, match="개학식"):
+        replace(mapping, ends_on_provided_text="")

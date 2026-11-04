@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from pathlib import Path
 from uuid import UUID
@@ -22,7 +23,7 @@ from src.desktop_v2.school_calendar_import import (
 from src.domain.entitlements import SchoolLunchMark
 from src.domain.projections import roster_audit_changes
 from src.domain.revisions import RevisionActor, RevisionMetadata, RevisionRecord, RevisionSource
-from src.domain.roster import Meal, MealEnrollment, Person, PersonProfile, RosterSnapshot
+from src.domain.roster import InclusiveDateRange, Meal, MealEnrollment, Person, PersonProfile, RosterSnapshot
 from src.domain.school_calendar import school_lunch_calendar_from_snapshot
 from src.importing.school_calendar import (
     SchoolCalendarNoteAction,
@@ -158,21 +159,18 @@ def test_review_dialog_allows_per_school_date_mark_edits_and_requires_note_choic
         dialog.close()
 
 
-def test_controller_commits_one_revision_and_verified_automatic_backup(
+def test_controller_commits_without_review_and_verified_automatic_backup(
     qapp: QApplication,
     tmp_path: Path,
+    monkeypatch,
 ):
     del qapp
     path = tmp_path / "controller.xlsx"
     _write_schedule(path)
     preview = _preview(path)
-    candidate = preview.note_candidates[0]
-    decisions = {
-        candidate.candidate_id: SchoolCalendarNoteDecision(
-            candidate.candidate_id,
-            SchoolCalendarNoteAction.IGNORE,
-        )
-    }
+    preview = parse_school_calendar_workbook(path, replace(
+        preview.mapping, starts_on_provided_text="O", ends_on_provided_text="O"
+    ))
 
     class AcceptedImport:
         def __init__(self, *, initial_directory, calendar_year, parent=None):
@@ -188,23 +186,13 @@ def test_controller_commits_one_revision_and_verified_automatic_backup(
         def preview():
             return preview
 
-    class AcceptedReview:
-        def __init__(self, value, *, known_school_names, parent=None):
-            del parent
-            assert value == preview
-            assert known_school_names == ("분당초",)
+    def forbidden_review(*args, **kwargs):
+        raise AssertionError("학교별 GUI 검토창을 열면 안 됩니다.")
 
-        @staticmethod
-        def exec():
-            return QDialog.DialogCode.Accepted
-
-        @staticmethod
-        def reviewed_preview():
-            return preview
-
-        @staticmethod
-        def decisions():
-            return decisions
+    monkeypatch.setattr(
+        "src.desktop_v2.school_calendar_import.SchoolCalendarReviewDialog",
+        forbidden_review,
+    )
 
     class Messages:
         @staticmethod
@@ -228,7 +216,6 @@ def test_controller_commits_one_revision_and_verified_automatic_backup(
         outcome = SchoolCalendarImportController(
             session,
             import_dialog_type=AcceptedImport,
-            review_dialog_type=AcceptedReview,
             actor_provider=lambda: RevisionActor("tester", "S-1-5-21-test"),
             today_provider=lambda: date(2026, 8, 31),
             recorded_at_provider=lambda: datetime(2026, 8, 31, 1, 0, tzinfo=UTC),
@@ -240,6 +227,8 @@ def test_controller_commits_one_revision_and_verified_automatic_backup(
         assert outcome.completed
         assert outcome.roster is not None
         assert outcome.roster.revision_id == IMPORT_REVISION_ID
+        assert outcome.roster.person(PERSON_ID).lunch_period == InclusiveDateRange(
+            date(2026, 7, 27), date(2026, 8, 18))
         assert outcome.backup_result is not None
         assert outcome.backup_result.record is not None
         backup_path = outcome.backup_result.record.path
@@ -247,6 +236,16 @@ def test_controller_commits_one_revision_and_verified_automatic_backup(
             session.database.snapshot(IMPORT_REVISION_ID)
         )
         assert stored.schedules[0].school_name == "분당초"
+        record = session.database.latest_revision()
+        assert record.import_batch.mapping_manifest["provided_text"]["starts_on"] == "O"
+        info = record.metadata.decisions["school_calendar_import"]
+        assert info["school_rows"][0]["note"] == "6학년 미급식"
+        assert info["note_reviews"][0]["action"] == "ignore"
+        # Notes alone never create grade exceptions when review is skipped.
+        assert not stored.vendor_service_available(
+            PersonProfile("아동", school_name="분당초", grade="6"),
+            date(2026, 7, 24),
+        )
 
     restored_path = tmp_path / "restored.sqlite3"
     with DatabaseSession.restore_and_open_with_user_password(
@@ -262,3 +261,42 @@ def test_controller_commits_one_revision_and_verified_automatic_backup(
             date(2026, 8, 3),
         )
         restored.database.check_integrity()
+        assert restored.database.current_roster().person(PERSON_ID).lunch_period == InclusiveDateRange(
+            date(2026, 7, 27), date(2026, 8, 18))
+
+
+def test_import_uses_current_comparison_values_when_saving(qapp, tmp_path):
+    path = tmp_path / "custom-ui.xlsx"
+    _write_schedule(path)
+    dialog = SchoolCalendarImportDialog(initial_directory=tmp_path, calendar_year=2026)
+    try:
+        dialog.load_file(path)
+        assert dialog._preview_table.horizontalHeaderItem(3).text() == "방학식 급식 제공 여부"
+        assert dialog._preview_table.horizontalHeaderItem(5).text() == "개학식 급식 제공 여부"
+        assert dialog._preview_table.item(0, 3).text() == "○"
+        assert dialog._continue.text() == "학교 일정 저장"
+        dialog._provided_text_edits["starts_mark"].setText("제공")
+        # No refresh click: save must read current settings instead of stale preview.
+        dialog._continue.click()
+        assert dialog.result() == QDialog.DialogCode.Accepted
+        row = dialog.preview().rows[0]
+        assert row.starts_on_mark is SchoolLunchMark.VENDOR_REQUIRED
+        assert row.ends_on_mark is SchoolLunchMark.SCHOOL_PROVIDES
+        assert dialog._preview_table.item(0, 3).text() == "×"
+    finally:
+        dialog.close()
+
+
+def test_import_rejects_empty_comparison_text(qapp, tmp_path):
+    path = tmp_path / "invalid-ui.xlsx"
+    _write_schedule(path)
+    dialog = SchoolCalendarImportDialog(initial_directory=tmp_path, calendar_year=2026)
+    try:
+        dialog.load_file(path)
+        dialog._provided_text_edits["ends_mark"].clear()
+        dialog._continue.click()
+        assert dialog.result() != QDialog.DialogCode.Accepted
+        assert not dialog._continue.isEnabled()
+        assert "개학식" in dialog._error.text()
+    finally:
+        dialog.close()

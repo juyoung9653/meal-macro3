@@ -1,4 +1,4 @@
-"""Guided school-calendar Excel import, editable ledger review, and commit."""
+"""School-calendar Excel mapping and direct commit; legacy review widgets."""
 
 from __future__ import annotations
 
@@ -120,7 +120,7 @@ class SchoolCalendarImportDialog(QDialog):
         self._preview_table = QTableWidget(0, 7)
         self._preview_table.setObjectName("schoolCalendarPreviewTable")
         self._preview_table.setHorizontalHeaderLabels(
-            ("원본 행", "학교", "시작일", "O/X", "종료일", "O/X", "비고")
+            ("원본 행", "학교", "방학식", "방학식 급식 제공 여부", "개학식", "개학식 급식 제공 여부", "비고")
         )
         self._preview_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._preview_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -144,7 +144,7 @@ class SchoolCalendarImportDialog(QDialog):
         cancel.setObjectName("quietAction")
         cancel.clicked.connect(self.reject)
         actions.addWidget(cancel)
-        self._continue = QPushButton("학교별 일정 검토")
+        self._continue = QPushButton("학교 일정 저장")
         self._continue.setObjectName("primaryAction")
         self._continue.setEnabled(False)
         self._continue.clicked.connect(self._accept_preview)
@@ -163,8 +163,8 @@ class SchoolCalendarImportDialog(QDialog):
         title = QLabel("학교 급식 운행표 불러오기")
         title.setObjectName("workspaceTitle")
         subtitle = QLabel(
-            "학교명·시작일·종료일·양 끝 O/X를 자동으로 읽습니다. "
-            "자동 탐지가 애매할 때만 아래 열 선택을 바꾸세요."
+            "학교명·방학식·개학식과 급식 제공 여부를 읽고 별도 검토창 없이 저장합니다. "
+            "학교 급식이 제공되는 값과 열 연결을 확인하세요."
         )
         subtitle.setObjectName("workspaceSubtitle")
         subtitle.setWordWrap(True)
@@ -219,10 +219,10 @@ class SchoolCalendarImportDialog(QDialog):
         layout.setHorizontalSpacing(10)
         labels = (
             ("school", "학교명 열"),
-            ("starts_on", "시작일 열"),
-            ("starts_mark", "시작일 O/X"),
-            ("ends_on", "종료일 열"),
-            ("ends_mark", "종료일 O/X"),
+            ("starts_on", "방학식 열"),
+            ("starts_mark", "방학식 급식 제공 여부"),
+            ("ends_on", "개학식 열"),
+            ("ends_mark", "개학식 급식 제공 여부"),
             ("note", "비고 열(선택)"),
         )
         for index, (key, label) in enumerate(labels):
@@ -233,6 +233,25 @@ class SchoolCalendarImportDialog(QDialog):
             combo.setMinimumWidth(180)
             self._mapping_combos[key] = combo
             layout.addWidget(combo, row + 1, column)
+        self._provided_text_edits: dict[str, QLineEdit] = {}
+        for column, (key, label) in enumerate((
+            ("starts_mark", "방학식 급식 제공으로 판단할 값"),
+            ("ends_mark", "개학식 급식 제공으로 판단할 값"),
+        )):
+            layout.addWidget(_field_label(label), 4, column)
+            edit = QLineEdit("O")
+            edit.setAccessibleName(label)
+            edit.setPlaceholderText("예: O, 제공, 급식 실시")
+            self._provided_text_edits[key] = edit
+            layout.addWidget(edit, 5, column)
+        hint = QLabel(
+            "앞뒤 공백을 제외하고 입력한 값과 정확히 같으면 제공, 다르거나 빈 칸이면 미제공입니다. "
+            "제공은 학교 급식이 있다는 뜻입니다. 비고는 참고 기록으로 보관하며 자동 반영하지 않습니다. "
+            "학년별 예외는 저장 후 학교 일정 수정에서 지정하세요."
+            " 날짜가 겹치면 이번 일정이 우선하며, 같은 파일에서는 뒤쪽 행이 우선합니다."
+        )
+        hint.setWordWrap(True)
+        layout.addWidget(hint, 6, 0, 1, 3)
         return frame
 
     def _browse(self) -> None:
@@ -289,7 +308,7 @@ class SchoolCalendarImportDialog(QDialog):
             return
         self._apply_mapping(inspection.proposed_mapping)
         self._mapping_status.setText(
-            "열을 자동으로 찾았습니다. 아래 미리보기에서 학교·날짜·O/X를 확인하세요."
+            "열을 자동으로 찾았습니다. 아래 미리보기에서 학교·날짜·급식 제공 여부를 확인하세요."
         )
         self._mapping_status.setProperty("outcome", "ready")
         _repolish(self._mapping_status)
@@ -335,10 +354,10 @@ class SchoolCalendarImportDialog(QDialog):
             label
             for key, label in (
                 ("school", "학교명"),
-                ("starts_on", "시작일"),
-                ("starts_mark", "시작일 O/X"),
-                ("ends_on", "종료일"),
-                ("ends_mark", "종료일 O/X"),
+                ("starts_on", "방학식"),
+                ("starts_mark", "방학식 급식 제공 여부"),
+                ("ends_on", "개학식"),
+                ("ends_mark", "개학식 급식 제공 여부"),
             )
             if values[key] is None
         ]
@@ -355,6 +374,8 @@ class SchoolCalendarImportDialog(QDialog):
             int(values["ends_on"]),
             int(values["ends_mark"]),
             None if values["note"] is None else int(values["note"]),
+            starts_on_provided_text=self._provided_text_edits["starts_mark"].text(),
+            ends_on_provided_text=self._provided_text_edits["ends_mark"].text(),
         )
 
     def _read_preview(self) -> None:
@@ -382,7 +403,7 @@ class SchoolCalendarImportDialog(QDialog):
         self._continue.setEnabled(preview.can_continue)
         self._mapping_status.setText(
             f"학교 {preview.school_count}곳 · 원본 {len(preview.rows)}행 · "
-            f"비고 검토 {len(preview.note_candidates)}건을 읽었습니다."
+            f"참고 비고 {len(preview.note_candidates)}건 · 별도 검토창 없이 저장합니다."
         )
         self._mapping_status.setProperty("outcome", "ready")
         _repolish(self._mapping_status)
@@ -394,9 +415,9 @@ class SchoolCalendarImportDialog(QDialog):
                 str(row.row_number),
                 row.school_name,
                 row.starts_on.strftime("%Y.%m.%d"),
-                row.starts_on_mark.value,
+                "○" if row.starts_on_mark is SchoolLunchMark.SCHOOL_PROVIDES else "×",
                 row.ends_on.strftime("%Y.%m.%d"),
-                row.ends_on_mark.value,
+                "○" if row.ends_on_mark is SchoolLunchMark.SCHOOL_PROVIDES else "×",
                 row.note or "",
             )
             for column, value in enumerate(values):
@@ -413,8 +434,10 @@ class SchoolCalendarImportDialog(QDialog):
         self._error.show()
 
     def _accept_preview(self) -> None:
+        # Re-read the current mapping and comparison text, even if the user
+        # changed them after the last preview without pressing refresh.
+        self._read_preview()
         if self._preview is None or not self._preview.can_continue:
-            self._show_error("오류가 없는 학교 일정 미리보기를 먼저 만들어주세요.")
             return
         self.accept()
 
@@ -482,7 +505,7 @@ class SchoolCalendarReviewDialog(QDialog):
         self._table = QTableWidget(0, 7)
         self._table.setObjectName("schoolCalendarLedger")
         self._table.setHorizontalHeaderLabels(
-            ("원본 행", "학교명", "시작일", "시작 O/X", "종료일", "종료 O/X", "원본 비고")
+            ("원본 행", "학교명", "방학식", "방학식 급식 제공 여부", "개학식", "개학식 급식 제공 여부", "원본 비고")
         )
         self._table.setAlternatingRowColors(True)
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -536,7 +559,7 @@ class SchoolCalendarReviewDialog(QDialog):
         frame.setObjectName("schoolCalendarReviewHeader")
         layout = QHBoxLayout(frame)
         layout.setContentsMargins(18, 14, 18, 14)
-        stamp = QLabel("O / X")
+        stamp = QLabel("급식 제공")
         stamp.setObjectName("schoolCalendarStamp")
         stamp.setAlignment(Qt.AlignmentFlag.AlignCenter)
         stamp.setMinimumSize(74, 52)
@@ -544,11 +567,11 @@ class SchoolCalendarReviewDialog(QDialog):
         copy = QVBoxLayout()
         eyebrow = QLabel("확인한 급식 지원 일정")
         eyebrow.setObjectName("editEyebrow")
-        title = QLabel("학교별 시작일·종료일을 확인하세요")
+        title = QLabel("학교별 방학식·개학식을 확인하세요")
         title.setObjectName("workspaceTitle")
         subtitle = QLabel(
-            "학교명·날짜·O/X는 표에서 바로 수정할 수 있습니다. "
-            "O는 학교 급식, X는 업체 배송입니다."
+            "학교명·날짜·급식 제공 여부는 표에서 바로 수정할 수 있습니다. "
+            "제공은 학교 급식, 미제공은 센터 중식 배송입니다."
         )
         subtitle.setObjectName("workspaceSubtitle")
         copy.addWidget(eyebrow)
@@ -645,7 +668,7 @@ class SchoolCalendarReviewDialog(QDialog):
                 SchoolCalendarNoteAction.VENDOR_REQUIRED.value,
             )
             action.addItem(
-                "학교 급식으로 반영 (O)",
+                "학교 급식 제공으로 반영",
                 SchoolCalendarNoteAction.SCHOOL_PROVIDES.value,
             )
             card_layout.addWidget(action, 1, 0)
@@ -837,7 +860,7 @@ class SchoolCalendarImportOutcome:
 
 
 class SchoolCalendarImportController:
-    """Commit one reviewed school workbook as one revision and one backup."""
+    """Commit a validated workbook directly as one revision and one backup."""
 
     def __init__(
         self,
@@ -845,7 +868,6 @@ class SchoolCalendarImportController:
         *,
         actor_provider: Callable[[], RevisionActor] | None = None,
         import_dialog_type=SchoolCalendarImportDialog,
-        review_dialog_type=SchoolCalendarReviewDialog,
         message_box=QMessageBox,
         today_provider: Callable[[], date] = date.today,
         recorded_at_provider: Callable[[], datetime] | None = None,
@@ -857,7 +879,6 @@ class SchoolCalendarImportController:
         self._session = session
         self._actor_provider = actor_provider or current_windows_actor
         self._import_dialog_type = import_dialog_type
-        self._review_dialog_type = review_dialog_type
         self._message_box = message_box
         self._today_provider = today_provider
         self._recorded_at_provider = recorded_at_provider or (lambda: datetime.now(UTC))
@@ -882,17 +903,12 @@ class SchoolCalendarImportController:
         if (yield DialogRequest(import_dialog, self._session)) != QDialog.DialogCode.Accepted:
             return SchoolCalendarImportOutcome(SchoolCalendarImportStatus.CANCELLED)
         preview = import_dialog.preview()
-        review = self._review_dialog_type(
-            preview,
-            known_school_names=tuple(
-                person.profile.school_name
-                for person in roster.persons
-                if person.profile.school_name is not None
-            ),
-            parent=parent,
-        )
-        if (yield DialogRequest(review, self._session)) != QDialog.DialogCode.Accepted:
-            return SchoolCalendarImportOutcome(SchoolCalendarImportStatus.CANCELLED)
+        decisions = {
+            candidate.candidate_id: SchoolCalendarNoteDecision(
+                candidate.candidate_id, SchoolCalendarNoteAction.IGNORE
+            )
+            for candidate in preview.note_candidates
+        }
         latest = self._session.database.latest_revision()
         if latest is None:
             self._message_box.critical(
@@ -905,8 +921,8 @@ class SchoolCalendarImportController:
             snapshot = self._session.database.snapshot(latest.metadata.revision_id)
             prepared = build_school_calendar_import_revision(
                 snapshot,
-                review.reviewed_preview(),
-                decisions=review.decisions(),
+                preview,
+                decisions=decisions,
                 actor=self._actor_provider(),
                 recorded_at=self._recorded_at_provider(),
                 revision_id=self._revision_id_factory(),
@@ -918,7 +934,7 @@ class SchoolCalendarImportController:
             self._message_box.critical(
                 parent,
                 "학교 일정을 저장하지 못했습니다",
-                "운영 데이터에는 반영하지 않았습니다. 표와 비고 검토 내용을 확인한 뒤 다시 시도해주세요.\n\n"
+                "운영 데이터에는 반영하지 않았습니다. 원본 날짜와 열 연결을 확인한 뒤 다시 시도해주세요.\n\n"
                 + user_error(error),
             )
             return SchoolCalendarImportOutcome(SchoolCalendarImportStatus.FAILED)
@@ -975,8 +991,8 @@ def _python_date(editor: WheelSafeDateEdit) -> date:
 def _mark_combo(selected: SchoolLunchMark) -> QComboBox:
     combo = QComboBox()
     combo.setObjectName("schoolCalendarMark")
-    combo.addItem("O · 학교 급식", SchoolLunchMark.SCHOOL_PROVIDES.value)
-    combo.addItem("X · 업체 배송", SchoolLunchMark.VENDOR_REQUIRED.value)
+    combo.addItem("○", SchoolLunchMark.SCHOOL_PROVIDES.value)
+    combo.addItem("×", SchoolLunchMark.VENDOR_REQUIRED.value)
     combo.setCurrentIndex(combo.findData(selected.value))
     return combo
 

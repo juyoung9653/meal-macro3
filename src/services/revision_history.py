@@ -83,6 +83,7 @@ _OPERATION_LABELS = {
 }
 
 _FIELD_LABELS = {
+    "lunch_period": "중식 기간", "lunch_starts_on": "중식 시작일", "lunch_ends_on": "중식 종료일",
     "same_month": "같은 달 안에서 자동변환",
     "excluded_forms": "일일식수 제외 배송 형태",
     "include_next_month": "다음 달 식수 포함",
@@ -248,6 +249,10 @@ def build_revision_change_rows(
             continue
         if change.entity_kind == CANCELLATION_KIND:
             rows.append(_cancellation_row(change, record, snapshot, previous_snapshot))
+            continue
+        if change.entity_kind == "school-lunch.import-deletion":
+            action = "선택한 파일로 불러온 학교 일정 전체를 삭제했습니다." if change.after is not None else "삭제했던 학교 일정 불러오기 기록을 복구했습니다."
+            rows.append(("학교 일정", "중식", "불러오기 전체 삭제", action))
             continue
         target = _target_text(change, snapshot, previous_snapshot)
         if change.entity_kind == HOUSEHOLD_KIND:

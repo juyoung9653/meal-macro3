@@ -130,10 +130,10 @@ def test_dialog_action_uses_unfiltered_source_and_only_include_hidden(app):
             "홍길동-석식", "홍길동-조식",
         )
         assert first.sheets[0].rows[0][1:] == (
-            "저녁 대상", "석식", "10", "성남시 분당구", "010-1111",
+            "저녁 대상", "석식", "10", "성남시 분당구", "010-1111", "", "",
         )
         assert first.sheets[1].rows[0][1:] == (
-            "아침 대상", "조식", "2", "성남시 분당구", "010-2222",
+            "아침 대상", "조식", "2", "성남시 분당구", "010-2222", "", "",
         )
 
         dialog.include_hidden_checkbox.click()

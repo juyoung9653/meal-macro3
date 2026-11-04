@@ -5,8 +5,14 @@ import errno
 import re
 
 
-_FALLBACK = "작업을 완료하지 못했습니다. 다시 시도해주세요."
+_FALLBACK = ("프로그램이 자료를 처리하는 중 예상하지 못한 문제가 발생했습니다. 현재 저장 상태를 확인한 뒤 "
+             "작업 창을 다시 열어 다시 시도해주세요. 같은 문제가 계속되면 수행한 작업과 이 안내를 프로그램 담당자에게 전달해주세요.")
+_INTEGRITY_MESSAGE = ("운영 파일의 자료와 변경 이력이 맞지 않아 작업을 진행할 수 없습니다. "
+                      "운영 파일을 다시 열어 확인해주세요. 계속되면 파일을 보관한 채 프로그램 담당자에게 점검을 요청하거나 정상 백업을 복원해주세요.")
+_CONFLICT_MESSAGE = ("작업 창을 연 뒤 다른 작업에서 자료를 변경하여 저장할 수 없습니다. "
+                     "이 창을 닫고 다시 열어 최신 내용을 확인한 뒤 변경 내용을 다시 입력해주세요.")
 _FIELDS = {
+    "lunch_period": "중식 기간", "lunch_starts_on": "중식 시작일", "lunch_ends_on": "중식 종료일",
     "name": "성명", "birth_date": "생년월일", "mobile_phone": "핸드폰",
     "phone": "전화번호", "phone_number": "전화번호", "telephone": "전화번호",
     "road_address": "도로명주소", "detail_address": "상세주소", "old_address": "지번주소",
@@ -58,12 +64,37 @@ _TOKEN_PATTERN = re.compile(r"(?<![A-Za-z0-9_])(" + "|".join(re.escape(k) for k 
 _USER_TEXT = re.compile(r"^[^:\n]+(?= 값(?:은|이))|(?:[A-Za-z]:[\\/]|\\\\)[^\n\"<>]*|[^\s\"'<>]+\.(?:xlsx|xlsm|xls|sqlite3|db|mealreplica|mealbackup|json|pdf|ini)\b|[\"'][^\"'\n]+[\"']", re.IGNORECASE)
 _INTERNAL = re.compile(r"(?<![A-Za-z0-9_])(?:[a-z]+_[a-z_]+|[A-Z][a-z]+(?:[A-Z][a-zA-Z]+)+)(?![A-Za-z0-9_])|<class |Traceback|0x[0-9a-fA-F]+|expected=|actual=|pywin32")
 _UUID = re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b")
+_TECHNICAL = re.compile(
+    r"(?<![A-Za-z0-9_])(?:entity|revision|snapshot|projection|ledger|canonical|metadata|payload|transaction|schema|migration|EntityRef|UUID|ID|typed|factory|JSON|bytes)(?![A-Za-z0-9_])"
+    r"|\b[a-z][a-z-]*\.[a-z][a-z_.-]*\b", re.I,
+)
 
 
 def user_error(error: BaseException | str | None) -> str:
     """Show actionable known failures, readable validation, or a bounded fallback."""
     raw = str(error).strip() if error is not None else ""
     low = raw.lower()
+    kind = type(error).__name__
+    # Explain the failure, not its implementation vocabulary. Keep these checks
+    # ahead of token translation; translating entity/insert/UUID was misleading.
+    if "이력이 있는 entity ID" in raw or "entity ID가 다시 insert" in raw:
+        subject = "학교 일정" if "school-lunch.schedule" in raw else "항목"
+        return (f"{subject}을 저장하지 못했습니다. 이전 등록 기록과 중복되어 저장이 차단되었습니다. "
+                "작업 창을 닫고 다시 열어 현재 등록 내용을 확인해주세요. 복구 후 다시 불러올 때 반복되면 프로그램 담당자에게 점검을 요청해주세요.")
+    if kind == "RevisionConflictError" or "parent revision이 현재" in raw or "audit before가 현재" in raw:
+        return _CONFLICT_MESSAGE
+    if kind in {"DatabaseIntegrityError", "ProjectionContractError"} or any(word in low for word in (
+        "typed projection", "audit before", "revision parent chain", "revision ledger", "봉인", "무결성 검사", "before chain",
+    )):
+        return _INTEGRITY_MESSAGE
+    if kind in {"DatabaseUnlockError", "CredentialUnlockError"}:
+        return "운영 파일의 잠금을 풀지 못했습니다. 선택한 운영 파일과 비밀번호를 확인해주세요."
+    if "school" in low and "entity id" in low:
+        return "학교 일정의 저장 정보가 맞지 않습니다. 학교 일정 창을 다시 열어 확인해주세요. 계속되면 프로그램 담당자에게 점검을 요청해주세요."
+    if "snapshot에 없는 사람" in raw:
+        return "선택한 대상자가 현재 명단에 없습니다. 명단을 다시 열어 대상자가 삭제되었는지 확인해주세요."
+    if "중식 일정이 없습니다" in raw:
+        return raw + " 운영 일정에서 해당 학교·기간의 방학 일정을 불러온 뒤 다시 시도해주세요."
     code = getattr(error, "errno", None)
     win = getattr(error, "winerror", None)
     if win in (32, 33) or "sharing violation" in low or "being used by another process" in low:
@@ -97,13 +128,12 @@ def user_error(error: BaseException | str | None) -> str:
         return f"{label} 항목을 찾을 수 없습니다. 입력 내용과 열 연결을 확인해주세요." if label else "필요한 항목을 찾을 수 없습니다. 화면을 다시 열어 확인해주세요."
     if isinstance(error, (TypeError, AttributeError)):
         label = next((title for key, title in _FIELDS.items() if re.search(r"(?<![A-Za-z_])" + key + r"(?![A-Za-z_])", raw)), None)
-        return f"{label} 값의 형식이 올바르지 않습니다. 내용을 확인해주세요." if label else "처리할 자료의 형식이 올바르지 않습니다. 입력 내용과 설정을 확인해주세요."
+        return (f"{label + ' ' if label else ''}자료를 프로그램이 처리하지 못했습니다. "
+                "작업 창을 다시 열어 확인해주세요. 계속되면 수행한 작업을 프로그램 담당자에게 전달해주세요.")
     if "migration 이력" in raw or "sqlite v2 db" in low:
         return "운영 파일의 데이터 형식이 프로그램과 맞지 않습니다. 선택한 파일과 프로그램 버전을 확인해주세요."
     if any(word in low for word in ("암호화 runtime", "pywin32가 필요", "qapplication이 실행")):
         return "작업에 필요한 구성 요소를 사용할 수 없습니다. 프로그램 설치 상태를 확인해주세요."
-    if any(word in low for word in ("typed projection", "audit before", "revision parent chain", "revision ledger")):
-        return "저장된 자료와 변경 이력이 일치하지 않습니다. 운영 데이터를 다시 열어 확인해주세요."
     if re.search(r"(?<![.a-z0-9_])sqlite(?![a-z0-9_])", low):
         return "운영 파일을 읽을 수 없습니다. 올바른 파일인지 확인해주세요."
     if not raw or not re.search(r"[가-힣]", raw):
@@ -114,7 +144,11 @@ def user_error(error: BaseException | str | None) -> str:
     def protect(match):
         protected.append(match.group())
         return f"§{len(protected)-1}§"
+    # Protect genuine filenames/quoted input before inspecting implementation
+    # tokens. Never display mechanically translated dotted entity names or UUIDs.
     message = _USER_TEXT.sub(protect, _UUID.sub("해당 항목", raw))
+    if _TECHNICAL.search(message) or "해당 항목" in message or "표준 식종순" in message:
+        return _FALLBACK
     def translate(match):
         label = _TERMS[match.group(1)]
         particle = match.group(2) or ""
@@ -130,7 +164,7 @@ def user_error(error: BaseException | str | None) -> str:
     message = _TOKEN_PATTERN.sub(translate, message)
     message = message.replace("머리글", "헤더").replace("가져오기", "불러오기").replace("임포트", "불러오기")
     if _INTERNAL.search(message):
-        return "처리할 자료에 올바르지 않은 항목이 있습니다. 입력 내용과 설정을 확인해주세요."
+        return _FALLBACK
     for index, value in enumerate(protected):
         message = message.replace(f"§{index}§", value)
     return message

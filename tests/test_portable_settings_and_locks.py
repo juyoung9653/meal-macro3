@@ -299,13 +299,27 @@ def test_startup_disposes_session_on_cancel_or_exception(tmp_path, stage):
 @pytest.mark.parametrize("stage", ["cancel", "controller_error", "event_error", "busy"])
 def test_main_keeps_app_lock_and_cleans_all_exits(app, tmp_path, monkeypatch, stage):
     import src.desktop_v2.__main__ as module
+    import src.desktop_v2.output_retention as retention_module
+    import src.desktop_v2.window_preferences as preferences_module
     (tmp_path / "data").mkdir()
     (tmp_path / "data" / "settings.ini").write_text("[portable]\ninitialized=true\n")
     monkeypatch.setattr(module, "application_lock", lambda: application_lock(tmp_path))
     monkeypatch.setattr(module, "DesktopStorageSettings", lambda **kwargs: DesktopStorageSettings(base_directory=tmp_path, **kwargs))
     messages = []
     monkeypatch.setattr(module, "QMessageBox", SimpleNamespace(critical=lambda *a: messages.append(a)))
-    closed = []
+    closed, executed, preferences, cleanup = [], [], [], []
+    # These UI integrations own QObject parents and have separate coverage.
+    # Keep this test focused on application-lock and session lifetimes.
+    def install_preferences(application):
+        assert application is fake_app
+        preferences.append(application)
+    def create_cleanup(settings, window):
+        with pytest.raises(FileLockError):
+            application_lock(tmp_path).acquire()
+        cleanup.append(window)
+        return object()
+    monkeypatch.setattr(preferences_module, "install_window_preferences", install_preferences)
+    monkeypatch.setattr(retention_module, "OutputCleanupScheduler", create_cleanup)
     class Controller:
         def __init__(self, settings):
             with pytest.raises(FileLockError):
@@ -320,10 +334,12 @@ def test_main_keeps_app_lock_and_cleans_all_exits(app, tmp_path, monkeypatch, st
                 window=SimpleNamespace(show=lambda: None, close=lambda: None))
     monkeypatch.setattr(module, "DesktopStartupController", Controller)
     def execute():
+        executed.append(True)
         with pytest.raises(FileLockError):
             application_lock(tmp_path).acquire()
         raise RuntimeError("event failed")
-    monkeypatch.setattr(module, "QApplication", SimpleNamespace(instance=lambda: SimpleNamespace(exec=execute)))
+    fake_app = SimpleNamespace(exec=execute)
+    monkeypatch.setattr(module, "QApplication", SimpleNamespace(instance=lambda: fake_app))
     if stage == "busy":
         with application_lock(tmp_path):
             assert module.main() == 1
@@ -331,7 +347,9 @@ def test_main_keeps_app_lock_and_cleans_all_exits(app, tmp_path, monkeypatch, st
                 application_lock(tmp_path).acquire()
     else:
         assert module.main() == (0 if stage == "cancel" else 1)
-    assert bool(closed) == (stage == "event_error")
+    assert preferences == [fake_app]
+    assert bool(executed) == bool(cleanup) == bool(closed) == (stage == "event_error")
+    assert bool(messages) == (stage != "cancel")
     with application_lock(tmp_path):
         pass
 
@@ -398,10 +416,11 @@ def test_document_default_write_failure_is_shown_and_stops_dispatch(tmp_path, mo
     from src.desktop_v2.document_hub import DocumentAction
     from src.desktop_v2.document_output import DocumentOutputMode
     from src.desktop_v2.settings_hub import SettingsAction
-    messages, dispatched = [], []
+    messages, dispatched, save_attempts = [], [], []
     class Settings:
         document_output_directory = tmp_path
         def save_document_output_directory(self, directory):
+            save_attempts.append(directory)
             raise OSError("settings unavailable")
     class Dialog:
         selected_action = DocumentAction.INVOICE
@@ -432,8 +451,13 @@ def test_document_default_write_failure_is_shown_and_stops_dispatch(tmp_path, mo
     else:
         Dialog.selected_action = SettingsAction.DOCUMENT_DIRECTORY
         controller._run_settings_hub(session, window)
+    assert save_attempts == [tmp_path]
     assert len(messages) == 1
-    assert messages[0][2] == "settings unavailable"
+    assert messages[0][1:] == (
+        "문서 저장 폴더를 저장하지 못했습니다",
+        "프로그램이 자료를 처리하는 중 예상하지 못한 문제가 발생했습니다. 현재 저장 상태를 확인한 뒤 "
+        "작업 창을 다시 열어 다시 시도해주세요. 같은 문제가 계속되면 수행한 작업과 이 안내를 프로그램 담당자에게 전달해주세요.",
+    )
     assert not dispatched
 
 

@@ -223,7 +223,7 @@ def test_native_drag_start_owns_move_without_qt_deleting_source_cells(app, monke
 
 
 @pytest.mark.parametrize("failure,expected_message", [
-    (OSError("disk full"), "disk full"),
+    (OSError("disk full"), "프로그램이 자료를 처리하는 중 예상하지 못한 문제가 발생했습니다."),
     (RevisionConflictError("stale parent"), "기사 관리를 다시 열어"),
 ])
 def test_controller_save_refresh_cancel_and_write_failure(app, tmp_path, failure, expected_message):

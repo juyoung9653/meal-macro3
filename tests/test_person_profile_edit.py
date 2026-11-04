@@ -275,8 +275,8 @@ def test_phone_can_copy_unchanged_subject_number_to_family():
     assert result.snapshot.person(sibling.person_id).profile.mobile_phone == roster.person(PERSON_ID).profile.mobile_phone
 
 
-@pytest.mark.parametrize("day, expected_count", [(date(2026, 8, 25), 1), (date(2026, 8, 26), 2)])
-def test_household_phone_respects_membership_effective_date(day, expected_count):
+@pytest.mark.parametrize("day", [date(2026, 8, 25), date(2026, 8, 26)])
+def test_household_phone_uses_current_membership_before_recorded_start(day):
     from dataclasses import replace
     from uuid import uuid4
 
@@ -292,4 +292,7 @@ def test_household_phone_respects_membership_effective_date(day, expected_count)
         actor=RevisionActor("tester", "test"), recorded_at=RECORDED_AT,
         effective_on=day, revision_id=NEW_REVISION_ID, household_mobile_phone=True,
     )
-    assert len(result.record.changes) == expected_count
+    assert len(result.record.changes) == 2
+    assert result.snapshot.person(PERSON_ID).profile.mobile_phone == "010-9999-9999"
+    assert result.snapshot.person(sibling.person_id).profile.mobile_phone == "010-9999-9999"
+    assert result.snapshot.memberships == roster.memberships

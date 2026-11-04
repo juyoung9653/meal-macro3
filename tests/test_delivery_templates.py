@@ -1,4 +1,5 @@
 """Synthetic Excel template edits, UI persistence and generation boundaries."""
+from copy import copy
 from dataclasses import replace
 from datetime import date
 from pathlib import Path
@@ -31,15 +32,17 @@ def test_real_template_column_styles_reach_measurement_and_serialized_output(tmp
     ws = wb["배송대타"]
     ws["C3"].font = Font(name="Arial", size=17, bold=True, italic=True, color="123456")
     ws["C3"].border = Border(bottom=Side(style="double", color="654321"))
+    ws["C6"].font = copy(ws["C3"].font)
+    ws["C6"].border = copy(ws["C3"].border)
     ws["C6"].fill = PatternFill("solid", fgColor="135790")
     ws["A18"].border = Border(left=Side(style="double", color="246810"), top=Side(style="thick", color="246810"))
     wb.save(path)
     wb.close()
-    snapshot, _ = source()
+    snapshot, _ = source(sizes=(3, 1, 1))
     data = prepare_delivery_substitute_data(snapshot, DAY, Meal.BREAKFAST)
     data = replace(data, rows=tuple(
         replace(row, entitlement_count=count)
-        for row, count in zip(data.rows, (3, 1, 2, 3), strict=True)
+        for row, count in zip(data.rows, (3, 1, 2, 3, 1), strict=True)
     ))
     selected = replace(options(data), columns=("name", "road_address"))
     observed = []
@@ -62,7 +65,7 @@ def test_real_template_column_styles_reach_measurement_and_serialized_output(tmp
     assert actual["B3"].font.name != "Arial"
 
 
-def test_default_asset_is_consumed_and_unchanged_style_keeps_native_layout(tmp_path, monkeypatch):
+def test_default_asset_is_consumed_and_preserves_group_fonts(tmp_path, monkeypatch):
     from src.core.settings import get_settings
     path = tmp_path / "default.xlsx"
     create_substitute_template(path)
@@ -77,8 +80,9 @@ def test_default_asset_is_consumed_and_unchanged_style_keeps_native_layout(tmp_p
     wb.save(path)
     wb.close()
     result = substitute_generator.build_substitute_workbook(data, options(data))
-    assert flags == [False, True]
-    assert result.active["C3"].font.sz == 18
+    assert flags == [True, True]
+    assert result.active["C3"].font.sz == 8
+    assert result.active["C5"].font.sz == 18
     result.close()
 
 

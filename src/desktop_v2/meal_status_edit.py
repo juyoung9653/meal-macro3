@@ -245,6 +245,7 @@ class MealStatusChangeDialog(QDialog):
         header_layout.addWidget(title)
         guide = QLabel(
             "여러 식종에 같은 상태를 적용하면서 시작일·종료일은 식종별로 입력합니다."
+            " 중식을 새로 추가하면 입력한 시작일을 중식 시작일로 저장하고, 종료일을 지정하지 않으면 학교 일정에서 중식 종료일을 채웁니다."
         )
         guide.setObjectName("workspaceSubtitle")
         guide.setWordWrap(True)
@@ -741,6 +742,8 @@ class MealStatusChangeController:
             changed_targets = tuple(selected) if is_batch else tuple((person_id, meal) for meal in meals)
             validate_meal_status_transition(roster, all_histories, changed_targets,
                 dialog.selected_status(), periods)
+            from src.domain.school_calendar import school_lunch_calendar_from_snapshot
+            school_calendar = school_lunch_calendar_from_snapshot(self._session.database.snapshot(roster.revision_id))
             if is_batch:
                 used_meals = {meal for _person_id, meal in selected}
                 prepared = build_batch_meal_status_revision(
@@ -759,6 +762,7 @@ class MealStatusChangeController:
                     },
                     intake_channel=intake_channel,
                     note=note,
+                    school_calendar=school_calendar,
                 )
             else:
                 prepared = build_meal_status_revision(
@@ -774,6 +778,7 @@ class MealStatusChangeController:
                     periods_by_meal=periods,
                     intake_channel=intake_channel,
                     note=note,
+                    school_calendar=school_calendar,
                 )
             backup_result = save_revision(self._session, prepared.record, parent=parent)
         except Exception as error:  # noqa: BLE001 - report persistence failures at the UI boundary

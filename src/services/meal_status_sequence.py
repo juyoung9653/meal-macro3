@@ -4,6 +4,8 @@ from collections import defaultdict
 from dataclasses import replace
 
 from src.domain.delivery_routing import routing_state_from_snapshot
+from src.domain.meal_status_projection import effective_meal_status
+from src.domain.school_calendar import school_lunch_calendar_from_snapshot
 from src.domain.projections import (
     ASSIGNMENT_KIND, STATUS_EVENT_KIND, roster_audit_changes,
     roster_from_historical_snapshot, status_event_from_state,
@@ -38,7 +40,7 @@ def prepare_meal_status_sequence(snapshot, record):
 
     Sequences follow the existing undated assignment contract. Each changed
     meal uses its own start date to resolve household membership and driver.
-    School calendars and view filters do not remove stops from the saved route.
+    School-calendar eligibility matches the route editor; view filters do not apply.
     """
     entities = dict(snapshot.entities)
     changed = []
@@ -55,6 +57,7 @@ def prepare_meal_status_sequence(snapshot, record):
     after = HistoricalSnapshot(record.metadata.revision_id, entities)
     roster = roster_from_historical_snapshot(after)
     routing = routing_state_from_snapshot(after)
+    calendar = school_lunch_calendar_from_snapshot(after)
     events_by_target = defaultdict(list)
     for event in status_events_from_historical_snapshot(after):
         events_by_target[(event.person_id, event.meal)].append(event)
@@ -78,10 +81,13 @@ def prepare_meal_status_sequence(snapshot, record):
         included = {}
         for person in roster.persons:
             pid = person.person_id
-            history = histories.get((pid, meal))
-            if pid not in stopped and (pid in delivery or history is None
-                                      or history.status_on(day) is not MealStatus.STOPPED):
+            status = effective_meal_status(roster, histories, calendar, pid, meal, day)
+            if pid not in stopped and status in (MealStatus.DELIVERY, MealStatus.PAUSED):
                 included[pid] = (meal,)
+            elif status is None:
+                view = routing.resolve(roster, pid, day)
+                if (view.driver_ids[meal], view.drivers[meal]) in affected_drivers:
+                    values[(pid, meal)] = ""
         rows = build_driver_household_rows(roster, routing, day, included_meals=included)
         for identity in affected_drivers:
             route = sorted(

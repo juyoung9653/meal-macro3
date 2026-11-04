@@ -58,7 +58,7 @@ from src.services.meal_service_availability import (
 )
 
 
-DELIVERY_REPORT_CALCULATION_CONTRACT_VERSION = 6
+DELIVERY_REPORT_CALCULATION_CONTRACT_VERSION = 7
 DELIVERY_REPORT_GROUPING_POLICY_VERSION = 3
 
 
@@ -156,14 +156,14 @@ def prepare_physical_delivery_data(
     period_end: date,
     meals: Sequence[Meal],
     *,
-    missing_lunch_schedule_as_zero: bool = False,
+    missing_lunch_schedule_as_zero: bool = True,
     include_service_period: bool = False,
 ) -> PreparedDeliveryReportData:
     """Prepare physical shipments without report grouping or driver requirements.
 
     ``reports`` is empty; shipments and calculation provenance use the same
     entitlement rules and evaluation window as delivery reports.
-    Monthly statistics may omit lunch on dates without a reviewed schedule.
+    Missing school schedules exclude only the affected lunch dates.
     include_service_period also retains meals eaten in the requested period,
     including bundles physically delivered in a different month or year.
     """
@@ -184,7 +184,7 @@ def _prepare_delivery_data(
     build_reports: bool,
     delivery_forms: Sequence[str | None] | None = None,
     remark_options: ReportRemarkOptions = ReportRemarkOptions(),
-    missing_lunch_schedule_as_zero: bool = False,
+    missing_lunch_schedule_as_zero: bool = True,
     include_service_period: bool = False,
     mapping_snapshot: HistoricalSnapshot | None = None,
 ) -> PreparedDeliveryReportData:
@@ -249,6 +249,7 @@ def _prepare_delivery_data(
     ordered_service_days = tuple(sorted(service_days))
     shipments: list[PhysicalShipment] = []
     exclusions: Counter[str] = Counter()
+    missing_lunch_schools = defaultdict(lambda: {"dates": set(), "people": set(), "count": 0})
     allowed_forms = set(selected_forms) if selected_forms is not None else None
     remark_forms = (set(remark_options.separate_forms)
                     if build_reports and remark_options.include_excluded_deliveries else set())
@@ -302,6 +303,18 @@ def _prepare_delivery_data(
                 except SchoolLunchCalendarError as error:
                     if (missing_lunch_schedule_as_zero and meal is Meal.LUNCH
                             and isinstance(error, SchoolLunchScheduleMissingError)):
+                        in_period = (period_start <= candidate_delivery <= period_end or
+                                     (include_service_period and period_start <= service_on <= period_end))
+                        if counted_form and in_period and decide_entitlement(
+                            roster, person.person_id, meal, service_on,
+                            status_history=history, service_available=True,
+                            service_provision=provision,
+                        ).entitlement is not None:
+                            school = person.profile.school_name or "학교명 없음"
+                            missing_lunch_schools[school]["dates"].add(service_on)
+                            missing_lunch_schools[school]["people"].add(person.person_id)
+                            missing_lunch_schools[school]["count"] += 1
+                            exclusions["school_lunch_schedule_missing"] += 1
                         continue
                     if (period_start <= candidate_delivery <= period_end
                             or (include_service_period and period_start <= service_on <= period_end)):
@@ -453,6 +466,12 @@ def _prepare_delivery_data(
                 "closed_delivery_day": "exclude_entire_bundle",
             },
             "school_lunch_calendar": school_calendar.manifest(),
+            "missing_lunch_schedule_policy": "exclude_affected_lunch_dates" if missing_lunch_schedule_as_zero else "require_schedule",
+            "missing_lunch_schedules": [
+                {"school_name": school, "service_dates": [day.isoformat() for day in sorted(values["dates"])],
+                 "person_count": len(values["people"]), "meal_count": values["count"]}
+                for school, values in sorted(missing_lunch_schools.items())
+            ],
             "service_adjustments": {
                 "policy_version": SERVICE_ADJUSTMENT_POLICY_VERSION,
                 "content_sha256": _state_sha256(

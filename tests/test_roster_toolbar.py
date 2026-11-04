@@ -73,7 +73,7 @@ def test_monthly_statistics_action_emits_once(window):
 def test_header_only_exposes_frequent_actions(window):
     header = window._more_button.parentWidget()
     visible = {button.text() for button in header.findChildren(QPushButton) if button.isVisible()}
-    assert visible == {"문서 만들기", "행 추가", "더보기"}
+    assert visible == {"문서 만들기", "신규 대상자 등록", "더보기"}
     assert window._more_button.menu() is None
     assert window._more_panel.isHidden()
     assert window._column_search_header.buttons["name"].isVisible()

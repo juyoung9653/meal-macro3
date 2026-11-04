@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from .user_messages import user_error
+from src.services.lunch_schedule_exclusions import lunch_schedule_exclusion_lines
+
 
 import hashlib
 from collections.abc import Callable, Mapping
@@ -77,6 +79,12 @@ from .startup_loading import run_progress_task
 DOCUMENT_RENDER_CONTRACT_VERSION = 1
 
 
+def _lunch_exclusion_notice(manifest):
+    lines = lunch_schedule_exclusion_lines(manifest)
+    return ("\n학교 일정이 없는 학교·날짜의 중식을 제외했습니다. 학교 일정을 등록한 뒤 다시 만들어주세요.\n"
+            + "\n".join(lines)) if lines else ""
+
+
 class DocumentGenerationStatus(StrEnum):
     COMPLETED = "completed"
     CANCELLED = "cancelled"
@@ -89,6 +97,7 @@ class DocumentGenerationOutcome:
     result: GeneratedDocumentResult | None = None
     roster: RosterSnapshot | None = None
     backup_result: AutomaticBackupResult | None = None
+    template_warning: str | None = None
 
     @property
     def completed(self) -> bool:
@@ -208,6 +217,8 @@ class DocumentGenerationController:
                 "파일과 문서 이력을 완료하지 않았습니다. 입력 자료와 설정을 확인해주세요.\n\n" + detail,
             )
             return DocumentGenerationOutcome(DocumentGenerationStatus.FAILED, roster=error.roster)
+        if outcome.template_warning:
+            self._message_box.warning(parent, "배송목록 이전 정상 양식 사용", outcome.template_warning)
         if outcome.backup_result.warning_required:
             self._message_box.warning(
                 parent, f"{action.label}는 만들었지만 자동 백업에 실패했습니다",
@@ -223,6 +234,7 @@ class DocumentGenerationController:
         refreshed: DocumentOutputSelection | None = None
         current_roster = None
         template_temp = None
+        template_resolution = None
         try:
             current_roster = self._session.database.current_roster()
             if current_roster is None:
@@ -256,7 +268,13 @@ class DocumentGenerationController:
                     columns=tuple(SubstituteColumn(key, label) for key, label in options.column_labels.items()) or None,
                     fallbacks=None if options.fallbacks is None else dict(options.fallbacks),
                 )
-                prepared.selected_rows(selection.document.substitute_options)
+                try:
+                    prepared.selected_rows(selection.document.substitute_options)
+                except ValueError as error:
+                    notice = _lunch_exclusion_notice(prepared.calculation_manifest)
+                    if notice:
+                        raise ValueError(user_error(error) + notice) from error
+                    raise
             elif action is DocumentAction.DELIVERY_REPORT:
                 prepare_report = prepare_happy_report_data if happy_report else prepare_delivery_report_data
                 prepared = prepare_report(
@@ -271,6 +289,7 @@ class DocumentGenerationController:
                 if not prepared.reports:
                     raise ValueError(
                         "선택한 기간·식종에 실제 배송할 대상이 없습니다."
+                        + _lunch_exclusion_notice(prepared.calculation_manifest)
                     )
             else:
                 prepared = prepare_monthly_document_data(
@@ -283,6 +302,7 @@ class DocumentGenerationController:
                 if not prepared.batch.deliveries:
                     raise ValueError(
                         "선택한 기간·식종에 청구하거나 확인할 급식 대상이 없습니다."
+                        + _lunch_exclusion_notice(prepared.calculation_manifest)
                     )
 
             refreshed = next_available_document_output(
@@ -296,11 +316,24 @@ class DocumentGenerationController:
                 from .delivery_template import DeliveryTemplateStore
                 from src.excel.delivery_templates import validate_delivery_template
                 delivery_profile = template_setting.profile if template_setting is not None else DocumentTemplateProfile.SCHOOL_MEAL
-                custom_delivery_template = DeliveryTemplateStore(str(self._session.credentials.database_id), profile=delivery_profile).selected(action)
+                delivery_store = DeliveryTemplateStore(str(self._session.credentials.database_id), profile=delivery_profile)
+                custom_delivery_template = delivery_store.selected(action)
                 if custom_delivery_template is not None and not happy_report:
-                    validate_delivery_template(custom_delivery_template, action.value)
+                    if action is not DocumentAction.DELIVERY_SUBSTITUTE:
+                        validate_delivery_template(custom_delivery_template, action.value)
                     template_path = custom_delivery_template
-            if template_path is not None and not template_path.is_file():
+                    if action is DocumentAction.DELIVERY_SUBSTITUTE:
+                        from src.excel.substitute_template_columns import sync_substitute_template
+                        from src.services.sqlite_delivery_substitute_service import all_substitute_template_columns
+                        catalog = {column.key: column for column in all_substitute_template_columns(current_roster)}
+                        catalog.update({column.key: column for column in prepared.columns})
+                        template_resolution = delivery_store.substitute_backup.resolve(template_path)
+                        if not template_resolution.used_previous:
+                            sync_substitute_template(template_path, tuple(catalog.values()), options.columns)
+                            template_resolution = delivery_store.substitute_backup.resolve(template_path)
+            if action is DocumentAction.DELIVERY_SUBSTITUTE and template_resolution is None:
+                template_resolution = delivery_store.substitute_backup.resolve(template_path)
+            if template_path is not None and not template_path.is_file() and template_resolution is None:
                 raise FileNotFoundError(
                     f"문서 양식 파일을 찾을 수 없습니다: {template_path.name}"
                 )
@@ -327,7 +360,7 @@ class DocumentGenerationController:
                     if template_bytes is None:
                         template_bytes, template_path, source_template_path = contents, frozen, source
             elif action in (DocumentAction.DELIVERY_REPORT, DocumentAction.DELIVERY_SUBSTITUTE):
-                template_bytes = template_path.read_bytes()
+                template_bytes = template_resolution.contents if template_resolution is not None else template_path.read_bytes()
                 template_temp = TemporaryDirectory(prefix="delivery-template-")
                 template_path = Path(template_temp.name) / source_template_path.name
                 template_path.write_bytes(template_bytes)
@@ -458,6 +491,9 @@ class DocumentGenerationController:
             if happy_report:
                 template_manifest["happy_report_render_contract_version"] = HAPPY_REPORT_RENDER_VERSION
                 template_manifest["templates"] = happy_template_manifest
+            if action is DocumentAction.DELIVERY_REPORT:
+                template_manifest["daily_report_layout"] = "fixed_template"
+                template_manifest["daily_report_layout_version"] = 2
             if action is DocumentAction.DELIVERY_SUBSTITUTE:
                 template_manifest["substitute_render_contract_version"] = SUBSTITUTE_RENDER_CONTRACT_VERSION
                 template_manifest["substitute_options"] = selection.document.substitute_options.manifest()
@@ -466,6 +502,9 @@ class DocumentGenerationController:
                     if column.key in selection.document.substitute_options.columns
                 ]
                 template_manifest["layout"] = "template_openpyxl_a4_group_safe"
+                template_manifest["template_used_previous_valid"] = template_resolution.used_previous
+                if template_resolution.used_previous:
+                    template_manifest["template_fallback_reason"] = template_resolution.reason
             if action in (DocumentAction.DELIVERY_REPORT, DocumentAction.DELIVERY_SUBSTITUTE):
                 template_manifest["delivery_template_profile"] = delivery_profile.value
             if template_setting is not None:
@@ -496,6 +535,7 @@ class DocumentGenerationController:
                 generated_at,
                 publication.output_sha256,
                 publication.output_byte_size,
+                lunch_exclusions=lunch_schedule_exclusion_lines(prepared.calculation_manifest),
             )
             # Verify the published file before sealing a successful document run.
             backup_result = self._session.append_document_run(run)
@@ -537,6 +577,7 @@ class DocumentGenerationController:
             result,
             current_roster,
             backup_result,
+            template_resolution.warning if template_resolution is not None else None,
         )
 
     def _template_path(
