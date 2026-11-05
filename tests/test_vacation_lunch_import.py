@@ -269,7 +269,8 @@ def test_consecutive_lunch_imports_persist_stop_and_restart_history(tmp_path):
         assert len(events) == 2
 
 
-def test_lunch_controller_skips_review_for_exact_match_and_preserves_cancelled_ambiguity(tmp_path):
+@pytest.mark.parametrize("calendar_first", [False, True])
+def test_lunch_controller_skips_review_for_exact_match_and_preserves_cancelled_ambiguity(tmp_path, calendar_first):
     path = tmp_path / "operation.sqlite3"
     backup_directory = tmp_path / "backups"
     backup_directory.mkdir()
@@ -316,6 +317,25 @@ def test_lunch_controller_skips_review_for_exact_match_and_preserves_cancelled_a
 
     with DatabaseSession.create(path, "test-password", "test-recovery", backup_directory=backup_directory) as session:
         session.append_revision(initial.record)
+        if calendar_first:
+            from src.domain.entitlements import SchoolLunchMark
+            from src.importing.school_calendar import (
+                SchoolCalendarColumnMapping, SchoolCalendarImportPreview,
+                SchoolVacationRow, build_school_calendar_import_revision,
+            )
+            calendar_preview = SchoolCalendarImportPreview(
+                "synthetic-calendar.xlsx", "c" * 64, 100, "일정", "d" * 64,
+                SchoolCalendarColumnMapping("일정", 2, 3, 2026, 1, 2, 3, 4, 5),
+                InclusiveDateRange(date(2026, 8, 3), date(2026, 8, 31)),
+                (SchoolVacationRow(3, "기존 학교", date(2026, 8, 17), SchoolLunchMark.SCHOOL_PROVIDES,
+                                   date(2026, 8, 21), SchoolLunchMark.SCHOOL_PROVIDES),), (), (),
+            )
+            calendar_import = build_school_calendar_import_revision(
+                session.database.snapshot(REVISION), calendar_preview,
+                decisions={}, actor=actor, recorded_at=datetime(2026, 7, 2, tzinfo=UTC),
+            )
+            session.append_revision(calendar_import.record)
+            assert session.database.latest_revision().metadata.effective_on > START
         outcome = GuidedRosterImportController(
             session, wizard_type=wizard_type(_preview("유지")),
             review_type=NoReview, actor_provider=lambda: actor,
@@ -323,6 +343,13 @@ def test_lunch_controller_skips_review_for_exact_match_and_preserves_cancelled_a
         ).run()
         assert outcome.completed
         assert "기존 배송 유지 1명" in Messages.summaries[-1]
+        if calendar_first:
+            from src.domain.school_calendar import school_lunch_calendar_from_snapshot
+            assert outcome.roster.person(KEEP).lunch_period == InclusiveDateRange(
+                date(2026, 8, 18), date(2026, 8, 20))
+            historical = session.database.snapshot(outcome.roster.revision_id)
+            assert school_lunch_calendar_from_snapshot(historical).schedule_for("기존 학교").covers(date(2026, 8, 3))
+            session.database.check_integrity()
         committed_id = session.database.latest_revision().metadata.revision_id
 
         ambiguous = PersonObservation(
@@ -346,3 +373,27 @@ def test_lunch_controller_skips_review_for_exact_match_and_preserves_cancelled_a
         ).run()
         assert cancelled.status is GuidedImportStatus.CANCELLED
         assert session.database.latest_revision().metadata.revision_id == committed_id
+
+        # A real future lunch status still blocks the import, independently
+        # of the latest revision's effective date or school-calendar dates.
+        from uuid import uuid4
+        from src.domain.projections import status_event_audit_change
+        from src.domain.revisions import RevisionMetadata, RevisionRecord, RevisionSource
+        reserved_id = uuid4()
+        stamp = datetime.now(UTC)
+        event = StatusEvent(uuid4(), reserved_id, KEEP, Meal.LUNCH,
+                            MealStatus.STOPPED, InclusiveDateRange(date(2026, 9, 1)), stamp)
+        session.append_revision(RevisionRecord(
+            RevisionMetadata(reserved_id, committed_id, stamp, START, actor,
+                             "합성 중식 예약", RevisionSource.UI),
+            (status_event_audit_change(event),),
+        ))
+        warnings = []
+        Messages.warning = staticmethod(lambda _parent, _title, message: warnings.append(message))
+        blocked = GuidedRosterImportController(
+            session, wizard_type=wizard_type(_preview("유지")),
+            review_type=NoReview, actor_provider=lambda: actor, message_box=Messages,
+        ).run()
+        assert blocked.status is GuidedImportStatus.CANCELLED
+        assert len(warnings) == 1 and "예약된 중식 상태" in warnings[0]
+        assert session.database.latest_revision().metadata.revision_id == reserved_id

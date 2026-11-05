@@ -49,7 +49,7 @@ def test_november_third_breakfast_uses_november_sixth_with_current_week_quantity
                                       (Meal.BREAKFAST,))
     report = result.reports[0]
     assert report.breakfast_on == date(2026, 11, 6)
-    assert report.breakfast_total == 6  # Previous week had only one person / three meals.
+    assert report.breakfast_total == 2  # Previous week had only one recipient.
     assert result.shipments == ()
     assert result.calculation_manifest["display_reference_days"][0]["breakfast"] == "2026-11-06"
 
@@ -127,7 +127,7 @@ def test_multiple_weeks_use_their_own_friday_quantities_and_only_actual_shipment
     result = prepare_happy_report_data(historical, date(2026, 11, 3), date(2026, 11, 10),
                                       (Meal.BREAKFAST,))
     assert [(report.breakfast_on, report.breakfast_total) for report in result.reports] == (
-        [(date(2026, 11, 6), 3)] * 6 + [(date(2026, 11, 13), 6)] * 2
+        [(date(2026, 11, 6), 1)] * 6 + [(date(2026, 11, 13), 2)] * 2
     )
     assert len(result.shipments) == 1
     assert result.shipments[0].delivery_on == date(2026, 11, 6)

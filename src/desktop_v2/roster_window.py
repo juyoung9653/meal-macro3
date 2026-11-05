@@ -1405,6 +1405,7 @@ class RosterWindow(QMainWindow):
     import_review_requested = Signal()
     person_edit_requested = Signal(object)
     cell_edit_requested = Signal(object, str, str)
+    bulk_cell_edit_requested = Signal(object, object)
     delivery_settings_requested = Signal(object)
     person_add_requested = Signal(object)
     person_delete_requested = Signal(object)
@@ -2847,7 +2848,7 @@ class RosterWindow(QMainWindow):
         guide = QLabel("우클릭: 이력보기·민원·상태 변경")
         guide.setObjectName("muted")
         guide.setWordWrap(True)
-        guide.setToolTip("모든 셀 우클릭: 이력보기·민원\n식종 셀 우클릭: 배송 상태·배송담당 변경\nCtrl·Shift로 여러 식종 셀 선택 후 우클릭하면 일괄 변경할 수 있습니다.")
+        guide.setToolTip("모든 셀 우클릭: 이력보기·민원\n식종 셀 우클릭: 배송 상태·배송담당 변경\n일반 칼럼 셀 우클릭: 선택 셀 일괄 변경\n드래그 또는 Ctrl·Shift로 여러 셀을 선택한 뒤 우클릭하면 일괄 변경할 수 있습니다.")
         layout.addWidget(guide)
         return frame
 
@@ -2860,6 +2861,12 @@ class RosterWindow(QMainWindow):
     ) -> QMenu:
         menu = QMenu(self)
         if meal is None:
+            if column_key is not None and is_roster_cell_editable(column_key):
+                cell_targets = self.selected_editable_cells()
+                if cell_targets:
+                    bulk = menu.addAction(f"선택 셀 일괄 변경 · {len(cell_targets)}개")
+                    revision_id = self._roster.revision_id
+                    bulk.triggered.connect(lambda: self.bulk_cell_edit_requested.emit(cell_targets, revision_id))
             if column_key != "sequence":
                 edit = QAction("정보 수정", menu)
                 edit.triggered.connect(lambda: self.person_edit_requested.emit(person.person_id))
@@ -2936,6 +2943,16 @@ class RosterWindow(QMainWindow):
         delete = QAction("명단 행 삭제", menu)
         delete.triggered.connect(lambda: self.person_delete_requested.emit(person.person_id))
         menu.addAction(delete)
+
+    def selected_editable_cells(self) -> tuple[tuple[UUID, str], ...]:
+        targets = {}
+        for index in sorted(self._table.selectionModel().selectedIndexes(), key=lambda item: (item.row(), item.column())):
+            if self._table.isRowHidden(index.row()) or self._table.isColumnHidden(index.column()):
+                continue
+            column = self._model.columns[index.column()]
+            if column.meal is None and is_roster_cell_editable(column.key):
+                targets[(self._model.person_at(index.row()).person_id, column.key)] = None
+        return tuple(targets)
 
     def selected_meal_targets(self) -> tuple[tuple[UUID, Meal], ...]:
         selected = self._table.selectionModel().selectedIndexes()

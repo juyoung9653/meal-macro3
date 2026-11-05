@@ -1,6 +1,3 @@
 @echo off
 chcp 65001 >nul
-cd /d "%~dp0.."
-python "scripts\cleanup_september30_stops.py" --no-pause
-echo.
-pause
+call "%~dp0중지식종_미배송정리.cmd"

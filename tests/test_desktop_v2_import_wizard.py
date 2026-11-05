@@ -402,12 +402,17 @@ def test_clean_import_validates_and_accepts_without_preview(
     wizard.close()
 
 
+@pytest.mark.parametrize("modal", (False, True))
 def test_preview_error_can_be_fixed_and_rechecked_inside_the_wizard(
     app: QApplication,
     tmp_path: Path,
+    modal: bool,
 ):
     path = _combined(tmp_path / "invalid.xlsx", meal="야식")
     wizard = RosterImportWizard()
+    wizard.setModal(modal)
+    wizard.show()
+    app.processEvents()
     wizard.path_edit.setText(str(path))
     assert wizard._inspect_source(), wizard.error_label.text()
     advance_wizard(wizard)
@@ -422,6 +427,9 @@ def test_preview_error_can_be_fixed_and_rechecked_inside_the_wizard(
     wizard._open_correction_dialog()
     app.processEvents()
     assert wizard.correction_dialog.isVisible()
+    assert wizard.correction_dialog.windowHandle().transientParent() == (
+        wizard.windowHandle() if modal else None
+    )
     editor = wizard._correction_editors[(2, "C")]
     editor.setCurrentText("조식 / 중식")
 
@@ -874,7 +882,7 @@ def test_meal_format_choice_only_shows_fields_for_the_selected_excel_shape(
     assert not wizard.breakfast_combo.isHidden()
     assert not wizard.true_values_edit.isHidden()
     assert wizard.combined_meal_combo.isHidden()
-    with pytest.raises(ValueError, match="자동으로 찾지 못했습니다"):
+    with pytest.raises(ValueError, match="식종별 열이 연결되지 않았습니다"):
         wizard._build_profile()
 
     wizard.meal_mode_combo.setCurrentIndex(

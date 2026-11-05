@@ -114,6 +114,6 @@ def test_both_happy_report_templates_copy_exact_body_and_total_styles(tmp_path):
             assert sheet['I4'].font.sz == 24
             assert not sheet['I4'].alignment.wrap_text
             assert sheet['I4'].border.bottom.style == 'double'
-            assert sheet['D4'].value == (1 if sheet.title.startswith('중식_') else 3)
+            assert sheet['D4'].value == 1
     finally:
         workbook.close()

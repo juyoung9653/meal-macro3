@@ -488,6 +488,15 @@ def test_real_wizard_direct_import_persists_once_and_skips_unchanged_source(
             self.path_edit.setText(str(path))
             assert self._inspect_source()
             advance_wizard(self)
+            if self._database_columns is not None:
+                # Reimports deliberately start unconnected; follow the current
+                # manual mapping flow before checking the no-change save path.
+                for column, target in {
+                    "A": "profile:name", "B": "profile:birth_date",
+                    "C": "meal:combined", "D": "profile:mobile_phone",
+                    "E": "profile:school_name", "F": "profile:road_address",
+                }.items():
+                    assert self.destination_table.assign_source(column, target)
             self.effective_date_edit.setDate(QDate(2026, 8, 17))
             advance_wizard(self)
             if needs_correction:

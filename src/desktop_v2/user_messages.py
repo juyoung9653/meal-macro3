@@ -89,6 +89,10 @@ def user_error(error: BaseException | str | None) -> str:
         return _INTEGRITY_MESSAGE
     if kind in {"DatabaseUnlockError", "CredentialUnlockError"}:
         return "운영 파일의 잠금을 풀지 못했습니다. 선택한 운영 파일과 비밀번호를 확인해주세요."
+    if kind == "CredentialNotFoundError":
+        return ("운영 파일의 비밀번호 정보 파일을 찾거나 읽을 수 없습니다. "
+                "운영 파일과 함께 받은 비밀번호 정보 파일을 같은 폴더에 두고, "
+                "파일 이름을 바꾸지 않았는지 확인한 뒤 다시 열어주세요.")
     if "school" in low and "entity id" in low:
         return "학교 일정의 저장 정보가 맞지 않습니다. 학교 일정 창을 다시 열어 확인해주세요. 계속되면 프로그램 담당자에게 점검을 요청해주세요."
     if "snapshot에 없는 사람" in raw:

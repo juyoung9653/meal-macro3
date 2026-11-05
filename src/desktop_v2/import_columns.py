@@ -332,6 +332,7 @@ class ImportColumnsTable(QWidget):
             self.section_layouts[group].addWidget(card)
             card.show()
         for key, layout in self.section_layouts.items():
+            self.sections[key].setVisible(key != "meal" or layout.count() > 0)
             self.section_counts[key].setText(f"{layout.count()}개")
             self.section_empty[key].setVisible(layout.count() == 0)
             layout.invalidate()
@@ -391,7 +392,12 @@ class ImportColumnsTable(QWidget):
             area.empty.setVisible(area.tiles.count() == 0)
             area.layout().invalidate()
         linked = sum(value != "ignore" and not value.startswith("missing:") for value in self._selected.values())
-        self.status.setText(f"연결 {linked} / {len(self.source_tiles)}개 · 문서에 사용하는 칼럼 / 식종 / 나머지 칼럼 순서로 표시합니다.")
+        groups = "문서에 사용하는 칼럼 / "
+        if any(key.startswith("meal:") for key in self.cards):
+            groups += "식종 / "
+        groups += "나머지 칼럼"
+        self.scroll.setAccessibleName("DB 칼럼 연결 자리 — " + groups)
+        self.status.setText(f"연결 {linked} / {len(self.source_tiles)}개 · {groups} 순서로 표시합니다.")
         missing_count = sum(value.startswith("missing:") for value in self._selected.values())
         summary = f"연결 {linked}개 · 가져오지 않음 {len(self.source_tiles) - linked - missing_count}개"
         if missing_count:

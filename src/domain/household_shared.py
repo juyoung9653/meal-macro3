@@ -943,6 +943,10 @@ def expand_household_shared_revision(snapshot, record):
     active = available - reviewed
     if "vacation_lunch" in record.metadata.decisions:
         active = active - {"status:lunch"}
+    if "bulk_lunch_period_edit" in record.metadata.decisions:
+        # Personal lunch dates, like a single lunch_period_edit, never change
+        # another household member's registration.
+        active = active - {"status:lunch"}
     correction = record.metadata.decisions.get("profile_routing_correction", {})
     corrected_components = {
         (UUID(item["person_id"]), item["column"])

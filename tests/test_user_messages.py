@@ -43,6 +43,14 @@ def test_windows_file_in_use_is_distinct_from_permissions():
     assert "다른 프로그램에서 파일을 사용 중" in user_error(error)
 
 
+def test_missing_database_password_file_explains_how_to_reopen():
+    from src.storage.database_credentials import CredentialNotFoundError
+    message = user_error(CredentialNotFoundError("internal.credentials.json"))
+    assert "비밀번호 정보 파일" in message
+    assert "같은 폴더" in message and "파일 이름" in message and "다시 열어" in message
+    assert "internal" not in message and "Credential" not in message
+
+
 @pytest.mark.parametrize("message", [
     "종료일은 시작일보다 빠를 수 없습니다.",
     "'Alice_school.xlsx' 파일의 'custom_name' 시트에서 성명을 찾지 못했습니다.",

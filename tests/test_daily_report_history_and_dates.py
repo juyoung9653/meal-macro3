@@ -67,7 +67,7 @@ def test_thursday_breakfast_uses_same_week_friday():
     result = prepare_happy_report_data(snapshot, thursday, thursday, (Meal.BREAKFAST,))
     assert result.shipments == ()
     assert result.reports[0].breakfast_on == date(2026, 8, 21)
-    assert result.reports[0].breakfast_total == 3
+    assert result.reports[0].breakfast_total == 1
 
 
 def test_zero_on_scheduled_day_uses_last_nonzero_reference_without_new_shipments():

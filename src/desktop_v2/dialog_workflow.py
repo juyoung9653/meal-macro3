@@ -85,6 +85,17 @@ def _show_work_dialog(dialog):
     if isinstance(dialog, (QMessageBox, QFileDialog)):
         dialog.show()
         return
+    parent = dialog.parentWidget()
+    while parent is not None:
+        if isinstance(parent, QDialog) and parent.isVisible() and parent.isModal():
+            # Startup uses exec(). Detaching its child makes Qt/Windows treat
+            # the child as an unrelated window blocked by that modal dialog.
+            dialog.ensurePolished()
+            dialog.winId()
+            dialog.windowHandle().setTransientParent(parent.windowHandle())
+            dialog.show()
+            return
+        parent = parent.parentWidget()
     # Polish may change window flags (including restored title-bar buttons).
     # Do that before detaching; otherwise Qt recreates the native owner on show.
     dialog.ensurePolished()

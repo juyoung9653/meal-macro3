@@ -97,12 +97,19 @@ def prepare_happy_report_data(snapshot, period_start, period_end, meals, *,
 
     grouped = {}
     presences = defaultdict(list)
+    breakfast_people = defaultdict(set)
     for shipment in shipments:
         values = values_for(shipment.person_id, shipment.delivery_on, shipment.meal)
         key = shipment.delivery_on, values["driver"], values["region"]
         row = grouped.setdefault(key, DailyDeliveryRow(DeliveryRoute(key[1], key[2])))
         field_name = {Meal.BREAKFAST: "breakfast", Meal.DINNER: "dinner", Meal.LUNCH: "lunch"}[shipment.meal]
-        setattr(row, field_name, getattr(row, field_name) + shipment.entitlement_count)
+        if shipment.meal is Meal.BREAKFAST:
+            # A weekend bundle is one recipient on the daily packing sheet.
+            # Keep all service-date entitlements in shipments for billing.
+            breakfast_people[key].add(shipment.person_id)
+            row.breakfast = len(breakfast_people[key])
+        else:
+            setattr(row, field_name, getattr(row, field_name) + shipment.entitlement_count)
         household_id = require_delivery_household(roster, shipment.person_id, shipment.service_dates)
         if shipment.meal in (Meal.DINNER, Meal.LUNCH):
             keys = row._lunch_household_keys if shipment.meal is Meal.LUNCH else row._dinner_household_keys
@@ -205,7 +212,7 @@ def prepare_happy_report_data(snapshot, period_start, period_end, meals, *,
                 lunch_on=references.get((day, Meal.LUNCH)), show_lunch=show_lunch))
         day += timedelta(days=1)
     target_shipments = tuple(item for item in shipments if period_start <= item.delivery_on <= period_end)
-    manifest = {**physical.calculation_manifest, "happy_report_contract_version": 3,
+    manifest = {**physical.calculation_manifest, "happy_report_contract_version": 4,
         "display_reference_days": [{"date": report.delivery_date.isoformat(),
             "breakfast": report.breakfast_on.isoformat() if report.breakfast_on else None,
             "dinner": report.dinner_on.isoformat() if report.dinner_on else None,
@@ -214,5 +221,6 @@ def prepare_happy_report_data(snapshot, period_start, period_end, meals, *,
         "selected_delivery_forms": None if allowed is None else list(delivery_forms),
         "remarks": remark_options.manifest(),
         "column_mapping": report_mapping.manifest(),
-        "household_grouping": "database_household", "quantity_basis": "physical_delivery_entitlements"}
+        "household_grouping": "database_household", "quantity_basis": "physical_delivery_entitlements",
+        "breakfast_quantity_basis": "distinct_recipients_per_delivery_day"}
     return PreparedHappyReports(tuple(display_reports), target_shipments, manifest)

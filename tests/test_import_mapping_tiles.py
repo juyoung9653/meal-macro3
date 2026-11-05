@@ -240,3 +240,70 @@ def test_mapping_dialog_closes_when_leaving_step(app, tmp_path):
     wizard._clear_busy()
     wizard.close()
     wizard.deleteLater()
+
+
+@pytest.mark.parametrize("modal", (True, False), ids=("first-import-exec", "existing-import"))
+def test_mapping_mouse_input_under_initial_import_modal(app, tmp_path, modal):
+    from PySide6.QtCore import QTimer
+    from PySide6.QtTest import QTest
+    from src.desktop_v2.import_wizard import RosterImportWizard
+    from src.importing.contracts import ProfileField
+
+    path = source(tmp_path / "initial.xlsx", headers=("성명", "생년월일", "식종"),
+                  rows=(("합성 아동", "20150302", "석식"),))
+    wizard = RosterImportWizard()
+    wizard.set_database_columns(None)
+    wizard.set_initial_import_defaults()
+    wizard.path_edit.setText(str(path))
+    assert wizard._inspect_source()
+    wizard._set_page(1)
+    failures = []
+    completed = []
+
+    def exercise():
+        try:
+            assert wizard.isModal() is modal
+            wizard.mapping_open_button.click()
+            QTest.qWait(50)
+            dialog = wizard.mapping_dialog
+            handle = dialog.windowHandle()
+            assert handle.transientParent() == (wizard.windowHandle() if modal else None)
+            board = wizard.destination_table
+            tile = board.source_tiles["B"]
+            board.scroll.ensureWidgetVisible(tile)
+            dialog.scroll.ensureWidgetVisible(board)
+            app.processEvents()
+            # Use QWindow events so Qt's modal blocking participates in the test.
+            QTest.mouseClick(handle, Qt.MouseButton.LeftButton, pos=tile.mapTo(dialog, tile.rect().center()))
+            assert tile.isChecked()
+            target = board.cards["profile:mobile_phone"].heading
+            board.scroll.ensureWidgetVisible(target)
+            app.processEvents()
+            QTest.mouseClick(handle, Qt.MouseButton.LeftButton, pos=target.mapTo(dialog, target.rect().center()))
+            assert wizard._build_profile().profile_columns[ProfileField.MOBILE_PHONE] == "B"
+            QTest.mouseClick(handle, Qt.MouseButton.LeftButton,
+                             pos=dialog.done_button.mapTo(dialog, dialog.done_button.rect().center()))
+            assert not dialog.isVisible()
+            assert wizard._mapping_review_complete()
+            wizard._open_mapping_dialog()
+            app.processEvents()
+            QTest.keyClick(dialog.windowHandle(), Qt.Key.Key_Escape)
+            assert not dialog.isVisible()
+            completed.append(True)
+        except BaseException as error:
+            failures.append(error)
+        finally:
+            wizard.reject()
+
+    if modal:
+        QTimer.singleShot(0, exercise)
+        wizard.exec()
+    else:
+        wizard.setModal(False)
+        wizard.show()
+        app.processEvents()
+        exercise()
+    wizard.deleteLater()
+    if failures:
+        raise failures[0]
+    assert completed == [True]

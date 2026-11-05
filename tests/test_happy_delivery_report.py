@@ -31,7 +31,8 @@ def paths():
 def test_physical_quantities_both_layouts_styles_merges_and_household_distribution(tmp_path):
     snapshot, _ = _snapshot(people=2, meals=tuple(Meal))
     result = prepare_happy_report_data(snapshot, date(2026, 8, 17), date(2026, 8, 21), tuple(Meal))
-    assert [(r.breakfast_total, r.dinner_total, r.lunch_total) for r in result.reports] == [(6, 2, 2)] * 5
+    assert [(r.breakfast_total, r.dinner_total, r.lunch_total) for r in result.reports] == [(2, 2, 2)] * 5
+    assert sum(s.entitlement_count for s in result.shipments if s.meal is Meal.BREAKFAST) == 6
     original = {k: Path(p).read_bytes() for k, p in paths().items()}
     workbook = build_happy_report_workbook(result.reports, paths())
     target = tmp_path / "daily.xlsx"
@@ -41,6 +42,7 @@ def test_physical_quantities_both_layouts_styles_merges_and_household_distributi
     try:
         assert saved.sheetnames[:2] == ["26.08.21", "중식_26.08.21"]
         dinner, lunch = saved["26.08.20"], saved["중식_26.08.20"]
+        assert dinner["D4"].value == dinner["D5"].value == 1
         assert dinner["E4"].value == dinner["E5"].value == 1
         assert dinner["J4"].value == "2*1"  # two regions, one stored household
         assert dinner["H4"].value == "=SUM(E4:E5)"
@@ -63,6 +65,45 @@ def test_physical_quantities_both_layouts_styles_merges_and_household_distributi
     finally:
         saved.close()
     assert original == {k: Path(p).read_bytes() for k, p in paths().items()}
+
+
+@pytest.mark.parametrize("delivery_weekdays,expected", [
+    ((0, 1, 2, 3, 4, 4, 4), ((21, 3),)),
+    ((0, 1, 2, 3, 4, 3, 4), ((20, 1), (21, 2))),
+    ((0, 1, 2, 3, 4, 5, 6), ((21, 1), (22, 1), (23, 1))),
+])
+def test_breakfast_counts_people_for_bundled_and_split_deliveries(delivery_weekdays, expected):
+    from src.domain.roster import HouseholdDeliverySetting
+    snapshot, _ = _snapshot(people=2, delivery_settings=(
+        HouseholdDeliverySetting(Meal.BREAKFAST, delivery_weekdays=delivery_weekdays),
+    ))
+    for day_number, meals_per_person in expected:
+        day = date(2026, 8, day_number)
+        result = prepare_happy_report_data(snapshot, day, day, (Meal.BREAKFAST,))
+        report = result.reports[0]
+        assert report.breakfast_on == day
+        assert report.breakfast_total == 2
+        assert [row.breakfast for row in report.rows] == [1, 1]
+        assert sum(s.entitlement_count for s in result.shipments) == 2 * meals_per_person
+        assert result.calculation_manifest["happy_report_contract_version"] == 4
+        assert result.calculation_manifest["breakfast_quantity_basis"] == "distinct_recipients_per_delivery_day"
+
+
+def test_breakfast_partial_bundle_still_counts_each_recipient_once():
+    from src.domain.roster import InclusiveDateRange
+    snapshot, _ = _snapshot(people=2)
+    roster = roster_from_historical_snapshot(snapshot)
+    friday = date(2026, 8, 21)
+    roster = replace(roster, enrollments=(
+        replace(roster.enrollments[0], period=InclusiveDateRange(date(2026, 1, 1), friday)),
+        roster.enrollments[1],
+    ))
+    snapshot = HistoricalSnapshot(snapshot.revision_id, {
+        **snapshot.entities, **roster_entity_states(roster),
+    })
+    result = prepare_happy_report_data(snapshot, friday, friday, (Meal.BREAKFAST,))
+    assert result.reports[0].breakfast_total == 2
+    assert sorted(s.entitlement_count for s in result.shipments) == [1, 3]
 
 
 def test_shared_mapping_fallback_zero_and_literal_notes_for_both_meals(tmp_path):

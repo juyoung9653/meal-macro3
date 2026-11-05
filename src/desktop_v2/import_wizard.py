@@ -550,7 +550,8 @@ class RosterImportWizard(QDialog):
         household_note.setWordWrap(True)
         body_layout.addWidget(household_note)
 
-        body_layout.addWidget(self._section("식종과 배송 정보"))
+        self.meal_section = self._section("식종과 배송 정보")
+        body_layout.addWidget(self.meal_section)
         meal_guide = self.meal_guide = QFrame()
         meal_guide.setObjectName("mealFormatGuide")
         meal_guide_layout = QVBoxLayout(meal_guide)
@@ -568,7 +569,7 @@ class RosterImportWizard(QDialog):
         meal_guide_layout.addWidget(meal_guide_examples)
         body_layout.addWidget(meal_guide)
 
-        meal_detection = QFrame()
+        meal_detection = self.meal_detection_panel = QFrame()
         meal_detection.setObjectName("mealDetectionPanel")
         meal_detection_layout = QHBoxLayout(meal_detection)
         meal_detection_layout.setContentsMargins(12, 8, 10, 8)
@@ -1150,7 +1151,8 @@ class RosterImportWizard(QDialog):
                        for field in self._mapping_combos)
         options.extend((("driver", "배송담당"), ("sequence", self._column_labels.get("sequence", "배송순서")),
                         ("reference", "원본 연번")))
-        options.extend((("meal:combined", "식종 (조식 / 중식 / 석식)"),
+        if self.purpose_combo.currentData() != ImportPurpose.VACATION_LUNCH:
+            options.extend((("meal:combined", "식종 (조식 / 중식 / 석식)"),
                         ("meal:breakfast", self._column_labels.get("status:breakfast", "조식") + " · 가입 여부"),
                         ("meal:lunch", self._column_labels.get("status:lunch", "중식") + " · 가입 여부"),
                         ("meal:dinner", self._column_labels.get("status:dinner", "석식") + " · 가입 여부")))
@@ -1176,6 +1178,8 @@ class RosterImportWizard(QDialog):
         return selected
 
     def _destination_changed(self, source, target):
+        if self.purpose_combo.currentData() == ImportPurpose.VACATION_LUNCH and target.startswith("meal:"):
+            return
         self._syncing_destinations = True
         try:
             bindings = self._destination_bindings(all_meals=True)
@@ -1273,7 +1277,15 @@ class RosterImportWizard(QDialog):
             item.setCheckState(Qt.CheckState.Checked)
             self.ignored_columns_list.addItem(item)
 
-        if self._suggested_profile is not None:
+        if self._database_columns is not None:
+            # Keep the saved profile identity for history/no-change detection,
+            # but leave every source column unconnected for manual review.
+            if self._suggested_profile is not None:
+                self._profile_name = self._suggested_profile.profile.name
+            self.mapping_status.setText(
+                "가져올 Excel 칼럼을 DB 칼럼에 직접 연결해주세요. 연결하지 않은 칼럼은 가져오지 않습니다."
+            )
+        elif self._suggested_profile is not None:
             self._apply_profile(self._suggested_profile.profile)
             self.mapping_status.setText(
                 f"같은 구조에서 사용한 '{self._suggested_profile.profile.name}' 설정을 제안했습니다. 열 연결을 다시 확인해주세요."
@@ -1283,7 +1295,8 @@ class RosterImportWizard(QDialog):
             self.mapping_status.setText(
                 "헤더 이름으로 열을 자동 연결했습니다. 자동 연결이 틀린 항목만 바꿔주세요."
             )
-        self._suggest_existing_destinations(inspection)
+        if self._database_columns is None:
+            self._suggest_existing_destinations(inspection)
         self._mapping_initialized = True
         self.destination_table.populate(inspection, self._destination_options(), self._destination_selection())
         self._mapping_changed()
@@ -1399,7 +1412,7 @@ class RosterImportWizard(QDialog):
             }
             if not meal_flags:
                 raise ValueError(
-                    "식종별 열을 자동으로 찾지 못했습니다. 아래에서 조식·중식·석식 열을 연결해주세요."
+                    "식종별 열이 연결되지 않았습니다. 조식·중식·석식 열을 연결해주세요."
                 )
         used = self._used_columns()
         ignored = tuple(
@@ -2127,7 +2140,11 @@ class RosterImportWizard(QDialog):
                 if was_disabled and column not in self._custom_destinations:
                     item.setCheckState(Qt.CheckState.Checked)
         self._syncing_destinations = False
-        self.destination_table.sync(self._destination_selection())
+        options = self._destination_options()
+        if self.destination_table.targets != options:
+            self.destination_table.populate(self._inspection, options, self._destination_selection())
+        else:
+            self.destination_table.sync(self._destination_selection())
         self.destination_table.set_meal_targets_enabled(self.purpose_combo.currentData() != ImportPurpose.VACATION_LUNCH)
         self._sync_meal_mapping_visibility()
 
@@ -2165,6 +2182,12 @@ class RosterImportWizard(QDialog):
 
     def _sync_meal_mapping_visibility(self) -> None:
         vacation_lunch = self.purpose_combo.currentData() == ImportPurpose.VACATION_LUNCH
+        connection_label = "자동 연결됨" if self._database_columns is None else "연결됨"
+        mode_label = self._meal_form.labelForField(self.meal_mode_combo)
+        if mode_label is not None:
+            mode_label.setText("식종 열 형태 (자동 선택)" if self._database_columns is None else "식종 열 형태")
+        self.meal_section.setVisible(not vacation_lunch)
+        self.meal_detection_panel.setVisible(not vacation_lunch)
         combined = self.meal_mode_combo.currentData() == "combined"
         if vacation_lunch:
             selected = True
@@ -2174,9 +2197,9 @@ class RosterImportWizard(QDialog):
             selected_column = self.combined_meal_combo.currentData()
             selected = selected_column is not None
             summary = (
-                f"자동 연결됨 · 식종 {selected_column}열"
+                f"{connection_label} · 식종 {selected_column}열"
                 if selected
-                else "식종 열 하나를 자동으로 찾지 못했습니다. 아래에서 연결해주세요."
+                else "식종 열 하나를 연결해주세요."
             )
             detail = (
                 f"식종: {self.combined_meal_combo.currentText()}"
@@ -2195,12 +2218,12 @@ class RosterImportWizard(QDialog):
             )
             selected = bool(selected_meals)
             summary = (
-                "자동 연결됨 · "
+                connection_label + " · "
                 + " / ".join(
                     f"{meal} {column}열" for meal, column, _text in selected_meals
                 )
                 if selected
-                else "조식·중식·석식 열을 자동으로 찾지 못했습니다. 아래에서 연결해주세요."
+                else "조식·중식·석식 열을 연결해주세요."
             )
             detail = " / ".join(
                 f"{meal}: {text}" for meal, _column, text in selected_meals
@@ -2225,10 +2248,10 @@ class RosterImportWizard(QDialog):
                 label.setVisible(visible)
         self.meal_detection_status.setText(summary)
         self.meal_detection_status.setToolTip(detail)
-        self.meal_guide.setVisible(not vacation_lunch)
-        self.meal_mapping_toggle.setVisible(selected and not vacation_lunch)
+        self.meal_guide.setVisible(not vacation_lunch and self._database_columns is None)
+        self.meal_mapping_toggle.setVisible(not vacation_lunch and selected)
         self.meal_mapping_toggle.setText(
-            "자동 연결만 보기" if show_details else "열 연결 바꾸기"
+            "연결 요약만 보기" if show_details else "열 연결 바꾸기"
         )
 
     def _table_changed(self, *_args) -> None:

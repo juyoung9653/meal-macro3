@@ -137,7 +137,7 @@ def test_happy_default_report_publishes_actual_workbook_and_seals_template_hash(
     workbook = openpyxl.load_workbook(outcome.result.output_path)
     # SQLite snapshot iteration can change which region is encountered first.
     assert {workbook.active[f"C{row}"].value: workbook.active[f"D{row}"].value
-            for row in (4, 5)} == {"가동": 9, "나동": 3}
+            for row in (4, 5)} == {"가동": 3, "나동": 1}
     workbook.close()
     manifest = session.database.document_runs()[0].template_manifest
     assert manifest["writer"] == "happy_delivery_report.make_happy_report_publication"

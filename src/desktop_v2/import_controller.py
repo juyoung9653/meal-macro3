@@ -146,9 +146,8 @@ class GuidedRosterImportController:
                 return GuidedImportOutcome(GuidedImportStatus.CANCELLED)
             latest = self._session.database.latest_revision()
             assert latest is not None
-            if latest.metadata.effective_on is not None and latest.metadata.effective_on > selection.effective_on:
-                self._message_box.warning(parent, "적용일 확인 필요", "현재 명단에 적용일 이후의 변경이 있습니다. 방학 중식 적용일을 다시 선택해주세요.")
-                return GuidedImportOutcome(GuidedImportStatus.CANCELLED)
+            # A calendar/settings revision's effective date is not a lunch
+            # status conflict. Check the actual lunch events below instead.
             historical = self._session.database.snapshot(latest.metadata.revision_id)
             lunch_events = status_events_from_historical_snapshot(historical, meal=Meal.LUNCH)
             if any(event.period.starts_on is not None and event.period.starts_on > selection.effective_on for event in lunch_events):

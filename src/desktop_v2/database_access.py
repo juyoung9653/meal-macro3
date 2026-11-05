@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QRadioButton,
     QVBoxLayout,
     QWidget,
 )
@@ -173,7 +174,7 @@ class _DatabaseAccessDialog(QDialog):
         callback,
         *,
         help_text: str | None = None,
-    ) -> None:
+    ) -> QPushButton:
         self._content.addWidget(_field_label(label_text))
         row = QHBoxLayout()
         row.setSpacing(7)
@@ -186,6 +187,7 @@ class _DatabaseAccessDialog(QDialog):
         self._content.addLayout(row)
         if help_text:
             self._content.addWidget(_help_label(help_text))
+        return browse
 
     def _add_password_field(
         self,
@@ -249,7 +251,7 @@ class _DatabaseAccessDialog(QDialog):
 
 
 class CreateDatabaseDialog(_DatabaseAccessDialog):
-    """One-time setup; ordinary users only see one password afterwards."""
+    """First setup can create a database or reuse an existing operating file."""
 
     def __init__(
         self,
@@ -259,13 +261,12 @@ class CreateDatabaseDialog(_DatabaseAccessDialog):
     ) -> None:
         super().__init__(
             window_title="처음 설정",
-            title="운영 파일 만들기",
+            title="운영 파일 준비",
             subtitle=(
-                "저장 위치와 자동 백업 위치를 정한 뒤 비밀번호를 설정합니다. "
-                "이 설정은 처음 한 번만 하며, 완료하면 기존 Excel 명단을 옮깁니다."
+                "새로 시작하거나, 이미 사용하던 운영 파일을 선택해주세요."
             ),
             rail_title="세 지점만 확인하면 끝납니다",
-            rail_copy="저장 위치와 비밀번호를 정하면 자동 백업을 시작합니다.",
+            rail_copy="사용할 운영 파일과 비밀번호, 이곳에서 저장할 자동 백업 위치를 확인합니다.",
             route_stops=(
                 "운영 데이터 저장 위치",
                 "사용할 비밀번호",
@@ -273,8 +274,18 @@ class CreateDatabaseDialog(_DatabaseAccessDialog):
             ),
             parent=parent,
         )
-        self.resize(790, 600)
+        self.resize(850, 650)
         self._settings = settings
+        modes = QHBoxLayout()
+        self.create_new_radio = QRadioButton("새 운영 파일 만들기")
+        self.open_existing_radio = QRadioButton("기존 운영 파일 열기")
+        self.create_new_radio.setChecked(True)
+        modes.addWidget(self.create_new_radio)
+        modes.addWidget(self.open_existing_radio)
+        modes.addStretch(1)
+        self._content.addLayout(modes)
+        self.mode_note = _help_label("")
+        self._content.addWidget(self.mode_note)
         self.database_path_edit = QLineEdit()
         self.database_path_edit.setObjectName("databasePathEdit")
         self.backup_directory_edit = QLineEdit()
@@ -282,7 +293,7 @@ class CreateDatabaseDialog(_DatabaseAccessDialog):
         self.user_password_edit = QLineEdit()
         self.user_password_edit.setObjectName("userPasswordEdit")
 
-        self._add_path_field(
+        self.database_browse_button = self._add_path_field(
             "운영 데이터 파일",
             self.database_path_edit,
             "위치 선택",
@@ -309,9 +320,41 @@ class CreateDatabaseDialog(_DatabaseAccessDialog):
             "설정 완료하고 명단 옮기기",
             self._submit,
         )
+        self.open_existing_radio.toggled.connect(self._change_mode)
+        self._refresh_mode()
+
+    def _change_mode(self, _checked: bool) -> None:
+        self.database_path_edit.clear()
+        self.user_password_edit.clear()
+        self._clear_error()
+        self._refresh_mode()
+
+    def _refresh_mode(self) -> None:
+        existing = self.open_existing_radio.isChecked()
+        self.database_browse_button.setText("파일 선택" if existing else "위치 선택")
+        self.mode_note.setText(
+            "기존 명단·설정·이력을 그대로 사용합니다. 운영 파일과 함께 받은 "
+            "비밀번호 정보 파일(.credentials.json)을 같은 폴더에 두세요."
+            if existing else
+            "새 비밀번호로 빈 운영 파일을 만든 뒤 Excel 명단을 불러옵니다."
+        )
+        self.user_password_edit.setPlaceholderText(
+            "선택한 운영 파일의 기존 비밀번호" if existing else "새로 사용할 비밀번호"
+        )
+        self.submit_button.setText(
+            "기존 운영 파일 열기" if existing else "설정 완료하고 명단 옮기기"
+        )
 
     def _browse_database(self) -> None:
         start = self.database_path_edit.text().strip()
+        if self.open_existing_radio.isChecked():
+            filename, _filter = QFileDialog.getOpenFileName(
+                self, "사용하던 운영 파일 선택", start,
+                "급식 운영 데이터 (*.sqlite3 *.db);;모든 파일 (*)",
+            )
+            if filename:
+                self.database_path_edit.setText(filename)
+            return
         filename, _filter = QFileDialog.getSaveFileName(
             self,
             "운영 데이터 파일 위치",
@@ -352,24 +395,42 @@ class CreateDatabaseDialog(_DatabaseAccessDialog):
             self._show_error("선택한 자동 백업 폴더가 없습니다.")
             return
         user_password = self.user_password_edit.text()
+        existing = self.open_existing_radio.isChecked()
         try:
-            session = DatabaseSession.create(
-                database_path,
-                user_password,
-                backup_directory=backup_directory,
-            )
+            if existing:
+                session = run_startup_task(
+                    lambda: DatabaseSession.open(
+                        database_path, user_password, backup_directory=backup_directory,
+                    ),
+                    message="선택한 운영 파일의 비밀번호와 저장 자료를 확인하는 중입니다.",
+                    parent=self,
+                )
+            else:
+                session = DatabaseSession.create(
+                    database_path,
+                    user_password,
+                    backup_directory=backup_directory,
+                )
         except Exception as error:
-            self._show_error(_friendly_error(error))
+            self._show_error(user_error(error) if existing else _friendly_error(error))
             return
         self._session = session
-        self.backup_result = session.try_backup_now()
+        self.backup_result = (
+            run_startup_task(session.try_backup_now,
+                             message="기존 운영 자료의 자동 백업을 준비하는 중입니다.", parent=self)
+            if existing else session.try_backup_now()
+        )
         try:
             if self._settings is not None:
                 self._settings.save_paths(database_path, backup_directory)
         except Exception as error:
             session.close()
             self._session = None
-            self._show_error("운영 파일은 생성됐지만 경로 설정을 저장하지 못했습니다. 파일을 보존했습니다. " + _friendly_error(error))
+            self._show_error(
+                ("운영 파일을 열었지만 사용할 경로를 기억하지 못했습니다. 다시 선택해주세요. "
+                 if existing else "운영 파일은 생성됐지만 경로 설정을 저장하지 못했습니다. 파일을 보존했습니다. ")
+                + user_error(error)
+            )
             return
         self.accept()
 

@@ -1,4 +1,7 @@
-"""Reversible, audited removal of meals with a historical September 30 stop."""
+"""Reversible cleanup by stop date, including legacy September 30 records."""
+from dataclasses import dataclass
+from datetime import date
+import re
 from uuid import uuid5
 
 from src.domain.meal_history_cancellation import CANCELLATION_KIND, MealHistoryTarget
@@ -7,10 +10,62 @@ from src.domain.revisions import AuditChange, ChangeOperation, EntityRef, Revisi
 from src.domain.roster import Meal
 from src.domain.status import MealStatus
 
+# Keep this persisted decision key so existing cleanup/restore history still works.
 RESET_DECISION = "september30_meal_reset"
 
 
-def find_targets(records):
+@dataclass(frozen=True)
+class StopDate:
+    month: int
+    day: int
+    year: int | None = None
+
+    def __post_init__(self):
+        try:
+            if type(self.month) is not int or type(self.day) is not int:
+                raise ValueError
+            if self.year is not None and type(self.year) is not int:
+                raise ValueError
+            date(2000 if self.year is None else self.year, self.month, self.day)
+        except (TypeError, ValueError):
+            raise ValueError("중지 시작일이 올바르지 않습니다. 실제 날짜를 2026-09-30 또는 9/30 형식으로 입력해주세요.") from None
+
+    @classmethod
+    def parse(cls, text):
+        exact = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})", text.strip())
+        if exact:
+            year, month, day = map(int, exact.groups())
+            return cls(month, day, year)
+        annual = re.fullmatch(r"(\d{1,2})/(\d{1,2})", text.strip())
+        if annual:
+            return cls(*map(int, annual.groups()))
+        raise ValueError("중지 시작일 형식을 확인해주세요. 해당 연도만 정리하려면 2026-09-30, 모든 연도의 같은 월·일은 9/30처럼 입력해주세요.")
+
+    @property
+    def label(self):
+        if self.year is not None:
+            return f"{self.year}년 {self.month}월 {self.day}일"
+        return f"{self.month}월 {self.day}일 (모든 연도)"
+
+    def matches(self, start):
+        return (start is not None and (start.month, start.day) == (self.month, self.day)
+                and (self.year is None or start.year == self.year))
+
+    def state(self):
+        return {"year": self.year, "month": self.month, "day": self.day}
+
+    @classmethod
+    def from_state(cls, state):
+        if not hasattr(state, "keys") or set(state) != {"year", "month", "day"}:
+            raise ValueError("정리 날짜 정보가 올바르지 않습니다. 정리 도구를 다시 실행해주세요.")
+        return cls(state["month"], state["day"], state["year"])
+
+
+LEGACY_STOP_DATE = StopDate(9, 30)
+
+
+def find_targets(records, *, stop_date=None):
+    selected = stop_date or LEGACY_STOP_DATE
     targets = set()
     for record in records:
         for change in record.changes:
@@ -21,15 +76,15 @@ def find_targets(records):
                     continue
                 event = status_event_from_state(change.entity_id, state)
                 start = event.period.starts_on
-                if event.status is MealStatus.STOPPED and start and (start.month, start.day) == (9, 30):
+                if event.status is MealStatus.STOPPED and selected.matches(start):
                     targets.add((str(event.person_id), event.meal.value))
     return frozenset(targets)
 
 
-def build_cleanup(snapshot, records, *, actor, recorded_at, revision_id):
+def build_cleanup(snapshot, records, *, actor, recorded_at, revision_id, stop_date=None):
     if not records or records[-1].metadata.revision_id != snapshot.revision_id:
         raise ValueError("명단이 변경되었습니다. 정리 도구를 다시 실행해주세요.")
-    targets = find_targets(records)
+    targets = find_targets(records, stop_date=stop_date)
     changes = []
     for ref, state in snapshot.entities.items():
         after = plain_json(state)
@@ -72,18 +127,24 @@ def build_cleanup(snapshot, records, *, actor, recorded_at, revision_id):
                 changes.append(AuditChange(CANCELLATION_KIND, marker_id, ChangeOperation.INSERT, None, marker))
     if not changes:
         return None
+    decision = {"targets": [list(pair) for pair in sorted(targets)]}
+    label = "9월 30일" if stop_date is None else stop_date.label
+    if stop_date is not None:
+        decision["stop_date"] = stop_date.state()
     return RevisionRecord(RevisionMetadata(
         revision_id, snapshot.revision_id, recorded_at, None, actor,
-        f"9월 30일 중지 대상 식종 정리 · {len(targets)}건", RevisionSource.UI,
-        decisions={RESET_DECISION: {"targets": [list(pair) for pair in sorted(targets)]}},
+        f"{label} 중지 대상 식종 정리 · {len(targets)}건", RevisionSource.UI,
+        decisions={RESET_DECISION: decision},
     ), tuple(changes))
 
 
 def validate_cleanup(snapshot, records, record):
+    decision = record.metadata.decisions[RESET_DECISION]
+    stop_date = StopDate.from_state(decision["stop_date"]) if "stop_date" in decision else None
     expected = build_cleanup(snapshot, records, actor=record.metadata.actor,
-        recorded_at=record.metadata.recorded_at, revision_id=record.metadata.revision_id)
+        recorded_at=record.metadata.recorded_at, revision_id=record.metadata.revision_id, stop_date=stop_date)
     if record != expected:
-        raise ValueError("9월 30일 중지 정리 대상과 저장 내용이 다릅니다. 정리 도구를 다시 실행해주세요.")
+        raise ValueError("선택한 날짜의 중지 정리 대상과 저장 내용이 다릅니다. 정리 도구를 다시 실행해주세요.")
 
 
 def hidden_history_changes(records):

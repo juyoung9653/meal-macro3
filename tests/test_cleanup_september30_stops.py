@@ -97,7 +97,7 @@ def test_cleanup_runtime_stays_open_on_error(monkeypatch, tmp_path):
     import runpy
     import sys
     from pathlib import Path
-    answers = iter([str(tmp_path / "nonexistent.sqlite3"), ""])
+    answers = iter(["2026-09-30", str(tmp_path / "nonexistent.sqlite3"), ""])
     prompts = []
     def answer(prompt):
         prompts.append(prompt)

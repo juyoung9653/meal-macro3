@@ -360,6 +360,7 @@ class DesktopStartupController:
             ("person_delete_requested", lambda person_id: launch(self._run_roster_row_delete, session, window, person_id)),
             ("relocation_requested", lambda person_id: launch(self._run_relocation, session, window, person_id)),
             ("cell_edit_requested", lambda person_id, column_key, text: launch(self._run_roster_cell_edit, session, window, person_id, column_key, text)),
+            ("bulk_cell_edit_requested", lambda targets, revision_id: launch(self._run_roster_bulk_edit, session, window, targets, revision_id)),
             ("column_input_rule_requested", lambda column_key: launch(self._run_column_input_rule, session, window, column_key)),
             ("monthly_statistics_requested", lambda: launch(self._run_monthly_statistics, session, window)),
             ("monthly_overview_requested", lambda: launch(self._run_monthly_overview, session, window)),
@@ -1285,6 +1286,14 @@ class DesktopStartupController:
             )
             return
         self._replace_roster(session, window, roster)
+
+    @dialog_workflow
+    def _run_roster_bulk_edit(self, session, window, targets, revision_id):
+        from .roster_bulk_edit import RosterBulkEditController
+        labels = {column.key: column.label for column in window.table_model.columns}
+        outcome = yield from invoke(RosterBulkEditController(session).run,
+            targets, labels, revision_id, window.table_model.service_day, window)
+        self._apply_roster_row_outcome(session, window, outcome)
 
     @dialog_workflow
     def _run_roster_row_add(self, session: DatabaseSession, window, selected_meal) -> None:

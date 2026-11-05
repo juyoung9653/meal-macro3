@@ -707,10 +707,12 @@ def test_routing_state_updates_effective_delivery_view_and_model_driver_filter(a
     window.relocation_requested.connect(relocation_requests.append)
     person = window.table_model.person_at(0)
     ordinary = window._create_context_menu(person, column_key="name")
-    assert [action.text() for action in ordinary.actions()] == ["정보 수정", "이력보기", "민원", "", "명단 행 삭제"]
+    assert ordinary.actions()[0].text().startswith("선택 셀 일괄 변경 · ")
+    assert [action.text() for action in ordinary.actions()[1:]] == ["정보 수정", "이력보기", "민원", "", "명단 행 삭제"]
     address = window._create_context_menu(person, column_key="address")
-    assert [action.text() for action in address.actions()] == ["정보 수정", "이사 등록", "이력보기", "민원", "", "명단 행 삭제"]
-    address.actions()[1].trigger()
+    assert address.actions()[0].text().startswith("선택 셀 일괄 변경 · ")
+    assert [action.text() for action in address.actions()[1:]] == ["정보 수정", "이사 등록", "이력보기", "민원", "", "명단 행 삭제"]
+    next(action for action in address.actions() if action.text() == "이사 등록").trigger()
     assert relocation_requests == [FIRST_PERSON_ID]
     assert not hasattr(window, "_driver_filter")
     window.close()
