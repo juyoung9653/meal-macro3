@@ -19,7 +19,7 @@ from src.excel.publication import WorkbookPublicationResult, publish_workbook
 from src.excel.substitute_excel_metrics import apply_excel_metrics
 from src.excel.substitute_page_layout import SheetGroup, SheetLayout
 
-SUBSTITUTE_RENDER_CONTRACT_VERSION = 12
+SUBSTITUTE_RENDER_CONTRACT_VERSION = 13
 _LABELS = {"name": "이름", "road_address": "신주소", "note": "비고2"}
 _FILLS = {2: "E6B8B7", 3: "B8CCE4", 4: "D8E4BC", 5: "CCC0DA"}
 _THIN = Side(style="thin", color="000000")
@@ -106,7 +106,7 @@ def _build_sheet(data: PreparedSubstituteData, options: SubstituteOptions):
     for row_number, item in enumerate(rows, 3):
         for col in range(1, used_cols + 1):
             key = options.columns[col - 1] if col <= len(columns) else None
-            value = item.values.get(key, "") if key else ""
+            value = row_number - 2 if key == "row_number" else item.values.get(key, "") if key else ""
             if key:
                 value = _preprocess(value, address=key == "road_address", note=key == "note" or labels[key] == "비고2")
             _put(ws, row_number, col, value)
@@ -116,7 +116,7 @@ def _build_sheet(data: PreparedSubstituteData, options: SubstituteOptions):
         _put(ws, group.start_row, len(columns) + 1, group.meal_count)
         if group.meal_count >= 2:
             for col, key in enumerate((*options.columns, "__summary"), 1):
-                if key != "name" and group.start_row < group.end_row:
+                if key not in ("name", "row_number") and group.start_row < group.end_row:
                     if key != "__summary":
                         values = _distinct_values(item.values.get(key, "") for item in rows[group.source_start:group.source_end + 1])
                         combined = "\n".join(_preprocess(value, address=key == "road_address",

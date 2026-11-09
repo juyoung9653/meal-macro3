@@ -161,7 +161,7 @@ def _fill_data(ws, report: DeliveryReport, *, preserve_template_styles=False) ->
             ws.cell(row_no, column).value = int(value) if value != "" else ""
         ws.cell(row_no, 7).value = item.person_total
         from src.excel.report_memo import write_report_memo
-        write_report_memo(ws.cell(row_no, 8), item.memo)
+        write_report_memo(ws.cell(row_no, 8), item.memo, headings=item.memo_headings)
         write_literal_cell(ws.cell(row_no, 9), item.reference_areas)
 
     apply_row(total_row, 9)

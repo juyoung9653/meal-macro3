@@ -34,7 +34,10 @@ STANDARD_COLUMNS = (
 
 # Output-only sources are independent of roster visibility and column names.
 DELIVERY_SOURCES = (
+    SubstituteColumn("row_number", "연번"),
     SubstituteColumn("delivery_day", "배송일자"),
+    SubstituteColumn("meal_history", "식종 변경 이력"),
+    SubstituteColumn("jurisdiction_join", "관할동 합치기"),
     SubstituteColumn("full_address", "전체 주소"),
     SubstituteColumn("driver_label", "배송담당"),
     SubstituteColumn("meal_title", "선택 식종 명단 제목"),

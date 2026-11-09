@@ -38,6 +38,7 @@ class DeliveryReportRow:
     person_total: int
     memo: str
     reference_areas: str
+    memo_headings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

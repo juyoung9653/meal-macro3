@@ -13,10 +13,12 @@ from openpyxl.worksheet.cell_range import CellRange
 TOKEN = re.compile(r"\{([^{}\r\n]+)\}")
 KEEP = "__keep_template"
 DEFAULTS = {
-    "연번": "sequence", "배송순서": "sequence", "학생": "name", "성명": "name", "이름": "name",
+    "연번": "row_number", "배송순서": "sequence", "학생": "name", "성명": "name", "이름": "name",
     "주소": "full_address", "전체 주소": "full_address", "도로명주소": "road_address",
     "상세주소": "detail_address", "연락처": "mobile_phone", "핸드폰": "mobile_phone",
     "전화번호": "telephone", "비고": "note", "관할동": "jurisdiction",
+    "식종 변경 이력": "meal_history", "식종변경 이력": "meal_history",
+    "관할동 조인": "jurisdiction_join", "관할동 합치기": "jurisdiction_join",
     "배송일자": "delivery_day", "배송일": "delivery_day", "날짜": "delivery_day",
     "배송담당": "driver_label", "명단제목": "meal_title", "식종": "meal_label",
     "선택식종": "meal_receives", "조식": "receives:breakfast",
@@ -160,6 +162,42 @@ def _repeat_rows(ws, start, end, count):
     return height
 
 
+def _trim_blank_tail(ws, body_end):
+    """Drop unused template rows, keeping footer content and its merged cells."""
+    # Drawing and table layouts need their full anchored range.
+    if ws._images or ws._charts or ws.tables:
+        return
+    last = max([body_end, *(cell.row for cell in ws._cells.values()
+                           if cell.value is not None or cell.comment or cell.hyperlink)])
+    for merged in ws.merged_cells.ranges:
+        anchor = ws.cell(merged.min_row, merged.min_col)
+        if anchor.value is not None or anchor.comment or anchor.hyperlink:
+            last = max(last, merged.max_row)
+    for merged in list(ws.merged_cells.ranges):
+        if merged.max_row > last:
+            ws.unmerge_cells(str(merged))
+            if merged.min_row <= last:
+                trimmed = CellRange(str(merged))
+                trimmed.max_row = last
+                ws.merge_cells(str(trimmed))
+    for key in list(ws._cells):
+        if key[0] > last:
+            del ws._cells[key]
+    for row in list(ws.row_dimensions):
+        if row > last:
+            del ws.row_dimensions[row]
+    ws.row_breaks.brk = [item for item in ws.row_breaks.brk if item.id < last]
+    if ws.print_area:
+        areas = []
+        for area in ws._print_area.ranges:
+            if area.min_row <= last:
+                trimmed = CellRange(str(area))
+                trimmed.max_row = min(trimmed.max_row, last)
+                areas.append(str(trimmed))
+        ws.print_area = areas
+    ws._current_row = last
+
+
 def _write(cell, value, workbook):
     from datetime import date
     if isinstance(value, date):
@@ -193,10 +231,14 @@ def build_mapped_delivery_workbook(path, data, options):
         if not any(TOKEN.search(str(cell.value or "")) for row in ws.iter_rows(min_row=start, max_row=end) for cell in row):
             raise ValueError("복사할 행에 플레이스홀더가 없습니다. 대상자 항목이 들어 있는 행을 선택해주세요.")
         height = _repeat_rows(ws, start, end, len(rows))
+        _trim_blank_tail(ws, start + height * len(rows) - 1)
         context = {"delivery_day": data.day, "driver_label": rows[0].driver_label,
                    "meal_title": data.meal.value + "명단", "meal_label": data.meal.value,
                    "jurisdiction": ", ".join(dict.fromkeys(row.values.get("jurisdiction", "") for row in rows
                                                            if row.values.get("jurisdiction")))}
+        context["jurisdiction_join"] = ", ".join(dict.fromkeys(
+            value.strip() for row in rows
+            if (value := row.values.get("jurisdiction", "")) and value.strip()))
         for row in ws:
             for cell in row:
                 if cell.data_type == "f" or not isinstance(cell.value, str):
@@ -208,6 +250,8 @@ def build_mapped_delivery_workbook(path, data, options):
                 person = rows[(cell.row - start) // height] if in_body else None
                 def resolve(key):
                     values = {**context, **dict(person.values)} if person else dict(context)
+                    values["row_number"] = (cell.row - start) // height + 1 if person else ""
+                    values["jurisdiction_join"] = context["jurisdiction_join"]
                     values["delivery_day"] = data.day
                     values["meal_label"], values["meal_title"] = data.meal.value, data.meal.value + "명단"
                     for source in (mapping.get(key, ""), options.template_fallbacks.get(key, "")):

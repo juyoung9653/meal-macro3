@@ -409,8 +409,12 @@ def _prepare_delivery_data(
                     previous_presences.get(key, ()), roster,
                     context=f"{key[0]:%Y%m%d} {key[1].value}",
                 )
-        reports = tuple(
-            _build_report(
+        def build_report_for(day, meal):
+            additional, headings = build_additional_remarks(
+                roster, report_mapping.for_meal(meal), histories, day, meal,
+                presences.get((day, meal), ()), remark_options,
+                form_shipments=remark_shipments if remark_forms else None, include_headings=True)
+            return _build_report(
                 day,
                 meal,
                 aggregates[(day, meal)],
@@ -418,13 +422,12 @@ def _prepare_delivery_data(
                 normalized_staff_sort.get(meal, ()),
                 report_mapping.remarks_for(histories, day, meal, coalesced_shipments, allowed_forms,
                                            presences.get((day, meal), ())),
-                build_additional_remarks(roster, report_mapping.for_meal(meal), histories, day, meal,
-                                         presences.get((day, meal), ()), remark_options,
-                                         form_shipments=remark_shipments if remark_forms else None),
+                additional,
                 remark_options.position,
+                headings,
             )
-            for day, meal in target_keys
-        )
+
+        reports = tuple(build_report_for(day, meal) for day, meal in target_keys)
 
     target_shipments = tuple(
         item
@@ -753,6 +756,7 @@ def _build_report(
     status_remarks: Mapping[str, str],
     additional_remarks: Mapping[str, str] | None = None,
     remark_position: str = "above",
+    additional_headings: Mapping[str, tuple[str, ...]] | None = None,
 ) -> DeliveryReport:
     # None denotes unavailable comparison data; equal buckets suppress deltas.
     if previous is None:
@@ -800,6 +804,7 @@ def _build_report(
                     ", ".join(ordered_areas[index : index + 2])
                     for index in range(0, len(ordered_areas), 2)
                 ),
+                memo_headings=(additional_headings or {}).get(staff, ()),
             )
         )
         for index, count in enumerate(current_buckets):

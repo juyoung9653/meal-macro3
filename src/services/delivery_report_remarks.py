@@ -170,10 +170,10 @@ def report_remark_columns(roster):
     )
 
 
-def build_additional_remarks(roster, routing, histories, day, meal, presences, options, *, form_shipments=None):
+def build_additional_remarks(roster, routing, histories, day, meal, presences, options, *, form_shipments=None, include_headings=False):
     """Use one nonblank priority value per delivered person, grouped by driver."""
     if not options.columns and not options.separate_forms:
-        return {}
+        return ({}, {}) if include_headings else {}
     values_by_staff = defaultdict(dict)
     forms_by_staff = defaultdict(lambda: defaultdict(list))
     seen = set()
@@ -214,10 +214,12 @@ def build_additional_remarks(roster, routing, histories, day, meal, presences, o
             if form in options.separate_forms:
                 driver = routing.resolve(roster, shipment.person_id, day).drivers[meal].strip() or "미지정"
                 forms_by_staff[driver][form].append(roster.person(shipment.person_id).profile.name)
-    result = {}
+    result, headings = {}, {}
     for staff in values_by_staff.keys() | forms_by_staff.keys():
         parts = [f"{value}\n({', '.join(names)})" for value, names in values_by_staff[staff].items()]
         parts.extend(f"{form} 별도\n({', '.join(forms_by_staff[staff][form])})"
                      for form in options.separate_forms if forms_by_staff[staff].get(form))
         result[staff] = "\n".join(parts)
-    return result
+        headings[staff] = tuple(values_by_staff[staff]) + tuple(
+            f"{form} 별도" for form in options.separate_forms if forms_by_staff[staff].get(form))
+    return (result, headings) if include_headings else result

@@ -77,6 +77,7 @@ class DeliveryPlaceholderMapping(QWidget):
             self.fallback_combos[token] = secondary
         layout.addWidget(self.table, 1)
         hint = QLabel("대상자마다 선택한 행을 복사해 끼워 넣습니다. 글꼴·색·테두리·정렬·표시 형식·행 높이·열 너비·인쇄 설정은 Excel 양식을 따릅니다.")
+        hint.setText(hint.text() + "\n비고에 상태 변경을 넣으려면 식종 변경 이력을 선택하세요. 이력이 없으면 2순위를 사용합니다.")
         hint.setWordWrap(True)
         layout.addWidget(hint)
 

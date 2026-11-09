@@ -151,6 +151,8 @@ class DeliverySubstituteDialog(QDialog):
         self.orientation = QComboBox()
         for label, value in (("세로", "portrait"), ("가로", "landscape")):
             self.orientation.addItem(label, value)
+        if status_list:
+            self.orientation.setCurrentIndex(self.orientation.findData("landscape"))
         self.split = QComboBox()
         for label, value in (("가구 수마다", "groups"), ("관할동마다", "dong"), ("구분 없음", "none")):
             self.split.addItem(label, value)

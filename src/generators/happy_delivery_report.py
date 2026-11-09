@@ -109,7 +109,8 @@ def _fill_daily_sheet(ws, sheet: DailyDeliverySheet, *, lunch_only: bool = False
             ws.cell(row_no, 5, row_data.dinner or None)
             ws.cell(row_no, 7, row_data.dinner_packages)
         note = row_data.lunch_note if lunch_only else row_data.dinner_note
-        write_report_memo(ws.cell(row_no, 9), row_data.note if note is None else note)
+        write_report_memo(ws.cell(row_no, 9), row_data.note if note is None else note,
+                          headings=row_data.note_headings)
 
     # 구청 및 기사별 병합/합계
 

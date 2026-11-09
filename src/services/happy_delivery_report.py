@@ -38,6 +38,7 @@ class DailyDeliveryRow:
     lunch_order: int = 0
     _dinner_household_keys: list[str] = field(default_factory=list, repr=False)
     _lunch_household_keys: list[str] = field(default_factory=list, repr=False)
+    note_headings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -115,12 +116,16 @@ def prepare_happy_report_data(snapshot, period_start, period_end, meals, *,
         tuple(events[person.person_id, meal]), same_month_pause=conversion.same_month)
         for person in roster.persons for meal in meals}
     extra_notes = defaultdict(list)
+    extra_headings = {}
     for day, meal in presences:
         status = report_mapping.remarks_for(histories, day, meal, remark_shipments,
             None if remark_options.include_excluded_deliveries else allowed, presences[day, meal])
-        additional = build_additional_remarks(roster, report_mapping.for_meal(meal), histories, day, meal,
+        additional, headings = build_additional_remarks(roster, report_mapping.for_meal(meal), histories, day, meal,
             presences[day, meal], remark_options,
-            form_shipments=remark_shipments if remark_options.include_excluded_deliveries else shipments)
+            form_shipments=remark_shipments if remark_options.include_excluded_deliveries else shipments,
+            include_headings=True)
+        for driver, values in headings.items():
+            extra_headings[day, driver, meal] = values
         for driver in status.keys() | additional.keys():
             parts = (additional.get(driver, ""), status.get(driver, "")) if remark_options.position == "above" else (
                 status.get(driver, ""), additional.get(driver, ""))
@@ -150,6 +155,8 @@ def prepare_happy_report_data(snapshot, period_start, period_end, meals, *,
                 marker = row.route.driver, meal
                 if count and marker not in seen:
                     parts.extend(extra_notes[day, row.route.driver, meal])
+                    row.note_headings = tuple(dict.fromkeys(
+                        (*row.note_headings, *extra_headings.get((day, row.route.driver, meal), ()))))
                     seen.add(marker)
                 setattr(row, variant + "_note", "\n".join(dict.fromkeys(parts)))
         rows = tuple(grouped[key] for key in keys)
@@ -178,6 +185,7 @@ def prepare_happy_report_data(snapshot, period_start, period_end, meals, *,
                     continue
                 key = row.route.driver, row.route.region
                 target = displayed.setdefault(key, DailyDeliveryRow(row.route))
+                target.note_headings = tuple(dict.fromkeys((*target.note_headings, *row.note_headings)))
                 if meal is Meal.BREAKFAST:
                     target.breakfast = count
                     if not target.dinner:

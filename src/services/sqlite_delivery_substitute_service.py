@@ -1,7 +1,8 @@
 """Prepare substitute sheets from sealed SQLite facts, never from an Excel input."""
 from __future__ import annotations
 
-from datetime import date
+from collections import defaultdict
+from datetime import date, timedelta
 from dataclasses import replace
 import re
 
@@ -23,6 +24,7 @@ from src.domain.pause_conversion import pause_conversion_from_snapshot
 from src.domain.projections import status_events_from_historical_snapshot
 from src.domain.status import resolve_status_history
 from src.services.happy_delivery_presence import happy_recipient_presences
+from src.services.delivery_report_remarks import status_remark_actions
 
 
 ROSTER_COLUMN_KEYS = {"school": "school_name", "mobile": "mobile_phone",
@@ -71,6 +73,28 @@ def sequence_sort_key(value: str):
     """Natural ordering without converting or losing the displayed sequence."""
     return (not bool(value), tuple((0, int(part)) if part.isdigit() else (1, part.casefold())
                                    for part in re.split(r"(\d+)", value) if part), value)
+
+
+def _meal_history_values(snapshot, roster, day, meals):
+    """Use the school daily report's active delivery dates and effective actions."""
+    sample_start = day - timedelta(days=day.weekday() + 22)
+    samples = prepare_physical_delivery_data(snapshot, sample_start, day, meals).shipments
+    events = defaultdict(list)
+    for event in status_events_from_historical_snapshot(snapshot):
+        events[event.person_id, event.meal].append(event)
+    conversion = pause_conversion_from_snapshot(snapshot)
+    histories = {
+        (person.person_id, meal): resolve_status_history(
+            person.person_id, meal, tuple(events[person.person_id, meal]),
+            same_month_pause=conversion.same_month)
+        for person in roster.persons for meal in meals
+    }
+    notes = defaultdict(list)
+    for meal in meals:
+        for person_id, action in status_remark_actions(
+                roster, histories, day, meal, samples, None).items():
+            notes[person_id].append(f"{meal.value}: {action}")
+    return {person_id: "\n".join(parts) for person_id, parts in notes.items()}
 
 
 def prepare_delivery_substitute_data(
@@ -139,6 +163,7 @@ def prepare_delivery_substitute_data(
         mapping = {key: key for key in keys}
         fallbacks = dict(requested_fallbacks)
     manifest.update(mapping=mapping, fallbacks=fallbacks)
+    meal_histories = _meal_history_values(snapshot, roster, day, meals)
     rows = []
     sort_keys = {}
     for shipment in sorted(shipments, key=lambda item: item.meal is not meal):
@@ -160,7 +185,8 @@ def prepare_delivery_substitute_data(
                       detail_address=view.detail_address or "", form=form)
         from src.domain.lunch_periods import lunch_date
         values.update({key: _text(lunch_date(person, key)) for key in ("lunch_starts_on", "lunch_ends_on")})
-        values.update(delivery_day=day.isoformat(), driver_label=driver or "미지정",
+        values.update(meal_history=meal_histories.get(person.person_id, ""),
+                      delivery_day=day.isoformat(), driver_label=driver or "미지정",
                       full_address=" ".join(part for part in (view.road_address, view.detail_address) if part),
                       meal_title=meal.value + "명단", meal_label=meal.value,
                       meal_receives="1" if shipment.meal is meal else "")
@@ -207,9 +233,10 @@ def prepare_delivery_substitute_data(
             combined[key] = replace(previous, values=values, box=previous.box or row.box)
     rows = sorted(combined.values(), key=lambda row: sort_keys[row.person_id, row.driver_key])
     return PreparedSubstituteData(day, meal, tuple(rows), columns, defaults, {
-        "substitute_calculation_contract_version": 6,
+        "substitute_calculation_contract_version": 7,
         "recipient_basis": "enrolled_delivery_or_paused" if status_list else "physical_delivery",
         "included_meals": [item.value for item in meals],
+        "meal_history_basis": "school_daily_report_status_actions",
         "breakfast_reference_day": None,
         "breakfast_reference_calculation": None,
         "column_mapping": manifest,
