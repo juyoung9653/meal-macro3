@@ -227,8 +227,7 @@ def test_controller_commits_without_review_and_verified_automatic_backup(
         assert outcome.completed
         assert outcome.roster is not None
         assert outcome.roster.revision_id == IMPORT_REVISION_ID
-        assert outcome.roster.person(PERSON_ID).lunch_period == InclusiveDateRange(
-            date(2026, 7, 27), date(2026, 8, 18))
+        assert outcome.roster.person(PERSON_ID).lunch_period == InclusiveDateRange()
         assert outcome.backup_result is not None
         assert outcome.backup_result.record is not None
         backup_path = outcome.backup_result.record.path
@@ -261,8 +260,7 @@ def test_controller_commits_without_review_and_verified_automatic_backup(
             date(2026, 8, 3),
         )
         restored.database.check_integrity()
-        assert restored.database.current_roster().person(PERSON_ID).lunch_period == InclusiveDateRange(
-            date(2026, 7, 27), date(2026, 8, 18))
+        assert restored.database.current_roster().person(PERSON_ID).lunch_period == InclusiveDateRange()
 
 
 def test_import_uses_current_comparison_values_when_saving(qapp, tmp_path):
@@ -298,5 +296,20 @@ def test_import_rejects_empty_comparison_text(qapp, tmp_path):
         assert dialog.result() != QDialog.DialogCode.Accepted
         assert not dialog._continue.isEnabled()
         assert "개학식" in dialog._error.text()
+    finally:
+        dialog.close()
+
+
+def test_import_preview_explains_recipient_reset_and_effective_date(qapp, tmp_path):
+    path = tmp_path / "reset-calendar.xlsx"
+    _write_schedule(path)
+    dialog = SchoolCalendarImportDialog(initial_directory=tmp_path, calendar_year=2026)
+    try:
+        dialog.load_file(path)
+        text = dialog._mapping_status.text()
+        assert "2026.07.24부터 전체 명단의 중식 대상을 초기화" in text
+        assert "이전 기간·변경 이력·조식·석식은 보존" in text
+        assert "같은 파일을 다시 저장해도 초기화" in text
+        dialog.reject()
     finally:
         dialog.close()

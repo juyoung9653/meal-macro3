@@ -19,41 +19,18 @@ def lunch_date(person: Person, key: str) -> date | None:
     return None if period is None else getattr(period, key.removeprefix("lunch_"))
 
 
-def fill_missing_lunch_periods(
-    roster: RosterSnapshot, calendar: SchoolLunchCalendar,
-) -> RosterSnapshot:
-    """Fill legacy blank dates from imported schools and existing registrations.
+def reset_lunch_periods(roster: RosterSnapshot, starts_on: date) -> RosterSnapshot:
+    """Clear current lunch dates and close registrations from a new season.
 
-    Explicit periods (including deliberately cleared ones) are preserved. These
-    are the bounds already imposed by the calendar and registrations, so no
-    enrollment or status history needs to be rewritten to display them.
+    Earlier registrations remain available for historical meal calculations.
+    No other meal, assignment, person, or status event is changed.
     """
-    registrations: dict[UUID, list[InclusiveDateRange]] = {}
-    for enrollment in roster.enrollments:
-        if enrollment.meal is Meal.LUNCH:
-            registrations.setdefault(enrollment.person_id, []).append(enrollment.period)
-    service_days = {}
-    persons = []
-    for person in roster.persons:
-        periods = registrations.get(person.person_id, ())
-        if person.lunch_period is None and periods:
-            try:
-                schedule = calendar.schedule_for(person.profile.school_name)
-            except (KeyError, SchoolLunchScheduleMissingError):
-                persons.append(person)
-                continue
-            key = (schedule.normalized_school_name, person.profile.grade)
-            if key not in service_days:
-                service_days[key] = tuple(
-                    item.service_on for item in schedule.days
-                    if calendar.vendor_service_available(person.profile, item.service_on)
-                )
-            days = [day for day in service_days[key]
-                    if any(period.contains(day) for period in periods)]
-            if days:
-                person = replace(person, lunch_period=InclusiveDateRange(min(days), max(days)))
-        persons.append(person)
-    return replace(roster, persons=tuple(persons))
+    ids = {item.person_id for item in roster.enrollments if item.meal is Meal.LUNCH}
+    ids.update(person.person_id for person in roster.persons if person.lunch_period is not None)
+    return set_lunch_periods(
+        roster, {pid: InclusiveDateRange() for pid in ids},
+        replace_from={pid: starts_on for pid in ids},
+    )
 
 
 def suggested_person_lunch_period(

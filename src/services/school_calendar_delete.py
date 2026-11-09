@@ -115,8 +115,10 @@ def build_import_deletion(snapshot, records, import_revision_id, *, actor, recor
                 if (change.entity_kind == PERSON_KIND and change.before and change.after
                         and change.before.get("lunch_period") != change.after.get("lunch_period")):
                     later_date_edits.add(change.entity_id)
-    # Revert only dates auto-filled by this import when no later edit changed them.
-    for change in source.changes:
+    # Legacy imports only filled display dates. New imports reset recipients;
+    # deleting a calendar must not revive those cleared registrations or dates.
+    reset_import = "lunch_reset" in source.metadata.decisions["school_calendar_import"]
+    for change in (() if reset_import else source.changes):
         if change.entity_kind != PERSON_KIND or change.before is None or change.after is None:
             continue
         if change.entity_id in later_date_edits:

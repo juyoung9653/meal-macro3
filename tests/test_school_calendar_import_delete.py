@@ -84,7 +84,7 @@ def test_overlap_same_month_bulk_delete_restore_and_reopen(tmp_path):
         assert {schedule.school_name for schedule in calendar.schedules} == {"가초"}
         assert not available(session, "가초", 2) and available(session, "가초", 21)
         assert session.database.current_roster().person(people[0].person_id).lunch_period == manual
-        assert session.database.current_roster().person(people[1].person_id).lunch_period is None
+        assert session.database.current_roster().person(people[1].person_id).lunch_period == InclusiveDateRange()
         remove(session, third)
         assert not school_lunch_calendar_from_snapshot(session.database.snapshot(session.database.latest_revision_id())).schedules
         assert school_calendar_import_history(session.database, session.database.latest_revision_id()) == ()

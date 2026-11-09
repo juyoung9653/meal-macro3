@@ -38,7 +38,7 @@ def test_restoring_before_school_import_allows_same_school_import_again(tmp_path
             if first_import is None:
                 first_import = session.database.revision(record.metadata.revision_id)
             current = session.database.current_roster()
-            assert current.person(person.person_id).lunch_period == InclusiveDateRange(date(2027, 7, 22), date(2027, 8, 17))
+            assert current.person(person.person_id).lunch_period == InclusiveDateRange()
             session.database.check_integrity()
             # A second INSERT while the school still exists remains a conflict.
             from dataclasses import replace

@@ -164,7 +164,8 @@ class SchoolCalendarImportDialog(QDialog):
         title.setObjectName("workspaceTitle")
         subtitle = QLabel(
             "학교명·방학식·개학식과 급식 제공 여부를 읽고 별도 검토창 없이 저장합니다. "
-            "학교 급식이 제공되는 값과 열 연결을 확인하세요."
+            "저장하면 기존 중식 대상과 개인 중식 날짜를 초기화합니다. "
+            "저장 후 중식 명단을 다시 불러오세요."
         )
         subtitle.setObjectName("workspaceSubtitle")
         subtitle.setWordWrap(True)
@@ -403,7 +404,10 @@ class SchoolCalendarImportDialog(QDialog):
         self._continue.setEnabled(preview.can_continue)
         self._mapping_status.setText(
             f"학교 {preview.school_count}곳 · 원본 {len(preview.rows)}행 · "
-            f"참고 비고 {len(preview.note_candidates)}건 · 별도 검토창 없이 저장합니다."
+            f"참고 비고 {len(preview.note_candidates)}건\n"
+            f"{min((row.starts_on for row in preview.rows), default=preview.coverage.starts_on):%Y.%m.%d}부터 전체 명단의 중식 대상을 초기화합니다. "
+            "개인 중식 날짜는 비우며, 이전 기간·변경 이력·조식·석식은 보존합니다. "
+            "같은 파일을 다시 저장해도 초기화됩니다."
         )
         self._mapping_status.setProperty("outcome", "ready")
         _repolish(self._mapping_status)

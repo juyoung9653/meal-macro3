@@ -62,7 +62,7 @@ def test_cumulative_history_school_search_and_actual_vacation_view(qapp, tmp_pat
         calendar = school_lunch_calendar_from_snapshot(session.database.snapshot(latest))
         assert calendar.vendor_service_available(person.profile, date(2027, 7, 22))
         assert calendar.vendor_service_available(person.profile, date(2027, 12, 23))
-        assert session.database.current_roster().person(person.person_id).lunch_period == InclusiveDateRange(date(2027, 7, 22), date(2027, 8, 17))
+        assert session.database.current_roster().person(person.person_id).lunch_period == InclusiveDateRange()
         dialog = SchoolCalendarEditDialog(calendar)
         try:
             dialog.set_import_history(history)

@@ -59,7 +59,7 @@ from .workbook import (
 )
 
 
-SCHOOL_CALENDAR_IMPORT_POLICY_VERSION = 3
+SCHOOL_CALENDAR_IMPORT_POLICY_VERSION = 4
 _NOTE_NAMESPACE = UUID("3616b7ab-b68d-4fc3-96ac-43efb8bde014")
 _MAX_DATA_ROWS = 10_000
 _BLANK_ROW_STOP = 100
@@ -605,11 +605,12 @@ def build_school_calendar_import_revision(
         )
         merged_by_key[key] = merged
         changed_names.append(merged.school_name)
-    from src.domain.lunch_periods import fill_missing_lunch_periods
+    from src.domain.lunch_periods import reset_lunch_periods
     from src.domain.projections import roster_audit_changes, roster_from_historical_snapshot
     roster = roster_from_historical_snapshot(current_snapshot)
-    filled_roster = fill_missing_lunch_periods(roster, SchoolLunchCalendar(replacements))
-    period_changes = roster_audit_changes(roster, filled_roster)
+    reset_starts_on = min(row.starts_on for row in preview.rows)
+    reset_roster = reset_lunch_periods(roster, reset_starts_on)
+    period_changes = roster_audit_changes(roster, reset_roster)
     changes.extend(period_changes)
     if not changes:
         raise ValueError("이번 학교 일정 가져오기로 달라지는 내용이 없습니다.")
@@ -617,7 +618,13 @@ def build_school_calendar_import_revision(
     decision_manifest = {
         "date_overlay_version": 1,
         "source_schedules": [school_lunch_school_schedule_state(item) for item in replacements],
-        "filled_lunch_periods": [str(change.entity_id) for change in period_changes],
+        "lunch_reset": {
+            "starts_on": reset_starts_on.isoformat(),
+            "person_ids": sorted({
+                str((change.after or change.before).get("person_id", change.entity_id))
+                for change in period_changes
+            }),
+        },
         "coverage": {
             "starts_on": preview.coverage.starts_on.isoformat(),
             "ends_on": preview.coverage.ends_on.isoformat(),
