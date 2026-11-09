@@ -109,6 +109,8 @@ def test_mapping_must_be_confirmed_and_edits_require_review_again(app, tmp_path)
 @pytest.mark.parametrize("purpose", [ImportPurpose.DATABASE, ImportPurpose.VACATION_LUNCH])
 def test_error_dialog_opens_first_and_row_exclusion_allows_import(app, tmp_path, purpose):
     wizard = RosterImportWizard(allow_vacation_lunch=True)
+    from tests.test_vacation_lunch_period_import import calendar_entry
+    wizard.set_lunch_calendar_entries((calendar_entry(),))
     wizard.purpose_combo.setCurrentIndex(wizard.purpose_combo.findData(purpose))
     wizard.path_edit.setText(str(source(tmp_path / "rows.xlsx", multiple_errors=True)))
     assert wizard._inspect_source()
@@ -133,6 +135,8 @@ def test_error_dialog_opens_first_and_row_exclusion_allows_import(app, tmp_path,
 
 def test_lunch_blank_name_requires_explicit_skip_and_hides_inactive_controls(app, tmp_path):
     wizard = RosterImportWizard(allow_vacation_lunch=True)
+    from tests.test_vacation_lunch_period_import import calendar_entry
+    wizard.set_lunch_calendar_entries((calendar_entry(),))
     wizard.purpose_combo.setCurrentIndex(wizard.purpose_combo.findData(ImportPurpose.VACATION_LUNCH))
     wizard.path_edit.setText(str(source(tmp_path / "rows.xlsx", blank_name=True)))
     assert wizard._inspect_source()

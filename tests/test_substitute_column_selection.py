@@ -11,7 +11,7 @@ from PySide6.QtWidgets import QDialog
 
 from src.desktop_v2.delivery_substitute import DeliverySubstituteDialog
 from src.desktop_v2.substitute_preferences import SubstituteColumnVisibilityDialog, preferences, exclude_hidden_columns
-from src.domain.delivery_substitute import SubstituteColumn
+from src.domain.delivery_substitute import SubstituteColumn, DELIVERY_SOURCES
 from src.domain.projections import roster_entity_states
 from src.domain.revisions import HistoricalSnapshot
 from src.domain.roster import CustomFieldType, Meal
@@ -106,7 +106,7 @@ def test_side_selection_has_priority_and_uses_raw_source(value, note, expected):
                                             fallbacks={custom_key: "note", "note": "road_address"})
     assert data.rows[0].values[custom_key] == expected
     assert data.rows[0].values["note"] == "테스트로 1"
-    assert [column.label for column in data.columns] == ["비고2", "비고", "내 주소"]
+    assert data.columns == columns + DELIVERY_SOURCES
 
 
 

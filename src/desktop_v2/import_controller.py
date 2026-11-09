@@ -120,6 +120,14 @@ class GuidedRosterImportController:
             parent=parent,
         )
         model = getattr(parent, "table_model", None)
+        if current_roster is not None and hasattr(wizard, "set_lunch_calendar_entries"):
+            from src.services.school_calendar_history import school_calendar_import_history
+            try:
+                wizard.set_lunch_calendar_entries(school_calendar_import_history(
+                    self._session.database, current_roster.revision_id))
+            except Exception as error:
+                self._message_box.critical(parent, "방학 기록을 읽지 못했습니다", user_error(error))
+                return GuidedImportOutcome(GuidedImportStatus.FAILED)
         labels = {column.key: column.label for column in getattr(model, "columns", ())}
         if hasattr(wizard, "set_database_columns"):
             wizard.set_database_columns(current_roster, labels)
@@ -136,6 +144,9 @@ class GuidedRosterImportController:
             return GuidedImportOutcome(GuidedImportStatus.CANCELLED)
         selection = wizard.selection()
         purpose = getattr(selection, "purpose", ImportPurpose.DATABASE)
+        from src.importing.vacation_lunch import LunchDuplicatePolicy
+        calendar_entry = getattr(selection, "lunch_calendar_entry", None)
+        duplicate_policy = getattr(selection, "lunch_duplicate_policy", LunchDuplicatePolicy.UPDATE)
         lunch_events = ()
         lunch_delivering_ids = ()
         if purpose is ImportPurpose.VACATION_LUNCH:
@@ -150,7 +161,7 @@ class GuidedRosterImportController:
             # status conflict. Check the actual lunch events below instead.
             historical = self._session.database.snapshot(latest.metadata.revision_id)
             lunch_events = status_events_from_historical_snapshot(historical, meal=Meal.LUNCH)
-            if any(event.period.starts_on is not None and event.period.starts_on > selection.effective_on for event in lunch_events):
+            if calendar_entry is None and any(event.period.starts_on is not None and event.period.starts_on > selection.effective_on for event in lunch_events):
                 self._message_box.warning(parent, "적용일 확인 필요", "적용일 뒤에 이미 예약된 중식 상태 변경이 있습니다. 적용일을 다시 선택해주세요.")
                 return GuidedImportOutcome(GuidedImportStatus.CANCELLED)
             lunch_delivering_ids = tuple(
@@ -201,7 +212,10 @@ class GuidedRosterImportController:
             )
             revision_id = uuid4()
             value_choices = None
-            if current_roster is not None:
+            if current_roster is not None and not (
+                purpose is ImportPurpose.VACATION_LUNCH
+                and calendar_entry is not None and duplicate_policy is LunchDuplicatePolicy.KEEP
+            ):
                 candidate = apply_reconciliation(
                     current_roster, plan, new_revision_id=revision_id,
                     decisions=decisions, custom_fields=selection.preview.custom_fields,
@@ -241,6 +255,8 @@ class GuidedRosterImportController:
                 purpose=purpose,
                 lunch_status_events=lunch_events,
                 lunch_value_choices=value_choices if purpose is ImportPurpose.VACATION_LUNCH else None,
+                lunch_calendar_entry=calendar_entry,
+                lunch_duplicate_policy=duplicate_policy,
                 value_choices=value_choices if purpose is ImportPurpose.DATABASE else None,
             )
             if current_roster is not None:
@@ -281,7 +297,11 @@ class GuidedRosterImportController:
             added = len(present_ids & new_ids)
             self._message_box.information(
                 parent, "방학 중식 명단을 반영했습니다",
-                f"기존 배송 유지 {retained}명 · 배송 재개 {restored}명 · 신규 {added}명 · 미배송 전환 {len(lunch['stopped'])}명\n적용일 {selection.effective_on.isoformat()}부터 반영됩니다.",
+                (f"방학 {calendar_entry.label}\n"
+                 f"중식 기간 반영 {len(present_ids)}명 · 중복 유지 {len(lunch.get('kept', ()))}명\n"
+                 "학교·학년별 중식 기간에만 등록했습니다. 이번 파일에 없는 기존 대상자는 유지했습니다."
+                 if calendar_entry is not None else
+                 f"기존 배송 유지 {retained}명 · 배송 재개 {restored}명 · 신규 {added}명 · 미배송 전환 {len(lunch['stopped'])}명\n적용일 {selection.effective_on.isoformat()}부터 반영됩니다."),
             )
         return GuidedImportOutcome(
             GuidedImportStatus.COMPLETED,

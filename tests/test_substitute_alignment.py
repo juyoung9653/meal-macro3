@@ -29,9 +29,14 @@ def test_weekday_defaults_survive_loading_saved_report_choices(app, action, week
     dialog = DocumentMealDialog(period)
     dialog.set_available_delivery_forms((None, "도시락"))
     dialog.set_report_choices(DailyReportChoices((Meal.BREAKFAST, Meal.LUNCH), (None,)), profile=profile)
+    if action is DocumentAction.DELIVERY_SUBSTITUTE:
+        dialog.set_substitute_profile(profile)
     expected = Meal.DINNER if weekday < 4 else Meal.BREAKFAST if weekday == 4 else Meal.LUNCH
     happy_report = action is DocumentAction.DELIVERY_REPORT and profile is DocumentTemplateProfile.HAPPY_LUNCHBOX
-    assert dialog.selected_meals() == ((Meal.BREAKFAST, Meal.DINNER) if happy_report else (expected,))
+    expected_meals = (Meal.BREAKFAST, Meal.DINNER) if happy_report else (expected,)
+    if action is DocumentAction.DELIVERY_SUBSTITUTE and profile is DocumentTemplateProfile.HAPPY_LUNCHBOX:
+        expected_meals += (Meal.DINNER if expected is Meal.BREAKFAST else Meal.BREAKFAST,)
+    assert dialog.selected_meals() == expected_meals
     if happy_report:
         assert "석식·조식을 기본 선택" in dialog._meal_help.text()
         assert "중식도 필요하면 체크" in dialog._meal_help.text()

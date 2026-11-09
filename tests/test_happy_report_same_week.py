@@ -1,4 +1,4 @@
-"""Same-week references must not change actual deliveries or cross week boundaries."""
+"""Date-specific status counts plus the school-list reference-date helper."""
 from dataclasses import replace
 from datetime import date, timedelta
 from types import SimpleNamespace
@@ -35,7 +35,7 @@ def test_reference_priority_and_week_boundaries_for_every_meal(meal):
                reference_delivery_days(outside, monday, monday + timedelta(days=6), (meal,)).values())
 
 
-def test_november_third_breakfast_uses_november_sixth_with_current_week_quantity():
+def test_november_third_breakfast_counts_selected_day_enrollments():
     original, _ = _snapshot(people=2, meals=(Meal.BREAKFAST,))
     roster = roster_from_historical_snapshot(original)
     roster = replace(roster, enrollments=(
@@ -48,14 +48,14 @@ def test_november_third_breakfast_uses_november_sixth_with_current_week_quantity
     result = prepare_happy_report_data(historical, date(2026, 11, 3), date(2026, 11, 3),
                                       (Meal.BREAKFAST,))
     report = result.reports[0]
-    assert report.breakfast_on == date(2026, 11, 6)
+    assert report.breakfast_on == date(2026, 11, 3)
     assert report.breakfast_total == 2  # Previous week had only one recipient.
-    assert result.shipments == ()
-    assert result.calculation_manifest["display_reference_days"][0]["breakfast"] == "2026-11-06"
+    assert len(result.shipments) == 2
+    assert result.calculation_manifest["display_reference_days"][0]["breakfast"] == "2026-11-03"
 
 
 @pytest.mark.parametrize("meal", (Meal.DINNER, Meal.LUNCH))
-def test_first_day_without_meals_uses_next_delivery_in_same_week(meal):
+def test_before_enrollment_does_not_count_future_recipients(meal):
     original, _ = _snapshot(meals=(meal,))
     roster = roster_from_historical_snapshot(original)
     roster = replace(roster, enrollments=tuple(
@@ -68,19 +68,19 @@ def test_first_day_without_meals_uses_next_delivery_in_same_week(meal):
     result = prepare_happy_report_data(historical, MONDAY, MONDAY, (meal,))
     report = result.reports[0]
     field = "dinner" if meal is Meal.DINNER else "lunch"
-    assert getattr(report, field + "_on") == MONDAY + timedelta(days=1)
-    assert getattr(report, field + "_total") == 1
+    assert getattr(report, field + "_on") is None
+    assert getattr(report, field + "_total") == 0
     assert result.shipments == ()
-    assert result.calculation_manifest["display_reference_days"][0][field] == "2026-08-18"
+    assert result.calculation_manifest["display_reference_days"][0][field] is None
 
 
-def test_weekend_lunch_reuses_friday_and_keeps_lunch_workbook():
+def test_weekend_lunch_counts_enrollments_and_keeps_lunch_workbook():
     original, _ = _snapshot(meals=(Meal.LUNCH,))
     sunday = MONDAY + timedelta(days=6)
     result = prepare_happy_report_data(original, sunday, sunday, (Meal.LUNCH,))
-    assert result.reports[0].lunch_on == MONDAY + timedelta(days=4)
+    assert result.reports[0].lunch_on == sunday
     assert result.reports[0].lunch_total == 1
-    assert result.shipments == ()
+    assert len(result.shipments) == 1
     workbook = build_happy_report_workbook(result.reports, paths())
     try:
         assert workbook.sheetnames == ["중식_26.08.23"]
@@ -114,7 +114,7 @@ def test_whole_week_without_meals_leaves_blank_sheet_despite_previous_week(meal)
         workbook.close()
 
 
-def test_multiple_weeks_use_their_own_friday_quantities_and_only_actual_shipments():
+def test_multiple_weeks_count_each_day_without_future_enrollments():
     original, _ = _snapshot(people=2, meals=(Meal.BREAKFAST,))
     roster = roster_from_historical_snapshot(original)
     roster = replace(roster, enrollments=(
@@ -127,17 +127,17 @@ def test_multiple_weeks_use_their_own_friday_quantities_and_only_actual_shipment
     result = prepare_happy_report_data(historical, date(2026, 11, 3), date(2026, 11, 10),
                                       (Meal.BREAKFAST,))
     assert [(report.breakfast_on, report.breakfast_total) for report in result.reports] == (
-        [(date(2026, 11, 6), 1)] * 6 + [(date(2026, 11, 13), 2)] * 2
+        [(date(2026, 11, 3) + timedelta(days=i), 1 if i < 6 else 2) for i in range(8)]
     )
-    assert len(result.shipments) == 1
-    assert result.shipments[0].delivery_on == date(2026, 11, 6)
+    assert len(result.shipments) == 10
+    assert result.shipments[0].delivery_on == date(2026, 11, 3)
 
 
-def test_delivery_form_filter_applies_before_choosing_reference():
+def test_delivery_form_filter_includes_paused_recipients():
     original, _, _ = source(forms={0: "BOX", 1: "일반"},
         statuses=((0, Meal.DINNER, MealStatus.PAUSED, MONDAY, MONDAY + timedelta(days=1)),))
     result = prepare_happy_report_data(original, MONDAY, MONDAY, (Meal.DINNER,),
                                       delivery_forms=("BOX",))
-    assert result.reports[0].dinner_on == MONDAY + timedelta(days=2)
+    assert result.reports[0].dinner_on == MONDAY
     assert result.reports[0].dinner_total == 1
-    assert result.shipments == ()
+    assert len(result.shipments) == 1

@@ -7,6 +7,10 @@ from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from enum import StrEnum
 from uuid import UUID, uuid4
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from src.services.school_calendar_history import SchoolCalendarImportEntry
 
 from src.domain.projections import roster_audit_changes, status_event_audit_change
 from src.domain.revisions import (
@@ -36,6 +40,7 @@ from .households import (
 from .profile_history import StoredImportProfile, import_profile_audit_change
 from .reconciliation import ReconciliationPlan
 from .workbook import WorkbookImportPreview
+from .vacation_lunch import LunchDuplicatePolicy, apply_vacation_periods
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +78,8 @@ def build_import_revision(
     purpose: ImportPurpose = ImportPurpose.DATABASE,
     lunch_status_events: tuple[StatusEvent, ...] = (),
     lunch_value_choices: Mapping | None = None,
+    lunch_calendar_entry: SchoolCalendarImportEntry | None = None,
+    lunch_duplicate_policy: LunchDuplicatePolicy = LunchDuplicatePolicy.UPDATE,
     value_choices: Mapping | None = None,
     household_grouping_columns: tuple[str, ...] = ("mobile",),
     household_grouping_snapshot: HistoricalSnapshot | None = None,
@@ -100,6 +107,10 @@ def build_import_revision(
     if preview.profile.row_filter is not None and purpose is not ImportPurpose.VACATION_LUNCH:
         raise ValueError("가져올 행 조건은 중식 명단 갱신에서만 사용할 수 있습니다.")
     if purpose is ImportPurpose.VACATION_LUNCH:
+        if not isinstance(lunch_duplicate_policy, LunchDuplicatePolicy):
+            raise ValueError("기존 대상자 처리 방식을 다시 선택해주세요.")
+        if lunch_calendar_entry is not None and plan.effective_on != lunch_calendar_entry.period.starts_on:
+            raise ValueError("선택한 방학과 명단 적용 기간이 다릅니다. 불러오기 창을 다시 열어 방학 기록을 선택해주세요.")
         if current_roster is None:
             raise ValueError("방학 중식 명단은 기존 운영 명단이 있어야 적용할 수 있습니다.")
         if preview.notices:
@@ -137,6 +148,8 @@ def build_import_revision(
             current_roster, result, preview, plan, revision_id,
             recorded_at, tuple(lunch_status_events), lunch_value_choices,
             household_grouping_snapshot=household_grouping_snapshot,
+            calendar_entry=lunch_calendar_entry,
+            duplicate_policy=lunch_duplicate_policy,
         )
     elif current_roster is not None:
         from .values import apply_import_values
@@ -207,6 +220,7 @@ def build_import_revision(
         **dict(result.decision_manifest),
         "import_purpose": purpose.value,
         "vacation_lunch": {
+            **dict(result.decision_manifest.get("vacation_scope", {})),
             "present": [str(person_id) for person_id in sorted(
                 (event.person_id for event in lunch_events if event.status is MealStatus.DELIVERY), key=str
             )],
@@ -306,6 +320,8 @@ def _apply_vacation_lunch(
     value_choices: Mapping | None = None,
     household_grouping_columns: tuple[str, ...] = ("mobile",),
     household_grouping_snapshot: HistoricalSnapshot | None = None,
+    calendar_entry=None,
+    duplicate_policy: LunchDuplicatePolicy = LunchDuplicatePolicy.UPDATE,
 ) -> tuple[ReconciliationResult, tuple[StatusEvent, ...]]:
     if result.ignored_observation_ids:
         raise ValueError("방학 중식 명단에서는 행 제외를 허용하지 않습니다.")
@@ -313,7 +329,7 @@ def _apply_vacation_lunch(
         raise ValueError("방학 중식 명단에는 대상자가 한 명 이상 있어야 합니다.")
     if any(not isinstance(event, StatusEvent) or event.meal is not Meal.LUNCH for event in historical_events):
         raise ValueError("중식 상태 이력만 전달할 수 있습니다.")
-    if any(event.period.starts_on is not None and event.period.starts_on > plan.effective_on for event in historical_events):
+    if calendar_entry is None and any(event.period.starts_on is not None and event.period.starts_on > plan.effective_on for event in historical_events):
         raise ValueError("적용일 뒤에 이미 예약된 중식 상태 변경이 있습니다. 날짜를 다시 확인해주세요.")
     if any(event.recorded_at > recorded_at for event in historical_events):
         raise ValueError("새 명단보다 나중에 기록된 중식 상태 이력이 있습니다.")
@@ -334,12 +350,17 @@ def _apply_vacation_lunch(
             event for event in historical_events if event.person_id == person_id
         )).status_on(plan.effective_on) is MealStatus.DELIVERY
     }
-    stopped_ids = delivering_ids - present_ids
+    stopped_ids = delivering_ids - present_ids if calendar_entry is None else set()
     from .lunch_values import apply_lunch_values
-    persons, reviewed_assignments = apply_lunch_values(current, result, plan, value_choices)
+    if calendar_entry is not None and duplicate_policy is LunchDuplicatePolicy.KEEP:
+        existing = {p.person_id: p for p in current.persons}
+        persons = tuple(existing.get(p.person_id, p) for p in result.snapshot.persons)
+        reviewed_assignments = current.assignments
+    else:
+        persons, reviewed_assignments = apply_lunch_values(current, result, plan, value_choices)
     persons = tuple(sorted(persons, key=lambda person: str(person.person_id)))
     enrollments = list(current.enrollments)
-    for person_id in sorted(present_ids, key=str):
+    for person_id in sorted(present_ids if calendar_entry is None else (), key=str):
         matching = [item for item in enrollments if item.person_id == person_id and item.meal is Meal.LUNCH]
         if any(item.period.contains(plan.effective_on) and item.period.ends_on is None for item in matching):
             continue
@@ -385,6 +406,27 @@ def _apply_vacation_lunch(
         custom_fields,
         delivery_defaults=current.delivery_defaults,
     )
+    if calendar_entry is not None:
+        from src.domain.school_calendar import school_lunch_calendar_from_snapshot
+        if household_grouping_snapshot is None:
+            raise ValueError("저장된 학교 일정을 확인할 수 없습니다. 불러오기 창을 다시 열어주세요.")
+        snapshot, periods, skipped = apply_vacation_periods(
+            current, snapshot, present_ids, calendar_entry,
+            school_lunch_calendar_from_snapshot(household_grouping_snapshot), duplicate_policy)
+        events = tuple(StatusEvent(
+            uuid4(), revision_id, pid, Meal.LUNCH, MealStatus.DELIVERY,
+            period, recorded_at, "방학 중식 명단 가져오기",
+        ) for pid, period in periods.items())
+        manifest = {**dict(result.decision_manifest), "vacation_scope": {
+            "calendar_revision_id": str(calendar_entry.revision_id),
+            "calendar_filename": calendar_entry.filename,
+            "starts_on": calendar_entry.period.starts_on.isoformat(),
+            "ends_on": calendar_entry.period.ends_on.isoformat(),
+            "duplicate_policy": duplicate_policy.value,
+            "kept": [str(pid) for pid in sorted(skipped, key=str)],
+        }}
+        return ReconciliationResult(snapshot, result.person_ids_by_observation,
+                                    result.ignored_observation_ids, manifest), events
     events = tuple(StatusEvent(
         uuid4(), revision_id, person_id, Meal.LUNCH, status,
         InclusiveDateRange(plan.effective_on, None), recorded_at,

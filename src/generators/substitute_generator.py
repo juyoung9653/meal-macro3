@@ -19,7 +19,7 @@ from src.excel.publication import WorkbookPublicationResult, publish_workbook
 from src.excel.substitute_excel_metrics import apply_excel_metrics
 from src.excel.substitute_page_layout import SheetGroup, SheetLayout
 
-SUBSTITUTE_RENDER_CONTRACT_VERSION = 11
+SUBSTITUTE_RENDER_CONTRACT_VERSION = 12
 _LABELS = {"name": "이름", "road_address": "신주소", "note": "비고2"}
 _FILLS = {2: "E6B8B7", 3: "B8CCE4", 4: "D8E4BC", 5: "CCC0DA"}
 _THIN = Side(style="thin", color="000000")
@@ -241,6 +241,12 @@ def build_substitute_workbook(data: PreparedSubstituteData, options: SubstituteO
     if template_path is None:
         from src.core.settings import get_settings
         template_path = get_settings().get_substitute_template_path()
+    from src.excel.mapped_delivery_template import build_mapped_delivery_workbook
+    from src.excel.delivery_templates import validate_delivery_template
+    validate_delivery_template(template_path, "delivery_substitute")
+    mapped = build_mapped_delivery_workbook(template_path, data, options)
+    if mapped is not None:
+        return mapped
     styles = load_substitute_styles(template_path)
     normal_font = styles["normal_font"]
     if substitute_styles_are_default(styles) and not styles["group_styles"]:

@@ -416,7 +416,7 @@ class ImportColumnsTable(QWidget):
         self._meals_enabled = enabled
         for key, card in self.cards.items():
             card.setEnabled(self.target_enabled(key))
-            card.setToolTip("" if self.target_enabled(key) else "방학 중식은 명단 포함 여부로 중식 배송을 갱신합니다.")
+            card.setToolTip("" if self.target_enabled(key) else "방학 중식은 선택한 방학 기간에 명단의 대상자를 등록합니다.")
         for combo in self.combos.values():
             for index in range(combo.count()):
                 combo.model().item(index).setEnabled(self.target_enabled(str(combo.itemData(index))))

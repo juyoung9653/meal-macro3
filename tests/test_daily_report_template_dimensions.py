@@ -53,12 +53,13 @@ def _assert_print_settings(sheet):
     assert sheet.column_dimensions['B'].min == 2 and sheet.column_dimensions['B'].max == 3
 
 
-@pytest.mark.parametrize('count', [0, 2, 7])
-def test_meal_report_copies_exact_row_heights_and_repeated_eighth_row(tmp_path, count):
+@pytest.mark.parametrize('count', [0, 2, 5, 6, 7])
+def test_meal_report_copies_exact_row_heights_and_repeated_seventh_row(tmp_path, count):
     template = tmp_path / 'meal.xlsx'
     source = load_workbook('assets/급식/일일식수템플릿.xlsx')
     sheet = source['aaa']
     _customize(sheet)
+    sheet['H8'].border = Border(bottom=Side(style='thick', color='654321'))
     sheet['A9'] = '사용자 합계'
     source.save(template)
     source.close()
@@ -72,12 +73,12 @@ def test_meal_report_copies_exact_row_heights_and_repeated_eighth_row(tmp_path, 
         sheet = workbook.active
         _assert_print_settings(sheet)
         for row in range(4, 4+count):
-            assert sheet.row_dimensions[row].height == 7 + min(row, 8)
+            assert sheet.row_dimensions[row].height == 7 + (row if row <= 8 else 7)
             cell = sheet.cell(row, 8)
             assert cell.value == memo and cell.data_type == 's'
             assert cell.font.name == 'Arial' and cell.font.sz == 24
             assert not cell.alignment.wrap_text and not cell.alignment.shrink_to_fit
-            assert cell.border.bottom.style == 'double'
+            assert cell.border.bottom.style == ('thick' if row == 8 else 'double')
             assert cell.fill.fgColor.rgb == '00ABCDEF'
         assert sheet.row_dimensions[4+count].height == 16
         assert sheet.cell(4+count, 1).value == '사용자 합계'

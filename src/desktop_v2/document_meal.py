@@ -96,9 +96,11 @@ class DocumentMealSelection:
         canonical = tuple(meal for meal in Meal if meal in set(meals))
         if (
             self.period.action is DocumentAction.DELIVERY_SUBSTITUTE
-            and len(canonical) != 1
+            and len(canonical) != 1 and not (len(canonical) == 2 and Meal.BREAKFAST in canonical)
         ):
-            raise ValueError("배송대타는 식종 하나만 선택할 수 있습니다.")
+            raise ValueError("배송목록은 석식 또는 중식에 조식을 함께 선택할 수 있습니다.")
+        if self.period.action is DocumentAction.DELIVERY_SUBSTITUTE and len(canonical) == 2:
+            canonical = tuple(meal for meal in canonical if meal is not Meal.BREAKFAST) + (Meal.BREAKFAST,)
         if self.substitute_options is not None:
             if not isinstance(self.substitute_options, SubstituteOptions):
                 raise TypeError("배송대타 설정이 올바르지 않습니다.")
@@ -132,6 +134,7 @@ class DocumentMealDialog(QDialog):
             raise TypeError("문서 기간 선택이 올바르지 않습니다.")
         super().__init__(parent)
         self._period = period
+        self._template_profile = None
         self._buttons_by_meal: dict[Meal, QAbstractButton] = {}
         self._cards: dict[Meal, QFrame] = {}
         self._exclusive_group: QButtonGroup | None = None
@@ -165,11 +168,26 @@ class DocumentMealDialog(QDialog):
         return self._period
 
     def selected_meals(self) -> tuple[Meal, ...]:
-        return tuple(
+        selected = tuple(
             meal
             for meal in Meal
             if self._buttons_by_meal[meal].isChecked()
         )
+        if (self._template_profile is DocumentTemplateProfile.HAPPY_LUNCHBOX
+                and getattr(self, "_include_breakfast", None) is not None
+                and self._include_breakfast.isChecked() and selected):
+            selected += (Meal.DINNER if selected == (Meal.BREAKFAST,) else Meal.BREAKFAST,)
+        return selected
+
+    def set_substitute_profile(self, profile: DocumentTemplateProfile | None) -> None:
+        if self._period.action is not DocumentAction.DELIVERY_SUBSTITUTE:
+            return
+        self._template_profile = profile
+        happy = profile is DocumentTemplateProfile.HAPPY_LUNCHBOX
+        self._include_breakfast.setVisible(happy)
+        self._include_breakfast.setChecked(happy)
+        self._meal_help.setText(_meal_instruction(self._period, profile=profile))
+        self._refresh_state()
 
     def set_report_choices(
         self, choices: DailyReportChoices, *,
@@ -188,6 +206,11 @@ class DocumentMealDialog(QDialog):
         self._refresh_remark_summary()
         for meal, button in self._buttons_by_meal.items():
             button.setChecked(meal in self._defaults)
+            description = self._cards[meal].findChild(QLabel, "documentMealDescription")
+            description.setText(
+                "선택일의 배송·일시중지 대상자를 1명씩 셉니다. 중지·미가입은 제외합니다."
+                if profile is DocumentTemplateProfile.HAPPY_LUNCHBOX else _MEAL_COPY[meal]
+            )
         for form, button in self._buttons_by_form.items():
             button.setChecked(form not in self._excluded_forms)
         self._refresh_state()
@@ -308,6 +331,12 @@ class DocumentMealDialog(QDialog):
             self._buttons_by_meal[meal] = button
             cards.addWidget(card, 1)
         section_layout.addLayout(cards, 1)
+        if self._period.action is DocumentAction.DELIVERY_SUBSTITUTE:
+            self._include_breakfast = QCheckBox("조식 함께 표시 · 받으면 1, 안 받으면 빈칸")
+            self._include_breakfast.setChecked(False)
+            self._include_breakfast.hide()
+            self._include_breakfast.toggled.connect(self._refresh_state)
+            section_layout.addWidget(self._include_breakfast)
         root.addWidget(section, 1)
 
         if self._period.action is DocumentAction.DELIVERY_REPORT:
@@ -468,6 +497,9 @@ class DocumentMealDialog(QDialog):
             button.setChecked(False)
 
     def _refresh_state(self, _checked=None) -> None:
+        if hasattr(self, "_include_breakfast"):
+            breakfast_only = self._buttons_by_meal[Meal.BREAKFAST].isChecked()
+            self._include_breakfast.setText(("석식" if breakfast_only else "조식") + " 함께 표시 · 받으면 1, 안 받으면 빈칸")
         selected = self.selected_meals() if self._buttons_by_meal else ()
         for meal, card in self._cards.items():
             card.setProperty("selected", meal in selected)
@@ -520,7 +552,9 @@ def _meal_instruction(
     profile: DocumentTemplateProfile | None = None,
 ) -> str:
     if period.action is DocumentAction.DELIVERY_SUBSTITUTE:
-        return "배송대타는 담당자 한 명의 배송표를 만들기 때문에 식종 하나만 선택합니다."
+        if profile is DocumentTemplateProfile.HAPPY_LUNCHBOX:
+            return "석식·중식은 조식을, 조식은 석식을 기본으로 함께 표시합니다. 행복도시락은 배송·일시중지이면 1, 중지·미가입이면 빈칸으로 표시합니다. 함께 표시를 해제하면 한 식종만 만듭니다."
+        return "배송목록을 만들 식종 하나를 선택하세요. 선택한 날짜·식종의 실제 배송 대상을 표시합니다."
     if period.action is DocumentAction.DELIVERY_REPORT:
         if profile is DocumentTemplateProfile.HAPPY_LUNCHBOX:
             return "행복도시락 일일식수는 석식·조식을 기본 선택합니다. 중식도 필요하면 체크하세요. 식종은 변경할 수 있으며, 제외한 배송 형태는 저장된 설정을 사용합니다."

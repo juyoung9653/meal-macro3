@@ -126,7 +126,7 @@ def _copy_sheet(src, dst) -> None:
 
 
 def _fill_data(ws, report: DeliveryReport, *, preserve_template_styles=False) -> None:
-    """Keep template rows 4–8 and repeat row 8 for any extra driver rows.
+    """Keep template rows 4–8 and repeat row 7 for any extra driver rows.
 
     Row 9 supplies the total row. The legacy style flag is accepted for callers;
     all reports now preserve the template, including clipped text and print scale.
@@ -154,13 +154,14 @@ def _fill_data(ws, report: DeliveryReport, *, preserve_template_styles=False) ->
             ws.cell(row, column)._style = copy(style)
 
     for row_no, item in enumerate(report.rows, 4):
-        apply_row(row_no, min(row_no, 8))
+        apply_row(row_no, row_no if row_no <= 8 else 7)
         write_literal_cell(ws.cell(row_no, 1), item.staff_label)
         for column, raw in enumerate(item.household_size_cells, 2):
             value = strip_diff(raw)
             ws.cell(row_no, column).value = int(value) if value != "" else ""
         ws.cell(row_no, 7).value = item.person_total
-        write_literal_cell(ws.cell(row_no, 8), item.memo)
+        from src.excel.report_memo import write_report_memo
+        write_report_memo(ws.cell(row_no, 8), item.memo)
         write_literal_cell(ws.cell(row_no, 9), item.reference_areas)
 
     apply_row(total_row, 9)

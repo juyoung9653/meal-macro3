@@ -69,6 +69,8 @@ from src.importing.households import (
     StoredHouseholdMatchingRule,
 )
 from src.importing.revision import ImportPurpose
+from src.importing.vacation_lunch import LunchDuplicatePolicy
+from src.services.school_calendar_history import SchoolCalendarImportEntry
 from src.importing.profile_history import StoredImportProfile
 
 from .import_columns import ImportColumnMappingDialog, ImportColumnsTable
@@ -127,6 +129,8 @@ class ImportWizardSelection:
     household_rule: HouseholdMatchingRule
     existing_household_rule: StoredHouseholdMatchingRule | None
     purpose: ImportPurpose = ImportPurpose.DATABASE
+    lunch_calendar_entry: SchoolCalendarImportEntry | None = None
+    lunch_duplicate_policy: LunchDuplicatePolicy = LunchDuplicatePolicy.UPDATE
 
 
 class RosterImportWizard(QDialog):
@@ -464,7 +468,7 @@ class RosterImportWizard(QDialog):
                 "각 Excel 열을 현재 DB의 칼럼에 연결하세요. * 항목만 필수입니다.",
             )
         )
-        self.lunch_mode_note = QLabel("방학 중식 명단: 이름·핸드폰으로 기존 명단과 연결합니다. 학교·학년은 높은 값을 우선하고, 빈칸은 기존 값을 유지하고, 충돌하는 값만 항목별로 선택합니다. 식종 열은 필요하지 않습니다.")
+        self.lunch_mode_note = QLabel("이름·핸드폰으로 연결하고 선택한 방학의 학교·학년별 중식 기간에 등록합니다. 식종 열은 필요하지 않습니다.")
         self.lunch_mode_note.setWordWrap(True)
         self.lunch_mode_note.setObjectName("sectionLabel")
         self.lunch_mode_note.setWordWrap(True)
@@ -472,6 +476,20 @@ class RosterImportWizard(QDialog):
         self.lunch_filter_panel = QWidget()
         filter_form = QFormLayout(self.lunch_filter_panel)
         filter_form.setContentsMargins(0, 0, 0, 0)
+        self.lunch_calendar_combo = QComboBox()
+        self.lunch_calendar_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.lunch_calendar_combo.setMinimumContentsLength(32)
+        self.lunch_calendar_combo.addItem("학교 일정에서 방학 파일을 먼저 불러와주세요", None)
+        filter_form.addRow("적용할 방학 기록 *", self.lunch_calendar_combo)
+        self.lunch_duplicate_combo = QComboBox()
+        self.lunch_duplicate_combo.addItem("기존 유지 · 중복 명단 무시", LunchDuplicatePolicy.KEEP)
+        self.lunch_duplicate_combo.addItem("업데이트 · 가져온 정보 반영", LunchDuplicatePolicy.UPDATE)
+        filter_form.addRow("기존 대상자 처리", self.lunch_duplicate_combo)
+        duplicate_note = QLabel("기존 유지는 기존 정보·등록 기간을 보존합니다. 업데이트는 기존 값과 다른 항목을 확인합니다. 해당 방학에 미등록이면 두 방식 모두 추가합니다.")
+        duplicate_note.setWordWrap(True)
+        duplicate_note.setObjectName("muted")
+        filter_form.addRow(duplicate_note)
+        self.lunch_calendar_combo.currentIndexChanged.connect(self._lunch_calendar_changed)
         self.lunch_filter_mode = QComboBox()
         self.lunch_filter_mode.addItem("전체 명단", "all")
         self.lunch_filter_mode.addItem("선택한 칼럼에 값이 있는 행", "nonempty")
@@ -483,7 +501,7 @@ class RosterImportWizard(QDialog):
         filter_form.addRow("가져올 중식 명단", self.lunch_filter_mode)
         filter_form.addRow("조건 칼럼", self.lunch_filter_column)
         filter_form.addRow("일치할 값", self.lunch_filter_value)
-        filter_note = QLabel("조건에 맞는 행만 중식 배송으로 반영합니다. 조건에서 빠진 기존 중식 배송자는 중지됩니다. 저장 전 가져올 명단과 제외 건수를 확인합니다.")
+        filter_note = QLabel("조건에 맞는 행만 선택한 방학에 등록합니다. 이번 파일에 없거나 조건에서 빠진 기존 대상자는 그대로 유지합니다.")
         filter_note.setWordWrap(True)
         filter_form.addRow(filter_note)
         self.lunch_filter_mode.currentIndexChanged.connect(self._lunch_filter_changed)
@@ -491,7 +509,8 @@ class RosterImportWizard(QDialog):
         self.lunch_filter_value.textChanged.connect(self._mapping_changed)
         layout.addWidget(self.lunch_filter_panel)
         effective_row = QHBoxLayout()
-        effective_row.addWidget(QLabel("이 명단을 적용할 날짜 (당일 포함) *"))
+        self.effective_date_label = QLabel("이 명단을 적용할 날짜 (당일 포함) *")
+        effective_row.addWidget(self.effective_date_label)
         self.effective_date_edit = WheelSafeDateEdit(QDate.currentDate())
         self.effective_date_edit.setCalendarPopup(True)
         self.effective_date_edit.setDisplayFormat("yyyy-MM-dd")
@@ -1571,7 +1590,7 @@ class RosterImportWizard(QDialog):
             self.preview_summary.setText(self.preview_summary.text() + f" · 직접 제외 {len(preview.excluded_rows)}행")
         if preview.profile.row_filter is not None:
             self.preview_summary.setText(self.preview_summary.text() + f" · 조건 제외 {len(preview.filtered_rows)}행")
-            self.issue_list.addItem("조건에서 빠진 기존 중식 배송자는 중지됩니다. 가져올 명단을 확인한 뒤 불러오기를 눌러주세요.")
+            self.issue_list.addItem("조건에서 빠진 기존 대상자는 그대로 유지됩니다. 가져올 명단을 확인한 뒤 불러오기를 눌러주세요.")
             self.notice_label.show()
             self.issue_list.show()
 
@@ -1584,7 +1603,7 @@ class RosterImportWizard(QDialog):
         self._pending_excluded_rows = set(self._excluded_rows)
         self.correction_help.setText(
             "값을 고치거나 왼쪽 체크로 원본 행 전체를 제외한 뒤 가져오세요. 원본 Excel은 바뀌지 않습니다."
-            + (" 제외된 기존 중식 배송자는 중지될 수 있습니다." if self.purpose_combo.currentData() == ImportPurpose.VACATION_LUNCH else ""))
+            + (" 제외한 행에 연결된 기존 대상자는 그대로 유지됩니다." if self.purpose_combo.currentData() == ImportPurpose.VACATION_LUNCH else ""))
         display_issues: list[ImportIssue] = []
         seen: set[tuple[object, ...]] = set()
         for issue in preview.issues:
@@ -1998,6 +2017,11 @@ class RosterImportWizard(QDialog):
         )
 
     def _finish_import_if_valid(self) -> bool:
+        lunch = self.purpose_combo.currentData() == ImportPurpose.VACATION_LUNCH
+        entry = self.lunch_calendar_combo.currentData() if lunch else None
+        if lunch and entry is None:
+            self._show_error(user_error(ValueError("적용할 방학 기록이 없습니다. 운영 일정 → 학교 일정에서 방학 파일을 불러온 뒤 명단 불러오기를 다시 열어주세요.")))
+            return False
         if not self._mapping_review_complete():
             self._set_page(1)
             self._open_mapping_dialog()
@@ -2007,7 +2031,7 @@ class RosterImportWizard(QDialog):
                 self._show_error("방학 중식 명단의 오류 행을 수정하거나 행 제외를 체크한 뒤 가져와주세요.")
             return False
         assert self._preview is not None
-        effective_on = self.effective_date_edit.date().toPython()
+        effective_on = entry.period.starts_on if entry is not None else self.effective_date_edit.date().toPython()
         self._selection = ImportWizardSelection(
             self._preview,
             effective_on,
@@ -2015,6 +2039,8 @@ class RosterImportWizard(QDialog):
             self._build_household_rule(),
             self._existing_household_rule,
             ImportPurpose(self.purpose_combo.currentData()),
+            entry,
+            LunchDuplicatePolicy(self.lunch_duplicate_combo.currentData()),
         )
         self.accept()
         return True
@@ -2167,14 +2193,28 @@ class RosterImportWizard(QDialog):
         self.lunch_filter_panel.setVisible(self.purpose_combo.currentData() == ImportPurpose.VACATION_LUNCH)
         self._lunch_filter_changed()
         self.purpose_note.setText(
-            "포함된 대상자는 중식 배송으로 반영하고 학교 일정과 적용일로 <b>중식 시작일·종료일</b>을 채웁니다. "
-            "<b>빠진 기존 중식 배송자는 중지</b>하고, 빠진 사람의 중식 날짜 칼럼은 비웁니다."
+            "불러온 방학 기록을 골라 <b>그 기간에만 중식을 등록</b>합니다. "
+            "1차·2차 명단을 누적할 수 있으며 이번 파일에 없는 기존 대상자는 유지합니다."
             if self.purpose_combo.currentData() == ImportPurpose.VACATION_LUNCH else
             "학교·학년은 높은 쪽을 유지하고 빈칸은 기존 값을 유지합니다. 충돌하는 값만 항목별로 선택합니다."
         )
         self.lunch_mode_note.setVisible(self.purpose_combo.currentData() == ImportPurpose.VACATION_LUNCH)
+        lunch = self.purpose_combo.currentData() == ImportPurpose.VACATION_LUNCH
+        self.effective_date_edit.setVisible(not lunch)
+        self.effective_date_label.setVisible(not lunch)
         self._sync_meal_mapping_visibility()
         self._mapping_changed()
+
+    def set_lunch_calendar_entries(self, entries):
+        self.lunch_calendar_combo.clear()
+        for entry in sorted(entries, key=lambda item: item.recorded_at, reverse=True):
+            self.lunch_calendar_combo.addItem(entry.label, entry)
+        if not entries:
+            self.lunch_calendar_combo.addItem("학교 일정에서 방학 파일을 먼저 불러와주세요", None)
+        self._lunch_calendar_changed()
+
+    def _lunch_calendar_changed(self, *_args):
+        self.lunch_calendar_combo.setToolTip(self.lunch_calendar_combo.currentText())
 
     def _toggle_meal_mapping_details(self) -> None:
         self._meal_mapping_expanded = not self._meal_mapping_expanded

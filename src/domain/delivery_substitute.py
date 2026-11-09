@@ -32,6 +32,19 @@ STANDARD_COLUMNS = (
     SubstituteColumn("form", "배송 형태"),
 )
 
+# Output-only sources are independent of roster visibility and column names.
+DELIVERY_SOURCES = (
+    SubstituteColumn("delivery_day", "배송일자"),
+    SubstituteColumn("full_address", "전체 주소"),
+    SubstituteColumn("driver_label", "배송담당"),
+    SubstituteColumn("meal_title", "선택 식종 명단 제목"),
+    SubstituteColumn("meal_label", "선택 식종 이름"),
+    SubstituteColumn("meal_receives", "선택 식종 제공 여부 (1 / 빈칸)"),
+    SubstituteColumn("receives:breakfast", "조식 제공 여부 (1 / 빈칸)"),
+    SubstituteColumn("receives:lunch", "중식 제공 여부 (1 / 빈칸)"),
+    SubstituteColumn("receives:dinner", "석식 제공 여부 (1 / 빈칸)"),
+)
+
 
 @dataclass(frozen=True, slots=True)
 class SubstituteOptions:
@@ -44,8 +57,16 @@ class SubstituteOptions:
     column_labels: Mapping[str, str] = field(default_factory=dict)
     horizontal_alignments: Mapping[str, str] = field(default_factory=dict)
     vertical_alignments: Mapping[str, str] = field(default_factory=dict)
+    template_mapping: Mapping[str, str] = field(default_factory=dict)
+    template_fallbacks: Mapping[str, str] = field(default_factory=dict)
+    template_rows: tuple[int, int] | None = None
 
     def __post_init__(self):
+        if self.template_rows is not None:
+            if (len(self.template_rows) != 2 or any(type(row) is not int for row in self.template_rows)
+                    or not 1 <= self.template_rows[0] <= self.template_rows[1]):
+                raise ValueError("복사할 시작 행과 끝 행을 확인해주세요.")
+            object.__setattr__(self, "template_rows", tuple(self.template_rows))
         if not isinstance(self.driver_key, str) or not self.driver_key:
             raise ValueError("배송담당을 선택해주세요.")
         columns = tuple(self.columns)
@@ -68,7 +89,7 @@ class SubstituteOptions:
                 raise ValueError("배송대타 칼럼 정렬 설정이 올바르지 않습니다.")
             object.__setattr__(self, name, MappingProxyType(dict(values)))
         object.__setattr__(self, "columns", columns)
-        for mapping in (self.fallbacks, self.column_labels):
+        for mapping in (self.fallbacks, self.column_labels, self.template_mapping, self.template_fallbacks):
             if mapping is not None and (
                 not isinstance(mapping, Mapping)
                 or any(not isinstance(key, str) or not isinstance(value, str) for key, value in mapping.items())
@@ -79,6 +100,8 @@ class SubstituteOptions:
                 raise ValueError("대체 칼럼은 다른 칼럼을 선택해주세요.")
             object.__setattr__(self, "fallbacks", MappingProxyType(dict(self.fallbacks)))
         object.__setattr__(self, "column_labels", MappingProxyType(dict(self.column_labels)))
+        object.__setattr__(self, "template_mapping", MappingProxyType(dict(self.template_mapping)))
+        object.__setattr__(self, "template_fallbacks", MappingProxyType(dict(self.template_fallbacks)))
 
     def manifest(self):
         return {"driver_key": self.driver_key, "columns": self.columns,
@@ -86,6 +109,9 @@ class SubstituteOptions:
                 "groups_per_page": self.groups_per_page,
                 "horizontal_alignments": dict(self.horizontal_alignments),
                 "vertical_alignments": dict(self.vertical_alignments),
+                "template_mapping": dict(self.template_mapping),
+                "template_fallbacks": dict(self.template_fallbacks),
+                "template_rows": self.template_rows,
                 **({"fallbacks": dict(self.fallbacks), "column_labels": dict(self.column_labels)}
                    if self.fallbacks is not None else {})}
 

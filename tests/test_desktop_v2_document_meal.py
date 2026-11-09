@@ -101,12 +101,13 @@ def test_selection_requires_unique_meals_and_stores_enum_order():
         replace(selection, meals=(Meal.LUNCH, Meal.LUNCH))
 
 
-def test_substitute_selection_accepts_exactly_one_meal():
+def test_substitute_selection_accepts_breakfast_pairs():
     period = _period(DocumentAction.DELIVERY_SUBSTITUTE)
 
     assert DocumentMealSelection(period, (Meal.LUNCH,)).meals == (Meal.LUNCH,)
-    with pytest.raises(ValueError, match="하나만"):
-        DocumentMealSelection(period, (Meal.BREAKFAST, Meal.LUNCH))
+    assert DocumentMealSelection(period, (Meal.BREAKFAST, Meal.LUNCH)).meals == (Meal.LUNCH, Meal.BREAKFAST)
+    with pytest.raises(ValueError, match="조식을 함께"):
+        DocumentMealSelection(period, (Meal.DINNER, Meal.LUNCH))
 
 
 def test_multi_meal_dialog_defaults_all_and_blocks_an_empty_selection(app):
@@ -135,7 +136,11 @@ def test_multi_meal_dialog_defaults_all_and_blocks_an_empty_selection(app):
     dialog.close()
 
 
-def test_substitute_dialog_is_exclusive_without_current_screen_meal(app):
+@pytest.mark.parametrize("profile_name", (None, "급식", "행복도시락"))
+def test_substitute_dialog_is_exclusive_without_current_screen_meal(app, profile_name):
+    from src.domain.document_templates import DocumentTemplateProfile
+    profile = DocumentTemplateProfile(profile_name) if profile_name else None
+    happy = profile is DocumentTemplateProfile.HAPPY_LUNCHBOX
     dialog = DocumentMealDialog(
         _period(
             DocumentAction.DELIVERY_SUBSTITUTE,
@@ -146,13 +151,23 @@ def test_substitute_dialog_is_exclusive_without_current_screen_meal(app):
     app.processEvents()
 
     assert dialog.selected_meals() == (Meal.DINNER,)
+    dialog.set_substitute_profile(profile)
+    assert dialog._include_breakfast.isVisible() == happy
+    assert dialog.selected_meals() == ((Meal.DINNER, Meal.BREAKFAST) if happy else (Meal.DINNER,))
     assert dialog._save_button.isEnabled()
     assert not dialog.findChildren(QLabel, "documentMealAnchorBadge")
     assert all("화면 식종" not in label.text() for label in dialog.findChildren(QLabel))
 
     dialog._buttons_by_meal[Meal.BREAKFAST].click()
     app.processEvents()
-    assert dialog.selected_meals() == (Meal.BREAKFAST,)
+    assert dialog.selected_meals() == ((Meal.BREAKFAST, Meal.DINNER) if happy else (Meal.BREAKFAST,))
+    dialog._buttons_by_meal[Meal.LUNCH].click()
+    assert dialog.selected_meals() == ((Meal.LUNCH, Meal.BREAKFAST) if happy else (Meal.LUNCH,))
+    if not happy:
+        dialog._include_breakfast.setChecked(True)
+        assert dialog.selection().meals == (Meal.LUNCH,)
+    dialog._include_breakfast.setChecked(False)
+    assert dialog.selected_meals() == (Meal.LUNCH,)
     assert dialog._save_button.isEnabled()
     dialog.close()
 

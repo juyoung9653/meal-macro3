@@ -10,8 +10,9 @@ from openpyxl import Workbook, load_workbook
 from src.services.happy_delivery_report import DailyDeliveryRow, DailyDeliverySheet
 from src.excel.delivery_templates import validate_delivery_template
 from src.excel.publication import publish_workbook
+from src.excel.report_memo import write_report_memo
 
-HAPPY_REPORT_RENDER_VERSION = 4
+HAPPY_REPORT_RENDER_VERSION = 5
 
 
 def _literal(cell, value):
@@ -108,7 +109,7 @@ def _fill_daily_sheet(ws, sheet: DailyDeliverySheet, *, lunch_only: bool = False
             ws.cell(row_no, 5, row_data.dinner or None)
             ws.cell(row_no, 7, row_data.dinner_packages)
         note = row_data.lunch_note if lunch_only else row_data.dinner_note
-        _literal(ws.cell(row_no, 9), row_data.note if note is None else note)
+        write_report_memo(ws.cell(row_no, 9), row_data.note if note is None else note)
 
     # 구청 및 기사별 병합/합계
 

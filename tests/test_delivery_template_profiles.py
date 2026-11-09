@@ -109,12 +109,14 @@ def test_output_screen_has_no_template_edit_entry(app, session, tmp_path):
     assert not hasattr(dialog, "set_template_scope")
 
 
-def test_happy_default_list_is_separate_identical_template(tmp_path, app, preferences):
+def test_happy_default_list_uses_its_own_placeholder_template(tmp_path, app, preferences):
     store = preferences("db", profile=Profile.HAPPY_LUNCHBOX)
     dialog = DeliveryTemplateDialog(DocumentAction.DELIVERY_SUBSTITUTE, "db", store=store)
     assert "기본 양식" in dialog.path_label.text()
     path = store.create(DocumentAction.DELIVERY_SUBSTITUTE)
-    assert path.read_bytes() == Path("assets/급식/배송목록템플릿.xlsx").read_bytes()
+    assert path.read_bytes() == Path("assets/행복도시락/배송목록템플릿.xlsx").read_bytes()
+    from src.excel.mapped_delivery_template import inspect_delivery_form
+    assert "배송일자" in inspect_delivery_form(path).targets
     assert path.parent == store.root
 
 

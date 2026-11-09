@@ -64,6 +64,9 @@ def test_vacation_lunch_wizard_accepts_source_without_meal_column(app, tmp_path)
     workbook.close()
 
     wizard = RosterImportWizard(allow_vacation_lunch=True)
+    from tests.test_vacation_lunch_period_import import calendar_entry
+    entry = calendar_entry()
+    wizard.set_lunch_calendar_entries((entry,))
     wizard.purpose_combo.setCurrentIndex(
         wizard.purpose_combo.findData(ImportPurpose.VACATION_LUNCH)
     )
@@ -76,6 +79,8 @@ def test_vacation_lunch_wizard_accepts_source_without_meal_column(app, tmp_path)
     assert wizard.preview.profile.default_meals == (Meal.LUNCH,)
     advance_wizard(wizard)
     assert wizard.selection().purpose is ImportPurpose.VACATION_LUNCH
+    assert wizard.selection().lunch_calendar_entry == entry
+    assert wizard.selection().effective_on == entry.period.starts_on
     wizard.close()
 
 
@@ -612,6 +617,8 @@ def test_excluded_blank_name_blocks_only_vacation_until_corrected(
     workbook.close()
     wizard = RosterImportWizard(allow_vacation_lunch=True)
     wizard.purpose_combo.setCurrentIndex(wizard.purpose_combo.findData(purpose))
+    from tests.test_vacation_lunch_period_import import calendar_entry
+    wizard.set_lunch_calendar_entries((calendar_entry(),))
     wizard.path_edit.setText(str(path))
 
     assert wizard._inspect_source(), wizard.error_label.text()

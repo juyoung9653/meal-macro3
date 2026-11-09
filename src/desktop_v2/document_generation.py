@@ -267,6 +267,7 @@ class DocumentGenerationController:
                     mapping_snapshot=current_snapshot,
                     columns=tuple(SubstituteColumn(key, label) for key, label in options.column_labels.items()) or None,
                     fallbacks=None if options.fallbacks is None else dict(options.fallbacks),
+                    include_breakfast=len(selection.document.meals) > 1,
                 )
                 try:
                     prepared.selected_rows(selection.document.substitute_options)

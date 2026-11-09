@@ -937,6 +937,18 @@ class DesktopStartupController:
                             except Exception as error:
                                 self._message_box.critical(window, "일일식수 선택을 읽지 못했습니다", user_error(error))
                                 return
+                    if action is DocumentAction.DELIVERY_SUBSTITUTE:
+                        profile_setter = getattr(meal, "set_substitute_profile", None)
+                        if callable(profile_setter):
+                            try:
+                                from src.domain.document_templates import document_template_setting_from_snapshot
+                                current = session.database.current_roster()
+                                setting = document_template_setting_from_snapshot(
+                                    session.database.snapshot(current.revision_id))
+                                profile_setter(setting.profile if setting else None)
+                            except Exception as error:
+                                self._message_box.critical(window, "배송목록 양식 설정을 읽지 못했습니다", user_error(error))
+                                return
                     meal_period = selected_period
                 stage = "meal"
                 continue
@@ -978,6 +990,7 @@ class DesktopStartupController:
                                 document.period.starts_on, document.meals[0],
                                 mapping_snapshot=session.database.snapshot(session.database.current_roster().revision_id),
                                 columns=columns, fallbacks={},
+                                include_breakfast=len(document.meals) > 1,
                             )
                         prepared = run_progress_task(
                             prepare_substitute,
@@ -991,6 +1004,18 @@ class DesktopStartupController:
                         scope_setter = getattr(substitute, "set_preferences_scope", None)
                         if callable(scope_setter):
                             scope_setter(str(session.credentials.database_id))
+                        template_setter = getattr(substitute, "set_template_path", None)
+                        if callable(template_setter):
+                            from .delivery_template import DeliveryTemplateStore
+                            from src.domain.document_templates import document_template_setting_from_snapshot, DocumentTemplateProfile
+                            current = session.database.snapshot(session.database.current_roster().revision_id)
+                            setting = document_template_setting_from_snapshot(current)
+                            profile = setting.profile if setting else DocumentTemplateProfile.SCHOOL_MEAL
+                            template_store = DeliveryTemplateStore(str(session.credentials.database_id), profile=profile)
+                            from src.core.settings import get_settings
+                            template_path = template_store.selected(action) or get_settings().get_substitute_template_path(profile.value)
+                            resolution = template_store.substitute_backup.resolve(template_path)
+                            template_setter(template_path, contents=resolution.contents)
                         visibility_setter = getattr(substitute, "set_visible_columns", None)
                         visible_getter = getattr(window, "columns_visible_in_any_sheet", None)
                         store, key = preferences(str(session.credentials.database_id))

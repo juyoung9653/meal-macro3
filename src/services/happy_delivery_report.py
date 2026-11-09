@@ -11,10 +11,10 @@ from src.domain.projections import status_events_from_historical_snapshot
 from src.domain.roster import Meal
 from src.domain.status import resolve_status_history
 from src.services.daily_report_mapping import DailyReportMapping
-from src.services.happy_report_dates import reference_delivery_days
+from src.services.happy_delivery_presence import happy_recipient_presences
 from src.services.delivery_households import require_delivery_household
 from src.services.delivery_report_remarks import build_additional_remarks, report_remark_columns
-from src.services.sqlite_delivery_report_service import prepare_physical_delivery_data, delivery_forms_from_snapshot
+from src.services.sqlite_delivery_report_service import delivery_forms_from_snapshot
 
 
 @dataclass(frozen=True)
@@ -64,6 +64,11 @@ class PreparedHappyReports:
 def prepare_happy_report_data(snapshot, period_start, period_end, meals, *,
                               mapping_snapshot=None, delivery_forms=None,
                               remark_options=ReportRemarkOptions()):
+    if type(period_start) is not date or type(period_end) is not date or period_start > period_end:
+        raise ValueError("일일식수의 시작일과 종료일을 확인해주세요.")
+    meals = tuple(meals)
+    if not meals or any(not isinstance(meal, Meal) for meal in meals) or len(set(meals)) != len(meals):
+        raise ValueError("일일식수에 포함할 식종을 중복 없이 선택해주세요.")
     mapping_snapshot = snapshot if mapping_snapshot is None else mapping_snapshot
     report_mapping = DailyReportMapping(snapshot, mapping_snapshot, "행복도시락")
     roster = report_mapping.roster
@@ -76,44 +81,29 @@ def prepare_happy_report_data(snapshot, period_start, period_end, meals, *,
     if allowed is not None and (not allowed or allowed - set(delivery_forms_from_snapshot(snapshot))):
         raise ValueError("일일식수 배송 형태를 확인해주세요.")
     sample_start = period_start - timedelta(days=28)
-    physical = prepare_physical_delivery_data(snapshot, period_start, period_end, meals)
-    comparison = prepare_physical_delivery_data(snapshot, sample_start, period_start - timedelta(days=1),
-        meals, missing_lunch_schedule_as_zero=True)
-    remark_shipments = comparison.shipments + physical.shipments
+    remark_shipments = happy_recipient_presences(snapshot, roster, sample_start, period_end, meals)
 
     def form_for(shipment):
         return next((item.form for item in roster.delivery_settings_for(shipment.person_id,
             on=shipment.service_dates[0]) if item.meal is shipment.meal), None)
 
-    week_end = period_end + timedelta(days=6 - period_end.weekday())
-    if period_end < week_end:
-        upcoming = prepare_physical_delivery_data(
-            snapshot, period_end + timedelta(days=1), week_end, meals,
-            missing_lunch_schedule_as_zero=True,
-        )
-        remark_shipments += upcoming.shipments
     shipments = tuple(item for item in remark_shipments if allowed is None or form_for(item) in allowed)
     values_for = report_mapping.values_for
 
     grouped = {}
     presences = defaultdict(list)
-    breakfast_people = defaultdict(set)
     for shipment in shipments:
+        if shipment.delivery_on < period_start:
+            continue
         values = values_for(shipment.person_id, shipment.delivery_on, shipment.meal)
         key = shipment.delivery_on, values["driver"], values["region"]
         row = grouped.setdefault(key, DailyDeliveryRow(DeliveryRoute(key[1], key[2])))
         field_name = {Meal.BREAKFAST: "breakfast", Meal.DINNER: "dinner", Meal.LUNCH: "lunch"}[shipment.meal]
-        if shipment.meal is Meal.BREAKFAST:
-            # A weekend bundle is one recipient on the daily packing sheet.
-            # Keep all service-date entitlements in shipments for billing.
-            breakfast_people[key].add(shipment.person_id)
-            row.breakfast = len(breakfast_people[key])
-        else:
-            setattr(row, field_name, getattr(row, field_name) + shipment.entitlement_count)
+        setattr(row, field_name, getattr(row, field_name) + 1)
         household_id = require_delivery_household(roster, shipment.person_id, shipment.service_dates)
         if shipment.meal in (Meal.DINNER, Meal.LUNCH):
             keys = row._lunch_household_keys if shipment.meal is Meal.LUNCH else row._dinner_household_keys
-            keys.extend([str(household_id)] * shipment.entitlement_count)
+            keys.append(str(household_id))
         presences[shipment.delivery_on, shipment.meal].append(SimpleNamespace(
             person_id=shipment.person_id, driver=values["driver"], form=form_for(shipment),
             sequence=roster.resolve_assignment(shipment.person_id, shipment.meal).sequence or ""))
@@ -165,7 +155,8 @@ def prepare_happy_report_data(snapshot, period_start, period_end, meals, *,
         rows = tuple(grouped[key] for key in keys)
         reports.append(DailyDeliverySheet(day, rows, sum(row.breakfast for row in rows),
             sum(row.dinner for row in rows), sum(row.lunch for row in rows)))
-    references = reference_delivery_days(shipments, period_start, period_end, meals)
+    references = {(item.delivery_on, item.meal): item.delivery_on for item in shipments
+                  if item.delivery_on >= period_start}
     by_day = {report.delivery_date: report for report in reports}
     display_reports = []
     show_term = any(enrollment.meal in meals and enrollment.meal in (Meal.BREAKFAST, Meal.DINNER)
@@ -212,7 +203,9 @@ def prepare_happy_report_data(snapshot, period_start, period_end, meals, *,
                 lunch_on=references.get((day, Meal.LUNCH)), show_lunch=show_lunch))
         day += timedelta(days=1)
     target_shipments = tuple(item for item in shipments if period_start <= item.delivery_on <= period_end)
-    manifest = {**physical.calculation_manifest, "happy_report_contract_version": 4,
+    manifest = {"happy_report_contract_version": 5,
+        "source_revision_id": str(snapshot.revision_id),
+        "recipient_basis": "enrolled_delivery_or_paused",
         "display_reference_days": [{"date": report.delivery_date.isoformat(),
             "breakfast": report.breakfast_on.isoformat() if report.breakfast_on else None,
             "dinner": report.dinner_on.isoformat() if report.dinner_on else None,
@@ -221,6 +214,6 @@ def prepare_happy_report_data(snapshot, period_start, period_end, meals, *,
         "selected_delivery_forms": None if allowed is None else list(delivery_forms),
         "remarks": remark_options.manifest(),
         "column_mapping": report_mapping.manifest(),
-        "household_grouping": "database_household", "quantity_basis": "physical_delivery_entitlements",
-        "breakfast_quantity_basis": "distinct_recipients_per_delivery_day"}
+        "household_grouping": "database_household", "quantity_basis": "one_per_enrolled_recipient",
+        "breakfast_quantity_basis": "one_per_enrolled_recipient"}
     return PreparedHappyReports(tuple(display_reports), target_shipments, manifest)

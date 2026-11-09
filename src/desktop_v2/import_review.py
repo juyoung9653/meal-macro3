@@ -263,7 +263,7 @@ class ImportReviewDialog(QDialog):
         subtitle = QLabel(
             f"적용일 {self._plan.effective_on.isoformat()} · "
             + "이름·핸드폰이 한 사람과 일치하면 자동 연결합니다. 이름·세대주명이 같거나 연결이 모호한 행은 확인이 필요합니다. 같은 사람이면 기존 대상자에 반영하고, 다른 사람이면 새 대상자로 등록하세요. ‘확인 행 모두 신규 등록’은 표의 모든 행을 별개의 새 사람으로 선택합니다."
-            + (" 중식 명단에 연결되지 않은 기존 배송자는 중지됩니다."
+            + (" 이번 파일에 없는 기존 중식 대상자는 그대로 유지합니다."
                if self._purpose is ImportPurpose.VACATION_LUNCH else "")
         )
         subtitle.setObjectName("workspaceSubtitle")
@@ -541,17 +541,7 @@ class ImportReviewDialog(QDialog):
             + f" · 제외 {sum(combo.currentData() == 'ignore' for combo in self._combos.values())}"
         )
         if self._purpose is ImportPurpose.VACATION_LUNCH:
-            present_ids = {
-                staged.matched_person_id
-                for staged in self._plan.staged_people
-                if staged.disposition is ReconciliationDisposition.MATCHED
-            }
-            present_ids.update(
-                combo.currentData() for combo in self._combos.values()
-                if isinstance(combo.currentData(), UUID)
-            )
-            omitted_count = len(self._lunch_delivering_ids - present_ids)
-            self._summary.setText(self._summary.text() + f" · 중식 미배송 전환 {omitted_count}")
+            self._summary.setText(self._summary.text() + " · 파일에 없는 기존 대상자 유지")
         self._buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(
             unresolved == 0 and self._all_resolved()
         )

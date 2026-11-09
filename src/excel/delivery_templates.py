@@ -40,6 +40,9 @@ def validate_delivery_template(path: str | Path, kind: str) -> None:
                 if any(str(merge) not in allowed for merge in ws.merged_cells.ranges):
                     raise ValueError("행복도시락 일일식수의 기본 병합 위치를 유지해주세요.")
             elif kind == "delivery_substitute":
+                from .mapped_delivery_template import read_delivery_form
+                if read_delivery_form(wb) is not None:
+                    return
                 if STYLE_SHEET not in wb.sheetnames:
                     raise ValueError("배송대타 시트가 있는 기본 양식 파일을 선택해주세요.")
                 ws = wb[STYLE_SHEET]

@@ -157,7 +157,7 @@ def test_form_summaries_counts_and_filter_are_preserved_with_status_memos():
     assert selected.reports[0].totals.person_total == len(selected.shipments) == 1
 
 
-def test_status_heading_keeps_template_font_with_one_form_summary(tmp_path):
+def test_status_heading_is_red_and_keeps_template_font_with_one_form_summary(tmp_path):
     historical, _, _ = source(count=1, starts={0: MONDAY}, forms={0: "박스"})
     prepared = prepare(historical)
     output = tmp_path / "report-colors.xlsx"
@@ -168,7 +168,12 @@ def test_status_heading_keeps_template_font_with_one_form_summary(tmp_path):
         assert str(value) == "신규 8/17~\n정자동(아동0)\n박스 1가구·1식"
         template = openpyxl.load_workbook("assets/급식/일일식수템플릿.xlsx")
         try:
-            assert isinstance(value, str)
+            from openpyxl.cell.rich_text import CellRichText, TextBlock
+            assert isinstance(value, CellRichText)
+            heading = next(block for block in value if isinstance(block, TextBlock))
+            assert heading.font.color.rgb == "FFFF0000"
+            assert heading.font.sz == template["aaa"]["H4"].font.sz
+            assert heading.text == "신규 8/17~\n"
             assert copy(workbook.active["H4"].font) == copy(template["aaa"]["H4"].font)
         finally:
             template.close()

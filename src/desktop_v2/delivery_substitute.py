@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QLabel, QTreeWidget, QTreeWidgetItem, QHeaderView, QSpinBox, QVBoxLayout, QWidget,
 )
 
-from src.domain.delivery_substitute import PreparedSubstituteData, SubstituteOptions
+from src.domain.delivery_substitute import PreparedSubstituteData, SubstituteOptions, DELIVERY_SOURCES
 from .document_meal import DocumentMealSelection
 from .theme import application_stylesheet, register_application_fonts
 from .substitute_preferences import preferences
@@ -117,7 +117,9 @@ class DeliverySubstituteDialog(QDialog):
         self._fallback_combos = {}
         self._alignment_combos = {"horizontal": {}, "vertical": {}}
         self._saved_preferences = {}
-        self.setWindowTitle("배송대타 · 담당과 출력 설정")
+        self._placeholder_panel = None
+        self._template_scope = None
+        self.setWindowTitle("배송목록 · 담당과 출력 설정")
         self.setMinimumSize(620, 560)
         self.resize(740, 640)
         register_application_fonts()
@@ -125,10 +127,13 @@ class DeliverySubstituteDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 20, 24, 20)
         layout.setSpacing(12)
-        title = QLabel(f"{data.day:%Y.%m.%d} · {data.meal.value} 배송대타")
+        title = QLabel(f"{data.day:%Y.%m.%d} · {'·'.join(meal.value for meal in document.meals)} 배송목록")
         title.setObjectName("documentCardTitle")
         layout.addWidget(title)
-        description = QLabel("실제 배송할 담당자를 선택하고, 출력 칼럼과 페이지를 정해주세요.")
+        status_list = data.calculation_manifest.get("recipient_basis") == "enrolled_delivery_or_paused"
+        description = QLabel("배송담당과 출력 항목을 선택하세요. " + (
+            "행복도시락은 배송·일시중지이면 1, 중지·미가입이면 빈칸이며 두 식종 모두 해당 없으면 제외합니다."
+            if status_list else "선택한 날짜·식종의 실제 배송 대상만 표시합니다."))
         description.setWordWrap(True)
         layout.addWidget(description)
         form = QFormLayout()
@@ -157,10 +162,13 @@ class DeliverySubstituteDialog(QDialog):
         paper.addWidget(self.split)
         paper.addWidget(self.group_limit)
         form.addRow("용지 · 페이지", paper)
+        self._paper_label = form.labelForField(paper)
         layout.addLayout(form)
         label = QLabel("배송대타에 넣을 항목 · 칼럼 이름을 드래그해 순서 변경\n체크한 칼럼을 목록 순서대로 출력합니다.")
+        self._columns_label = label
         layout.addWidget(label)
         columns_layout = QHBoxLayout()
+        self._columns_layout = columns_layout
         self.columns = ColumnOrderTree()
         self.columns.move_requested.connect(self._move_column)
         self.columns.setObjectName("substituteColumns")
@@ -186,6 +194,7 @@ class DeliverySubstituteDialog(QDialog):
                       "출력 선택·순서·1순위 칼럼·정렬은 이 PC의 운영 파일별로 기억합니다.\n"
                       "가구 집계와 BOX 표시는 원래 명단을 기준으로 유지됩니다.")
         hint.setWordWrap(True)
+        self._columns_hint = hint
         layout.addWidget(hint)
         self.error = QLabel()
         self.error.setWordWrap(True)
@@ -261,6 +270,15 @@ class DeliverySubstituteDialog(QDialog):
             return
         if self._preferences is not None:
             saved = {**self._saved_preferences, **options.manifest()}
+            if self._placeholder_panel is not None:
+                by_template = saved.get("placeholder_templates", {})
+                saved["placeholder_templates"] = {**(by_template if isinstance(by_template, dict) else {}),
+                    self._template_scope: {"template_mapping": dict(options.template_mapping),
+                                           "template_fallbacks": dict(options.template_fallbacks),
+                                           "template_rows": options.template_rows}}
+            saved.pop("template_mapping", None)
+            saved.pop("template_fallbacks", None)
+            saved.pop("template_rows", None)
             saved.pop("driver_key")
             saved.pop("column_labels", None)
             saved.pop("fallbacks", None)
@@ -369,7 +387,7 @@ class DeliverySubstituteDialog(QDialog):
         self.columns.blockSignals(False)
 
     def set_visible_columns(self, keys):
-        self._visible_keys = set(keys)
+        self._visible_keys = set(keys) | {column.key for column in DELIVERY_SOURCES}
         self._rebuild_columns(self._column_keys(), set(self._selected_keys(include_hidden=True)), self._fallback_values())
         hidden_count = len(self._data.columns) - len(self._visible_keys & set(self._column_keys()))
         self.visibility_note.setText(
@@ -379,6 +397,11 @@ class DeliverySubstituteDialog(QDialog):
         self._refresh()
 
     def options(self) -> SubstituteOptions:
+        if self._placeholder_panel is not None:
+            return SubstituteOptions(self.driver.currentData() or "", self._data.default_columns or (self._data.columns[0].key,),
+                fallbacks={}, column_labels={column.key: column.label for column in self._data.columns},
+                template_mapping=self._placeholder_panel.mapping(), template_rows=self._placeholder_panel.rows(),
+                template_fallbacks=self._placeholder_panel.fallbacks())
         return SubstituteOptions(self.driver.currentData() or "",
             tuple(self._selected_keys()),
             self.orientation.currentData(), self.split.currentData(), self.group_limit.value(),
@@ -386,6 +409,31 @@ class DeliverySubstituteDialog(QDialog):
             column_labels={column.key: column.label for column in self._data.columns},
             horizontal_alignments={key: value for key, value in self._alignment_values("horizontal").items() if key in self._selected_keys()},
             vertical_alignments={key: value for key, value in self._alignment_values("vertical").items() if key in self._selected_keys()})
+
+    def set_template_path(self, path, *, contents=None):
+        from hashlib import sha256
+        from pathlib import Path
+        from src.excel.mapped_delivery_template import inspect_delivery_form
+        from .delivery_placeholder_mapping import DeliveryPlaceholderMapping
+        from io import BytesIO
+        form = inspect_delivery_form(BytesIO(contents) if contents is not None else path)
+        if form is None:
+            return
+        self._template_scope = sha256(str(Path(path).resolve()).encode("utf-8")).hexdigest()
+        saved = self._saved_preferences.get("placeholder_templates", {})
+        saved = saved.get(self._template_scope, {}) if isinstance(saved, dict) else {}
+        self._placeholder_panel = DeliveryPlaceholderMapping(form, self._data.columns, saved, self,
+                                                            legacy_primary=self._fallback_values())
+        self.layout().insertWidget(self.layout().indexOf(self._columns_label), self._placeholder_panel, 1)
+        for widget in (self.columns, self._columns_label, self._columns_hint, self.visibility_note,
+                       self.orientation, self.split, self.group_limit):
+            widget.hide()
+        if self._paper_label is not None:
+            self._paper_label.hide()
+        self.layout().setStretchFactor(self._columns_layout, 0)
+        for spin in (self._placeholder_panel.start, self._placeholder_panel.end):
+            spin.valueChanged.connect(self._refresh)
+        self._refresh()
 
     def selection(self) -> DocumentMealSelection:
         options = self.options()

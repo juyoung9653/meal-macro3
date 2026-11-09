@@ -28,11 +28,34 @@ def paths():
             for key, meal in (("dinner", "석식"), ("lunch", "중식"))}
 
 
+@pytest.mark.parametrize('lunch_only', [False, True])
+def test_status_heading_is_red_without_restyling_other_note_lines(tmp_path, lunch_only):
+    from openpyxl.cell.rich_text import CellRichText, TextBlock
+    from src.services.happy_delivery_report import DailyDeliveryRow, DailyDeliverySheet, DeliveryRoute
+    note = '메모 먼저\n신규 8/17~\n정자동(합성아동)\n복원'
+    row = DailyDeliveryRow(DeliveryRoute('합성기사', '정자동'), dinner=0 if lunch_only else 1,
+        lunch=1 if lunch_only else 0, dinner_note=note, lunch_note=note)
+    report = DailyDeliverySheet(date(2026,8,17), (row,), 0, row.dinner, row.lunch)
+    workbook = build_happy_report_workbook((report,), paths())
+    target = tmp_path / 'rich.xlsx'
+    workbook.save(target)
+    workbook.close()
+    saved = load_workbook(target, rich_text=True)
+    cell = saved.active['I4']
+    assert isinstance(cell.value, CellRichText)
+    assert str(cell.value) == note
+    highlighted = [block for block in cell.value if isinstance(block, TextBlock)]
+    assert [block.text for block in highlighted] == ['신규 8/17~\n', '복원']
+    assert all(block.font.color.rgb == 'FFFF0000' for block in highlighted)
+    assert all(block.font.sz == cell.font.sz and block.font.rFont == cell.font.name for block in highlighted)
+    saved.close()
+
+
 def test_physical_quantities_both_layouts_styles_merges_and_household_distribution(tmp_path):
     snapshot, _ = _snapshot(people=2, meals=tuple(Meal))
     result = prepare_happy_report_data(snapshot, date(2026, 8, 17), date(2026, 8, 21), tuple(Meal))
     assert [(r.breakfast_total, r.dinner_total, r.lunch_total) for r in result.reports] == [(2, 2, 2)] * 5
-    assert sum(s.entitlement_count for s in result.shipments if s.meal is Meal.BREAKFAST) == 6
+    assert sum(s.entitlement_count for s in result.shipments if s.meal is Meal.BREAKFAST) == 10
     original = {k: Path(p).read_bytes() for k, p in paths().items()}
     workbook = build_happy_report_workbook(result.reports, paths())
     target = tmp_path / "daily.xlsx"
@@ -84,9 +107,9 @@ def test_breakfast_counts_people_for_bundled_and_split_deliveries(delivery_weekd
         assert report.breakfast_on == day
         assert report.breakfast_total == 2
         assert [row.breakfast for row in report.rows] == [1, 1]
-        assert sum(s.entitlement_count for s in result.shipments) == 2 * meals_per_person
-        assert result.calculation_manifest["happy_report_contract_version"] == 4
-        assert result.calculation_manifest["breakfast_quantity_basis"] == "distinct_recipients_per_delivery_day"
+        assert sum(s.entitlement_count for s in result.shipments) == 2
+        assert result.calculation_manifest["happy_report_contract_version"] == 5
+        assert result.calculation_manifest["breakfast_quantity_basis"] == "one_per_enrolled_recipient"
 
 
 def test_breakfast_partial_bundle_still_counts_each_recipient_once():
@@ -103,7 +126,7 @@ def test_breakfast_partial_bundle_still_counts_each_recipient_once():
     })
     result = prepare_happy_report_data(snapshot, friday, friday, (Meal.BREAKFAST,))
     assert result.reports[0].breakfast_total == 2
-    assert sorted(s.entitlement_count for s in result.shipments) == [1, 3]
+    assert sorted(s.entitlement_count for s in result.shipments) == [1, 1]
 
 
 def test_shared_mapping_fallback_zero_and_literal_notes_for_both_meals(tmp_path):
@@ -148,14 +171,14 @@ def test_variant_selection_is_independent_and_wrong_variant_is_rejected(tmp_path
     validate_delivery_template(lunch, "happy_report_lunch")
 
 
-def test_unassigned_driver_goes_to_unclassified_and_missing_lunch_is_excluded():
+def test_unassigned_driver_goes_to_unclassified_and_lunch_uses_status_without_calendar():
     snapshot, _ = _snapshot(include_driver=False, meals=(Meal.DINNER, Meal.LUNCH))
     result = prepare_happy_report_data(snapshot, date(2026, 8, 17), date(2026, 8, 17), (Meal.DINNER,))
     assert result.reports[0].rows[0].route.driver == "미분류"
     assert result.reports[0].rows[0].route.region == "미분류"
     missing = prepare_happy_report_data(snapshot, date(2026, 10, 5), date(2026, 10, 5), (Meal.LUNCH,))
-    assert not missing.shipments
-    assert missing.calculation_manifest["missing_lunch_schedules"]
+    assert missing.reports[0].lunch_total == 1
+    assert "missing_lunch_schedules" not in missing.calculation_manifest
 
 
 def test_mapping_dialog_exposes_shared_daily_scope_for_both_profiles():

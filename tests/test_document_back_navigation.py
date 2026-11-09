@@ -88,3 +88,58 @@ def test_real_back_buttons_reopen_same_steps_with_unsaved_choices(monkeypatch, t
     settle()
     assert run.closed and emitted == []
     window.close()
+
+
+@pytest.mark.parametrize("profile", tuple(DocumentTemplateProfile))
+def test_substitute_meal_screen_uses_current_profile_and_keeps_choice_on_back(monkeypatch, tmp_path, profile):
+    from uuid import uuid4
+    from src.domain.revisions import HistoricalSnapshot, EntityRef
+    from src.domain.document_templates import (
+        DOCUMENT_TEMPLATE_SETTING_KIND, DOCUMENT_TEMPLATE_SETTING_ID,
+        DocumentTemplateSetting, document_template_setting_state,
+    )
+    app = QApplication.instance() or QApplication([])
+    window = QWidget()
+    period_value = _period(DocumentAction.DELIVERY_SUBSTITUTE)
+    window.table_model = SimpleNamespace(service_day=period_value.anchor_day, meal=period_value.anchor_meal)
+    snapshot, _ = _snapshot()
+    current_id = uuid4()
+    current = HistoricalSnapshot(current_id, {
+        EntityRef(DOCUMENT_TEMPLATE_SETTING_KIND, DOCUMENT_TEMPLATE_SETTING_ID):
+            document_template_setting_state(DocumentTemplateSetting(1, profile, current_id)),
+    })
+    session = SimpleNamespace(database=SimpleNamespace(
+        revision_summaries=lambda: (period_value.source,),
+        current_roster=lambda: SimpleNamespace(revision_id=current_id),
+        snapshot=lambda revision: current if revision == current_id else snapshot,
+    ))
+    controller = DesktopStartupController(settings=SimpleNamespace(document_output_directory=tmp_path))
+    monkeypatch.setattr(controller, "_ensure_document_prerequisites", lambda *_: True)
+    run = launch(controller._run_document_hub, session, window)
+    def settle():
+        app.processEvents()
+        app.processEvents()
+        assert run.error is None
+    try:
+        run.request.dialog._cards[DocumentAction.DELIVERY_SUBSTITUTE].click()
+        settle()
+        period = run.request.dialog
+        period.accept()
+        settle()
+        meal = run.request.dialog
+        assert isinstance(meal, DocumentMealDialog)
+        happy = profile is DocumentTemplateProfile.HAPPY_LUNCHBOX
+        assert meal._include_breakfast.isVisible() == happy
+        assert len(meal.selection().meals) == (2 if happy else 1)
+        meal._include_breakfast.setChecked(False)
+        meal.findChild(QDialogButtonBox).button(QDialogButtonBox.StandardButton.Cancel).click()
+        settle()
+        assert run.request.dialog is period
+        period.accept()
+        settle()
+        assert run.request.dialog is meal
+        assert len(meal.selection().meals) == 1
+        meal.reject()
+        settle()
+    finally:
+        window.close()

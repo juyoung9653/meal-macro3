@@ -32,27 +32,20 @@ class DesktopStorageSettings:
     """Explicit QSettings injection preserves test/embedded callers' isolation."""
 
     def __init__(self, settings: QSettings | None = None, *, base_directory: Path | None = None,
-                 legacy_settings: QSettings | None = None, app_lock: ExclusiveFileLock | None = None) -> None:
+                 app_lock: ExclusiveFileLock | None = None) -> None:
         self.base_directory = Path(base_directory or application_directory()).resolve()
         self.portable = settings is None
         if settings is not None:
             self._settings = settings
             return
         path = self.base_directory / "data" / "settings.ini"
-        # Migration is only allowed under the application lock. An existing INI
-        # is authoritative, including an empty file or missing path values.
+        # Only this executable folder owns the shared paths. Missing settings
+        # start fresh; never read paths from the Windows registry.
         if not path.exists():
             if app_lock is None or not app_lock.acquired or app_lock.path != path.parent / "app.lock":
                 raise OSError("공통 설정을 초기화하려면 프로그램 잠금이 필요합니다.")
             path.parent.mkdir(parents=True, exist_ok=True)
-            legacy = legacy_settings if legacy_settings is not None else QSettings(ORGANIZATION, APPLICATION)
-            values: dict[str, object] = {}
-            for key in PATH_KEYS:
-                if legacy.contains(key):
-                    value = legacy.value(key, "")
-                    values[key] = self._stored_path(value) if isinstance(value, str) and value.strip() else ""
-            values["portable/initialized"] = True
-            self._initialize(path, values)
+            self._initialize(path, {"portable/initialized": True})
         self._settings = QSettings(str(path), QSettings.Format.IniFormat)
         self._settings.sync()
         if self._settings.status() != QSettings.Status.NoError:
@@ -60,8 +53,8 @@ class DesktopStorageSettings:
 
     @staticmethod
     def _initialize(path: Path, values: dict[str, object]) -> None:
-        # Publish a complete INI only. A failed first write must not leave an
-        # authoritative empty file that would suppress migration next time.
+        # Publish a complete INI only. A failed first write must not leave a
+        # partial settings file that would prevent a clean retry next time.
         descriptor, name = tempfile.mkstemp(prefix=".settings-", suffix=".ini", dir=path.parent)
         os.close(descriptor)
         temporary = None

@@ -45,13 +45,14 @@ def test_history_is_default_and_can_be_replaced_or_used_as_fallback(profile, pre
     assert "일시중지 8/17" in notes(result, profile)
 
 
-def test_friday_dinner_shows_thursday_without_adding_actual_shipments():
+def test_friday_dinner_counts_selected_day_without_week_reference():
     snapshot, _ = _snapshot(people=2, meals=(Meal.DINNER,))
     friday = date(2026, 8, 21)
     result = prepare_happy_report_data(snapshot, friday, friday, (Meal.DINNER,))
-    assert result.shipments == ()
+    assert len(result.shipments) == 2
+    assert {item.delivery_on for item in result.shipments} == {friday}
     assert result.reports[0].delivery_date == friday
-    assert result.reports[0].dinner_on == friday - timedelta(days=1)
+    assert result.reports[0].dinner_on == friday
     assert result.reports[0].dinner_total == 2
     workbook = build_happy_report_workbook(result.reports, paths())
     try:
@@ -61,23 +62,25 @@ def test_friday_dinner_shows_thursday_without_adding_actual_shipments():
         workbook.close()
 
 
-def test_thursday_breakfast_uses_same_week_friday():
+def test_thursday_breakfast_counts_selected_day_without_week_reference():
     snapshot, _ = _snapshot(meals=(Meal.BREAKFAST,))
     thursday = date(2026, 8, 20)
     result = prepare_happy_report_data(snapshot, thursday, thursday, (Meal.BREAKFAST,))
-    assert result.shipments == ()
-    assert result.reports[0].breakfast_on == date(2026, 8, 21)
+    assert len(result.shipments) == 1
+    assert result.shipments[0].delivery_on == thursday
+    assert result.reports[0].breakfast_on == thursday
     assert result.reports[0].breakfast_total == 1
 
 
-def test_zero_on_scheduled_day_uses_last_nonzero_reference_without_new_shipments():
+def test_previous_pause_does_not_move_selected_day_backwards():
     thursday = date(2026, 8, 20)
     snapshot, _, _ = source(count=1, statuses=((0, Meal.DINNER, MealStatus.PAUSED, thursday, thursday),))
     friday = thursday + timedelta(days=1)
     result = prepare_happy_report_data(snapshot, friday, friday, (Meal.DINNER,))
-    assert result.reports[0].dinner_on == thursday - timedelta(days=1)
+    assert result.reports[0].dinner_on == friday
     assert result.reports[0].dinner_total == 1
-    assert result.shipments == ()
+    assert len(result.shipments) == 1
+    assert result.shipments[0].delivery_on == friday
     workbook = build_happy_report_workbook(result.reports, paths())
     try:
         assert workbook.sheetnames == ["26.08.21"]

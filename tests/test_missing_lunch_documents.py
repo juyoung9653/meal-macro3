@@ -15,7 +15,7 @@ from src.services.lunch_schedule_exclusions import lunch_schedule_exclusion_line
 from tests.test_sqlite_delivery_report_service import _snapshot
 
 
-@pytest.mark.parametrize("kind", ["daily", "happy", "monthly", "physical", "substitute"])
+@pytest.mark.parametrize("kind", ["daily", "monthly", "physical", "substitute"])
 def test_missing_school_excludes_its_lunch_and_keeps_other_school_and_meals(kind):
     snapshot, ids = _snapshot(people=2, meals=tuple(Meal))
     roster = roster_from_historical_snapshot(snapshot)

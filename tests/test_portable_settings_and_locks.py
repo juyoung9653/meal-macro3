@@ -33,55 +33,79 @@ def raw_settings(path):
     return QSettings(str(path), QSettings.Format.IniFormat)
 
 
-def test_portable_migration_is_once_paths_only_and_relative(tmp_path, monkeypatch):
+@pytest.fixture
+def ini_settings_only(monkeypatch):
+    import src.desktop_v2.portable_settings as module
+
+    class IniSettingsOnly:
+        Format, Status = QSettings.Format, QSettings.Status
+
+        def __new__(cls, *args):
+            assert len(args) == 2 and args[1] == QSettings.Format.IniFormat, "Native settings must never be read"
+            return QSettings(*args)
+
+    monkeypatch.setattr(module, "QSettings", IniSettingsOnly)
+
+
+def test_portable_paths_are_explicit_and_relative(tmp_path, monkeypatch, ini_settings_only):
     base = tmp_path / "program"
-    legacy = raw_settings(tmp_path / "old.ini")
-    legacy.setValue("storage/database_path", str(base / "records" / "db.sqlite3"))
-    legacy.setValue("storage/backup_directory", str(tmp_path / "external-backups"))
-    legacy.setValue("documents/output_directory", str(base / "output"))
-    legacy.setValue("roster/column_width", 150)
     with application_lock(base) as lock:
-        settings = DesktopStorageSettings(base_directory=base, legacy_settings=legacy, app_lock=lock)
-        assert settings.database_path == base / "records" / "db.sqlite3"
-        assert raw_settings(base / "data" / "settings.ini").value("storage/database_path") == "records/db.sqlite3"
-        settings.save_paths(settings.database_path, settings.backup_directory)
+        settings = DesktopStorageSettings(base_directory=base, app_lock=lock)
+        assert settings.database_path is None
+        assert settings.backup_directory is None
+        assert settings.document_output_directory is None
+        settings.save_paths(base / "records" / "db.sqlite3", tmp_path / "external-backups")
         settings.save_document_output_directory(base / "output")
         stored = raw_settings(base / "data" / "settings.ini")
         assert stored.value("storage/database_path") == "records/db.sqlite3"
         assert stored.value("documents/output_directory") == "output"
         assert stored.value("storage/backup_directory") == str(tmp_path / "external-backups")
-        assert not stored.contains("roster/column_width")
         monkeypatch.chdir(tmp_path)
-        legacy.setValue("storage/database_path", "must-not-migrate-again")
-        reopened = DesktopStorageSettings(base_directory=base, legacy_settings=legacy, app_lock=lock)
+        reopened = DesktopStorageSettings(base_directory=base, app_lock=lock)
         assert reopened.database_path == base / "records" / "db.sqlite3"
+        assert reopened.backup_directory == tmp_path / "external-backups"
+        assert reopened.document_output_directory == base / "output"
         assert not (base / "records").exists()
         assert not (base / "output").exists()
 
 
 @pytest.mark.parametrize("contents", ["", "[portable]\ninitialized=true\n", "[storage]\ndatabase_path=\n"])
-def test_existing_ini_is_authoritative_even_empty(tmp_path, contents):
+def test_existing_ini_is_authoritative_even_empty(tmp_path, contents, ini_settings_only):
     (tmp_path / "data").mkdir()
     (tmp_path / "data" / "settings.ini").write_text(contents, encoding="utf-8")
-    legacy = raw_settings(tmp_path / "old.ini")
-    legacy.setValue("storage/database_path", "old.sqlite3")
-    settings = DesktopStorageSettings(base_directory=tmp_path, legacy_settings=legacy)
+    settings = DesktopStorageSettings(base_directory=tmp_path)
     assert settings.database_path is None
     assert (tmp_path / "data" / "settings.ini").read_text(encoding="utf-8") == contents
 
 
-def test_empty_legacy_initializes_and_never_imports_later(tmp_path):
-    legacy = raw_settings(tmp_path / "old.ini")
-    with application_lock(tmp_path) as lock:
-        DesktopStorageSettings(base_directory=tmp_path, legacy_settings=legacy, app_lock=lock)
-    assert raw_settings(tmp_path / "data" / "settings.ini").contains("portable/initialized")
-    legacy.setValue("storage/database_path", "new-legacy.sqlite3")
-    assert DesktopStorageSettings(base_directory=tmp_path, legacy_settings=legacy).database_path is None
+@pytest.mark.parametrize("reset", ["delete_ini", "new_folder"])
+def test_reset_or_relocation_without_ini_starts_fresh(tmp_path, reset, ini_settings_only):
+    base = tmp_path / "program"
+    with application_lock(base) as lock:
+        settings = DesktopStorageSettings(base_directory=base, app_lock=lock)
+        settings.save_paths(tmp_path / "chosen.sqlite3", tmp_path / "backups")
+        settings.save_document_output_directory(tmp_path / "output")
+    del settings
+    if reset == "delete_ini":
+        (base / "data" / "settings.ini").unlink()
+    else:
+        base = tmp_path / "relocated"
+    with application_lock(base) as lock:
+        settings = DesktopStorageSettings(base_directory=base, app_lock=lock)
+        assert settings.database_path is None
+        assert settings.backup_directory is None
+        assert settings.document_output_directory is None
+        # The actual startup decision must offer first setup, not the old login.
+        marker = object()
+        controller = DesktopStartupController(settings=settings, create_dialog_type=lambda **kwargs: marker)
+        assert controller._access_dialog(None) is marker
+    assert raw_settings(base / "data" / "settings.ini").contains("portable/initialized")
+    assert DesktopStorageSettings(base_directory=base).database_path is None
 
 
-def test_migration_requires_matching_live_app_lock(tmp_path):
+def test_initialization_requires_matching_live_app_lock(tmp_path):
     with pytest.raises(OSError):
-        DesktopStorageSettings(base_directory=tmp_path, legacy_settings=raw_settings(tmp_path / "old.ini"))
+        DesktopStorageSettings(base_directory=tmp_path)
     assert not (tmp_path / "data" / "settings.ini").exists()
 
 
@@ -464,8 +488,6 @@ def test_document_default_write_failure_is_shown_and_stops_dispatch(tmp_path, mo
 @pytest.mark.parametrize("failure", ["sync", "publish"])
 def test_failed_initialization_leaves_no_authoritative_ini_and_retries(tmp_path, monkeypatch, failure):
     import src.desktop_v2.portable_settings as module
-    legacy = raw_settings(tmp_path / "legacy.ini")
-    legacy.setValue("storage/database_path", str(tmp_path / "chosen.sqlite3"))
     original_rename, original_link = module.os.rename, module.os.link
     failed = True
     class InitialSettings:
@@ -486,12 +508,12 @@ def test_failed_initialization_leaves_no_authoritative_ini_and_retries(tmp_path,
         monkeypatch.setattr(module.os, "link", deny_publish)
     with application_lock(tmp_path) as lock:
         with pytest.raises(OSError):
-            DesktopStorageSettings(base_directory=tmp_path, legacy_settings=legacy, app_lock=lock)
+            DesktopStorageSettings(base_directory=tmp_path, app_lock=lock)
         assert not (tmp_path / "data" / "settings.ini").exists()
         assert not list((tmp_path / "data").glob(".settings-*.ini"))
         failed = False
         monkeypatch.setattr(module.os, "rename", original_rename)
         monkeypatch.setattr(module.os, "link", original_link)
-        settings = DesktopStorageSettings(base_directory=tmp_path, legacy_settings=legacy, app_lock=lock)
-        assert settings.database_path == tmp_path / "chosen.sqlite3"
+        settings = DesktopStorageSettings(base_directory=tmp_path, app_lock=lock)
+        assert settings.database_path is None
         assert raw_settings(tmp_path / "data" / "settings.ini").contains("portable/initialized")

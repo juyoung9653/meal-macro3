@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 from datetime import date
+from dataclasses import replace
 import re
 
 from src.domain.delivery_substitute import (
-    PreparedSubstituteData, SubstituteColumn, SubstituteRow, STANDARD_COLUMNS,
+    PreparedSubstituteData, SubstituteColumn, SubstituteRow, STANDARD_COLUMNS, DELIVERY_SOURCES,
 )
 from src.domain.document_templates import document_template_setting_from_snapshot, DocumentTemplateProfile
 from src.domain.document_column_mappings import mapping_setting_from_snapshot
@@ -21,6 +22,7 @@ from src.generators.mapping_values import resolve_mapping_value
 from src.domain.pause_conversion import pause_conversion_from_snapshot
 from src.domain.projections import status_events_from_historical_snapshot
 from src.domain.status import resolve_status_history
+from src.services.happy_delivery_presence import happy_recipient_presences
 
 
 ROSTER_COLUMN_KEYS = {"school": "school_name", "mobile": "mobile_phone",
@@ -41,7 +43,8 @@ def all_substitute_template_columns(roster, view_columns=None):
     """The complete current catalog, independent of visibility or source date."""
     columns = {column.key: column for column in STANDARD_COLUMNS}
     for key, label in (("school_type", "학교급"), ("class_name", "반"),
-                       ("household_head_name", "세대주명"), ("relationship_to_child", "아동과의 관계")):
+                       ("household_head_name", "세대주명"), ("relationship_to_child", "아동과의 관계"),
+                       ("lunch_starts_on", "중식 시작일"), ("lunch_ends_on", "중식 종료일")):
         columns[key] = SubstituteColumn(key, label)
     for meal in Meal:
         key = f"status:{meal.name.lower()}"
@@ -75,15 +78,20 @@ def prepare_delivery_substitute_data(
     *, mapping_snapshot: HistoricalSnapshot | None = None,
     columns: tuple[SubstituteColumn, ...] | None = None,
     fallbacks: dict[str, str] | None = None,
+    include_breakfast: bool = False,
 ) -> PreparedSubstituteData:
     if type(day) is not date or not isinstance(meal, Meal):
         raise TypeError("배송 날짜와 식종이 올바르지 않습니다.")
-    physical = prepare_physical_delivery_data(snapshot, day, day, (meal,))
     roster = roster_from_historical_snapshot(snapshot)
     routing = routing_state_from_snapshot(snapshot)
     mapping_snapshot = snapshot if mapping_snapshot is None else mapping_snapshot
     template = document_template_setting_from_snapshot(mapping_snapshot)
     template_profile = template.profile if template else DocumentTemplateProfile.SCHOOL_MEAL
+    status_list = template_profile is DocumentTemplateProfile.HAPPY_LUNCHBOX
+    meals = ((meal, Meal.BREAKFAST) if status_list and include_breakfast and meal is not Meal.BREAKFAST
+             else (meal,))
+    physical = None if status_list else prepare_physical_delivery_data(snapshot, day, day, (meal,))
+    shipments = (happy_recipient_presences(snapshot, roster, day, day, meals) if status_list else physical.shipments)
     setting = (mapping_setting_from_snapshot(mapping_snapshot, template_profile.value, "substitute")
                if fallbacks is None else None)
     requested_columns, requested_fallbacks = columns, fallbacks
@@ -93,11 +101,13 @@ def prepare_delivery_substitute_data(
         columns = tuple(requested_columns)
         valid = {column.key for column in STANDARD_COLUMNS} | {
             "school_type", "class_name", "household_head_name", "relationship_to_child",
+            "lunch_starts_on", "lunch_ends_on", *(column.key for column in DELIVERY_SOURCES),
             *(f"status:{meal.name.lower()}" for meal in Meal),
             *(f"custom:{item.definition_id}" for item in custom),
         }
         if len({column.key for column in columns}) != len(columns) or any(column.key not in valid for column in columns):
             raise ValueError("선택한 원본에 없는 배송대타 칼럼입니다. 칼럼이나 원본 변경번호를 확인해주세요.")
+    columns = tuple({column.key: column for column in (*columns, *DELIVERY_SOURCES)}.values())
     defaults = tuple(column.key for column in STANDARD_COLUMNS[:6])
     note2 = next((item for item in custom if item.name.strip() == "비고2"), None)
     defaults += (f"custom:{note2.definition_id}" if note2 else "note",)
@@ -131,23 +141,30 @@ def prepare_delivery_substitute_data(
     manifest.update(mapping=mapping, fallbacks=fallbacks)
     rows = []
     sort_keys = {}
-    for shipment in physical.shipments:
+    for shipment in sorted(shipments, key=lambda item: item.meal is not meal):
         person = roster.person(shipment.person_id)
         profile = person.profile
         # Group using this source revision's household, independently of
         # recorded membership dates and mapped output column values.
         household_id = require_delivery_household(roster, person.person_id, shipment.service_dates)
-        view = routing.resolve(roster, person.person_id, day)
-        driver = view.drivers[meal]
-        driver_id = view.driver_ids[meal]
+        view = routing.resolve(roster, person.person_id, shipment.delivery_on)
+        driver = view.drivers[shipment.meal]
+        driver_id = view.driver_ids[shipment.meal]
         driver_key = f"driver:{driver_id}" if driver_id else f"name:{driver}" if driver else "unassigned"
         forms = {setting.form or "" for service_on in shipment.service_dates
-                 for setting in roster.delivery_settings_for(person.person_id, on=service_on) if setting.meal is meal}
+                 for setting in roster.delivery_settings_for(person.person_id, on=service_on) if setting.meal is shipment.meal}
         form = " / ".join(sorted(forms - {""}))
         values = {column.key: _text(getattr(profile, column.key, None)) for column in (*STANDARD_COLUMNS, *columns)}
-        values.update(sequence=roster.resolve_assignment(person.person_id, meal).sequence or "",
+        values.update(sequence=roster.resolve_assignment(person.person_id, shipment.meal).sequence or "",
                       jurisdiction=view.jurisdiction or "", road_address=view.road_address or "",
                       detail_address=view.detail_address or "", form=form)
+        from src.domain.lunch_periods import lunch_date
+        values.update({key: _text(lunch_date(person, key)) for key in ("lunch_starts_on", "lunch_ends_on")})
+        values.update(delivery_day=day.isoformat(), driver_label=driver or "미지정",
+                      full_address=" ".join(part for part in (view.road_address, view.detail_address) if part),
+                      meal_title=meal.value + "명단", meal_label=meal.value,
+                      meal_receives="1" if shipment.meal is meal else "")
+        values.update({f"receives:{item.name.lower()}": "1" if shipment.meal is item else "" for item in Meal})
         values.update({f"custom:{item.definition_id}": _text(profile.custom_values.get(item.definition_id)) for item in custom})
         for column in columns:
             if column.key.startswith("status:"):
@@ -158,7 +175,7 @@ def prepare_delivery_substitute_data(
                         same_month_pause=pause_conversion_from_snapshot(snapshot).same_month).status_on(day).value
                     if status_meal in roster.meals_for(person.person_id, on=day) else "-"
                 )
-        sort_keys[person.person_id] = (driver or "미지정", sequence_sort_key(values["sequence"]), values["name"], str(person.person_id))
+        sort_keys.setdefault((person.person_id, driver_key), (driver or "미지정", sequence_sort_key(values["sequence"]), values["name"], str(person.person_id)))
         if setting is not None:
             # Resolve all outputs against the unmodified source, never against
             # another mapped output. Mapping a phone must not change grouping.
@@ -175,13 +192,31 @@ def prepare_delivery_substitute_data(
         rows.append(SubstituteRow(person.person_id, household_id, driver_key, driver or "미지정",
                                   values, shipment.entitlement_count, any(value.upper().endswith("BOX") for value in forms),
                                   _text(profile.mobile_phone), view.jurisdiction or ""))
-    rows.sort(key=lambda row: sort_keys[row.person_id])
+    combined = {}
+    for row in rows:
+        key = (row.person_id, row.driver_key)
+        if key not in combined:
+            combined[key] = row
+        else:
+            previous = combined[key]
+            values = dict(previous.values)
+            for item in Meal:
+                field = f"receives:{item.name.lower()}"
+                values[field] = values.get(field) or row.values.get(field, "")
+            values["meal_receives"] = values.get("meal_receives") or row.values.get("meal_receives", "")
+            combined[key] = replace(previous, values=values, box=previous.box or row.box)
+    rows = sorted(combined.values(), key=lambda row: sort_keys[row.person_id, row.driver_key])
     return PreparedSubstituteData(day, meal, tuple(rows), columns, defaults, {
-        "substitute_calculation_contract_version": 4,
+        "substitute_calculation_contract_version": 6,
+        "recipient_basis": "enrolled_delivery_or_paused" if status_list else "physical_delivery",
+        "included_meals": [item.value for item in meals],
+        "breakfast_reference_day": None,
+        "breakfast_reference_calculation": None,
         "column_mapping": manifest,
         "source_revision_id": str(snapshot.revision_id),
         "delivery_day": day.isoformat(), "meal": meal.value,
-        "physical_delivery": physical.calculation_manifest,
+        **({"physical_delivery": physical.calculation_manifest} if physical else {}),
         "household_grouping": "source_revision_current_household_within_selected_driver",
-        "routing_basis": "physical_delivery_day", "meal_count_basis": "service_date_entitlements",
+        "routing_basis": "selected_day" if status_list else "physical_delivery_day",
+        "meal_count_basis": "recipient_presence" if status_list else "service_date_entitlements",
     })

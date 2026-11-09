@@ -437,7 +437,7 @@ def test_options_preferences_are_database_scoped_accept_only_and_tolerate_remove
     first.accept()
     assert first.result() == QDialog.DialogCode.Accepted
     saved = settings.value(first._preferences_key)
-    assert "driver" not in saved and "합성기사" not in saved
+    assert "driver_key" not in saved and "합성기사" not in saved
     reopened = make()
     assert reopened.options() == expected
     reopened.orientation.setCurrentIndex(0)

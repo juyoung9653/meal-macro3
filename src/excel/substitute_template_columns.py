@@ -69,6 +69,9 @@ def sync_substitute_template(path, columns, selected=()):
     book = load_workbook(path)
     temporary = None
     try:
+        from .mapped_delivery_template import read_delivery_form
+        if read_delivery_form(book) is not None:
+            return False
         ws = book[STYLE_SHEET]
         keys = template_column_keys(ws)
         labels = {key: ws.cell(2, index).value for index, key in enumerate(keys, 1)}
