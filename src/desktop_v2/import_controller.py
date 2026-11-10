@@ -131,12 +131,18 @@ class GuidedRosterImportController:
         labels = {column.key: column.label for column in getattr(model, "columns", ())}
         if hasattr(wizard, "set_database_columns"):
             wizard.set_database_columns(current_roster, labels)
+        if hasattr(wizard, "set_household_grouping_columns"):
+            from src.domain.household_grouping import grouping_columns
+            current_snapshot = (self._session.database.snapshot(current_roster.revision_id)
+                                if current_roster is not None else None)
+            wizard.set_household_grouping_columns(grouping_columns(current_snapshot))
         if hasattr(wizard, "set_document_targets"):
             latest = self._session.database.latest_revision()
             if latest is not None:
-                from src.services.import_column_priority import document_import_targets
-                targets, unavailable = document_import_targets(
-                    self._session.database.snapshot(latest.metadata.revision_id), current_roster)
+                from .import_document_usage import import_document_targets
+                targets, unavailable = import_document_targets(
+                    self._session.database.snapshot(latest.metadata.revision_id), current_roster,
+                    str(self._session.credentials.database_id), column_labels=labels)
                 wizard.set_document_targets(targets, unavailable)
         if current_roster is None and hasattr(wizard, "set_initial_import_defaults"):
             wizard.set_initial_import_defaults()
@@ -146,7 +152,7 @@ class GuidedRosterImportController:
         purpose = getattr(selection, "purpose", ImportPurpose.DATABASE)
         from src.importing.vacation_lunch import LunchDuplicatePolicy
         calendar_entry = getattr(selection, "lunch_calendar_entry", None)
-        duplicate_policy = getattr(selection, "lunch_duplicate_policy", LunchDuplicatePolicy.UPDATE)
+        duplicate_policy = LunchDuplicatePolicy.UPDATE
         lunch_events = ()
         lunch_delivering_ids = ()
         if purpose is ImportPurpose.VACATION_LUNCH:
@@ -298,7 +304,7 @@ class GuidedRosterImportController:
             self._message_box.information(
                 parent, "방학 중식 명단을 반영했습니다",
                 (f"방학 {calendar_entry.label}\n"
-                 f"중식 기간 반영 {len(present_ids)}명 · 중복 유지 {len(lunch.get('kept', ()))}명\n"
+                 f"중식 기간 반영 {len(present_ids)}명 · 신규 {added}명\n"
                  "학교·학년별 중식 기간에만 등록했습니다. 이번 파일에 없는 기존 대상자는 유지했습니다."
                  if calendar_entry is not None else
                  f"기존 배송 유지 {retained}명 · 배송 재개 {restored}명 · 신규 {added}명 · 미배송 전환 {len(lunch['stopped'])}명\n적용일 {selection.effective_on.isoformat()}부터 반영됩니다."),

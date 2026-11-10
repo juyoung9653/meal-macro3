@@ -35,21 +35,16 @@ def app():
     return QApplication.instance() or QApplication([])
 
 
-def test_create_dialog_requires_name_and_meal(app):
+def test_create_dialog_requires_name_and_registers_without_meals(app):
     dialog = RosterRowCreateDialog(Meal.LUNCH, date(2026, 10, 5))
-    assert dialog.start_date_edit.date() == QDate(2026, 10, 5)
     dialog._accept_valid()
     assert dialog.result() != QDialog.DialogCode.Accepted
     assert "성명" in dialog._error.text()
     dialog._editors["name"].setText("새 대상")
-    dialog._meal_checks[Meal.LUNCH].setChecked(False)
-    dialog._accept_valid()
-    assert dialog.result() != QDialog.DialogCode.Accepted
-    assert "식종" in dialog._error.text()
-    dialog._meal_checks[Meal.DINNER].setChecked(True)
     dialog._accept_valid()
     assert dialog.result() == QDialog.DialogCode.Accepted
-    assert dialog.values() == (PersonProfile("새 대상"), (Meal.DINNER,), date(2026, 10, 5))
+    assert dialog.values() == (PersonProfile("새 대상"), (), date(2026, 10, 5))
+    assert dialog.request().intake_channel is None
 
 
 def test_create_dialog_collects_simplified_profile_custom_fields_and_meals(app):
@@ -72,7 +67,6 @@ def test_create_dialog_collects_simplified_profile_custom_fields_and_meals(app):
     dialog._editors[f"custom:{definitions[1].definition_id}"].setText("2.5")
     dialog._editors[f"custom:{definitions[2].definition_id}"].setText("2026-10-05")
     dialog._editors[f"custom:{definitions[3].definition_id}"].setCurrentIndex(2)
-    dialog._meal_checks[Meal.DINNER].setChecked(True)
     dialog._accept_valid()
     assert dialog.result() == QDialog.DialogCode.Accepted
     request = dialog.request()
@@ -81,7 +75,7 @@ def test_create_dialog_collects_simplified_profile_custom_fields_and_meals(app):
     assert request.profile.road_address == "도로 1"
     assert request.profile.detail_address == "101호"
     assert request.profile.custom_values == {definitions[0].definition_id: "010-456", definitions[1].definition_id: 2.5, definitions[2].definition_id: date(2026, 10, 5), definitions[3].definition_id: "B"}
-    assert request.meals == (Meal.DINNER, Meal.LUNCH)
+    assert request.meals == ()
     assert request.assignments == {}
     assert request.household_id is None
     assert request.statuses == {}
@@ -97,77 +91,20 @@ def test_create_dialog_excludes_internal_profile_fields_and_keeps_driver_selecti
         *(f"newPerson_status_{meal.name}" for meal in Meal),
     }
     assert all(dialog.findChild(QWidget, name) is None for name in removed_names)
-    assert all(dialog.findChild(QWidget, f"newPerson_driver_{meal.name}") is not None for meal in Meal)
+    assert all(dialog.findChild(QWidget, f"newPerson_driver_{meal.name}") is None for meal in Meal)
 
 
-def test_start_date_ignores_wheel_but_keeps_keyboard_and_calendar(app):
-    dialog = RosterRowCreateDialog(Meal.LUNCH, date(2026, 10, 5))
-    dialog.show()
-    app.processEvents()
-    editor = dialog.start_date_edit
-    original = editor.date()
-    wheel = QWheelEvent(
-        QPointF(4, 4), QPointF(4, 4), QPoint(), QPoint(0, 120),
-        Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
-        Qt.ScrollPhase.ScrollUpdate, False,
-    )
-    QApplication.sendEvent(editor, wheel)
-    assert editor.date() == original
-    editor.setFocus()
-    QTest.keyClick(editor, Qt.Key.Key_Up)
-    assert editor.date() != original
-    assert editor.calendarPopup()
-    dialog.close()
-
-
-def test_create_dialog_uses_per_meal_actual_delivery_dates_and_earliest_household_match(app):
+def test_registration_uses_selected_day_for_household_without_delivery_fields(app):
     matched_on = []
-    dialog = RosterRowCreateDialog(
-        Meal.BREAKFAST,
-        date(2026, 10, 7),
-        household_matcher=lambda _profile, starts_on: matched_on.append(starts_on),
-    )
-    dialog._editors["name"].setText("식종별 시작")
-    dialog._meal_checks[Meal.DINNER].setChecked(True)
-    assert dialog._start_date_edits[Meal.DINNER].date() == QDate(2026, 10, 7)
-    assert dialog._start_date_edits[Meal.BREAKFAST].date() == QDate(2026, 10, 9)
-    dialog._start_date_edits[Meal.DINNER].setDate(QDate(2026, 10, 8))
-
+    dialog = RosterRowCreateDialog(Meal.BREAKFAST, date(2026, 10, 7),
+        household_matcher=lambda _profile, day: matched_on.append(day))
+    dialog._editors["name"].setText("신규 대상")
     dialog._accept_valid()
-
-    assert dialog.result() == QDialog.DialogCode.Accepted
-    assert matched_on == [date(2026, 10, 8)]
-    assert dialog.request().meal_starts_on == {
-        Meal.DINNER: date(2026, 10, 8),
-        Meal.BREAKFAST: date(2026, 10, 9),
-    }
-    assert dialog.request().starts_on == date(2026, 10, 8)
-
-
-def test_create_dialog_rejects_invalid_manual_meal_date_and_uses_reconfigured_mapping(app):
-    defaults = tuple(
-        HouseholdDeliverySetting(
-            item.meal,
-            (5, 6) if item.meal is Meal.BREAKFAST else item.weekdays,
-            delivery_weekdays=(0, 1, 2, 3, 4, 0, 0)
-            if item.meal is Meal.BREAKFAST
-            else item.delivery_weekdays,
-        )
-        for item in standard_delivery_defaults()
-    )
-    dialog = RosterRowCreateDialog(
-        Meal.BREAKFAST,
-        date(2026, 10, 7),
-        delivery_defaults=defaults,
-    )
-    dialog._editors["name"].setText("재설정 요일")
-    assert dialog.start_date_edit.date() == QDate(2026, 10, 12)
-    dialog.start_date_edit.setDate(QDate(2026, 10, 8))
-
-    dialog._accept_valid()
-
-    assert dialog.result() != QDialog.DialogCode.Accepted
-    assert "월요일" in dialog._error.text()
+    assert matched_on == [date(2026, 10, 7)]
+    assert dialog.request().meal_starts_on == {}
+    assert dialog.request().assignments == {}
+    assert not hasattr(dialog, "start_date_edit")
+    assert not hasattr(dialog, "_meal_checks")
 
 
 def test_create_dialog_keeps_typed_values_open_when_household_match_is_ambiguous(app):

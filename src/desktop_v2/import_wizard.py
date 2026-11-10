@@ -10,6 +10,7 @@ from datetime import date
 from pathlib import Path
 from typing import Callable, TypeVar
 from uuid import UUID, uuid4, uuid5
+from weakref import WeakMethod
 
 from PySide6.QtCore import QDate, QEvent, QEventLoop, QSize, QTimer, Qt
 from PySide6.QtGui import (
@@ -465,7 +466,7 @@ class RosterImportWizard(QDialog):
         layout.addLayout(
             self._page_heading(
                 "2. Excel 열과 명단 항목 연결",
-                "각 Excel 열을 현재 DB의 칼럼에 연결하세요. * 항목만 필수입니다.",
+                "각 Excel 열을 현재 DB의 칼럼에 연결하세요. * 항목과 (가구 묶기 기준) 칼럼은 필수 연결입니다.",
             )
         )
         self.lunch_mode_note = QLabel("이름·핸드폰으로 연결하고 선택한 방학의 학교·학년별 중식 기간에 등록합니다. 식종 열은 필요하지 않습니다.")
@@ -481,11 +482,7 @@ class RosterImportWizard(QDialog):
         self.lunch_calendar_combo.setMinimumContentsLength(32)
         self.lunch_calendar_combo.addItem("학교 일정에서 방학 파일을 먼저 불러와주세요", None)
         filter_form.addRow("적용할 방학 기록 *", self.lunch_calendar_combo)
-        self.lunch_duplicate_combo = QComboBox()
-        self.lunch_duplicate_combo.addItem("기존 유지 · 중복 명단 무시", LunchDuplicatePolicy.KEEP)
-        self.lunch_duplicate_combo.addItem("업데이트 · 가져온 정보 반영", LunchDuplicatePolicy.UPDATE)
-        filter_form.addRow("기존 대상자 처리", self.lunch_duplicate_combo)
-        duplicate_note = QLabel("기존 유지는 기존 정보·등록 기간을 보존합니다. 업데이트는 기존 값과 다른 항목을 확인합니다. 해당 방학에 미등록이면 두 방식 모두 추가합니다.")
+        duplicate_note = QLabel("기존 대상자는 가져온 정보로 업데이트합니다. 기존 값과 다른 항목은 저장 전에 확인합니다. 선택한 방학의 중식 기간을 적용하며 이번 명단에 없는 사람은 유지합니다.")
         duplicate_note.setWordWrap(True)
         duplicate_note.setObjectName("muted")
         filter_form.addRow(duplicate_note)
@@ -536,6 +533,8 @@ class RosterImportWizard(QDialog):
         self.destination_table = ImportColumnsTable()
         self.destination_table.destination_changed.connect(self._destination_changed)
         self.mapping_dialog = ImportColumnMappingDialog(self.destination_table, self)
+        self.mapping_dialog.validate_mapping = WeakMethod(self._validate_household_mapping)
+        self.set_household_grouping_columns(("mobile",))
         self.mapping_dialog.setStyleSheet(application_stylesheet())
         self.finished.connect(self.mapping_dialog.close)
         self.mapping_dialog.finished.connect(self._mapping_dialog_closed)
@@ -1142,6 +1141,21 @@ class RosterImportWizard(QDialog):
             self.destination_table.priority_note.setText(
                 "·".join(unavailable) + " 양식을 읽을 수 없어 저장된 연결만 앞쪽에 표시합니다.")
             self.destination_table.priority_note.show()
+
+    def set_household_grouping_columns(self, columns):
+        from src.domain.household_grouping import PROFILE_COLUMNS
+        targets = tuple(key if key.startswith("custom:") else "profile:" + PROFILE_COLUMNS[key][0]
+                        for key in columns)
+        self._household_targets = targets
+        self.destination_table.set_household_targets(targets)
+        self._confirmed_mapping_key = None
+
+    def _validate_household_mapping(self):
+        selected = set(self._destination_selection().values())
+        labels = dict(self._destination_options())
+        missing = [labels.get(key, "설정에서 지정한 가구 기준 칼럼") for key in self._household_targets if key not in selected]
+        if missing:
+            raise ValueError("가구 묶기 기준 칼럼에 원본 Excel 열을 연결해주세요: " + ", ".join(missing))
 
     def _profile_label(self, field):
         key = {ProfileField.SCHOOL_NAME: "school", ProfileField.MOBILE_PHONE: "mobile",
@@ -1969,6 +1983,7 @@ class RosterImportWizard(QDialog):
                 self._set_page(0)
                 return
             try:
+                self._validate_household_mapping()
                 profile = self._build_profile()
                 self._build_household_rule()
             except Exception as error:
@@ -2026,6 +2041,11 @@ class RosterImportWizard(QDialog):
             self._set_page(1)
             self._open_mapping_dialog()
             return False
+        try:
+            self._validate_household_mapping()
+        except ValueError as error:
+            self._show_error(user_error(error))
+            return False
         if not self._can_import():
             if self._preview is not None and self._preview.notices and self.purpose_combo.currentData() == ImportPurpose.VACATION_LUNCH:
                 self._show_error("방학 중식 명단의 오류 행을 수정하거나 행 제외를 체크한 뒤 가져와주세요.")
@@ -2040,7 +2060,7 @@ class RosterImportWizard(QDialog):
             self._existing_household_rule,
             ImportPurpose(self.purpose_combo.currentData()),
             entry,
-            LunchDuplicatePolicy(self.lunch_duplicate_combo.currentData()),
+            LunchDuplicatePolicy.UPDATE,
         )
         self.accept()
         return True
@@ -2185,6 +2205,9 @@ class RosterImportWizard(QDialog):
 
     def _lunch_filter_changed(self, *_args):
         mode = self.lunch_filter_mode.currentData()
+        form = self.lunch_filter_panel.layout()
+        form.setRowVisible(self.lunch_filter_column, mode != "all")
+        form.setRowVisible(self.lunch_filter_value, mode == "equals")
         self.lunch_filter_column.setEnabled(mode != "all")
         self.lunch_filter_value.setEnabled(mode == "equals")
         self._mapping_changed()

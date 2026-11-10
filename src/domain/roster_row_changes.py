@@ -64,8 +64,8 @@ def build_roster_row_revision(
     if add_person is not None:
         if not isinstance(add_person, Person):
             raise TypeError("add_person은 Person이어야 합니다.")
-        if not enroll_meals or any(not isinstance(meal, Meal) for meal in enroll_meals):
-            raise ValueError("새 대상자에게 하나 이상의 식종을 지정해야 합니다.")
+        if any(not isinstance(meal, Meal) for meal in enroll_meals):
+            raise ValueError("가입할 식종을 확인해주세요.")
         if len(set(enroll_meals)) != len(enroll_meals):
             raise ValueError("식종을 중복 지정할 수 없습니다.")
         common_start = effective_on if delivery_starts_on is None else delivery_starts_on

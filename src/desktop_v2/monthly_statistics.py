@@ -29,6 +29,7 @@ class MonthlyStatisticsDialog(QDialog):
             self.setWindowFlags(Qt.WindowType.Widget)
             self.setMinimumSize(0, 0)
         self._load = load
+        self._loaded = False
         root = QVBoxLayout(self)
         title = QLabel("월별 식수")
         title.setObjectName("workspaceTitle")
@@ -122,6 +123,7 @@ class MonthlyStatisticsDialog(QDialog):
         self.refresh()
 
     def refresh(self, *_args) -> None:
+        self._loaded = False
         self.table.setRowCount(0)
         self.summary.clear()
         self.revision_note.clear()
@@ -136,6 +138,7 @@ class MonthlyStatisticsDialog(QDialog):
             self.error.show()
             return
         self.error.hide()
+        self._loaded = True
         result = result.for_basis(self.basis.currentData())
         self.scope.setText(self.basis.currentText() + " · 전체 명단")
         self.table.setHorizontalHeaderItem(0, QTableWidgetItem("배송일" if result.basis is MealCountBasis.DELIVERY else "식사일"))

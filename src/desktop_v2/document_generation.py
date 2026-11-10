@@ -313,12 +313,15 @@ class DocumentGenerationController:
             )
             template_path = self._template_path(template_setting, action)
             custom_delivery_template = None
+            report_layout = None
             if action in (DocumentAction.DELIVERY_REPORT, DocumentAction.DELIVERY_SUBSTITUTE):
                 from .delivery_template import DeliveryTemplateStore
                 from src.excel.delivery_templates import validate_delivery_template
                 delivery_profile = template_setting.profile if template_setting is not None else DocumentTemplateProfile.SCHOOL_MEAL
                 delivery_store = DeliveryTemplateStore(str(self._session.credentials.database_id), profile=delivery_profile)
                 custom_delivery_template = delivery_store.selected(action)
+                if action is DocumentAction.DELIVERY_REPORT and not happy_report:
+                    report_layout = delivery_store.report_layout(custom_delivery_template)
                 if custom_delivery_template is not None and not happy_report:
                     if action is not DocumentAction.DELIVERY_SUBSTITUTE:
                         validate_delivery_template(custom_delivery_template, action.value)
@@ -463,6 +466,7 @@ class DocumentGenerationController:
                     template_path,
                     output_password=None,
                     overwrite=False,
+                    report_layout=report_layout,
                     **({"preserve_template_styles": True} if custom_delivery_template is not None else {}),
                 )
                 kind = DocumentKind.DELIVERY_REPORT
@@ -494,7 +498,10 @@ class DocumentGenerationController:
                 template_manifest["templates"] = happy_template_manifest
             if action is DocumentAction.DELIVERY_REPORT:
                 template_manifest["daily_report_layout"] = "fixed_template"
-                template_manifest["daily_report_layout_version"] = 2
+                template_manifest["daily_report_layout_version"] = 2 if happy_report else 4
+                if not happy_report:
+                    template_manifest["daily_report_rows"] = report_layout.manifest()
+                    template_manifest["daily_report_change_fill"] = "C5D9F1"
             if action is DocumentAction.DELIVERY_SUBSTITUTE:
                 template_manifest["substitute_render_contract_version"] = SUBSTITUTE_RENDER_CONTRACT_VERSION
                 template_manifest["substitute_options"] = selection.document.substitute_options.manifest()

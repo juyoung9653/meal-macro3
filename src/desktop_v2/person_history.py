@@ -102,6 +102,7 @@ class HistoryRowsModel(QAbstractTableModel):
 
 class PersonHistoryDialog(QDialog):
     meal_history_cancel_requested = Signal(object)
+    meal_history_details_requested = Signal(object)
 
     def __init__(self, person, tables, histories, selected_meal, parent=None, *, entries=(), revision_id=None):
         super().__init__(parent)
@@ -127,7 +128,7 @@ class PersonHistoryDialog(QDialog):
             if name == "식종 변경":
                 self._meal_count_label = count_label
             if name == "식종 변경":
-                note = QLabel("Ctrl·Shift로 여러 기록을 선택한 뒤 우클릭하면 한 번에 취소할 수 있습니다. 취소한 기록은 이 목록에서 사라지며 원본과 취소 내용은 더보기 → 조회·기록 → 전체 변경 이력에 보존됩니다.")
+                note = QLabel("접수 경로·비고는 해당 셀을 더블클릭하거나 한 건을 우클릭해 수정합니다. Ctrl·Shift로 여러 기록을 선택한 뒤 우클릭하면 한 번에 취소할 수 있습니다. 원본과 수정·취소 내용은 더보기 → 조회·기록 → 전체 변경 이력에 보존됩니다.")
                 note.setWordWrap(True)
                 page_layout.addWidget(note)
             view = QTableView()
@@ -154,6 +155,7 @@ class PersonHistoryDialog(QDialog):
                 self._configure_meal_history_columns(view, headings)
                 view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
                 view.customContextMenuRequested.connect(self._open_meal_history_context_menu)
+                view.doubleClicked.connect(lambda index: self._edit_meal_details(index))
             elif detail_rows is not None:
                 widths = (130, 235, 235, 110, 145) if name == "정보 변경" else (150, 80, 100, 410, 110)
                 for index, width in enumerate(widths):
@@ -199,7 +201,14 @@ class PersonHistoryDialog(QDialog):
         label = f"선택한 변경 {len(targets)}건 취소" if len(targets) > 1 else "선택한 변경 취소"
         menu.addAction(label).triggered.connect(
             lambda: self.meal_history_cancel_requested.emit(targets[0] if len(targets) == 1 else targets))
+        if len(targets) == 1:
+            menu.addAction("접수 경로·비고 수정").triggered.connect(
+                lambda: self.meal_history_details_requested.emit(targets[0]))
         return menu
+
+    def _edit_meal_details(self, index):
+        if index.isValid() and index.column() in (2, 4) and index.row() < len(self._meal_entries):
+            self.meal_history_details_requested.emit(self._meal_entries[index.row()].target)
 
     def _open_meal_history_context_menu(self, position):
         view = self.findChild(QTableView, "history_식종 변경")

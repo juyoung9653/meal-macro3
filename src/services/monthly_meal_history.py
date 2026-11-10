@@ -10,6 +10,7 @@ from datetime import date
 from uuid import UUID
 
 from src.domain.revision_visibility import effective_history_revisions
+from src.domain.meal_history_details import meal_history_details
 from src.domain.meal_history_cancellation import MealHistoryTarget, cancelled_meal_history_targets
 from src.domain.projections import (
     ENROLLMENT_KIND, STATUS_EVENT_KIND, enrollments_from_state,
@@ -35,6 +36,7 @@ class MonthlyMealHistoryEntry:
     intake_channel: str = "-"
     note: str = ""
     source_period: InclusiveDateRange | None = None
+    target: MealHistoryTarget | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,6 +78,7 @@ def build_monthly_meal_history(
         items.sort(key=lambda event: event.recorded_at)
     revisions = effective_history_revisions(revisions)
     cancelled = cancelled_meal_history_targets(revisions)
+    corrections = meal_history_details(revisions)
     candidates = {}
     for record in revisions:
         metadata = record.metadata
@@ -94,7 +97,7 @@ def build_monthly_meal_history(
             explicit.add((event.person_id, event.meal))
             if snapshot.entity(STATUS_EVENT_KIND, event.event_id) == change.after:
                 candidates[(STATUS_EVENT_KIND, event.event_id)] = (
-                    event.person_id, event.meal, event.status, event.period, metadata, event.event_id,
+                    event.person_id, event.meal, event.status, event.period, metadata, event.event_id, target,
                 )
         added = metadata.decisions.get("roster_row_change")
         if (metadata.source is not RevisionSource.UI or not isinstance(added, Mapping)
@@ -110,10 +113,10 @@ def build_monthly_meal_history(
                     continue
                 candidates[(ENROLLMENT_KIND, change.entity_id, enrollment.period)] = (
                     enrollment.person_id, enrollment.meal, MealStatus.DELIVERY,
-                    enrollment.period, metadata, None,
+                    enrollment.period, metadata, None, target,
                 )
     rows = []
-    for person_id, meal, status, period, metadata, event_id in candidates.values():
+    for person_id, meal, status, period, metadata, event_id, target in candidates.values():
         # An ongoing action belongs to its original start month, even if later
         # overrides split its effective period into newly starting segments.
         if not include_all_periods and period.ends_on is None and (
@@ -138,8 +141,9 @@ def build_monthly_meal_history(
                     person_id, profile.name, profile.birth_date, profile.school_name,
                     meal, status, applicable, metadata.actor.username,
                     metadata.display_code or format_revision_timestamp(metadata.recorded_at),
-                    *meal_change_details(metadata.decisions),
+                    *corrections.get(target, meal_change_details(metadata.decisions)),
                     source_period=period,
+                    target=target,
                 ))
     meal_order = {Meal.DINNER: 0, Meal.BREAKFAST: 1, Meal.LUNCH: 2}
     rows.sort(key=lambda row: (

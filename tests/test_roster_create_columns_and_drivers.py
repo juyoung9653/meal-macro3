@@ -48,13 +48,10 @@ def test_driver_choices_are_ids_and_unchecked_meals_never_submit_stale_choice(ap
     view = RosterRowCreateDialog(Meal.DINNER, routing_state=RoutingState(drivers))
     try:
         view._editors["name"].setText("가상 대상")
-        view._driver_combos[Meal.DINNER].setCurrentIndex(2)
-        view._meal_checks[Meal.BREAKFAST].setChecked(True)
-        view._driver_combos[Meal.BREAKFAST].setCurrentIndex(1)
-        view._meal_checks[Meal.BREAKFAST].setChecked(False)
-        assert not view._driver_combos[Meal.BREAKFAST].isEnabled()
+        assert not hasattr(view, "_driver_combos")
         view._accept_valid()
-        assert view.request().assignments == {Meal.DINNER: (drivers[1].driver_id, None)}
+        assert view.request().assignments == {}
+        assert view.request().meals == ()
     finally:
         view.close()
 
@@ -90,9 +87,6 @@ def test_actual_dialog_controller_saves_profile_household_and_dated_drivers_atom
         view._editors["address"].setText("가상로 1")
         view._editors["detail_address"].setText("101호")
         view._editors[f"custom:{custom.definition_id}"].setText("010-2222-2222")
-        view._meal_checks[Meal.LUNCH].setChecked(True)
-        view._driver_combos[Meal.DINNER].setCurrentIndex(1)
-        view._driver_combos[Meal.LUNCH].setCurrentIndex(2)
         view._accept_valid()
         assert view.result() == QDialog.DialogCode.Accepted, view._error.text()
         return view.result()
@@ -121,7 +115,8 @@ def test_actual_dialog_controller_saves_profile_household_and_dated_drivers_atom
             state = routing_state_from_snapshot(session.database.snapshot(updated.revision_id))
             assert all(value is None for value in state.resolve(updated, new_person, date(2026, 10, 31)).driver_ids.values())
             assert state.resolve(updated, new_person, starts_on).driver_ids == {meal: None for meal in Meal}
-            assert state.resolve(updated, new_person, delivery_start).driver_ids == {Meal.DINNER: drivers[0].driver_id, Meal.BREAKFAST: None, Meal.LUNCH: drivers[1].driver_id}
+            assert state.resolve(updated, new_person, delivery_start).driver_ids == {meal: None for meal in Meal}
+            assert updated.meals_for(new_person, on=starts_on) == ()
             assert updated.meals_for(new_person, on=date(2026, 10, 31)) == ()
     finally:
         parent.close()

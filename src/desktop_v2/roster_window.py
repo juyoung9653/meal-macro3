@@ -1400,6 +1400,7 @@ class RosterWindow(QMainWindow):
     current_sheet_export_requested = Signal(object)
     driver_households_export_requested = Signal(object, object)
     meal_history_cancel_requested = Signal(object, object)
+    meal_history_details_requested = Signal(object, object)
     revision_history_requested = Signal()
     complaint_history_requested = Signal()
     import_review_requested = Signal()
@@ -2836,7 +2837,7 @@ class RosterWindow(QMainWindow):
         self._meal_history_list.setObjectName("mealHistory")
         self._meal_history_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._meal_history_list.customContextMenuRequested.connect(self._open_meal_history_context_menu)
-        self._meal_history_list.setToolTip("Ctrl·Shift로 여러 기록을 선택한 뒤 우클릭하면 한 번에 취소할 수 있습니다.")
+        self._meal_history_list.setToolTip("한 건을 우클릭하면 접수 경로·비고를 수정할 수 있습니다. Ctrl·Shift로 여러 기록을 선택한 뒤 우클릭하면 한 번에 취소할 수 있습니다.")
         self._meal_history_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._meal_history_list.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._meal_history_list.setUniformItemSizes(False)
@@ -3394,6 +3395,9 @@ class RosterWindow(QMainWindow):
         action = menu.addAction(label)
         revision_id = self._roster.revision_id
         action.triggered.connect(lambda: self.meal_history_cancel_requested.emit(target, revision_id))
+        if len(targets) == 1:
+            menu.addAction("접수 경로·비고 수정").triggered.connect(
+                lambda: self.meal_history_details_requested.emit(target, revision_id))
         menu.exec(self._meal_history_list.viewport().mapToGlobal(position))
 
     def _meal_history_rows_for(self, person: Person) -> tuple:

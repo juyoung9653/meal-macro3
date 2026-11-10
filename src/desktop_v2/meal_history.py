@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from uuid import UUID
 
 from src.domain.revision_visibility import effective_history_revisions
+from src.domain.meal_history_details import meal_history_details
 from src.domain.meal_history_cancellation import MealHistoryTarget, cancelled_meal_history_targets
 from src.domain.projections import ENROLLMENT_KIND, STATUS_EVENT_KIND, enrollments_from_state, status_event_from_state
 from src.domain.revisions import ChangeOperation, RevisionRecord, RevisionSource, format_revision_timestamp
@@ -57,6 +58,7 @@ def build_meal_history_entries_by_person(revisions):
     revisions = effective_history_revisions(revisions)
     rows = defaultdict(list)
     cancelled = cancelled_meal_history_targets(revisions)
+    corrections = meal_history_details(revisions)
     for record in sorted(revisions, key=lambda item: item.metadata.recorded_at):
         if (is_roster_import_history(record)
                 or "meal_history_cancellation" in record.metadata.decisions
@@ -77,7 +79,8 @@ def build_meal_history_entries_by_person(revisions):
             target = MealHistoryTarget(metadata.revision_id, STATUS_EVENT_KIND, event.event_id)
             if target not in cancelled:
                 meal, category, period = meal_status_summary(event)
-                rows[event.person_id].append(MealHistoryEntry((meal, category, intake, period, note, *details), target))
+                channel, memo = corrections.get(target, (intake, note))
+                rows[event.person_id].append(MealHistoryEntry((meal, category, channel, period, memo, *details), target))
         added = metadata.decisions.get("roster_row_change")
         if (metadata.source is not RevisionSource.UI
                 or not isinstance(added, Mapping) or added.get("operation") != "add"):
@@ -98,6 +101,7 @@ def build_meal_history_entries_by_person(revisions):
                     continue
                 start = enrollment.period.starts_on
                 period = f"{start.isoformat() if start is not None else '시작일 미지정'} ~ "
+                channel, memo = corrections.get(target, (intake, note))
                 rows[enrollment.person_id].append(MealHistoryEntry(
-                    (enrollment.meal.value, "시작", intake, period, note, *details), target))
+                    (enrollment.meal.value, "시작", channel, period, memo, *details), target))
     return {person_id: tuple(items) for person_id, items in rows.items()}

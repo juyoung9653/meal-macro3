@@ -19,6 +19,7 @@ from src.domain.pause_conversion import PAUSE_CONVERSION_KIND
 from src.domain.daily_report_choices import CHOICES_KIND
 from src.domain.export_security import EXPORT_PASSWORD_SETTING_KIND
 from src.domain.meal_history_cancellation import CANCELLATION_KIND, CANCELLATION_DECISION
+from src.domain.meal_history_details import DETAILS_KIND
 from src.domain.projections import (
     ASSIGNMENT_KIND,
     CUSTOM_FIELD_KIND,
@@ -53,6 +54,7 @@ _KIND_LABELS = {
     CUSTOM_FIELD_KIND: "사용자 정의 항목",
     STATUS_EVENT_KIND: "상태 변경",
     CANCELLATION_KIND: "식종 변경 등록 취소",
+    DETAILS_KIND: "식종 이력 접수 경로·비고",
     DRIVER_KIND: "배송담당",
     DRIVER_ORDER_KIND: "기사 표시 순서",
     DAILY_DRIVER_ORDER_KIND: "일일식수 기사 순서",
@@ -249,6 +251,16 @@ def build_revision_change_rows(
             continue
         if change.entity_kind == CANCELLATION_KIND:
             rows.append(_cancellation_row(change, record, snapshot, previous_snapshot))
+            continue
+        if change.entity_kind == DETAILS_KIND:
+            state = change.after or change.before
+            person = snapshot.entity(PERSON_KIND, UUID(state["person_id"]))
+            name = (person or {}).get("name", "대상자")
+            for key, label in (("intake_channel", "접수 경로"), ("note", "비고")):
+                before = (change.before or {}).get(key, state.get("original_" + key, ""))
+                after = (change.after or {}).get(key, "")
+                if before != after:
+                    rows.append((name, state["meal"], "식종 이력 " + label, f"{before or '미입력'} → {after or '미입력'}"))
             continue
         if change.entity_kind == "school-lunch.import-deletion":
             action = "선택한 파일로 불러온 학교 일정 전체를 삭제했습니다." if change.after is not None else "삭제했던 학교 일정 불러오기 기록을 복구했습니다."

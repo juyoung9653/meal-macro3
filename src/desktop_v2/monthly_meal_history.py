@@ -1,4 +1,4 @@
-"""Read-only monthly meal action history work window."""
+"""Monthly meal history with filters and editable intake details."""
 
 from __future__ import annotations
 
@@ -9,10 +9,10 @@ from dataclasses import dataclass
 from datetime import date
 import re
 
-from PySide6.QtCore import QSignalBlocker, Qt
+from PySide6.QtCore import QSignalBlocker, Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView, QComboBox, QDialog, QHBoxLayout, QHeaderView, QLabel,
-    QPushButton, QSpinBox, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QPushButton, QSpinBox, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QMenu,
 )
 
 from src.services.monthly_meal_history import MonthlyMealHistory
@@ -46,6 +46,8 @@ def _entry_values(item):
 
 
 class MonthlyMealHistoryDialog(QDialog):
+    details_edit_requested = Signal(object, object)
+
     def __init__(self, selected_day: date, load: Callable[[int, int], MonthlyMealHistory], parent: QWidget | None = None, *, embedded=False):
         super().__init__(parent)
         register_application_fonts()
@@ -61,6 +63,7 @@ class MonthlyMealHistoryDialog(QDialog):
         self._column_values: dict[str, frozenset[str]] = {}
         self._loaded = False
         self._entries = ()
+        self._display_entries = ()
         self._sort_criteria = ()
         root = QVBoxLayout(self)
         title = QLabel("월별 식종 변경 이력")
@@ -72,6 +75,7 @@ class MonthlyMealHistoryDialog(QDialog):
         root.addWidget(scope)
         note = QLabel("종료일 없는 기록은 시작한 달에만 표시합니다. 기간이 정해진 기록은 그 기간과 겹치는 달마다 표시합니다.")
         note.setWordWrap(True)
+        note.setText(note.text() + "\n접수 경로·비고는 해당 셀을 더블클릭하거나 기록을 우클릭해 수정할 수 있습니다.")
         root.addWidget(note)
         period = QHBoxLayout()
         previous = QPushButton("이전 달")
@@ -137,6 +141,9 @@ class MonthlyMealHistoryDialog(QDialog):
         self._column_search_header.setMinimumSectionSize(80)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.cellDoubleClicked.connect(self._edit_details)
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._details_menu)
         self.table.setAlternatingRowColors(True)
         self.table.verticalHeader().setVisible(False)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
@@ -176,6 +183,7 @@ class MonthlyMealHistoryDialog(QDialog):
     def refresh(self, *_args) -> None:
         self._loaded = False
         self._entries = ()
+        self._display_entries = ()
         self.table.setRowCount(0)
         self.summary.clear()
         try:
@@ -192,7 +200,23 @@ class MonthlyMealHistoryDialog(QDialog):
         self._entries = tuple(sorted(result.entries,
             key=lambda item: _revision_sort_key(item.revision_code), reverse=True))
         self._loaded = True
+        self.expected_revision_id = result.revision_id
         self._render_sorted_entries()
+
+    def _edit_details(self, row, column):
+        if column not in (3, 5) or not 0 <= row < len(self._display_entries):
+            return
+        entry = self._display_entries[row]
+        if entry.target is not None:
+            self.details_edit_requested.emit(entry.target, self.expected_revision_id)
+
+    def _details_menu(self, position):
+        index = self.table.indexAt(position)
+        if not index.isValid():
+            return
+        menu = QMenu(self)
+        menu.addAction("접수 경로·비고 수정").triggered.connect(lambda: self._edit_details(index.row(), 3))
+        menu.exec(self.table.viewport().mapToGlobal(position))
 
     def _cycle_sort(self, column):
         if not 0 <= column < len(_COLUMNS):
@@ -220,6 +244,7 @@ class MonthlyMealHistoryDialog(QDialog):
                     return (item.period.starts_on or date.min, item.period.ends_on or date.max)
                 return _entry_values(item)[column].casefold()
             entries.sort(key=sort_value, reverse=order == Qt.SortOrder.DescendingOrder)
+        self._display_entries = tuple(entries)
         self.table.setRowCount(len(entries))
         for row, item in enumerate(entries):
             for column, value in enumerate(_entry_values(item)):

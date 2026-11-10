@@ -16,16 +16,9 @@ from datetime import UTC, date, datetime
 from enum import StrEnum
 from uuid import UUID, uuid4
 
-from PySide6.QtCore import QDate
-from PySide6.QtWidgets import QCheckBox, QComboBox, QDialog, QFormLayout, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QVBoxLayout, QWidget
 
 from src.domain.delivery_routing import RoutingState, routing_state_from_snapshot
-from src.domain.delivery_dates import (
-    actual_delivery_weekdays,
-    next_actual_delivery_date,
-    validate_actual_delivery_date,
-    weekday_text,
-)
 from src.domain.column_input_rules import InputRule, load_rules, validate_new_profile
 from src.domain.roster import CustomFieldDefinition, CustomFieldType, DeliveryAssignment, HouseholdDeliverySetting, Meal, Person, PersonProfile, RosterSnapshot, standard_delivery_defaults
 from src.domain.roster_row_changes import build_roster_row_revision
@@ -40,7 +33,6 @@ from src.storage.database_session import (
     DatabaseSession,
 )
 
-from .date_edit import WheelSafeDateEdit
 from .row_household_conflicts import RowHouseholdConflictDialog
 from .column_input_rules import make_rule_editor
 from .import_controller import current_windows_actor
@@ -61,16 +53,6 @@ _PROFILE_COLUMNS = {
 }
 
 
-def _date_value(editor: WheelSafeDateEdit) -> date:
-    selected = editor.date()
-    return date(selected.year(), selected.month(), selected.day())
-
-
-def _compact_weekday_text(weekdays: tuple[int, ...]) -> str:
-    text = weekday_text(weekdays)
-    return text if text == "없음" else text.replace("요일", "") + "요일"
-
-
 @dataclass(frozen=True, slots=True)
 class RosterRowCreateRequest:
     profile: PersonProfile
@@ -84,7 +66,7 @@ class RosterRowCreateRequest:
 
 
 class RosterRowCreateDialog(QDialog):
-    """Collect a new person's profile and at least one enrolled meal."""
+    """Collect personal information without enrolling or assigning meals."""
 
     def __init__(self, selected_meal: Meal = Meal.LUNCH, start_date: date | None = None, parent: QWidget | None = None, *, custom_fields: tuple[CustomFieldDefinition, ...] = (), household_matcher: Callable[[PersonProfile, date], UUID | None] | None = None, column_labels: Mapping[str, str] | None = None, routing_state: RoutingState | None = None, input_rules: dict[str, InputRule] | None = None, delivery_defaults: tuple[HouseholdDeliverySetting, ...] | None = None) -> None:
         super().__init__(parent)
@@ -109,7 +91,7 @@ class RosterRowCreateDialog(QDialog):
         title = QLabel("신규 대상자 등록")
         title.setObjectName("workspaceTitle")
         root.addWidget(title)
-        hint = QLabel("명단의 인적사항과 가입 식종을 입력합니다. 배송 시작일 전에는 배송 대상에 포함되지 않습니다. 중식 시작일은 입력한 날짜로, 종료일은 등록된 학교 일정으로 채웁니다.")
+        hint = QLabel("인적사항만 등록합니다. 등록 후 명단에서 식종의 배송 상태와 담당 기사를 지정해주세요.")
         hint.setObjectName("workspaceSubtitle")
         hint.setWordWrap(True)
         root.addWidget(hint)
@@ -150,68 +132,7 @@ class RosterRowCreateDialog(QDialog):
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(1, 1)
         body_layout.addWidget(frame)
-        delivery_frame = QFrame()
-        delivery_frame.setObjectName("editSection")
-        delivery_form = QFormLayout(delivery_frame)
-        delivery_form.addRow(QLabel("가입·배송"))
-        self._meal_checks = {}
-        meals_row = QHBoxLayout()
-        for meal in (Meal.DINNER, Meal.BREAKFAST, Meal.LUNCH):
-            check = QCheckBox(meal.value)
-            check.setChecked(meal is selected_meal)
-            self._meal_checks[meal] = check
-            meals_row.addWidget(check)
-        delivery_form.addRow("가입 식종 *", meals_row)
-        self._intake_channel = QComboBox()
-        self._intake_channel.setObjectName("intakeChannel")
-        self._intake_channel.addItem("-", None)
-        for channel in IntakeChannel:
-            self._intake_channel.addItem(channel.value, channel)
-        delivery_form.addRow("접수 경로", self._intake_channel)
-        day = start_date or date.today()
-        self._start_date_edits: dict[Meal, WheelSafeDateEdit] = {}
-        for meal, check in self._meal_checks.items():
-            default_day = next_actual_delivery_date(self._delivery_defaults, meal, day)
-            editor = WheelSafeDateEdit(
-                QDate(default_day.year, default_day.month, default_day.day)
-            )
-            editor.setObjectName(f"deliveryStartDate_{meal.name}")
-            editor.setCalendarPopup(True)
-            editor.setDisplayFormat("yyyy-MM-dd")
-            editor.setEnabled(check.isChecked())
-            check.toggled.connect(editor.setEnabled)
-            allowed = QLabel(
-                "실제 배송: "
-                + _compact_weekday_text(
-                    actual_delivery_weekdays(self._delivery_defaults, meal)
-                )
-            )
-            allowed.setObjectName("muted")
-            row = QHBoxLayout()
-            row.addWidget(editor)
-            row.addWidget(allowed)
-            row.addStretch()
-            delivery_form.addRow(f"{meal.value} 배송 시작일 *", row)
-            self._start_date_edits[meal] = editor
-        # Compatibility for callers that still inspect the initially selected date.
-        self.start_date_edit = self._start_date_edits[selected_meal]
-        self._driver_combos: dict[Meal, QComboBox] = {}
-        state = routing_state or RoutingState()
-        for meal, check in self._meal_checks.items():
-            combo = QComboBox()
-            combo.setObjectName(f"newPerson_driver_{meal.name}")
-            combo.addItem("미지정", None)
-            for driver in state.drivers:
-                label = driver.name + (f" · {driver.telephone}" if driver.telephone else "")
-                combo.addItem(label, driver.driver_id)
-            combo.setEnabled(check.isChecked())
-            check.toggled.connect(combo.setEnabled)
-            self._driver_combos[meal] = combo
-            delivery_form.addRow(f"{meal.value} 배송 담당", combo)
-        delivery_hint = QLabel("선택한 식종의 배송 시작일부터 담당 기사를 적용합니다." if state.drivers else "등록된 기사가 없습니다. 미지정으로 추가한 뒤 배송기사 관리에서 기사를 등록할 수 있습니다.")
-        delivery_hint.setWordWrap(True)
-        delivery_form.addRow(delivery_hint)
-        body_layout.addWidget(delivery_frame)
+        self._registration_day = start_date or date.today()
         scroll.setWidget(body)
         root.addWidget(scroll, 1)
         self._error = QLabel()
@@ -261,20 +182,9 @@ class RosterRowCreateDialog(QDialog):
                 custom_values=custom_values,
             )
             validate_new_profile(profile, self._input_rules)
-            meals = tuple(meal for meal, check in self._meal_checks.items() if check.isChecked())
-            if not meals:
-                raise ValueError("가입 식종을 하나 이상 선택해주세요.")
-            starts_by_meal = {
-                meal: _date_value(self._start_date_edits[meal]) for meal in meals
-            }
-            for meal, starts_on in starts_by_meal.items():
-                validate_actual_delivery_date(
-                    self._delivery_defaults,
-                    meal,
-                    starts_on,
-                    field_name="배송 시작일",
-                )
-            starts_on = min(starts_by_meal.values())
+            meals = ()
+            starts_by_meal = {}
+            starts_on = self._registration_day
             household_id = (
                 self._household_matcher(profile, starts_on)
                 if self._household_matcher is not None else None
@@ -285,11 +195,8 @@ class RosterRowCreateDialog(QDialog):
             return
         self._profile, self._meals = profile, meals
         self._start_date = starts_on
-        assignments = {meal: (self._driver_combos[meal].currentData(), None) for meal in meals if self._driver_combos[meal].currentData() is not None}
         self._request = RosterRowCreateRequest(
-            profile, meals, starts_on, assignments, household_id, {}, starts_by_meal,
-            intake_channel=(IntakeChannel(self._intake_channel.currentData())
-                            if self._intake_channel.currentData() is not None else None),
+            profile, meals, starts_on, {}, household_id, {}, starts_by_meal,
         )
         self.accept()
 
@@ -417,7 +324,7 @@ class RosterRowEditController:
                 explicit_grouping = snapshot is not None and snapshot.entity(GROUPING_KIND, GROUPING_ID) is not None
                 # Explicit criteria are applied after the full draft has been built.
                 household_id = None if explicit_grouping else match_existing_household_id(
-                    request.profile, None, roster, effective_on=min(starts_by_meal.values()),
+                    request.profile, None, roster, effective_on=min(starts_by_meal.values(), default=request.starts_on),
                 )
                 state = routing_state_from_snapshot(snapshot) if snapshot is not None and request.assignments else RoutingState()
                 meal_assignments = []

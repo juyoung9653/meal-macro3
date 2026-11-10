@@ -11,8 +11,10 @@ from pathlib import Path
 from openpyxl import Workbook, load_workbook
 from openpyxl.cell.rich_text import CellRichText, TextBlock
 from openpyxl.cell.text import InlineFont
+from openpyxl.styles import PatternFill
 
-from ..core.diff_format import strip_diff
+from ..core.diff_format import has_diff, strip_diff
+from ..excel.report_template_layout import ReportTemplateLayout, resize_report_body
 from ..core.settings import get_settings
 from ..excel.excel_utils import write_literal_cell
 from ..excel.publication import WorkbookPublicationResult, publish_workbook
@@ -25,6 +27,7 @@ def get_template_path() -> str:
 
 
 TEMPLATE_SHEET = "aaa"
+DIFF_FILL = PatternFill("solid", fgColor="FFC5D9F1")
 
 
 def _format_korean_date(date_str: str) -> str:
@@ -60,6 +63,7 @@ def make_report_publication(
     output_password: str | None = None,
     overwrite: bool = True,
     preserve_template_styles: bool = False,
+    report_layout: ReportTemplateLayout | None = None,
 ) -> WorkbookPublicationResult:
     """Publish one verified report workbook from an explicit template."""
 
@@ -73,7 +77,7 @@ def make_report_publication(
             f"일일식수 템플릿을 찾을 수 없습니다: {tpl_file}"
         )
 
-    if preserve_template_styles:
+    if preserve_template_styles or report_layout is not None:
         from src.excel.delivery_templates import validate_delivery_template
         validate_delivery_template(tpl_file, "delivery_report")
 
@@ -82,6 +86,10 @@ def make_report_publication(
     out = Workbook()
     try:
         src = tpl[TEMPLATE_SHEET]
+        layout = report_layout or ReportTemplateLayout()
+        # Older callers may supply an unstyled, header-only synthetic template.
+        if report_layout is not None or preserve_template_styles:
+            layout.validate(src)
         default = out.active
         if default is not None:
             out.remove(default)
@@ -90,7 +98,7 @@ def make_report_publication(
             ws = out.create_sheet(title=f"{report.day:%Y%m%d}({report.meal})")
             _copy_sheet(src, ws)
             ws["A1"] = _format_korean_date(report.day.strftime("%Y%m%d"))
-            _fill_data(ws, report, preserve_template_styles=preserve_template_styles)
+            _fill_data(ws, report, report_layout=layout, preserve_template_styles=preserve_template_styles)
 
             last_row = ws.max_row
             ws.print_area = f"A1:I{last_row}"
@@ -125,46 +133,26 @@ def _copy_sheet(src, dst) -> None:
     copy_template_sheet(src, dst)
 
 
-def _fill_data(ws, report: DeliveryReport, *, preserve_template_styles=False) -> None:
-    """Keep template rows 4–8 and repeat row 7 for any extra driver rows.
-
-    Row 9 supplies the total row. The legacy style flag is accepted for callers;
-    all reports now preserve the template, including clipped text and print scale.
-    """
-    count = len(report.rows)
-    styles = {r: [copy(ws.cell(r, c)._style) for c in range(1, 10)] for r in range(4, 10)}
-    dimensions = {r: copy(ws.row_dimensions[r]) for r in range(4, 10)}
-    total_row = 4 + count
-    total_label = ws.cell(9, 1).value or "합계"
+def _fill_data(ws, report: DeliveryReport, *, preserve_template_styles=False, report_layout=None) -> None:
+    """Repeat the selected row; only changed counts and driver names override fills."""
+    layout = report_layout or ReportTemplateLayout()
+    total_label = ws.cell(layout.total_row, 1).value or "합계"
     ws["A2"] = f"*아동급식 {report.meal}*"
-    if count > 5:
-        ws.insert_rows(9, count - 5)
-    elif count < 5:
-        ws.delete_rows(total_row + 1, 5 - count)
-    for r in range(4, max(9, total_row) + 1):
-        if r in ws.row_dimensions:
-            del ws.row_dimensions[r]
-
-    def apply_row(row, prototype):
-        dimension = copy(dimensions[prototype])
-        dimension.index = row
-        dimension.parent = ws
-        ws.row_dimensions[row] = dimension
-        for column, style in enumerate(styles[prototype], 1):
-            ws.cell(row, column)._style = copy(style)
-
-    for row_no, item in enumerate(report.rows, 4):
-        apply_row(row_no, row_no if row_no <= 8 else 7)
+    total_row = resize_report_body(ws, layout, len(report.rows))
+    for row_no, item in enumerate(report.rows, layout.body_start):
         write_literal_cell(ws.cell(row_no, 1), item.staff_label)
+        if any(has_diff(raw) for raw in item.household_size_cells):
+            ws.cell(row_no, 1).fill = copy(DIFF_FILL)
         for column, raw in enumerate(item.household_size_cells, 2):
             value = strip_diff(raw)
             ws.cell(row_no, column).value = int(value) if value != "" else ""
+            if has_diff(raw):
+                ws.cell(row_no, column).fill = copy(DIFF_FILL)
         ws.cell(row_no, 7).value = item.person_total
         from src.excel.report_memo import write_report_memo
         write_report_memo(ws.cell(row_no, 8), item.memo, headings=item.memo_headings)
         write_literal_cell(ws.cell(row_no, 9), item.reference_areas)
 
-    apply_row(total_row, 9)
     ws.cell(total_row, 1).value = total_label
     for column, count in enumerate(report.totals.household_counts, 2):
         ws.cell(total_row, column).value = count

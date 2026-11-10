@@ -23,10 +23,8 @@ def validate_delivery_template(path: str | Path, kind: str) -> None:
         wb = load_workbook(path)
         try:
             if kind == "delivery_report":
-                if "aaa" not in wb.sheetnames or wb["aaa"].max_row < 9 or wb["aaa"].max_column < 9:
-                    raise ValueError("일일식수는 aaa 시트와 A1:I9 기본 구조가 필요합니다.")
-                if any(merge.min_row <= 9 and merge.max_row >= 4 for merge in wb["aaa"].merged_cells.ranges):
-                    raise ValueError("일일식수 데이터 영역 4~9행은 셀을 병합하지 마세요.")
+                if "aaa" not in wb.sheetnames or wb["aaa"].max_row < 4 or wb["aaa"].max_column < 9:
+                    raise ValueError("일일식수는 aaa 시트와 A~I열이 필요합니다. 날짜·식종 제목은 1~2행에 두고 본문·합계 행은 양식 확인/수정에서 지정해주세요.")
             elif kind in ("happy_report_dinner", "happy_report_lunch"):
                 ws = wb.worksheets[0]
                 lunch = kind == "happy_report_lunch"

@@ -17,23 +17,17 @@ from tests.test_meal_history_cancellation import ACTOR, DAY, STAMP, Messages, in
 from tests.test_roster_batch_selection import _window, FIRST, SECOND
 
 
-@pytest.mark.parametrize("channel", [None, IntakeChannel.PHONE, IntakeChannel.EMAIL, IntakeChannel.OTHER])
-def test_row_intake_matches_status_editor_and_persists_in_history(session, channel):
+def test_profile_only_registration_has_no_intake_or_meal_history(session):
     app = QApplication.instance() or QApplication([])
     person = initialize(session)
     roster = session.database.current_roster()
     dialog = RosterRowCreateDialog(Meal.DINNER, DAY, delivery_defaults=roster.delivery_defaults)
     status_dialog = MealStatusChangeDialog(roster.person(person), roster, {}, DAY, Meal.DINNER, MealStatus.STOPPED)
-    combo = dialog._intake_channel
-    assert combo.currentData() is status_dialog._intake_channel.currentData() is None
-    assert [combo.itemText(i) for i in range(combo.count())] == [
-        status_dialog._intake_channel.itemText(i) for i in range(status_dialog._intake_channel.count())]
+    assert not hasattr(dialog, "_intake_channel")
     dialog._editors["name"].setText("접수 신규")
-    dialog._meal_checks[Meal.BREAKFAST].setChecked(True)
-    combo.setCurrentIndex(combo.findData(channel))
     dialog._accept_valid()
     request = dialog.request()
-    assert request.intake_channel == channel
+    assert request.intake_channel is None
     class Accepted:
         def __init__(self, *args):
             pass
@@ -52,8 +46,7 @@ def test_row_intake_matches_status_editor_and_persists_in_history(session, chann
     session.close()
     with DatabaseSession.open(path, "test-password") as reopened:
         rows = build_person_meal_history_rows(load_revision_chain(reopened.database, revision_id), added.person_id)
-        assert len(rows) == 2
-        assert {r[2] for r in rows} == {channel.value if channel else "-"}
+        assert rows == ()
     dialog.close()
     status_dialog.close()
     app.processEvents()

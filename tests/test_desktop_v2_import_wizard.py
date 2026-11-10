@@ -64,6 +64,7 @@ def test_vacation_lunch_wizard_accepts_source_without_meal_column(app, tmp_path)
     workbook.close()
 
     wizard = RosterImportWizard(allow_vacation_lunch=True)
+    wizard.set_household_grouping_columns(("name",))  # This fixture groups by its supplied name column.
     from tests.test_vacation_lunch_period_import import calendar_entry
     entry = calendar_entry()
     wizard.set_lunch_calendar_entries((entry,))
@@ -271,6 +272,7 @@ def test_wizard_lists_tables_across_sheets_and_clears_corrections_on_switch(app,
     workbook.close()
 
     wizard = RosterImportWizard()
+    wizard.set_household_grouping_columns(("name",))  # This fixture groups by its supplied name column.
     wizard.path_edit.setText(str(path))
     assert wizard._inspect_source(), wizard.error_label.text()
     assert wizard.table_combo.count() == 2
@@ -512,6 +514,7 @@ def test_correction_value_column_expands_for_long_values(
     _save_with_table(workbook, path)
     workbook.close()
     wizard = RosterImportWizard()
+    wizard.set_household_grouping_columns(("name",))  # This fixture groups by its supplied name column.
     wizard.show()
     wizard.path_edit.setText(str(path))
 
@@ -541,6 +544,7 @@ def test_unmapped_optional_birth_date_does_not_show_preview(
     _save_with_table(workbook, path)
     workbook.close()
     wizard = RosterImportWizard()
+    wizard.set_household_grouping_columns(("name",))  # This fixture groups by its supplied name column.
     wizard.path_edit.setText(str(path))
 
     assert wizard._inspect_source(), wizard.error_label.text()
@@ -616,6 +620,7 @@ def test_excluded_blank_name_blocks_only_vacation_until_corrected(
     _save_with_table(workbook, path)
     workbook.close()
     wizard = RosterImportWizard(allow_vacation_lunch=True)
+    wizard.set_household_grouping_columns(("name",))  # This fixture groups by its supplied name column.
     wizard.purpose_combo.setCurrentIndex(wizard.purpose_combo.findData(purpose))
     from tests.test_vacation_lunch_period_import import calendar_entry
     wizard.set_lunch_calendar_entries((calendar_entry(),))

@@ -89,6 +89,7 @@ def test_wizard_requires_filtered_preview_and_normal_import_ignores_filter(tmp_p
     path=tmp_path/'lunch.xlsx'
     workbook(path,[('대상','20150101','1'),('제외','20150102','0')])
     wizard=RosterImportWizard(allow_vacation_lunch=True)
+    wizard.set_household_grouping_columns(("name",))
     from tests.test_vacation_lunch_period_import import calendar_entry
     wizard.set_lunch_calendar_entries((calendar_entry(),))
     try:

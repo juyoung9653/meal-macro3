@@ -347,6 +347,7 @@ class DesktopStartupController:
             ("current_sheet_export_requested", lambda snapshot: launch(self._run_current_sheet_export, session, window, snapshot)),
             ("driver_households_export_requested", lambda snapshot, dialog: launch(self._run_current_sheet_export, session, window, snapshot, parent=dialog)),
             ("meal_history_cancel_requested", lambda target, expected_revision_id: launch(self._run_meal_history_cancel, session, window, target, expected_revision_id)),
+            ("meal_history_details_requested", lambda target, expected_revision_id: launch(self._run_meal_history_details, session, window, target, expected_revision_id)),
             ("revision_history_requested", lambda: launch(self._run_revision_history, session, window)),
             ("complaint_history_requested", lambda: launch(self._run_complaint_history, session, window)),
             ("driver_replacement_requested", lambda: launch(self._run_driver_replacement, session, window)),
@@ -654,6 +655,9 @@ class DesktopStartupController:
     def _create_person_history(self, session, person, meal, parent):
         try:
             dialog = create_person_history_dialog(session, person, meal, parent)
+            dialog.meal_history_details_requested.connect(lambda target: launch(
+                self._run_meal_history_details, session, parent, target,
+                dialog.expected_revision_id, source_dialog=dialog))
             signal = getattr(dialog, "meal_history_cancel_requested", None)
             if signal is not None:
                 signal.connect(lambda target: launch(
@@ -682,6 +686,23 @@ class DesktopStartupController:
                         source_dialog, "취소는 저장됐지만 이력을 새로고침하지 못했습니다",
                         "취소 내용은 저장되었습니다. 이력 창을 닫고 다시 열어주세요.\n\n" + user_error(error),
                     )
+
+    @dialog_workflow
+    def _run_meal_history_details(self, session, window, target, expected_revision_id, *, source_dialog=None):
+        from .meal_history_details import MealHistoryDetailsController
+        roster = yield from invoke(MealHistoryDetailsController(session).run, target, expected_revision_id,
+                                   parent=source_dialog if source_dialog is not None else window)
+        if roster is not None:
+            self._replace_roster_if_changed(session, window, roster)
+            if source_dialog is not None:
+                try:
+                    if hasattr(source_dialog, "reload_meal_history"):
+                        source_dialog.reload_meal_history(session)
+                    else:
+                        source_dialog.refresh()
+                except Exception as error:
+                    self._message_box.warning(source_dialog, "수정은 저장됐지만 이력을 새로고침하지 못했습니다",
+                        "접수 경로·비고는 저장되었습니다. 이력 창을 닫고 다시 열어주세요.\n\n" + user_error(error))
 
     @dialog_workflow
     def _run_relocation(self, session, window, person_id) -> None:
@@ -718,6 +739,10 @@ class DesktopStartupController:
 
         dialog = MonthlyOverviewDialog(window.table_model.service_day, load,
                             lambda year, month: load(year, month, True), parent=window)
+        dialog.export_requested.connect(lambda snapshot: launch(
+            self._run_current_sheet_export, session, window, snapshot, parent=dialog))
+        dialog.history.details_edit_requested.connect(lambda target, revision: launch(
+            self._run_meal_history_details, session, window, target, revision, source_dialog=dialog))
         yield DialogRequest(dialog)
 
     @dialog_workflow
@@ -756,6 +781,8 @@ class DesktopStartupController:
             )
 
         dialog = MonthlyMealHistoryDialog(window.table_model.service_day, load, parent=window)
+        dialog.details_edit_requested.connect(lambda target, revision: launch(
+            self._run_meal_history_details, session, window, target, revision, source_dialog=dialog))
         yield DialogRequest(dialog)
 
     @dialog_workflow

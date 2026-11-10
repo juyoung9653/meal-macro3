@@ -160,9 +160,12 @@ def test_delete_removes_one_person_and_current_dependents_only():
     assert result.record.metadata.decisions["roster_row_change"]["operation"] == "delete"
 
 
-def test_add_rejects_empty_meals_and_delete_rejects_missing_person():
-    with pytest.raises(ValueError, match="하나 이상의 식종"):
-        build_roster_row_revision(_roster(), add_person=Person(UUID("89000000-0000-0000-0000-000000000006"), PersonProfile("새 대상")), **ARGS)
+def test_add_person_without_meals_and_delete_rejects_missing_person():
+    person = Person(UUID("89000000-0000-0000-0000-000000000006"), PersonProfile("새 대상"))
+    result = build_roster_row_revision(_roster(), add_person=person, **ARGS)
+    assert result.snapshot.person(person.person_id) == person
+    assert not any(item.person_id == person.person_id for item in result.snapshot.enrollments)
+    assert not any(item.person_id == person.person_id for item in result.snapshot.assignments)
     with pytest.raises(KeyError):
         build_roster_row_revision(_roster(), delete_person_id=UUID("89000000-0000-0000-0000-000000000007"), **ARGS)
 

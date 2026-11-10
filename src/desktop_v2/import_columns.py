@@ -142,7 +142,15 @@ class DropArea(QFrame):
         self.heading.setToolTip(label)
         self.heading.setAccessibleName(label + "에 연결")
         self.heading.clicked.connect(lambda: board.assign_selected(target))
-        body.addWidget(self.heading)
+        heading_row = QHBoxLayout()
+        heading_row.setSpacing(3)
+        heading_row.addWidget(self.heading, 1)
+        self.household_badge = QLabel("(가구 묶기 기준)")
+        self.household_badge.setStyleSheet(f"color: {ROUTE}; font-size: 11px; font-weight: 600;")
+        self.household_badge.setToolTip("필수 연결: 이 칼럼에 원본 Excel 열을 연결해주세요.")
+        self.household_badge.setVisible(target in board.household_targets)
+        heading_row.addWidget(self.household_badge)
+        body.addLayout(heading_row)
         self.badge = QLabel("문서 사용")
         self.badge.setStyleSheet(f"color: {ROUTE}; font-size: 11px;")
         self.badge.setVisible(target in board.document_targets)
@@ -209,6 +217,7 @@ class ImportColumnsTable(QWidget):
         self.combos, self._selected, self.source_tiles, self.cards = {}, {}, {}, {}
         self.targets = []
         self.document_targets = frozenset()
+        self.household_targets = frozenset()
         self._selected_source = None
         self._meals_enabled = True
         self.setStyleSheet(f"""
@@ -241,7 +250,7 @@ class ImportColumnsTable(QWidget):
         self.grid_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.sections, self.section_layouts, self.section_counts, self.section_empty = {}, {}, {}, {}
         for key, title, description, background, foreground in (
-            ("document", "문서에 사용하는 칼럼", "청구서·확인서의 항목 연결에 사용하는 칼럼입니다.", ROUTE, SURFACE),
+            ("document", "문서에 사용하는 칼럼", "청구서·확인서·일일식수·배송목록의 기본 연결과 저장한 1·2순위 연결에 사용하는 칼럼입니다. 원본 Excel 열 연결 여부와는 다릅니다.", ROUTE, SURFACE),
             ("meal", "식종", "엑셀의 식종 열 하나 또는 조식·중식·석식 열을 연결하세요.", INK_SOFT, SURFACE),
             ("other", "나머지 칼럼", "문서 사용 칼럼 외의 명단 정보·배송 정보·원본 참조입니다.", CANVAS, TEXT),
         ):
@@ -321,6 +330,11 @@ class ImportColumnsTable(QWidget):
     def set_document_targets(self, targets):
         self.document_targets = frozenset(targets)
         self._order_cards()
+
+    def set_household_targets(self, targets):
+        self.household_targets = frozenset(targets)
+        for key, card in self.cards.items():
+            card.household_badge.setVisible(key in self.household_targets)
 
     def _order_cards(self):
         for layout in self.section_layouts.values():
@@ -461,6 +475,7 @@ class ImportColumnMappingDialog(QDialog):
     def __init__(self, board, parent=None):
         super().__init__(parent)
         self.board = board
+        self.validate_mapping = None
         self.setWindowTitle("엑셀 열과 DB 칼럼 연결")
         self.setWindowModality(Qt.WindowModality.NonModal)
         self.setSizeGripEnabled(True)
@@ -487,6 +502,19 @@ class ImportColumnMappingDialog(QDialog):
         footer.addWidget(self.done_button)
         layout.addLayout(footer)
         self.finished.connect(board._drag_timer.stop)
+
+    def accept(self):
+        validate = self.validate_mapping() if self.validate_mapping is not None else None
+        if validate is not None:
+            try:
+                validate()
+            except ValueError as error:
+                from .user_messages import user_error
+                self.board.error.setText(user_error(error))
+                self.board.error.show()
+                self.scroll.ensureWidgetVisible(self.board.error)
+                return
+        super().accept()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

@@ -92,8 +92,10 @@ def test_export_multi_creates_the_exact_requested_file(
             None,
             None,
         ]
-        assert worksheet["A4"].fill.fill_type is None
-        assert worksheet["B4"].fill.fill_type is None
+        assert worksheet["A4"].fill.fgColor.rgb == "FFC5D9F1"
+        assert worksheet["B4"].fill.fgColor.rgb == "FFC5D9F1"
+        assert worksheet["C4"].fill.fill_type is None
+        assert workbook["20260728(석식)"]["A4"].fill.fill_type is None
         assert [worksheet.cell(5, column).value for column in range(2, 10)] == [
             1,
             0,

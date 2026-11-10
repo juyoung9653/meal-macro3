@@ -142,14 +142,13 @@ def test_wizard_requires_saved_vacation_and_retains_selection_across_modes():
     wizard.set_lunch_calendar_entries((first, newer))
     assert wizard.lunch_calendar_combo.currentData() == newer
     wizard.lunch_calendar_combo.setCurrentIndex(1)
-    wizard.lunch_duplicate_combo.setCurrentIndex(1)
     wizard.purpose_combo.setCurrentIndex(0)
     assert wizard.lunch_filter_panel.isHidden()
     assert not wizard.effective_date_edit.isHidden()
     wizard.purpose_combo.setCurrentIndex(1)
     assert wizard.effective_date_edit.isHidden()
     assert wizard.lunch_calendar_combo.currentData() == first
-    assert wizard.lunch_duplicate_combo.currentData() == LunchDuplicatePolicy.UPDATE
+    assert not hasattr(wizard, "lunch_duplicate_combo")
     wizard.reject()
     assert wizard._selection is None
     wizard.deleteLater()
@@ -230,7 +229,7 @@ def test_controller_persists_selected_record_policy_and_periods_on_reopen(tmp_pa
                 message_box=Messages, actor_provider=lambda: actor).run()
             assert result.completed
         session.database.check_integrity()
-        assert "변경할 내용이 없어" in summaries[-1]
+        assert "중식 기간 반영 2명" in summaries[-1]
     with DatabaseSession.open(path, "test-password") as session:
         roster = session.database.current_roster()
         session.database.check_integrity()
@@ -241,4 +240,4 @@ def test_controller_persists_selected_record_policy_and_periods_on_reopen(tmp_pa
         lunch = session.database.latest_revision().metadata.decisions["vacation_lunch"]
         assert lunch["calendar_revision_id"] == str(entries[0].revision_id)
         assert lunch["duplicate_policy"] == "update"
-        assert lunch["present"] == (str(OMIT),)
+        assert set(lunch["present"]) == {str(KEEP), str(OMIT)}

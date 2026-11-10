@@ -17,6 +17,7 @@ from PySide6.QtWidgets import QComboBox, QDialog, QDialogButtonBox, QFileDialog,
 from src.core.settings import get_settings
 from src.domain.document_templates import DocumentTemplateProfile
 from src.excel.delivery_templates import validate_delivery_template
+from src.excel.report_template_layout import ReportTemplateLayout
 from src.excel.substitute_template_columns import sync_substitute_template
 from src.domain.delivery_substitute import STANDARD_COLUMNS
 from src.services.delivery_template_backup import DeliveryTemplateBackup
@@ -53,21 +54,45 @@ class DeliveryTemplateStore:
         value = self.settings.value(key)
         return Path(value) if isinstance(value, str) and value else None
 
-    def save(self, action: DocumentAction, path: Path | None, *, meal="석식") -> None:
+    def _report_layout_key(self, path):
+        scope = str(Path(path).resolve()).casefold() if path is not None else "default"
+        return self.key + "report_rows/" + sha256(scope.encode("utf-8")).hexdigest()
+
+    def report_layout(self, path=None):
+        raw = self.settings.value(self._report_layout_key(path))
+        if raw is None:
+            return ReportTemplateLayout()
+        try:
+            return ReportTemplateLayout(**json.loads(raw))
+        except (TypeError, ValueError) as error:
+            raise ValueError("저장된 일일식수 행 설정을 읽지 못했습니다. 양식 확인/수정에서 본문·복사 행 설정을 다시 지정해주세요.") from error
+
+    def save(self, action: DocumentAction, path: Path | None, *, meal="석식", report_layout=None) -> None:
         if path is not None:
             validate_delivery_template(path, self.validation_kind(action, meal))
             if action is DocumentAction.DELIVERY_SUBSTITUTE:
                 self.substitute_backup.remember(path)
         key = self.selection_key(action, meal)
-        had_previous = self.settings.contains(key)
-        previous = self.settings.value(key)
-        self.settings.setValue(key, str(path.resolve()) if path else "")
+        updates = {key: str(path.resolve()) if path else ""}
+        if action is DocumentAction.DELIVERY_REPORT and self.profile is DocumentTemplateProfile.SCHOOL_MEAL:
+            layout = report_layout or self.report_layout(path)
+            workbook = load_workbook(path or get_settings().get_report_template_path())
+            try:
+                layout.validate(workbook["aaa"])
+            finally:
+                workbook.close()
+            updates[self._report_layout_key(path)] = json.dumps(layout.manifest())
+        previous = {name: (self.settings.contains(name), self.settings.value(name)) for name in updates}
+        for name, value in updates.items():
+            self.settings.setValue(name, value)
         self.settings.sync()
         if self.settings.status() != QSettings.Status.NoError:
-            if had_previous:
-                self.settings.setValue(key, previous)
-            else:
-                self.settings.remove(key)
+            for name, (existed, value) in previous.items():
+                if existed:
+                    self.settings.setValue(name, value)
+                else:
+                    self.settings.remove(name)
+            self.settings.sync()
             raise OSError("양식 선택을 저장하지 못했습니다. PC 설정 저장 권한을 확인해주세요.")
 
     def create(self, action: DocumentAction, *, meal="석식") -> Path:
@@ -103,17 +128,20 @@ class DeliveryTemplateStore:
                     if name != "aaa":
                         del wb[name]
                 ws = wb["aaa"]
+                rows = self.report_layout()
+                rows.validate(ws)
                 ws["A1"] = "날짜 자동 입력"
-                for row in ws.iter_rows(min_row=4, max_row=9, max_col=9):
+                for row in ws.iter_rows(min_row=rows.body_start, max_row=rows.body_end, max_col=9):
                     for cell in row:
                         cell.value = None
-                ws["A9"] = "합계"
+                for column in range(1, 10):
+                    ws.cell(rows.total_row, column).value = "합계" if column == 1 else None
                 guide = wb.create_sheet("수정 안내")
                 for row, text in enumerate(("aaa 시트: 글꼴·크기·글자색·채우기·테두리를 Excel에서 수정하세요.",
-                    "1~3행은 제목, 4~8행은 담당별 본문입니다. 6번째 담당부터 8행 서식을 반복합니다.",
-                    "9행은 합계 서식입니다. 데이터와 합계 위치는 인원에 맞춰 자동으로 정해집니다.",
-                    "시트 이름과 A:I 칼럼, 1~9행 위치를 유지하세요. 데이터 영역 병합·행/열 삽입은 지원하지 않습니다.",
-                    "모든 일일식수는 열 너비·행 높이·글꼴·색·테두리·정렬·줄바꿈·인쇄 설정을 그대로 사용합니다. 내용이 잘려도 자동으로 늘리거나 줄이지 않습니다.",
+                    "기본은 4~8행 본문·6행 복사 기준·9행 합계입니다. 양식 확인/수정의 본문·복사 행 설정에서 바꿀 수 있습니다.",
+                    "기사가 많으면 복사 기준 행 바로 아래에 행을 삽입합니다. 이후 본문과 끝 테두리·합계·하단 문구도 함께 내려갑니다.",
+                    "aaa 시트와 A:I 칼럼, 1~2행 날짜·식종 제목을 유지하세요. 행을 옮기면 본문·합계 위치를 다시 지정하고 해당 영역은 병합하지 마세요.",
+                    "열 너비·행 높이·글꼴·테두리·정렬·인쇄 설정을 유지합니다. 이전 배송일과 가구 수가 다른 칸과 기사 이름은 연한 파란색으로 강조합니다.",
                     "Excel에서 저장하고 닫은 뒤 이 양식 사용을 누르세요. 기존 생성 파일은 바뀌지 않습니다."), 1):
                     guide.cell(row, 1, text)
                 guide.column_dimensions["A"].width = 120
@@ -136,6 +164,7 @@ class DeliveryTemplateDialog(QDialog):
         self.meal = "석식"
         self.path = self.store.selected(action)
         self._saved_path = self.path
+        self._report_layouts = {}
         self._opener = opener or QDesktopServices.openUrl
         self.setWindowTitle(f"{self.profile.value} · {action.label} 양식 확인/수정")
         self.resize(720, 430)
@@ -167,6 +196,16 @@ class DeliveryTemplateDialog(QDialog):
             button.setObjectName("quietAction")
             button.clicked.connect(handler)
             layout.addWidget(button)
+        if self.profile is DocumentTemplateProfile.SCHOOL_MEAL and action is DocumentAction.DELIVERY_REPORT:
+            self.resize(720, 560)
+            self.setMinimumHeight(530)
+            self.report_rows_label = QLabel()
+            self.report_rows_label.setWordWrap(True)
+            layout.addWidget(self.report_rows_label)
+            button = QPushButton("본문·복사 행 설정")
+            button.setObjectName("quietAction")
+            button.clicked.connect(self._edit_report_rows)
+            layout.addWidget(button)
         if action is DocumentAction.DELIVERY_SUBSTITUTE:
             limits = QLabel("자유 양식은 값을 넣을 셀에 {성명}, {주소}, {배송일자}처럼 플레이스홀더를 입력하세요. "
                             "배송목록을 만들 때 각 플레이스홀더에 넣을 항목과 복사할 행을 선택합니다. 플레이스홀더가 가장 많은 행을 자동 제안하며 Excel 서식을 그대로 사용합니다. "
@@ -189,6 +228,34 @@ class DeliveryTemplateDialog(QDialog):
 
     def _refresh(self):
         self.path_label.setText(str(self.path) if self.path else f"현재 선택: {self.profile.value} 기본 양식")
+        if hasattr(self, "report_rows_label"):
+            rows = self._report_layout()
+            self.report_rows_label.setText(f"본문 {rows.body_start}~{rows.body_end}행 · 복사 기준 {rows.copy_row}행 · 합계 {rows.total_row}행")
+
+    def _report_layout(self):
+        if self.path not in self._report_layouts:
+            self._report_layouts[self.path] = self.store.report_layout(self.path)
+        return self._report_layouts[self.path]
+
+    def _edit_report_rows(self):
+        from .report_template_layout import ReportTemplateLayoutDialog
+        try:
+            path = self.path or Path(get_settings().get_report_template_path())
+            validate_delivery_template(path, "delivery_report")
+            dialog = ReportTemplateLayoutDialog(path, self._report_layout(), self)
+        except Exception as error:
+            QMessageBox.critical(self, "행 설정을 열지 못했습니다", user_error(error))
+            return
+        dialog.template_path = self.path
+        dialog.accepted.connect(self._apply_report_rows)
+        dialog.finished.connect(dialog.deleteLater)
+        self._report_rows_dialog = dialog
+        dialog.open()
+
+    def _apply_report_rows(self):
+        dialog = self._report_rows_dialog
+        self._report_layouts[dialog.template_path] = dialog.selection()
+        self._refresh()
 
     def _change_meal(self, index):
         requested = self.meal_combo.itemData(index)
@@ -235,7 +302,10 @@ class DeliveryTemplateDialog(QDialog):
     def _open(self):
         try:
             if self.path is None:
+                rows = self._report_layout() if hasattr(self, "report_rows_label") else None
                 self.path = self.store.create(self.action, meal=self.meal)
+                if rows is not None:
+                    self._report_layouts[self.path] = rows
                 self._refresh()
             if self.action is DocumentAction.DELIVERY_SUBSTITUTE:
                 self._sync_substitute()
@@ -265,7 +335,8 @@ class DeliveryTemplateDialog(QDialog):
     def accept(self):
         try:
             self._sync_substitute()
-            self.store.save(self.action, self.path, meal=self.meal)
+            options = {"report_layout": self._report_layout()} if hasattr(self, "report_rows_label") else {}
+            self.store.save(self.action, self.path, meal=self.meal, **options)
         except Exception as error:
             QMessageBox.critical(self, "양식을 저장하지 못했습니다", user_error(error))
             return

@@ -1,5 +1,5 @@
 """Compact entry points for related roster work."""
-from PySide6.QtCore import QSignalBlocker, Qt
+from PySide6.QtCore import QSignalBlocker, Qt, Signal
 from PySide6.QtWidgets import (QComboBox, QDialog, QHBoxLayout, QLabel, QListWidget, QMenu,
     QListWidgetItem, QPushButton, QSpinBox, QTabWidget, QVBoxLayout, QWidget, QWidgetAction)
 
@@ -51,6 +51,8 @@ class ExportChoiceDialog(QDialog):
 
 
 class MonthlyOverviewDialog(QDialog):
+    export_requested = Signal(object)
+
     def __init__(self, selected_day, load_statistics, load_history, parent=None):
         super().__init__(parent)
         self.resize(940, 710)
@@ -78,7 +80,14 @@ class MonthlyOverviewDialog(QDialog):
         self.tabs.addTab(self.statistics, "식수")
         self.tabs.addTab(self.history, "식종 변경")
         root.addWidget(self.tabs, 1)
-        root.addWidget(_button("닫기", self.accept))
+        actions = QHBoxLayout()
+        self.export_button = _button("현재 탭 Excel 내보내기", self._export)
+        self.export_button.setToolTip("현재 탭에서 보이는 내용을 필터·정렬 순서대로 저장합니다.")
+        actions.addWidget(self.export_button)
+        actions.addStretch()
+        actions.addWidget(_button("닫기", self.accept))
+        root.addLayout(actions)
+        self.statistics.basis.currentIndexChanged.connect(self._update_export_enabled)
         self.year.valueChanged.connect(self.refresh)
         self.month.currentIndexChanged.connect(self.refresh)
         self.tabs.currentChanged.connect(self.refresh)
@@ -98,6 +107,31 @@ class MonthlyOverviewDialog(QDialog):
             page.year.setValue(self.year.value())
             page.month.setCurrentIndex(self.month.currentIndex())
         page.refresh()
+        self._update_export_enabled()
+
+    def _update_export_enabled(self, *_):
+        self.export_button.setEnabled(self.tabs.currentWidget()._loaded)
+
+    def export_snapshot(self):
+        from .current_sheet_export import CurrentSheetSnapshot, TextWorkbookSnapshot
+        page = self.tabs.currentWidget()
+        if not page._loaded:
+            return None
+        title = f"{self.year.value():04d}-{self.month.currentData():02d} {self.tabs.tabText(self.tabs.currentIndex())}"
+        if page is self.statistics:
+            title += " " + ("배송일 기준" if page.basis.currentIndex() == 0 else "식사일 기준")
+        table = page.table
+        columns = tuple(table.horizontalHeader().logicalIndex(i) for i in range(table.columnCount())
+                        if not table.isColumnHidden(table.horizontalHeader().logicalIndex(i)))
+        headers = tuple(table.horizontalHeaderItem(column).text() for column in columns)
+        rows = tuple(tuple(table.item(row, column).text() for column in columns)
+                     for row in range(table.rowCount()) if not table.isRowHidden(row))
+        return TextWorkbookSnapshot(title, (CurrentSheetSnapshot(title, headers, rows),))
+
+    def _export(self):
+        snapshot = self.export_snapshot()
+        if snapshot is not None:
+            self.export_requested.emit(snapshot)
 
 
 class OperatingScheduleDialog(QDialog):

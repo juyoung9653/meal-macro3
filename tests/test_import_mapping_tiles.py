@@ -145,13 +145,15 @@ def test_document_priority_uses_effective_mapping_and_fallbacks(monkeypatch):
     specs = {
         "invoice": SimpleNamespace(defaults={"이름": "성명", "주소": priority.FULL_ADDRESS_FIELD, "메모": "비고"}, targets=("이름", "주소", "메모")),
         "confirmation": SimpleNamespace(defaults={"연락처": "핸드폰"}, targets=("연락처",)),
+        "daily_report": SimpleNamespace(defaults={"region": "custom:daily"}, targets=("region",)),
+        "substitute": SimpleNamespace(defaults={"석식:name": "custom:delivery"}, targets=("석식:name",)),
     }
     monkeypatch.setattr(priority, "mapping_editor_spec", lambda profile, kind, **kwargs: specs[kind])
     monkeypatch.setattr(priority, "load_mapping_overrides", lambda snapshot, profile, kind: {"메모": "", "이름": "custom:stable-id", "삭제된 항목": "학교명"} if kind == "invoice" else {})
     monkeypatch.setattr(priority, "load_mapping_fallbacks", lambda snapshot, profile, kind: {"연락처": "전화번호", "삭제된 항목": "학년"} if kind == "confirmation" else {})
     targets, unavailable = priority.document_import_targets(object())
     assert not unavailable
-    assert targets == {"custom:stable-id", "profile:road_address", "profile:detail_address", "profile:mobile_phone", "profile:telephone"}
+    assert targets == {"custom:daily", "custom:delivery", "custom:stable-id", "profile:road_address", "profile:detail_address", "profile:mobile_phone", "profile:telephone"}
 
 
 def test_unavailable_template_preserves_saved_priority_without_blocking(monkeypatch):
@@ -161,7 +163,7 @@ def test_unavailable_template_preserves_saved_priority_without_blocking(monkeypa
     monkeypatch.setattr(priority, "mapping_editor_spec", unavailable)
     monkeypatch.setattr(priority, "load_mapping_overrides", lambda *args: {"연락처": "핸드폰"})
     monkeypatch.setattr(priority, "load_mapping_fallbacks", lambda *args: {})
-    assert priority.document_import_targets(object()) == (frozenset({"profile:mobile_phone"}), ("청구서", "확인서"))
+    assert priority.document_import_targets(object()) == (frozenset({"profile:mobile_phone"}), ("청구서", "확인서", "일일식수", "배송목록"))
 
 
 def test_no_document_profile_has_no_invented_priority(monkeypatch):
@@ -193,6 +195,7 @@ def test_current_templates_and_legacy_confirmation_aliases(monkeypatch):
 
 def test_mapping_opens_only_on_request_and_preserves_edits_on_close(app, tmp_path):
     wizard = wizard_for(source(tmp_path / "새 명단.xlsx"), roster())
+    wizard.set_household_grouping_columns(("name",))
     wizard._set_page(1)
     wizard.show()
     app.processEvents()

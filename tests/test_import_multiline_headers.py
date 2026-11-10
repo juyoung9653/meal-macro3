@@ -192,6 +192,7 @@ def test_explicit_header_start_and_selected_sheet_reach_the_parser(tmp_path, mak
     book.save(path)
     book.close()
     wizard = make_wizard()
+    wizard.set_household_grouping_columns(("name",))
     wizard.path_edit.setText(str(path))
     wizard.source_layout_combo.setCurrentIndex(wizard.source_layout_combo.findData("two-row"))
     wizard.header_row_spin.setValue(4)
