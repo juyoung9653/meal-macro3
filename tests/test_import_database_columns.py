@@ -8,6 +8,8 @@ import pytest
 from PySide6.QtWidgets import QApplication
 from openpyxl.worksheet.table import Table
 
+from tests.import_wizard_helpers import select_single_header_source
+
 from src.desktop_v2.import_wizard import RosterImportWizard
 from src.domain.roster import CustomFieldDefinition, CustomFieldType, Person, PersonProfile, RosterSnapshot
 from src.importing.contracts import ProfileField, ImportMappingProfile
@@ -47,7 +49,7 @@ def roster():
 def wizard_for(path, current, *, profiles=(), connect=True):
     wizard = RosterImportWizard(existing_profiles=profiles)
     wizard.set_database_columns(current, {"name": "대상자", "school": "재학 학교"})
-    wizard.path_edit.setText(str(path))
+    select_single_header_source(wizard, path)
     assert wizard._inspect_source(), wizard.error_label.text()
     assert all(combo.currentData() == "ignore" for combo in wizard.destination_table.combos.values())
     if connect:
@@ -72,7 +74,7 @@ def test_existing_import_starts_unmapped_even_with_saved_profile(app, tmp_path, 
     path = source(tmp_path / "manual.xlsx",
                   headers=("성명", "생년월일", "식종", "원본 코드", "수량", "확인일", "분류", "새 메모"))
     initial = RosterImportWizard()
-    initial.path_edit.setText(str(path))
+    select_single_header_source(initial, path)
     assert initial._inspect_source()
     original = initial._build_profile()
     assert original.profile_columns[ProfileField.NAME] == "A"
@@ -83,7 +85,7 @@ def test_existing_import_starts_unmapped_even_with_saved_profile(app, tmp_path, 
     wizard.set_database_columns(roster())
     if lunch:
         wizard.purpose_combo.setCurrentIndex(wizard.purpose_combo.findData(ImportPurpose.VACATION_LUNCH))
-    wizard.path_edit.setText(str(path))
+    select_single_header_source(wizard, path)
     try:
         assert wizard._inspect_source()
         assert all(combo.currentData() == "ignore" for combo in wizard.destination_table.combos.values())
@@ -248,7 +250,7 @@ def test_switching_import_purpose_preserves_manual_mapping_without_meal_targets(
     current = roster()
     wizard = RosterImportWizard(allow_vacation_lunch=True)
     wizard.set_database_columns(current, {"name": "대상자"})
-    wizard.path_edit.setText(str(source(tmp_path / "modes.xlsx")))
+    select_single_header_source(wizard, source(tmp_path / "modes.xlsx"))
     assert wizard._inspect_source()
     try:
         key = "custom:" + str(current.custom_fields[0].definition_id)
@@ -301,7 +303,7 @@ def test_custom_display_alias_is_used_without_changing_definition(app, tmp_path)
                   rows=(("합성 아동", "20150302", "석식", "007"),))
     wizard = RosterImportWizard()
     wizard.set_database_columns(current, {"name": "대상자", key: "현장 관리번호"})
-    wizard.path_edit.setText(str(path))
+    select_single_header_source(wizard, path)
     try:
         assert wizard._inspect_source()
         assert wizard.destination_table.combos["D"].currentData() == "ignore"

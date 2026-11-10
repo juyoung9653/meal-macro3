@@ -386,6 +386,29 @@ class _CellInput:
     number_format: str
 
 
+
+@dataclass(frozen=True, slots=True)
+class WorkbookSheetPreview:
+    sheet_names: tuple[str, ...]
+    selected_sheet: str
+    rows: tuple[WorkbookPreviewRow, ...]
+
+
+def preview_workbook_sheet(path: str | Path, *, password: str | None = None,
+                           sheet_name: str | None = None, start_row: int = 1,
+                           row_limit: int = 200) -> WorkbookSheetPreview:
+    """Show original rows, including blanks and titles, before choosing a header."""
+    start_row = _positive_int(start_row, "미리보기 시작 행")
+    row_limit = _positive_int(row_limit, "미리보기 행 수")
+    with _open_workbook(_source_path(path), password or "") as workbook:
+        sheet = _select_sheet(workbook, sheet_name)
+        rows = tuple(WorkbookPreviewRow(number, tuple(_display_value(value) for value in values))
+                     for number, values in enumerate(sheet.iter_rows(
+                         min_row=start_row, max_row=min(sheet.max_row or (start_row + row_limit - 1), start_row + row_limit - 1),
+                         max_col=min(sheet.max_column or _MAX_COLUMNS, _MAX_COLUMNS), values_only=True), start_row))
+        return WorkbookSheetPreview(tuple(workbook.sheetnames), sheet.title, rows)
+
+
 def inspect_workbook(
     path: str | Path,
     *,

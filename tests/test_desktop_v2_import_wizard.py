@@ -1,7 +1,7 @@
 """Guided first-run workbook route tests."""
 
 from __future__ import annotations
-from tests.import_wizard_helpers import advance_wizard
+from tests.import_wizard_helpers import advance_wizard, select_single_header_source
 
 import os
 from contextlib import contextmanager
@@ -71,7 +71,7 @@ def test_vacation_lunch_wizard_accepts_source_without_meal_column(app, tmp_path)
     wizard.purpose_combo.setCurrentIndex(
         wizard.purpose_combo.findData(ImportPurpose.VACATION_LUNCH)
     )
-    wizard.path_edit.setText(str(path))
+    select_single_header_source(wizard, path)
     assert wizard._inspect_source(), wizard.error_label.text()
     advance_wizard(wizard)
     advance_wizard(wizard)
@@ -119,7 +119,7 @@ def _combined(path: Path, meal: str = "조식 / 중식") -> Path:
 def test_unchecked_additional_column_survives_saved_profile(app, tmp_path):
     path = _combined(tmp_path / "additional.xlsx")
     wizard = RosterImportWizard()
-    wizard.path_edit.setText(str(path))
+    select_single_header_source(wizard, path)
     assert wizard._inspect_source(), wizard.error_label.text()
     extra = wizard.ignored_columns_list.item(4)
     assert extra.checkState() == Qt.CheckState.Checked
@@ -135,7 +135,7 @@ def test_unchecked_additional_column_survives_saved_profile(app, tmp_path):
     wizard.close()
 
     reused = RosterImportWizard(existing_profiles=(stored,))
-    reused.path_edit.setText(str(path))
+    select_single_header_source(reused, path)
     assert reused._inspect_source()
     assert reused.ignored_columns_list.item(4).checkState() == Qt.CheckState.Unchecked
     assert reused._build_profile() == profile
@@ -148,7 +148,7 @@ def test_unchecked_additional_column_survives_saved_profile(app, tmp_path):
 def test_only_active_meal_controls_reserve_source_columns(app, tmp_path):
     path = _combined(tmp_path / "dormant.xlsx")
     wizard = RosterImportWizard(allow_vacation_lunch=True)
-    wizard.path_edit.setText(str(path))
+    select_single_header_source(wizard, path)
     assert wizard._inspect_source(), wizard.error_label.text()
     # A remembered flag control is inactive while combined mode is selected.
     wizard._set_combo(wizard.breakfast_combo, "E")
@@ -174,7 +174,7 @@ def test_only_active_meal_controls_reserve_source_columns(app, tmp_path):
 def test_saved_header_name_custom_mapping_restores_values_and_id(app, tmp_path):
     path = _combined(tmp_path / "saved-header.xlsx")
     initial = RosterImportWizard()
-    initial.path_edit.setText(str(path))
+    select_single_header_source(initial, path)
     assert initial._inspect_source()
     initial.ignored_columns_list.item(4).setCheckState(Qt.CheckState.Unchecked)
     profile = initial._build_profile()
@@ -183,7 +183,7 @@ def test_saved_header_name_custom_mapping_restores_values_and_id(app, tmp_path):
     stored = StoredImportProfile(profile, initial._inspection.header_fingerprint)
     initial.close()
     restored = RosterImportWizard(existing_profiles=(stored,))
-    restored.path_edit.setText(str(path))
+    select_single_header_source(restored, path)
     assert restored._inspect_source()
     assert restored.ignored_columns_list.item(4).checkState() == Qt.CheckState.Unchecked
     selected = restored._build_profile()
@@ -239,10 +239,12 @@ def test_wizard_requires_table_and_clears_old_preview_on_file_change(app, tmp_pa
 
     wizard = RosterImportWizard()
     assert wizard.purpose_combo.parent() is None
-    wizard.path_edit.setText(str(table_path))
+    select_single_header_source(wizard, table_path)
+    wizard.source_layout_combo.setCurrentIndex(wizard.source_layout_combo.findData("auto"))
     assert wizard._inspect_source(), wizard.error_label.text()
     assert wizard.raw_table.rowCount() == 1
-    wizard.path_edit.setText(str(plain_path))
+    select_single_header_source(wizard, plain_path)
+    wizard.source_layout_combo.setCurrentIndex(wizard.source_layout_combo.findData("auto"))
     assert wizard.inspection is None
     assert wizard.raw_table.rowCount() == 0
     assert not wizard._inspect_source()
@@ -273,7 +275,8 @@ def test_wizard_lists_tables_across_sheets_and_clears_corrections_on_switch(app,
 
     wizard = RosterImportWizard()
     wizard.set_household_grouping_columns(("name",))  # This fixture groups by its supplied name column.
-    wizard.path_edit.setText(str(path))
+    select_single_header_source(wizard, path)
+    wizard.source_layout_combo.setCurrentIndex(wizard.source_layout_combo.findData("auto"))
     assert wizard._inspect_source(), wizard.error_label.text()
     assert wizard.table_combo.count() == 2
     assert wizard.table_combo.currentData() == "명단"
@@ -321,7 +324,8 @@ def test_wizard_can_select_valid_table_after_unsupported_default(app, tmp_path, 
     monkeypatch.setattr(workbook_module, "_open_workbook", counted_open)
 
     wizard = RosterImportWizard()
-    wizard.path_edit.setText(str(path))
+    select_single_header_source(wizard, path)
+    wizard.source_layout_combo.setCurrentIndex(wizard.source_layout_combo.findData("auto"))
     assert not wizard._inspect_source()
     assert open_count == 1
     assert "헤더가 없습니다" in wizard.error_label.text()
@@ -347,7 +351,8 @@ def test_wizard_keeps_named_default_selected_when_its_layout_is_unsupported(app,
     workbook.close()
 
     wizard = RosterImportWizard()
-    wizard.path_edit.setText(str(path))
+    select_single_header_source(wizard, path)
+    wizard.source_layout_combo.setCurrentIndex(wizard.source_layout_combo.findData("auto"))
     assert not wizard._inspect_source()
     assert wizard.table_combo.currentData() == "명단"
     assert "헤더가 없습니다" in wizard.error_label.text()
@@ -362,7 +367,7 @@ def test_clean_import_validates_and_accepts_without_preview(
 ):
     path = _combined(tmp_path / "existing.xlsx")
     wizard = RosterImportWizard()
-    wizard.path_edit.setText(str(path))
+    select_single_header_source(wizard, path)
 
     assert wizard._inspect_source(), wizard.error_label.text()
     assert wizard.inspection is not None
@@ -420,7 +425,7 @@ def test_preview_error_can_be_fixed_and_rechecked_inside_the_wizard(
     wizard.setModal(modal)
     wizard.show()
     app.processEvents()
-    wizard.path_edit.setText(str(path))
+    select_single_header_source(wizard, path)
     assert wizard._inspect_source(), wizard.error_label.text()
     advance_wizard(wizard)
     advance_wizard(wizard)
@@ -472,7 +477,7 @@ def test_correction_dialog_fits_a_compact_screen_without_clipping_actions(
     wizard = RosterImportWizard()
     wizard.resize(800, 540)
     wizard.show()
-    wizard.path_edit.setText(str(path))
+    select_single_header_source(wizard, path)
 
     assert wizard._inspect_source(), wizard.error_label.text()
     advance_wizard(wizard)
@@ -516,7 +521,7 @@ def test_correction_value_column_expands_for_long_values(
     wizard = RosterImportWizard()
     wizard.set_household_grouping_columns(("name",))  # This fixture groups by its supplied name column.
     wizard.show()
-    wizard.path_edit.setText(str(path))
+    select_single_header_source(wizard, path)
 
     assert wizard._inspect_source(), wizard.error_label.text()
     advance_wizard(wizard)
@@ -545,7 +550,7 @@ def test_unmapped_optional_birth_date_does_not_show_preview(
     workbook.close()
     wizard = RosterImportWizard()
     wizard.set_household_grouping_columns(("name",))  # This fixture groups by its supplied name column.
-    wizard.path_edit.setText(str(path))
+    select_single_header_source(wizard, path)
 
     assert wizard._inspect_source(), wizard.error_label.text()
     assert wizard._mapping_combos[ProfileField.BIRTH_DATE].currentData() is None
@@ -624,7 +629,7 @@ def test_excluded_blank_name_blocks_only_vacation_until_corrected(
     wizard.purpose_combo.setCurrentIndex(wizard.purpose_combo.findData(purpose))
     from tests.test_vacation_lunch_period_import import calendar_entry
     wizard.set_lunch_calendar_entries((calendar_entry(),))
-    wizard.path_edit.setText(str(path))
+    select_single_header_source(wizard, path)
 
     assert wizard._inspect_source(), wizard.error_label.text()
     advance_wizard(wizard)
@@ -663,7 +668,8 @@ def test_government_headers_get_reviewable_defaults_and_private_columns_ignored(
 ):
     path = _survey(tmp_path / "survey.xlsx")
     wizard = RosterImportWizard()
-    wizard.path_edit.setText(str(path))
+    select_single_header_source(wizard, path)
+    wizard.source_layout_combo.setCurrentIndex(wizard.source_layout_combo.findData("auto"))
 
     assert wizard._inspect_source(), wizard.error_label.text()
     assert wizard._build_profile().source_kind == "survey-xlsx"
@@ -717,7 +723,7 @@ def test_password_entry_retries_the_protected_workbook_without_reload_click(
 
     monkeypatch.setattr(import_wizard_module, "inspect_workbook", password_gate)
     wizard = RosterImportWizard()
-    wizard.path_edit.setText(str(path))
+    select_single_header_source(wizard, path)
 
     assert not wizard._inspect_source()
     assert wizard.inspection is None
@@ -761,7 +767,7 @@ def test_password_enter_does_not_reopen_the_file_picker(
     )
     wizard = RosterImportWizard()
     wizard.show()
-    wizard.path_edit.setText(str(path))
+    select_single_header_source(wizard, path)
 
     assert not wizard._inspect_source()
     assert wizard.inspection is None
@@ -805,7 +811,7 @@ def test_back_from_preview_reuses_password_for_the_same_workbook(
     monkeypatch.setattr(import_wizard_module, "inspect_workbook", password_gate)
     monkeypatch.setattr(import_wizard_module, "parse_workbook", parse_gate)
     wizard = RosterImportWizard()
-    wizard.path_edit.setText(str(path))
+    select_single_header_source(wizard, path)
     wizard.password_edit.setText(password)
 
     assert wizard._inspect_source(), wizard.error_label.text()
@@ -846,7 +852,7 @@ def test_editing_a_proposed_profile_creates_next_version(
     wizard = RosterImportWizard(
         existing_profiles=(StoredImportProfile(original, inspection.header_fingerprint),)
     )
-    wizard.path_edit.setText(str(path))
+    select_single_header_source(wizard, path)
     assert wizard._inspect_source(), wizard.error_label.text()
 
     assert wizard._build_profile().name == "저장된 설정"
@@ -929,7 +935,8 @@ def test_workbook_loading_banner_keeps_the_window_responsive(
 
     monkeypatch.setattr(import_wizard_module, "inspect_workbook", delayed_inspect)
     wizard = RosterImportWizard()
-    wizard.path_edit.setText(str(path))
+    select_single_header_source(wizard, path)
+    wizard.source_layout_combo.setCurrentIndex(wizard.source_layout_combo.findData("auto"))
 
     def observe_and_release() -> None:
         observed.append(
@@ -958,7 +965,7 @@ def test_preview_loading_uses_its_own_clear_busy_message(
 ):
     path = _combined(tmp_path / "slow-preview.xlsx")
     wizard = RosterImportWizard()
-    wizard.path_edit.setText(str(path))
+    select_single_header_source(wizard, path)
     assert wizard._inspect_source(), wizard.error_label.text()
     advance_wizard(wizard)
     assert wizard.page_stack.currentIndex() == 1
@@ -1024,7 +1031,8 @@ def test_legacy_address_fallback_returns_to_unmapped_pool(app, tmp_path):
     from dataclasses import replace
     path = _survey(tmp_path / "legacy-address.xlsx")
     original = RosterImportWizard()
-    original.path_edit.setText(str(path))
+    select_single_header_source(original, path)
+    original.source_layout_combo.setCurrentIndex(original.source_layout_combo.findData("auto"))
     assert original._inspect_source()
     base = original._build_profile()
     stored_profile = replace(base, version=2,
@@ -1033,7 +1041,8 @@ def test_legacy_address_fallback_returns_to_unmapped_pool(app, tmp_path):
     saved = StoredImportProfile(stored_profile, original.inspection.header_fingerprint)
     original.close()
     wizard = RosterImportWizard(existing_profiles=(saved,))
-    wizard.path_edit.setText(str(path))
+    select_single_header_source(wizard, path)
+    wizard.source_layout_combo.setCurrentIndex(wizard.source_layout_combo.findData("auto"))
     assert wizard._inspect_source()
     current = wizard._build_profile()
     assert current.profile_columns[ProfileField.ROAD_ADDRESS] == "N"
@@ -1049,7 +1058,7 @@ def test_legacy_address_fallback_returns_to_unmapped_pool(app, tmp_path):
 def test_correction_editors_fit_equal_height_rows(app, tmp_path, multiple_errors):
     from tests.test_import_row_exclusions import source
     wizard = RosterImportWizard()
-    wizard.path_edit.setText(str(source(tmp_path / "row-height.xlsx", multiple_errors=multiple_errors)))
+    select_single_header_source(wizard, source(tmp_path / "row-height.xlsx", multiple_errors=multiple_errors))
     assert wizard._inspect_source()
     advance_wizard(wizard)
     advance_wizard(wizard)
@@ -1069,4 +1078,70 @@ def test_correction_editors_fit_equal_height_rows(app, tmp_path, multiple_errors
             assert editor.height() >= editor.minimumSizeHint().height()
             editor_heights.append(editor.height())
         assert len(set(editor_heights)) == 1
+    wizard.close()
+
+
+def test_manual_header_click_preserves_original_rows_and_imports_below_header(app, tmp_path):
+    path = tmp_path / "manual.xlsx"
+    book = openpyxl.Workbook()
+    sheet = book.active
+    sheet.title = "원본"
+    sheet.append(["합성 명단 안내"])
+    sheet.append([])
+    sheet.append(["성명", "핸드폰", "식종"])
+    sheet.append(["합성아동", "01012345678", "석식"])
+    other = book.create_sheet("다른 시트")
+    other.append(["안내"])
+    other.append([])
+    other.append(["성명", "핸드폰", "식종"])
+    other.append(["다른아동", "01099998888", "석식"])
+    book.save(path)
+    book.close()
+    before = path.read_bytes()
+    wizard = RosterImportWizard()
+    select_single_header_source(wizard, path)
+    assert wizard.source_layout_combo.currentData() == "manual"
+    assert wizard._inspect_source()
+    assert wizard.raw_table.item(0, 0).text() == "합성 명단 안내"
+    assert wizard.raw_table.rowCount() == 4
+    wizard.show()
+    app.processEvents()
+    QTest.mouseClick(wizard.raw_table.viewport(), Qt.MouseButton.LeftButton,
+                    pos=wizard.raw_table.visualItemRect(wizard.raw_table.item(2, 1)).center())
+    assert wizard.inspection.header_row == 3
+    assert wizard._mapping_combos[ProfileField.NAME].currentData() == "A"
+    assert wizard.raw_table.verticalHeaderItem(2).text() == "3 · 헤더"
+    advance_wizard(wizard)
+    advance_wizard(wizard)
+    assert wizard.preview.can_continue, wizard.error_label.text()
+    assert [person.name for person in wizard.preview.observations] == ["합성아동"]
+    assert wizard.preview.profile.data_start_row == 4
+    wizard._set_page(0)
+    wizard._cell_overrides[(4, "A")] = "수정값"
+    wizard.table_combo.setCurrentIndex(wizard.table_combo.findData("다른 시트"))
+    assert wizard.inspection.selected_sheet == "다른 시트"
+    assert not wizard._cell_overrides
+    wizard.raw_table.verticalHeader().sectionClicked.emit(1)
+    assert wizard.inspection is None
+    assert wizard.raw_table.rowCount() == 4
+    wizard.raw_table.verticalHeader().sectionClicked.emit(2)
+    assert wizard.inspection.header_row == 3
+    assert path.read_bytes() == before
+    wizard.close()
+
+
+def test_manual_preview_shows_sheet_when_first_row_is_blank(app, tmp_path):
+    path = tmp_path / "blank-first.xlsx"
+    book = openpyxl.Workbook()
+    book.active.cell(4, 1, "성명")
+    book.active.cell(5, 1, "합성아동")
+    book.save(path)
+    book.close()
+    wizard = RosterImportWizard()
+    select_single_header_source(wizard, path)
+    assert not wizard._inspect_source()
+    assert wizard.raw_table.item(3, 0).text() == "성명"
+    wizard.raw_table.cellClicked.emit(3, 0)
+    assert wizard.inspection.header_row == 4
+    assert wizard.inspection.preview_rows[0].values == ("합성아동",)
     wizard.close()

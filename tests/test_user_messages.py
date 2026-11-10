@@ -187,3 +187,28 @@ def test_exception_aliases_cannot_bypass_ui_error_formatter():
                     if isinstance(call.func.value, ast.Name) and "log" in call.func.value.id.lower():
                         continue
                     assert not any(exposes(arg, handler.name) for arg in call.args), (path, call.lineno)
+
+
+def test_password_failure_is_separate_from_file_and_credential_damage():
+    from src.storage.database_credentials import CredentialUnlockError, CredentialFormatError
+    from src.storage.encrypted_database import DatabaseUnlockError
+    from src.desktop_v2.database_access import _friendly_error
+    password = CredentialUnlockError("비밀번호가 올바르지 않거나 DB 비밀번호 정보가 손상되었습니다.")
+    message = user_error(password)
+    assert "비밀번호" in message and "다시 입력" in message
+    assert "손상" not in message and "복원" not in message
+    assert _friendly_error(password) == message
+    damaged = DatabaseUnlockError("file is not a database")
+    assert "두 파일" in user_error(damaged) and "백업" in user_error(damaged)
+    assert "다시 입력" not in user_error(damaged)
+    assert _friendly_error(damaged) == user_error(damaged)
+    credential = CredentialFormatError("ciphertext: invalid bytes")
+    assert "비밀번호 정보 파일의 형식" in user_error(credential)
+    assert "ciphertext" not in user_error(credential)
+
+
+def test_backup_integrity_error_keeps_backup_context():
+    from src.storage.database_backup import BackupIntegrityError
+    message = user_error(BackupIntegrityError("백업 무결성 검사 실패"))
+    assert "선택한 백업 파일" in message
+    assert "다른 정상 백업" in message

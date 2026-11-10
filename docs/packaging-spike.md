@@ -294,3 +294,13 @@ $spikePython = Join-Path $spikeEnv 'Scripts\python.exe'
 - 기본 및 최소 창 크기에서 초기화 기준일·영향 범위·후속 작업 안내를 확인했다. HTML 본문·질문 찾아보기·화면 예시를 수정하고 AI 설명서를 77절·질문 254개로 생성했다. HTML 8개 페이지의 로컬 참조 498개 및 배포 설명서 82개 파일의 원본 일치를 확인했다.
 - 빌드 명령: python -m PyInstaller --noconfirm --workpath artifacts/lunch-calendar-reset/work sqlite_v2.spec. 결과: dist/meal_delivery.exe, 76,814,650 bytes. 파일·제품 버전은 1.0.0이며 소스·실행 파일 --packaging-smoke 종료 코드는 모두 0이다. SHA-256: c0a33a43489173698a461396da23217a0767c14a835d5ff269f94b2ec579b1e8.
 - 기존 실행 파일·빌드 및 검사 로그·화면·검증 결과는 artifacts/lunch-calendar-reset/에 보관했다. 패키징 검사는 전체 GUI·Excel 기능 검증을 대신하지 않는다.
+
+## 명단 헤더 두 행 기본값 빌드 (2026-11-10)
+
+- 명단 불러오기의 헤더 직접 선택 범위는 두 행이 기본이며, 새 파일을 고를 때도 두 행으로 시작한다. 한 행 파일은 명시적으로 한 행을 선택한다. 비밀번호 오류 안내 분리와 문서 사용 체크 반영을 포함한다.
+- 관련 가져오기·앱 흐름 검사 117개가 통과했다. 직전 변경에서는 Excel 직접 실행 검사 28개를 제외한 전체 회귀 3,178개가 통과했으며, 이번 기본값 변경 후에는 관련 검사만 다시 실행했다.
+- HTML 안내·합성 화면 예시를 수정하고 scripts/export_ai_manual.py로 AI 설명서를 재생성했다. dist의 설명서.html·html/·AI_사용설명서.txt도 최신본과 일치한다.
+- 빌드 명령: python -m PyInstaller --noconfirm --workpath artifacts/two-row-default-build/work sqlite_v2.spec.
+- 결과: dist/meal_delivery.exe, 파일·제품 버전 1.0.0, 76,850,251 bytes. SHA-256: 8ebaa1e7ce9f4d4110d0370ff97463524147259fdf8e849a9636b1ae368fa82f.
+- 소스와 실행 파일의 --packaging-smoke 종료 코드는 모두 0이다. 실행 파일은 Python 경로·관련 환경을 제거한 시스템 임시 폴더에서 확인했다. 공휴일 데이터 포함 검사이며 전체 GUI·설치된 Excel 검증을 대신하지 않는다.
+- 빌드·검사 로그 및 검증 정보: artifacts/two-row-default-build/.

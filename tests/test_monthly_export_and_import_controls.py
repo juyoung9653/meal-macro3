@@ -130,3 +130,35 @@ def test_delivery_placeholder_saved_primary_fallback_and_path_scope(app, tmp_pat
     assert not notices
     assert targets == {custom, "profile:school_name", "profile:mobile_phone", "profile:jurisdiction"}
     assert "profile:name" not in targets and "profile:note" not in targets
+
+
+def test_delivery_usage_excludes_unchecked_columns_and_their_fallbacks(app, tmp_path, monkeypatch):
+    from src.desktop_v2 import import_document_usage as usage
+    from src.desktop_v2.substitute_preferences import preferences
+    from src.domain.document_templates import DocumentTemplateProfile
+    current = roster()
+    template = tmp_path / "legacy.xlsx"
+    book = Workbook()
+    book.active.append(["성명", "주소"])
+    book.save(template)
+    book.close()
+    settings = QSettings(str(tmp_path / "usage.ini"), QSettings.Format.IniFormat)
+    store, key = preferences("synthetic", settings)
+    custom = "custom:" + str(current.custom_fields[0].definition_id)
+    store.setValue(key, json.dumps({"order": ["name", "note", custom],
+        "columns": ["name"], "fallbacks_by_meal": {
+            "석식": {"name": "mobile_phone", "note": custom},
+            "조식": {"name": "telephone", custom: "birth_date"}}}))
+    monkeypatch.setattr(usage, "document_template_setting_from_snapshot",
+                        lambda snapshot: SimpleNamespace(profile=DocumentTemplateProfile.SCHOOL_MEAL))
+    def capture(snapshot, roster, **kwargs):
+        from src.services.import_column_priority import key_import_targets
+        # Another document still uses the note, independently of delivery checks.
+        return key_import_targets(kwargs["substitute_sources"]) | {"profile:note"}, ()
+    monkeypatch.setattr(usage, "document_import_targets", capture)
+    targets, notices = usage.import_document_targets(object(), current, "synthetic",
+        settings=SimpleNamespace(get_substitute_template_path=lambda profile: str(template)),
+        preferences_store=settings)
+    assert not notices
+    assert targets == {"profile:name", "profile:mobile_phone", "profile:telephone", "profile:note"}
+    assert custom not in targets and "profile:birth_date" not in targets

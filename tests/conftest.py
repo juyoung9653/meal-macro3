@@ -105,13 +105,24 @@ def _keep_qt_application_alive():
 
 @pytest.fixture(autouse=True)
 def _collect_qt_objects_on_gui_thread(_keep_qt_application_alive):
-    """Release prior-test UI cycles before a later data worker can collect them."""
-    yield
-    if _keep_qt_application_alive is None:
+    """Dispose each test's windows without replaying application close handlers."""
+    app = _keep_qt_application_alive
+    if app is None:
+        yield
         return
     import gc
     from PySide6.QtCore import QCoreApplication, QEvent
 
+    existing = set(app.topLevelWidgets())
+    yield
+    # A closed Qt window can still own controllers that reference a closed DB.
+    # Leaving it alive lets another test's close-all cleanup publish settings and
+    # block on a real warning dialog. Delete this test's widgets directly: close
+    # handlers and their save prompts belong in the test, not fixture teardown.
+    for widget in app.topLevelWidgets():
+        if widget not in existing:
+            widget.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
     gc.collect()
     QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 

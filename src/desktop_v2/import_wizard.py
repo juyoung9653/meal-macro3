@@ -12,6 +12,8 @@ from typing import Callable, TypeVar
 from uuid import UUID, uuid4, uuid5
 from weakref import WeakMethod
 
+from openpyxl.utils import get_column_letter
+
 from PySide6.QtCore import QDate, QEvent, QEventLoop, QSize, QTimer, Qt
 from PySide6.QtGui import (
     QColor,
@@ -51,9 +53,11 @@ from src.importing.workbook import (
     WorkbookImportPasswordError,
     WorkbookImportPreview,
     WorkbookInspection,
+    WorkbookSheetPreview,
     WorkbookStructureError,
     WorkbookTable,
     inspect_workbook,
+    preview_workbook_sheet,
     parse_workbook,
     proposed_profile,
 )
@@ -178,6 +182,7 @@ class RosterImportWizard(QDialog):
         self._initial_directory = (
             "" if initial_directory is None else str(Path(initial_directory))
         )
+        self._sheet_preview: WorkbookSheetPreview | None = None
         self._inspection: WorkbookInspection | None = None
         self._preview: WorkbookImportPreview | None = None
         self._suggested_profile: StoredImportProfile | None = None
@@ -384,7 +389,7 @@ class RosterImportWizard(QDialog):
         layout.addLayout(
             self._page_heading(
                 "1. 기존 Excel 파일 선택",
-                "Excel 표 또는 2줄 헤더가 있는 시트를 선택합니다. 파일은 수정하지 않습니다.",
+                "Excel 내용을 확인하고 제목이 있는 행을 클릭해 헤더로 선택하세요. 파일은 수정하지 않습니다.",
             )
         )
         form = QFormLayout()
@@ -426,17 +431,24 @@ class RosterImportWizard(QDialog):
         form.addRow("Excel 파일 비밀번호", self.password_edit)
 
         self.source_layout_combo = QComboBox()
+        self.source_layout_combo.addItem("헤더 직접 선택", "manual")
         self.source_layout_combo.addItem("자동 · Excel 표 우선", "auto")
-        self.source_layout_combo.addItem("2줄 헤더", "two-row")
         self.source_layout_combo.currentIndexChanged.connect(self._source_layout_changed)
         form.addRow("헤더 읽기", self.source_layout_combo)
         self.header_row_spin = QSpinBox()
         self.header_row_spin.setRange(1, 1_048_575)
         self.header_row_spin.setValue(1)
-        self.header_row_spin.setEnabled(False)
-        self.header_row_spin.setToolTip("2줄 헤더의 첫 번째 행입니다. 데이터는 두 번째 헤더 다음 행부터 읽습니다.")
+        self.header_row_spin.setKeyboardTracking(False)
+        self.header_row_spin.setEnabled(True)
+        self.header_row_spin.setToolTip("미리보기의 행을 클릭하거나 번호를 입력하세요. 데이터는 선택한 헤더 다음 행부터 읽습니다.")
         self.header_row_spin.valueChanged.connect(self._header_row_changed)
         form.addRow("헤더 시작 행", self.header_row_spin)
+        self.header_count_combo = QComboBox()
+        self.header_count_combo.addItem("한 행", 1)
+        self.header_count_combo.addItem("두 행 · 병합 헤더", 2)
+        self.header_count_combo.setCurrentIndex(self.header_count_combo.findData(2))
+        self.header_count_combo.currentIndexChanged.connect(self._header_row_changed)
+        form.addRow("헤더 범위", self.header_count_combo)
         self.table_combo = QComboBox()
         self.table_combo.setEnabled(False)
         self.table_combo.currentIndexChanged.connect(self._table_changed)
@@ -455,6 +467,11 @@ class RosterImportWizard(QDialog):
         self.raw_table = QTableWidget(0, 0)
         self.raw_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.raw_table.setAlternatingRowColors(True)
+        self.raw_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.raw_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.raw_table.cellClicked.connect(lambda row, column: self._select_header_preview_row(row))
+        self.raw_table.verticalHeader().sectionClicked.connect(self._select_header_preview_row)
+        self.raw_table.setAccessibleName("원본 Excel 미리보기 · 헤더로 사용할 행 선택")
         self.raw_table.verticalHeader().setVisible(False)
         layout.addWidget(self.raw_table, 1)
         return page
@@ -922,10 +939,13 @@ class RosterImportWizard(QDialog):
             self._show_error("기존 Excel 파일을 선택해주세요.")
             return False
         selected_source = self.table_combo.currentData() if self.table_combo.count() else None
-        two_rows = self.source_layout_combo.currentData() == "two-row"
+        manual = self.source_layout_combo.currentData() == "manual"
         header_row = self.header_row_spin.value()
-        selected_table = None if two_rows else selected_source
+        header_count = self.header_count_combo.currentData()
+        self._sheet_preview = None
+        selected_table = None if manual else selected_source
         self._inspection = None
+        self._confirmed_mapping_key = None
         self._preview = None
         self._cell_overrides.clear()
         self._excluded_rows.clear()
@@ -937,17 +957,25 @@ class RosterImportWizard(QDialog):
         self._refresh_actions()
         password = self.password_edit.text() or self._source_password or ""
         try:
+            if manual:
+                self._sheet_preview = self._run_busy_task(
+                    "Excel 내용을 읽는 중입니다", "헤더를 선택할 원본 시트를 읽고 있습니다.",
+                    lambda: preview_workbook_sheet(path_text, password=password, sheet_name=selected_source,
+                                                   start_row=max(1, header_row - 20)))
+                self._source_password = password
+                self._populate_sheets(self._sheet_preview)
+                self._render_sheet_preview()
             inspection = self._run_busy_task(
                 "Excel 파일을 여는 중입니다",
                 "파일 비밀번호를 확인하고 Excel 표를 읽고 있습니다. 잠시 기다려주세요.",
                 lambda: inspect_workbook(
                     path_text,
                     password=password,
-                    require_table=not two_rows,
+                    require_table=not manual,
                     table_name=selected_table,
-                    sheet_name=selected_source if two_rows else None,
+                    sheet_name=selected_source if manual else None,
                     header_row=header_row,
-                    header_row_count=2 if two_rows else 1,
+                    header_row_count=header_count if manual else 1,
                     allow_two_row_headers=True,
                 ),
             )
@@ -966,7 +994,10 @@ class RosterImportWizard(QDialog):
             self._password_retry_pending = False
             self.inspect_button.setText("표 미리보기")
             if isinstance(error, WorkbookStructureError):
-                self._populate_tables(error.tables, selected_table)
+                if manual and self._sheet_preview is not None:
+                    self.file_status.setText("원본에서 헤더로 사용할 행을 클릭해주세요. 빈 행은 헤더로 사용할 수 없습니다.")
+                else:
+                    self._populate_tables(error.tables, selected_table)
             self._show_error(user_error(error))
             return False
         self._password_retry_pending = False
@@ -975,18 +1006,42 @@ class RosterImportWizard(QDialog):
         self._inspection = inspection
         if inspection.selected_table is None:
             self.source_layout_combo.blockSignals(True)
-            self.source_layout_combo.setCurrentIndex(self.source_layout_combo.findData("two-row"))
+            self.source_layout_combo.setCurrentIndex(self.source_layout_combo.findData("manual"))
             self.source_layout_combo.blockSignals(False)
             self.header_row_spin.setEnabled(True)
+            self.header_count_combo.setEnabled(True)
+            self.header_count_combo.blockSignals(True)
+            self.header_count_combo.setCurrentIndex(self.header_count_combo.findData(inspection.header_row_count))
+            self.header_count_combo.blockSignals(False)
             self._populate_sheets(inspection)
+            if not manual:
+                self.header_row_spin.blockSignals(True)
+                self.header_row_spin.setValue(inspection.header_row)
+                self.header_row_spin.blockSignals(False)
+                try:
+                    self._sheet_preview = self._run_busy_task(
+                        "Excel 내용을 읽는 중입니다", "헤더를 선택할 원본 시트를 읽고 있습니다.",
+                        lambda: preview_workbook_sheet(path_text, password=password,
+                                                       sheet_name=inspection.selected_sheet,
+                                                       start_row=max(1, inspection.header_row - 20)))
+                except Exception as error:
+                    self._inspection = None
+                    self._show_error(user_error(error))
+                    self._refresh_actions()
+                    return False
+                manual = True
         else:
             self._populate_tables(inspection.tables, inspection.selected_table)
-        self._render_raw_preview(inspection)
+        if manual:
+            self._render_sheet_preview()
+        else:
+            self._render_raw_preview(inspection)
         source_name = inspection.selected_table or inspection.selected_sheet
         header_note = " · 2줄 헤더는 세분화된 제목 우선" if inspection.header_row_count == 2 else ""
         self.file_status.setText(
-            f"{source_name} · 헤더 {len(inspection.columns)}열{header_note} · "
-            f"미리보기 {len(inspection.preview_rows)}행을 확인했습니다."
+            f"{source_name} · 헤더 {inspection.header_row}~{inspection.header_row + inspection.header_row_count - 1}행 · 데이터 {inspection.header_row + inspection.header_row_count}행부터 · {len(inspection.columns)}열{header_note} · "
+            f"미리보기 {len(self._sheet_preview.rows) if manual else len(inspection.preview_rows)}행을 확인했습니다."
+            + (" 헤더로 사용할 행을 클릭하세요." if manual else "")
         )
         try:
             self._prepare_mapping(inspection)
@@ -1017,7 +1072,7 @@ class RosterImportWizard(QDialog):
         finally:
             self._loading_structure = False
 
-    def _populate_sheets(self, inspection: WorkbookInspection) -> None:
+    def _populate_sheets(self, inspection: WorkbookInspection | WorkbookSheetPreview) -> None:
         self._loading_structure = True
         try:
             self.table_combo.clear()
@@ -1031,21 +1086,55 @@ class RosterImportWizard(QDialog):
     def _source_layout_changed(self, *_args) -> None:
         if self._loading_structure:
             return
-        self.header_row_spin.setEnabled(self.source_layout_combo.currentData() == "two-row")
+        manual = self.source_layout_combo.currentData() == "manual"
+        self.header_row_spin.setEnabled(manual)
+        self.header_count_combo.setEnabled(manual)
         self._invalidate_structure()
 
     def _header_row_changed(self, *_args) -> None:
         if self._loading_structure:
             return
         self._inspection = None
+        self._confirmed_mapping_key = None
         self._preview = None
-        self._cell_overrides.clear()
-        self._excluded_rows.clear()
-        self._pending_excluded_rows.clear()
-        self.raw_table.clear()
-        self.raw_table.setRowCount(0)
-        self.raw_table.setColumnCount(0)
         self._refresh_actions()
+        if self.path_edit.text().strip():
+            self._inspect_source()
+
+    def _select_header_preview_row(self, row: int) -> None:
+        if self._busy or self.source_layout_combo.currentData() != "manual" or self._sheet_preview is None:
+            return
+        self.header_row_spin.setValue(self._sheet_preview.rows[row].row_number)
+
+    def _render_sheet_preview(self) -> None:
+        preview = self._sheet_preview
+        if preview is None:
+            return
+        self.raw_table.clear()
+        width = max((len(row.values) for row in preview.rows), default=0)
+        self.raw_table.setColumnCount(width)
+        self.raw_table.setRowCount(len(preview.rows))
+        self.raw_table.setHorizontalHeaderLabels([get_column_letter(i + 1) for i in range(width)])
+        first = self.header_row_spin.value()
+        last = first + self.header_count_combo.currentData() - 1
+        for index, row in enumerate(preview.rows):
+            selected = first <= row.row_number <= last
+            self.raw_table.setVerticalHeaderItem(index, QTableWidgetItem(
+                f"{row.row_number} · 헤더" if selected else str(row.row_number)))
+            for column, value in enumerate(row.values):
+                item = QTableWidgetItem(value)
+                if selected:
+                    item.setBackground(QColor("#C5D9F1"))
+                self.raw_table.setItem(index, column, item)
+        self.raw_table.verticalHeader().setVisible(True)
+        self.raw_table.resizeColumnsToContents()
+        for column in range(width):
+            self.raw_table.setColumnWidth(column, min(260, max(80, self.raw_table.columnWidth(column))))
+        selected_index = next((index for index, row in enumerate(preview.rows)
+                               if row.row_number == first), None)
+        if selected_index is not None and width:
+            self.raw_table.scrollToItem(self.raw_table.item(selected_index, 0))
+
 
     def _retry_password_if_needed(self) -> None:
         if (
@@ -2331,8 +2420,14 @@ class RosterImportWizard(QDialog):
             self.header_row_spin.blockSignals(True)
             self.header_row_spin.setValue(1)
             self.header_row_spin.blockSignals(False)
-            self.header_row_spin.setEnabled(False)
+            self.header_row_spin.setEnabled(True)
+            self.header_count_combo.blockSignals(True)
+            self.header_count_combo.setCurrentIndex(self.header_count_combo.findData(2))
+            self.header_count_combo.blockSignals(False)
+            self.header_count_combo.setEnabled(True)
+        self._sheet_preview = None
         self._inspection = None
+        self._confirmed_mapping_key = None
         self._preview = None
         self._cell_overrides.clear()
         self._excluded_rows.clear()

@@ -8,7 +8,7 @@ from openpyxl.utils.exceptions import InvalidFileException
 
 from src.core.settings import get_settings
 from src.domain.document_templates import document_template_setting_from_snapshot
-from src.domain.delivery_substitute import DELIVERY_SOURCES
+from src.domain.delivery_substitute import DELIVERY_SOURCES, STANDARD_COLUMNS
 from src.excel.mapped_delivery_template import inspect_delivery_form
 from src.services.sqlite_delivery_substitute_service import all_substitute_template_columns
 from src.services.import_column_priority import document_import_targets
@@ -45,21 +45,16 @@ def import_document_targets(snapshot, roster, database_id, *, settings=None, pre
     try:
         form = inspect_delivery_form(path)
     except (OSError, ValueError, KeyError, BadZipFile, InvalidFileException):
-        sources = {*primary.values(), *fallback.values()}
-        # Preserve saved database links when the workbook cannot be inspected.
-        targets, unavailable = document_import_targets(snapshot, roster, settings=settings)
-        from src.services.import_column_priority import key_import_targets
-        return targets | key_import_targets(sources), tuple(dict.fromkeys((*unavailable, "배송목록")))
+        sources = ({*primary.values(), *fallback.values()} if selected
+                   else _legacy_sources(roster, saved))
+        targets, unavailable = document_import_targets(
+            snapshot, roster, settings=settings, substitute_sources=sources)
+        return targets, tuple(dict.fromkeys((*unavailable, "배송목록")))
     if form is None:
-        # Legacy layouts use the database's per-meal mappings plus local priorities.
-        targets, unavailable = document_import_targets(snapshot, roster, settings=settings)
-        from src.services.import_column_priority import key_import_targets
-        sources = set()
-        by_meal = saved.get("fallbacks_by_meal", {})
-        for values in by_meal.values() if isinstance(by_meal, dict) else ():
-            if isinstance(values, dict):
-                sources.update(source for source in values.values() if isinstance(source, str))
-        return targets | key_import_targets(sources), unavailable
+        # The output dialog uses checked roster columns and its per-meal choices.
+        # Historical DB mappings do not drive this path (options supplies fallbacks).
+        sources = _legacy_sources(roster, saved)
+        return document_import_targets(snapshot, roster, settings=settings, substitute_sources=sources)
     columns = all_substitute_template_columns(roster)
     labels = {column.key: column.label for column in (*columns, *DELIVERY_SOURCES)}
     aliases = {"school": "school_name", "mobile": "mobile_phone", "address": "road_address"}
@@ -80,3 +75,20 @@ def import_document_targets(snapshot, roster, database_id, *, settings=None, pre
             sources.update(values[legacy_key] for values in legacy_maps
                            if isinstance(values.get(legacy_key), str))
     return document_import_targets(snapshot, roster, settings=settings, substitute_sources=sources)
+
+
+def _legacy_sources(roster, saved):
+    keys = {column.key for column in all_substitute_template_columns(roster)}
+    selected, order = saved.get("columns"), saved.get("order")
+    valid = (isinstance(selected, list) and isinstance(order, list)
+             and all(isinstance(value, str) for value in (*selected, *order)))
+    checked = set(selected) & keys if valid else set()
+    if not checked:
+        checked = {column.key for column in STANDARD_COLUMNS[:6]} & keys
+    sources = set(checked)
+    by_meal = saved.get("fallbacks_by_meal", {})
+    for values in by_meal.values() if isinstance(by_meal, dict) else ():
+        if isinstance(values, dict):
+            sources.update(source for target, source in values.items()
+                           if target in checked and isinstance(source, str))
+    return sources

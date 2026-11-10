@@ -8,6 +8,8 @@ from PySide6.QtCore import QCoreApplication, QEvent, QMimeData, QPoint, QPointF,
 from PySide6.QtGui import QDragEnterEvent, QDropEvent
 from PySide6.QtWidgets import QApplication, QScrollArea, QVBoxLayout, QWidget
 
+from tests.import_wizard_helpers import select_single_header_source
+
 from src.desktop_v2.import_columns import ImportColumnsTable, _MIME
 from src.importing.workbook import SourceColumn
 from src.services import import_column_priority as priority
@@ -257,7 +259,7 @@ def test_mapping_mouse_input_under_initial_import_modal(app, tmp_path, modal):
     wizard = RosterImportWizard()
     wizard.set_database_columns(None)
     wizard.set_initial_import_defaults()
-    wizard.path_edit.setText(str(path))
+    select_single_header_source(wizard, path)
     assert wizard._inspect_source()
     wizard._set_page(1)
     failures = []

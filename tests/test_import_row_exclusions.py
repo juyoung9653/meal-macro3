@@ -18,7 +18,7 @@ from src.importing.profile_history import StoredImportProfile
 from src.importing.revision import ImportPurpose
 from src.importing.workbook import parse_workbook, inspect_workbook, WorkbookStructureError
 from src.storage.database_session import DatabaseSession
-from tests.import_wizard_helpers import advance_wizard
+from tests.import_wizard_helpers import advance_wizard, select_single_header_source
 from tests.test_import_profile_columns import prepare
 
 
@@ -85,7 +85,7 @@ def test_explicit_exclusion_is_saved_in_revision_and_not_reused_as_profile(tmp_p
 
 def test_mapping_must_be_confirmed_and_edits_require_review_again(app, tmp_path):
     wizard = RosterImportWizard()
-    wizard.path_edit.setText(str(source(tmp_path / "rows.xlsx")))
+    select_single_header_source(wizard, source(tmp_path / "rows.xlsx"))
     assert wizard._inspect_source()
     wizard._go_next()
     assert wizard.next_button.text() == "열 연결 확인"
@@ -112,7 +112,7 @@ def test_error_dialog_opens_first_and_row_exclusion_allows_import(app, tmp_path,
     from tests.test_vacation_lunch_period_import import calendar_entry
     wizard.set_lunch_calendar_entries((calendar_entry(),))
     wizard.purpose_combo.setCurrentIndex(wizard.purpose_combo.findData(purpose))
-    wizard.path_edit.setText(str(source(tmp_path / "rows.xlsx", multiple_errors=True)))
+    select_single_header_source(wizard, source(tmp_path / "rows.xlsx", multiple_errors=True))
     assert wizard._inspect_source()
     advance_wizard(wizard)
     advance_wizard(wizard)
@@ -138,7 +138,7 @@ def test_lunch_blank_name_requires_explicit_skip_and_hides_inactive_controls(app
     from tests.test_vacation_lunch_period_import import calendar_entry
     wizard.set_lunch_calendar_entries((calendar_entry(),))
     wizard.purpose_combo.setCurrentIndex(wizard.purpose_combo.findData(ImportPurpose.VACATION_LUNCH))
-    wizard.path_edit.setText(str(source(tmp_path / "rows.xlsx", blank_name=True)))
+    select_single_header_source(wizard, source(tmp_path / "rows.xlsx", blank_name=True))
     assert wizard._inspect_source()
     advance_wizard(wizard)
     assert wizard.meal_mapping_toggle.isHidden()
@@ -157,7 +157,7 @@ def test_lunch_blank_name_requires_explicit_skip_and_hides_inactive_controls(app
 
 def test_empty_import_blocked_and_exclusions_can_be_reset(app, tmp_path):
     wizard = RosterImportWizard()
-    wizard.path_edit.setText(str(source(tmp_path / "rows.xlsx")))
+    select_single_header_source(wizard, source(tmp_path / "rows.xlsx"))
     assert wizard._inspect_source()
     advance_wizard(wizard)
     wizard._open_mapping_dialog()
@@ -181,7 +181,7 @@ def test_saved_manual_normalization_becomes_automatic(app, tmp_path):
     inspection = inspect_workbook(path, table_name="명단")
     old = replace(profile(), version=3, date_normalization=DateNormalization.YYYYMMDD, phone_normalization=PhoneNormalization.PRESERVE)
     wizard = RosterImportWizard(existing_profiles=(StoredImportProfile(old, inspection.header_fingerprint),))
-    wizard.path_edit.setText(str(path))
+    select_single_header_source(wizard, path)
     assert wizard._inspect_source()
     current = wizard._build_profile()
     assert current.date_normalization == DateNormalization.AUTO

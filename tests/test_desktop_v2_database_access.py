@@ -461,6 +461,8 @@ def test_login_keeps_dialog_open_on_wrong_password_then_opens_on_correct_one(
     assert dialog.result() != QDialog.DialogCode.Accepted
     assert not dialog._error.isHidden()
     assert "비밀번호" in dialog._error.text()
+    assert "손상" not in dialog._error.text()
+    assert "다시 입력" in dialog._error.text()
     assert not any(
         isinstance(widget, StartupLoadingDialog) and widget.isVisible()
         for widget in app.topLevelWidgets()
@@ -598,3 +600,18 @@ def test_legacy_two_password_backup_restores_with_everyday_password(
     assert settings.database_path == restored.resolve()
     dialog.session.close()
     DatabaseSession.open(restored, "everyday-password").close()
+
+
+def test_login_with_valid_password_and_unreadable_database_reports_file_problem(app, tmp_path):
+    path = tmp_path / "damaged.sqlite3"
+    DatabaseSession.create(path, "correct-password", "recovery-password").close()
+    # Preserve the matching credentials, damage only the synthetic database.
+    path.write_bytes(b"invalid database content" * 300)
+    dialog = LoginDialog(path)
+    dialog.password_edit.setText("correct-password")
+    dialog._submit()
+    assert dialog.result() != QDialog.DialogCode.Accepted
+    assert "운영 파일을 읽지 못했습니다" in dialog._error.text()
+    assert "백업" in dialog._error.text()
+    assert "다시 입력" not in dialog._error.text()
+    dialog.close()

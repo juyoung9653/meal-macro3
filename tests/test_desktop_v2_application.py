@@ -1,7 +1,7 @@
 """Mandatory first-import and startup-gating controller tests."""
 
 from __future__ import annotations
-from tests.import_wizard_helpers import advance_wizard
+from tests.import_wizard_helpers import advance_wizard, select_single_header_source
 
 import hashlib
 import os
@@ -485,7 +485,7 @@ def test_real_wizard_direct_import_persists_once_and_skips_unchanged_source(
         def exec(self):
             accepted = []
             self.accepted.connect(lambda: accepted.append(True))
-            self.path_edit.setText(str(path))
+            select_single_header_source(self, path)
             assert self._inspect_source()
             advance_wizard(self)
             if self._database_columns is not None:

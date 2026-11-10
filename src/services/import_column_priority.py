@@ -2,6 +2,7 @@
 from zipfile import BadZipFile
 from openpyxl.utils.exceptions import InvalidFileException
 
+from src.domain.delivery_substitute import STANDARD_COLUMNS
 from src.templates.confirmation_fields import placeholder_mapping
 from src.core.models import FULL_ADDRESS_FIELD
 from src.domain.document_templates import document_template_setting_from_snapshot
@@ -45,6 +46,10 @@ def document_import_targets(snapshot, roster=None, *, settings=None, substitute_
         if kind == "substitute" and substitute_sources is not None:
             continue
         overrides = load_mapping_overrides(snapshot, profile, kind)
+        def included(target):
+            return kind != "substitute" or target.partition(":")[2] in {
+                column.key for column in STANDARD_COLUMNS[:6]
+            }
         valid_targets = None
         try:
             options = {}
@@ -55,17 +60,17 @@ def document_import_targets(snapshot, roster=None, *, settings=None, substitute_
         except (OSError, ValueError, KeyError, BadZipFile, InvalidFileException):
             # An unavailable output template must not prevent roster imports.
             unavailable.append(label)
-            sources.update(overrides.values())
+            sources.update(source for target, source in overrides.items() if included(target))
         else:
-            valid_targets = set(spec.targets)
+            valid_targets = {target for target in spec.targets if included(target)}
             mapping = (placeholder_mapping(spec.defaults, overrides) if kind == "confirmation"
                        else effective_mapping(spec.defaults, overrides))
-            sources.update(mapping[target] for target in spec.targets if target in mapping)
+            sources.update(mapping[target] for target in valid_targets if target in mapping)
         fallbacks = load_mapping_fallbacks(snapshot, profile, kind)
         if kind == "confirmation" and valid_targets is not None:
             fallbacks = placeholder_mapping({target: "" for target in spec.targets}, fallbacks)
         sources.update(source for target, source in fallbacks.items()
-                       if not target.startswith("__calc_") and (valid_targets is None or target in valid_targets))
+                       if included(target) and not target.startswith("__calc_") and (valid_targets is None or target in valid_targets))
     targets = set(source_import_targets(sources))
     if substitute_sources is not None:
         targets.update(key_import_targets(substitute_sources))

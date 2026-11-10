@@ -83,16 +83,26 @@ def user_error(error: BaseException | str | None) -> str:
                 "작업 창을 닫고 다시 열어 현재 등록 내용을 확인해주세요. 복구 후 다시 불러올 때 반복되면 프로그램 담당자에게 점검을 요청해주세요.")
     if kind == "RevisionConflictError" or "parent revision이 현재" in raw or "audit before가 현재" in raw:
         return _CONFLICT_MESSAGE
-    if kind in {"DatabaseIntegrityError", "ProjectionContractError"} or any(word in low for word in (
-        "typed projection", "audit before", "revision parent chain", "revision ledger", "봉인", "무결성 검사", "before chain",
-    )):
-        return _INTEGRITY_MESSAGE
-    if kind in {"DatabaseUnlockError", "CredentialUnlockError"}:
-        return "운영 파일의 잠금을 풀지 못했습니다. 선택한 운영 파일과 비밀번호를 확인해주세요."
+    if kind == "CredentialUnlockError":
+        return "비밀번호를 확인하지 못했습니다. 선택한 운영 파일의 비밀번호를 다시 입력해주세요. 한/영 입력과 Caps Lock도 확인해주세요."
+    if kind == "DatabaseUnlockError":
+        return ("운영 파일을 읽지 못했습니다. 운영 파일과 비밀번호 정보 파일이 서로 맞지 않거나 운영 파일에 문제가 있습니다. "
+                "함께 받은 두 파일을 같은 폴더에 두고 다시 열거나 정상 백업으로 복원해주세요.")
+    if kind == "CredentialFormatError":
+        return ("비밀번호 정보 파일의 형식이 올바르지 않아 읽지 못했습니다. "
+                "운영 파일과 함께 받은 비밀번호 정보 파일을 다시 복사하거나 정상 백업으로 복원해주세요.")
+    if kind in {"BackupFormatError", "BackupIntegrityError"}:
+        return "선택한 백업 파일의 형식이나 내용에 문제가 있어 복원하지 못했습니다. 다른 정상 백업 파일을 선택해주세요."
+    if kind == "BackupRestoreConflictError":
+        return "복원할 위치에 기존 파일이 있습니다. 다른 파일 이름을 선택해주세요."
     if kind == "CredentialNotFoundError":
         return ("운영 파일의 비밀번호 정보 파일을 찾거나 읽을 수 없습니다. "
                 "운영 파일과 함께 받은 비밀번호 정보 파일을 같은 폴더에 두고, "
                 "파일 이름을 바꾸지 않았는지 확인한 뒤 다시 열어주세요.")
+    if kind in {"DatabaseIntegrityError", "ProjectionContractError"} or any(word in low for word in (
+        "typed projection", "audit before", "revision parent chain", "revision ledger", "봉인", "무결성 검사", "before chain",
+    )):
+        return _INTEGRITY_MESSAGE
     if "school" in low and "entity id" in low:
         return "학교 일정의 저장 정보가 맞지 않습니다. 학교 일정 창을 다시 열어 확인해주세요. 계속되면 프로그램 담당자에게 점검을 요청해주세요."
     if "snapshot에 없는 사람" in raw:

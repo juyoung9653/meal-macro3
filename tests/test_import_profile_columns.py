@@ -13,6 +13,8 @@ from openpyxl.worksheet.table import Table
 from PySide6.QtCore import QCoreApplication, QEvent, QSettings, Qt
 from PySide6.QtWidgets import QApplication, QDialog
 
+from tests.import_wizard_helpers import select_single_header_source
+
 from src.desktop_v2.application import DesktopStartupController
 from src.desktop_v2.import_wizard import RosterImportWizard
 from src.desktop_v2.roster_cell_edit import is_roster_cell_editable, updated_profile_for_cell
@@ -70,7 +72,7 @@ def prepare(preview):
 def test_wizard_all_columns_survive_encrypted_reopen(app, tmp_path, blank, as_custom):
     path = make_source(tmp_path, blank)
     wizard = RosterImportWizard()
-    wizard.path_edit.setText(str(path))
+    select_single_header_source(wizard, path)
     assert wizard._inspect_source(), wizard.error_label.text()
     if as_custom:
         for key in OPTIONAL:
@@ -96,7 +98,7 @@ def test_wizard_all_columns_survive_encrypted_reopen(app, tmp_path, blank, as_cu
         fields = DesktopStartupController._imported_profile_fields(session, roster)
         saved = import_profiles_from_snapshot(session.database.snapshot(roster.revision_id))
         reused = RosterImportWizard(existing_profiles=saved)
-        reused.path_edit.setText(str(path))
+        select_single_header_source(reused, path)
         assert reused._inspect_source()
         assert reused._build_profile() == profile
         window = RosterWindow(roster, imported_profile_fields=fields, column_settings=QSettings(str(tmp_path / "view.ini"), QSettings.Format.IniFormat))

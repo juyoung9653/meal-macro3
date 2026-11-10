@@ -146,8 +146,9 @@ def test_wizard_suggests_leaf_headers_remembers_edits_and_can_read_a_table_next(
     path = _file(tmp_path)
     wizard = make_wizard()
     wizard.path_edit.setText(str(path))
+    assert wizard.header_count_combo.currentData() == 2
     assert wizard._inspect_source(), wizard.error_label.text()
-    assert wizard.source_layout_combo.currentData() == "two-row"
+    assert wizard.source_layout_combo.currentData() == "manual"
     assert wizard._mapping_combos[ProfileField.NAME].currentData() == "H"
     assert wizard._mapping_combos[ProfileField.SCHOOL_NAME].currentData() == "F"
     wizard._set_combo(wizard._mapping_combos[ProfileField.SCHOOL_TYPE], "E")
@@ -164,6 +165,7 @@ def test_wizard_suggests_leaf_headers_remembers_edits_and_can_read_a_table_next(
     restored = stored_import_profile_from_state(profile.profile_id, json.loads(json.dumps(stored.state())))
     reused = make_wizard(existing_profiles=(restored,))
     reused.path_edit.setText(str(path))
+    assert reused.header_count_combo.currentData() == 2
     assert reused._inspect_source()
     assert reused._build_profile() == profile
     assert reused.ignored_columns_list.item(10).checkState() == Qt.CheckState.Unchecked
@@ -178,9 +180,15 @@ def test_wizard_suggests_leaf_headers_remembers_edits_and_can_read_a_table_next(
     book.save(table_path)
     book.close()
     reused.path_edit.setText(str(table_path))
+    reused.source_layout_combo.setCurrentIndex(reused.source_layout_combo.findData("auto"))
     assert reused._inspect_source()
     assert reused.inspection.selected_table == "명단"
     assert reused.inspection.header_row_count == 1
+    reused.path_edit.setText(str(path))
+    assert reused.source_layout_combo.currentData() == "manual"
+    assert reused.header_count_combo.currentData() == 2
+    assert reused._inspect_source()
+    assert reused.inspection.header_row_count == 2
 
 
 def test_explicit_header_start_and_selected_sheet_reach_the_parser(tmp_path, make_wizard):
@@ -194,7 +202,7 @@ def test_explicit_header_start_and_selected_sheet_reach_the_parser(tmp_path, mak
     wizard = make_wizard()
     wizard.set_household_grouping_columns(("name",))
     wizard.path_edit.setText(str(path))
-    wizard.source_layout_combo.setCurrentIndex(wizard.source_layout_combo.findData("two-row"))
+    assert wizard.header_count_combo.currentData() == 2
     wizard.header_row_spin.setValue(4)
     assert wizard._inspect_source(), wizard.error_label.text()
     wizard.table_combo.setCurrentIndex(wizard.table_combo.findData("다른 중식"))

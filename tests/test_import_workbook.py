@@ -1323,3 +1323,22 @@ def test_formula_in_mapped_cell_is_never_imported_as_personal_data(tmp_path: Pat
 
     assert not preview.can_continue
     assert any("수식 셀" in issue.message for issue in preview.issues)
+
+
+def test_raw_header_preview_preserves_blank_rows_and_limits_large_sheet(tmp_path):
+    from src.importing.workbook import preview_workbook_sheet
+    import openpyxl
+    path = tmp_path / "header-preview.xlsx"
+    book = openpyxl.Workbook()
+    book.active.cell(220, 1, "성명")
+    book.active.cell(221, 1, "합성아동")
+    book.save(path)
+    book.close()
+    initial = preview_workbook_sheet(path)
+    assert len(initial.rows) == 200
+    assert initial.rows[0].row_number == 1
+    assert initial.rows[0].values == ("",)
+    later = preview_workbook_sheet(path, start_row=200)
+    assert later.rows[20].row_number == 220
+    assert later.rows[20].values == ("성명",)
+    assert later.rows[21].values == ("합성아동",)

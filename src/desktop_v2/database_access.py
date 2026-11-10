@@ -25,17 +25,11 @@ from src.storage.database_session import (
     DatabaseSession,
 )
 from src.storage.database_backup import (
-    BackupFormatError,
-    BackupIntegrityError,
-    BackupRestoreConflictError,
     restore_backup_with_user_password,
 )
 from src.storage.database_credentials import (
-    CredentialUnlockError,
-    PasswordPolicyError,
     credential_path_for,
 )
-from src.storage.encrypted_database import DatabaseUnlockError
 
 from .theme import application_stylesheet, register_application_fonts
 from .startup_loading import run_progress_task, run_startup_task
@@ -880,12 +874,4 @@ def _help_label(text: str) -> QLabel:
 
 
 def _friendly_error(error: Exception) -> str:
-    if isinstance(error, (CredentialUnlockError, DatabaseUnlockError)):
-        return "비밀번호가 맞지 않거나 운영 데이터가 손상되었습니다. 입력을 확인해주세요."
-    if isinstance(error, PasswordPolicyError):
-        return user_error(error)
-    if isinstance(error, (BackupFormatError, BackupIntegrityError)):
-        return "선택한 자동 백업 파일이 올바르지 않거나 손상되었습니다."
-    if isinstance(error, BackupRestoreConflictError):
-        return "복원할 위치에 기존 파일이 있습니다. 다른 파일 이름을 선택해주세요."
     return user_error(error)
